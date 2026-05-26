@@ -132,7 +132,8 @@ orch-watch:cd /path/to/repo && python3 scripts/orch-watch \
 
 - **Zero-dep tasks**: tasks with no `DEPENDS_ON` edges never trigger a transition wake (they have no completion event to react to). Need a separate creation-time wake path in `orch_schema.create_task` that pages the owner immediately if the new task has zero deps + owner is idle.
 - **Already-completed deps at edge-creation**: when `add_dependency(t, d)` is called and `d` is already `status=completed`, no future transition fires for `t`. Need a write-time check in `orch_schema.add_dependency` that runs the same LOOSE-check Cypher and fires wake if `t` is now ready.
-- Both deferred from v0.4.0 because they're additive features, not correctness gaps in the shipped path. Tracked in [issue tracker / next-session backlog].
+
+> **Honest caveat for current adopters** (Clarity sign-off 2026-05-26): until v0.4.1 lands, zero-dep tasks are a **silent-drop in the shipped readiness-checker path**. A supervisor that ingests a plan containing zero-dep owned tasks and then goes idle won't get woken on those tasks via `orch-watch`'s done-DEL signal — they'll only show up via `taey-plan next` polling. Treasurer / x-claude / external adopters: either pull explicitly with `taey-plan next` after plan-load, OR structure plans so every initially-actionable task has a no-op `bootstrap` dependency that completes immediately at start (then the standard transition-wake fires). Both are workarounds; v0.4.1 closes the gap properly.
 
 ## Out of scope for v0.4.x
 

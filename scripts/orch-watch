@@ -403,29 +403,39 @@ def investigate(r, node_id: str, event_type: str,
                     "Stop hook should have cleared.", node_id)
         return
 
-    # Audit fix (Gaia orch-watch #3): measure stuck-time from
-    # ``last_activity`` (when the worker last did something) NOT from
-    # ``started_at`` (when dispatch happened). A worker actively working
-    # for 4 minutes then idle for 30 seconds should NOT be flagged stuck
-    # at the 5-minute threshold; the right invariant is "idle for longer
-    # than the threshold." last_activity is the canonical "last did
-    # anything" stamp written by every hook (pre-tool, post-tool, stop,
-    # user-prompt). Compared to Redis-server time so cross-host clock
-    # skew can't fire alerts early/late.
+    # Audit fix #3 (Gaia, code audit 2026-05-26) + fix-of-fix (real-fleet
+    # observation 2026-05-26 evening): a task cannot be "stuck" longer
+    # than it has existed. The original v0.2.0 used time-since-dispatch
+    # (task.started_at), which over-fires when a worker is busy 4min then
+    # idle 30s. v0.2.1 switched to time-since-last-activity, which under-
+    # fires the opposite way: a fresh dispatch on a long-idle worker is
+    # flagged stuck immediately even though the task is brand new.
+    #
+    # The right invariant: stuck_for = max-of-{time-since-dispatch,
+    # time-since-last-activity}. The task is stuck only when BOTH
+    # (a) it has existed long enough AND (b) the worker hasn't done
+    # anything since. Using max means a fresh dispatch on a long-idle
+    # worker gets its own threshold window before being flagged; a long-
+    # standing dispatch on a recently-active worker waits for the
+    # activity-since-dispatch gap to grow past threshold.
+    #
+    # Equivalent expression: stuck_for = now - max(started_at, last_activity).
+    # Compared to Redis-server time so cross-host clock skew is bounded.
     last_activity_raw = r.get(f"taey:{node_id}:last_activity")
     try:
-        last_activity = float(last_activity_raw) if last_activity_raw else None
+        last_activity = float(last_activity_raw) if last_activity_raw else 0.0
     except Exception:
-        last_activity = None
-    if last_activity is None:
-        # Fall back to started_at if last_activity not available (e.g.,
-        # very old dispatch that predates the last_activity convention).
-        try:
-            last_activity = float(task.get("started_at", 0))
-        except Exception:
-            last_activity = 0.0
+        last_activity = 0.0
+    try:
+        started_at = float(task.get("started_at", 0))
+    except Exception:
+        started_at = 0.0
 
-    stuck_for = int(_redis_now(r) - last_activity)
+    boundary = max(started_at, last_activity)
+    if boundary <= 0:
+        return  # No reliable boundary timestamp — skip rather than false-fire.
+
+    stuck_for = int(_redis_now(r) - boundary)
     if stuck_for < stuck_threshold_sec:
         return
 

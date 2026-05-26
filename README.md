@@ -1,10 +1,12 @@
 # claude-code-fleet-orchestrator
 
-> Tmux-fleet orchestration: supervisor↔worker dispatch, recurring schedules, universal Stop+notify across Claude Code / codex / gemini / grok / any tmux-driven REPL CLI.
+> Turn scattered AI terminals into a supervised tmux fleet: dispatch work to Claude Code / Codex / Gemini / Grok / any **hookable** REPL CLI, get `done`/`error`/`interrupted` outcomes back inline so the supervisor can update the plan instead of babysitting panes.
 
-Current version: **v0.4.0** (Phase A + B + C + D shipped — see [`docs/STATUS.md`](docs/STATUS.md)).
+Current version: **v0.4.1** (Phase A + B + C + D shipped + audit fixes — see [`docs/STATUS.md`](docs/STATUS.md)).
 
-Built on top of [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (≥ v0.2.2), which provides the message transport (Redis inbox, daemon, tmux-send, per-CLI Stop hooks). This repo adds the supervisor-worker coordination layer.
+Built on top of [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (≥ v0.2.3), which provides the message transport (Redis inbox, daemon, tmux-send, per-CLI Stop hooks). This repo adds the supervisor-worker coordination layer.
+
+**Scope**: terminal-native hookable REPL CLIs only — IDE-embedded agents (Cursor, etc.) and many-to-many distributed topologies are NOT in scope; see [fleet-notify's scope section](https://github.com/palios-taey/claude-code-fleet-notify#scope-what-this-is-and-what-this-isnt).
 
 ## Why
 
@@ -14,7 +16,7 @@ This product closes that gap with one primitive: **the worker's Stop hook is the
 
 Layered on top: an event-driven watchloop (Redis keyspace listener — fires only on state changes, no poll spam) and a recurring-task runner with file-tracked state + hash-on-fire provenance.
 
-## What's shipped (v0.3.x)
+## What's shipped (v0.4.x)
 
 | Component | Purpose | Phase |
 |---|---|---|
