@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""orch-watch — event-driven supervisor wake daemon.
+
+Replaces the 3-min-poll watchloop that spammed supervisors with
+"CONTINUE" messages even when there was no work. Subscribes to Redis
+keyspace notifications and fires wakes ONLY when a state transition
+actually warrants supervisor attention.
+
+What this daemon handles (the gaps the existing systems do NOT cover):
+
+- ``Stuck current_task`` detection: a worker is idle with current_task
+  still set (outcome != done OR outcome unknown) for longer than
+  ``--stuck-threshold-sec`` seconds. The Stop hook already sent its
+  peer_idle once when the worker stopped; this catches the case where
+  the supervisor missed or didn't act on that signal, OR where the
+  worker has been quietly sitting on an unresolved dispatch.
+
+What this daemon does NOT handle (covered elsewhere):
+
+- ``inbox depth > 0 on an idle session`` → fleet-notify daemon already
+  injects via tmux. We don't second-guess it.
+- ``Worker just stopped, outcome enum set`` → Stop hook already sent
+  peer_idle to the supervisor with the outcome. We don't duplicate.
+- ``Supervisor's own OrchTask dependencies just unblocked`` → planned
+  for v0.3.0 alongside the plan tracker extraction; not in v0.2.0.
+
+Requires Redis to have ``notify-keyspace-events`` configured to include
+at minimum ``Kgl$`` (keyspace + generic + list + string events). The
+installer (Phase D) will set this; for manual install run::
+
+    redis-cli CONFIG SET notify-keyspace-events 'Kgl$'
+    redis-cli CONFIG REWRITE   # persist to redis.conf
+
+Run from peer-respawn DAEMONS list or systemd::
+
+    orch-watch --redis-host 127.0.0.1 --stuck-threshold-sec 300
+
+Output: structured logging to stderr; one peer_idle-style wake message
+per detected condition pushed to the supervisor's inbox via the released
+``taey-notify`` CLI. Dedup TTL ``--dedup-ttl-sec`` (default 3600) prevents
+the same stuck-task wake from re-firing every event.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+import time
+from typing import Optional
+
+# Make the released fleet-notify importable for identity + state_key
+for _path in (
+    "/usr/local/lib/claude-code-fleet-notify",
+    "/home/mira/claude-code-fleet-notify",
+):
+    if os.path.isdir(_path):
+        sys.path.insert(0, _path)
+        break
+
+import redis as redis_lib
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [orch-watch] %(levelname)s %(message)s",
+)
+log = logging.getLogger(__name__)
+
+# Reuse fleet-notify's supervisor resolution rule so this daemon and the
+# Stop hook never disagree about who to address.
+SUFFIX_SUPERVISOR_RULES = ("-codex", "-gemini", "-grok")
+
+# Redis key patterns the daemon subscribes to. KEYSPACE notifications
+# arrive on channels named __keyspace@<db>__:<key>. We subscribe via
+# PSUBSCRIBE with glob patterns.
+SUBSCRIBE_PATTERNS = (
+    "__keyspace@0__:taey:*:current_task",
+    "__keyspace@0__:taey:*:idle",
+    "__keyspace@0__:taey:*:last_activity",
+)
+
+# Extract <node> from "__keyspace@0__:taey:<node>:<suffix>"
+_KEY_RE = re.compile(r"^__keyspace@\d+__:taey:(.+):([a-z_]+)$")
+
+
+def resolve_supervisor(r, node_id: str) -> Optional[str]:
+    """Mirror fleet-notify's _resolve_supervisor: explicit override wins,
+    else suffix-strip, else None."""
+    try:
+        explicit = r.get(f"taey:{node_id}:parent")
+        if explicit:
+            return explicit
+    except Exception:
+        pass
+    for suffix in SUFFIX_SUPERVISOR_RULES:
+        if node_id.endswith(suffix):
+            return node_id[: -len(suffix)]
+    return None
+
+
+def parse_node_from_channel(channel: str):
+    """Return (node_id, suffix) or (None, None) if the channel doesn't match
+    one of our subscription patterns."""
+    m = _KEY_RE.match(channel)
+    if not m:
+        return None, None
+    return m.group(1), m.group(2)
+
+
+def get_current_task(r, node_id: str):
+    """Read taey:<node>:current_task as dict or None."""
+    raw = r.get(f"taey:{node_id}:current_task")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"raw": raw}
+
+
+def get_last_outcome(r, node_id: str):
+    """Read taey:<node>:last_outcome as dict or None."""
+    raw = r.get(f"taey:{node_id}:last_outcome")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"outcome": "unknown", "details": raw}
+
+
+def notify_supervisor_of_stuck(r, supervisor: str, node_id: str,
+                                task: dict, stuck_for_sec: int,
+                                dedup_ttl_sec: int) -> bool:
+    """Push a single 'stuck task' alert to the supervisor. Returns True
+    if the message was sent, False if deduped or unable."""
+    dedup_key = f"taey:orch-watch-stuck:{node_id}"
+    if r.exists(dedup_key):
+        return False
+
+    last_outcome = get_last_outcome(r, node_id) or {"outcome": "unknown"}
+    outcome = last_outcome.get("outcome", "unknown")
+    details = last_outcome.get("details", "")
+    task_id = task.get("task_id", "?")
+    desc = (task.get("description") or "")[:120]
+
+    body_parts = [
+        f"STUCK: {node_id} idle for {stuck_for_sec}s with unresolved task={task_id}",
+        f"outcome={outcome}",
+    ]
+    if desc:
+        body_parts.append(f'"{desc}"')
+    if details:
+        body_parts.append(f"details={details[:200]}")
+    body_parts.append(
+        "Investigate the worker pane, retry with dispatch(), "
+        "or clear with clear_current_task() to acknowledge."
+    )
+    body = " | ".join(body_parts)
+
+    cli = "/usr/local/bin/taey-notify"
+    if os.path.isfile(cli) and os.access(cli, os.X_OK):
+        result = subprocess.run(
+            [cli, supervisor, body, "--from", "orch-watch",
+             "--type", "escalation", "--priority", "high"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            log.error("taey-notify failed for %s: %s",
+                      supervisor, result.stderr.strip())
+            return False
+    else:
+        # Fallback direct push if CLI is missing
+        msg = json.dumps({
+            "from": "orch-watch",
+            "type": "escalation",
+            "body": body,
+            "priority": "high",
+            "msg_id": f"orch-watch-stuck-{node_id}-{int(time.time())}",
+            "timestamp": time.time(),
+        })
+        r.lpush(f"taey:{supervisor}:inbox", msg)
+
+    r.set(dedup_key, "1", ex=dedup_ttl_sec)
+    log.info("Sent STUCK alert: supervisor=%s worker=%s task=%s stuck_for=%ss",
+             supervisor, node_id, task_id, stuck_for_sec)
+    return True
+
+
+def check_stuck(r, node_id: str, stuck_threshold_sec: int,
+                dedup_ttl_sec: int) -> None:
+    """Evaluate whether a node is in the stuck-task state and notify
+    the supervisor if so. Called on any state-transition event for the
+    node."""
+    # Worker must be idle to be "stuck" — if it's still working, no alert.
+    idle = r.get(f"taey:{node_id}:idle")
+    if not idle:
+        return
+
+    task = get_current_task(r, node_id)
+    if not task:
+        return  # No unresolved task → not stuck.
+
+    # If the last_outcome says "done", current_task should have been
+    # cleared by the Stop hook already. If it's still here with done,
+    # something is wrong but it's not "stuck" — it's a Stop hook bug.
+    # Don't escalate on this state; log only.
+    last_outcome = get_last_outcome(r, node_id)
+    if last_outcome and last_outcome.get("outcome") == "done":
+        log.warning("State drift on %s: current_task set but outcome=done. "
+                    "Stop hook should have cleared.", node_id)
+        return
+
+    # Use task.started_at as the clock — how long since dispatch?
+    started_at = task.get("started_at", 0)
+    try:
+        stuck_for = int(time.time() - float(started_at))
+    except Exception:
+        stuck_for = 0
+    if stuck_for < stuck_threshold_sec:
+        return
+
+    supervisor = resolve_supervisor(r, node_id)
+    if not supervisor:
+        log.debug("No supervisor for %s; skip stuck alert.", node_id)
+        return
+
+    notify_supervisor_of_stuck(r, supervisor, node_id, task,
+                                stuck_for, dedup_ttl_sec)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--redis-host", default=os.environ.get("REDIS_HOST", "127.0.0.1"))
+    parser.add_argument("--redis-port", type=int,
+                        default=int(os.environ.get("REDIS_PORT", "6379")))
+    parser.add_argument("--stuck-threshold-sec", type=int, default=300,
+                        help="Idle + unresolved current_task for this long → stuck alert.")
+    parser.add_argument("--dedup-ttl-sec", type=int, default=3600,
+                        help="Don't re-fire the same stuck alert within this window.")
+    parser.add_argument("--sweep-interval-sec", type=int, default=600,
+                        help="Periodic safety-net sweep across all current_task keys, "
+                             "catches conditions that fired no event recently.")
+    args = parser.parse_args()
+
+    r = redis_lib.Redis(host=args.redis_host, port=args.redis_port,
+                        decode_responses=True, socket_timeout=10)
+    r.ping()
+
+    # Verify keyspace notifications are enabled. If not, set them ourselves
+    # (the installer should make this permanent via CONFIG REWRITE).
+    cfg = r.config_get("notify-keyspace-events").get("notify-keyspace-events", "")
+    needed = set("Kgl$")
+    if not needed.issubset(set(cfg)):
+        log.warning("notify-keyspace-events=%r is missing required flags %r; "
+                    "setting Kgl$ (run CONFIG REWRITE to persist).", cfg, "".join(needed))
+        r.config_set("notify-keyspace-events", "Kgl$")
+
+    pubsub = r.pubsub()
+    pubsub.psubscribe(*SUBSCRIBE_PATTERNS)
+    log.info("Started: subscribed to %s; stuck_threshold=%ss dedup_ttl=%ss",
+             SUBSCRIBE_PATTERNS, args.stuck_threshold_sec, args.dedup_ttl_sec)
+
+    last_sweep = 0.0
+    for message in pubsub.listen():
+        # Periodic safety-net sweep — catches conditions that fired no
+        # event recently (e.g., a worker that's been idle with stuck
+        # current_task for hours and no fresh activity is happening).
+        now = time.time()
+        if now - last_sweep > args.sweep_interval_sec:
+            last_sweep = now
+            try:
+                for k in r.scan_iter(match="taey:*:current_task"):
+                    # taey:<node>:current_task
+                    parts = k.split(":", 2)
+                    if len(parts) == 3:
+                        node = parts[1]
+                        check_stuck(r, node, args.stuck_threshold_sec, args.dedup_ttl_sec)
+            except Exception as exc:
+                log.error("Sweep failed: %s", exc)
+
+        if message.get("type") not in ("pmessage", "message"):
+            continue
+
+        channel = message.get("channel", "")
+        node_id, suffix = parse_node_from_channel(channel)
+        if not node_id:
+            continue
+
+        try:
+            check_stuck(r, node_id, args.stuck_threshold_sec, args.dedup_ttl_sec)
+        except Exception as exc:
+            log.error("check_stuck failed for %s: %s", node_id, exc)
+
+
+if __name__ == "__main__":
+    main()
