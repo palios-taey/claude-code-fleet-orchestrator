@@ -6,23 +6,40 @@ Replaces the 3-min-poll watchloop that spammed supervisors with
 keyspace notifications and fires wakes ONLY when a state transition
 actually warrants supervisor attention.
 
-What this daemon handles (the gaps the existing systems do NOT cover):
+TWO SIGNALS the daemon pages on (both are silent stalls no awake actor
+would notice — per Gaia, Phase B consultation 2026-05-26):
 
-- ``Stuck current_task`` detection: a worker is idle with current_task
-  still set (outcome != done OR outcome unknown) for longer than
-  ``--stuck-threshold-sec`` seconds. The Stop hook already sent its
-  peer_idle once when the worker stopped; this catches the case where
-  the supervisor missed or didn't act on that signal, OR where the
-  worker has been quietly sitting on an unresolved dispatch.
+1. ``Stuck current_task while worker idle`` — a worker is idle with
+   current_task still set (outcome != done) longer than
+   ``--stuck-threshold-sec``. The Stop hook already fired its single
+   peer_idle when the worker stopped; this catches the case where the
+   supervisor missed or didn't act on it.
 
-What this daemon does NOT handle (covered elsewhere):
+2. ``Done-DEL that unblocks supervisor's OrchTask while supervisor is
+   idle`` — symmetric twin of the stuck signal. When a worker finishes
+   cleanly (outcome=done), the Stop hook deletes current_task. If that
+   completion unblocked a previously-blocked OrchTask whose owner is
+   currently idle, the supervisor won't poll themselves — actionable
+   work sits forever. The DEL handler invokes a pluggable readiness
+   checker (``--readiness-checker``); if the checker says "yes,
+   supervisor X has newly-ready work", page X.
 
-- ``inbox depth > 0 on an idle session`` → fleet-notify daemon already
-  injects via tmux. We don't second-guess it.
-- ``Worker just stopped, outcome enum set`` → Stop hook already sent
-  peer_idle to the supervisor with the outcome. We don't duplicate.
-- ``Supervisor's own OrchTask dependencies just unblocked`` → planned
-  for v0.3.0 alongside the plan tracker extraction; not in v0.2.0.
+NEITHER signal is a pull state. Pulls (inbox piling up, no-progress-
+since-last-event) are not paged — supervisors drain them on their next
+loop, or the daemon's safety-net sweep catches them.
+
+HYBRID INVOCATION (Logos, same consultation): primary always-on Redis
+PSUBSCRIBE for low-latency event-driven wakes + independent low-cadence
+safety-net poll (``--sweep-interval-sec``, default 1800s = 30 min) that
+runs the SAME investigate handler over all known nodes. Keyspace
+notifications are best-effort / at-most-once / fire-and-forget; pure
+always-on has non-zero silent missed-event probability on subscriber
+death, network partition, or Redis restart. The 30-min poll covers
+that gap with linear complexity delta and exponential reliability gain.
+
+Both invocation paths route through the same ``investigate(node_id)``
+function — single source of truth for "stuck/unblocked" semantics and
+the wake message shape.
 
 Requires Redis to have ``notify-keyspace-events`` configured to include
 at minimum ``Kgl$`` (keyspace + generic + list + string events). The
@@ -33,12 +50,33 @@ installer (Phase D) will set this; for manual install run::
 
 Run from peer-respawn DAEMONS list or systemd::
 
-    orch-watch --redis-host 127.0.0.1 --stuck-threshold-sec 300
+    orch-watch --redis-host 127.0.0.1 --stuck-threshold-sec 300 \\
+               --readiness-checker /path/to/plan_readiness.py:check_readiness
 
 Output: structured logging to stderr; one peer_idle-style wake message
 per detected condition pushed to the supervisor's inbox via the released
-``taey-notify`` CLI. Dedup TTL ``--dedup-ttl-sec`` (default 3600) prevents
-the same stuck-task wake from re-firing every event.
+``taey-notify`` CLI. Dedup TTL ``--dedup-ttl-sec`` (default 3600)
+prevents the same stuck-task wake from re-firing every event.
+
+Readiness-checker interface
+---------------------------
+
+The DEL-side handler invokes an external function the operator wires up::
+
+    def check_readiness(supervisor: str, completed_task: dict) -> Optional[str]:
+        \"\"\"Return a wake message body if this completion unblocked work
+        for an idle supervisor, else None.\"\"\"
+
+``completed_task`` is the dict that was in ``taey:<worker>:current_task``
+immediately before deletion: {task_id, description, supervisor,
+started_at}. Implementations typically check the supervisor's plan
+tracker for ready tasks now owned by them, or check Neo4j OrchTask
+dependencies. The fleet-orchestrator plan tracker (Phase D, v0.4.0)
+will ship a default implementation; for v0.2.x the operator wires their
+own.
+
+If no ``--readiness-checker`` is configured, DEL events are logged and
+skipped (preserves backward compat with Phase B v0.2.0).
 """
 from __future__ import annotations
 
@@ -190,31 +228,136 @@ def notify_supervisor_of_stuck(r, supervisor: str, node_id: str,
     return True
 
 
-def check_stuck(r, node_id: str, stuck_threshold_sec: int,
-                dedup_ttl_sec: int) -> None:
-    """Evaluate whether a node is in the stuck-task state and notify
-    the supervisor if so. Called on any state-transition event for the
-    node."""
-    # Worker must be idle to be "stuck" — if it's still working, no alert.
+def notify_supervisor_of_unblock(r, supervisor: str, completed_task: dict,
+                                  message: str, dedup_ttl_sec: int) -> bool:
+    """Push a single unblock-wake to the supervisor when a worker's
+    done-DEL unblocked their owned OrchTask. ``message`` is the body the
+    readiness checker returned. Returns True if sent, False if deduped."""
+    task_id = completed_task.get("task_id", "?")
+    dedup_key = f"taey:orch-watch-unblock:{supervisor}:{task_id}"
+    if r.exists(dedup_key):
+        return False
+
+    cli = "/usr/local/bin/taey-notify"
+    if os.path.isfile(cli) and os.access(cli, os.X_OK):
+        result = subprocess.run(
+            [cli, supervisor, message, "--from", "orch-watch",
+             "--type", "wake", "--priority", "normal"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            log.error("taey-notify (unblock) failed for %s: %s",
+                      supervisor, result.stderr.strip())
+            return False
+    else:
+        msg = json.dumps({
+            "from": "orch-watch",
+            "type": "wake",
+            "body": message,
+            "priority": "normal",
+            "msg_id": f"orch-watch-unblock-{supervisor}-{task_id}-{int(time.time())}",
+            "timestamp": time.time(),
+        })
+        r.lpush(f"taey:{supervisor}:inbox", msg)
+
+    r.set(dedup_key, "1", ex=dedup_ttl_sec)
+    log.info("Sent UNBLOCK wake: supervisor=%s completed_task=%s",
+             supervisor, task_id)
+    return True
+
+
+def handle_done_del(r, node_id: str, snapshot: dict,
+                     readiness_checker, dedup_ttl_sec: int) -> None:
+    """A worker's current_task was DEL'd by the Stop hook because outcome=
+    done. Run the readiness checker; if it returns a wake message, page
+    the supervisor whose task was unblocked.
+
+    ``snapshot`` is the (worker, task) pair captured BEFORE the DEL
+    actually happened — kept in memory by investigate() because by the
+    time we react to the keyspace event the key is already gone.
+    """
+    if not readiness_checker:
+        log.debug("done-DEL on %s but no --readiness-checker configured; skipping.",
+                  node_id)
+        return
+
+    completed_task = snapshot.get("task")
+    supervisor = snapshot.get("supervisor") or resolve_supervisor(r, node_id)
+    if not supervisor or not completed_task:
+        return
+
+    # Only wake if the supervisor is currently idle. If they're working,
+    # they'll see the unblocked task on their next pull (taey-plan next).
+    if not r.get(f"taey:{supervisor}:idle"):
+        log.debug("Supervisor %s not idle; skip unblock wake.", supervisor)
+        return
+
+    try:
+        message = readiness_checker(supervisor, completed_task)
+    except Exception as exc:
+        log.error("readiness_checker raised for supervisor=%s task=%s: %s",
+                  supervisor, completed_task.get("task_id"), exc)
+        return
+
+    if not message:
+        return  # Checker says no unblock — no wake.
+
+    notify_supervisor_of_unblock(r, supervisor, completed_task,
+                                  message, dedup_ttl_sec)
+
+
+# Memory of in-flight tasks per node so we can react to current_task DEL
+# events with the task content (which is gone from Redis by the time we
+# see the event). Refreshed on every SET we observe + by the periodic
+# sweep. Stale entries do no harm — they're only consulted on DEL.
+_TASK_SNAPSHOTS: dict = {}
+
+
+def investigate(r, node_id: str, event_type: str,
+                stuck_threshold_sec: int, dedup_ttl_sec: int,
+                readiness_checker) -> None:
+    """Single source of truth for what 'stuck' and 'unblocked' mean.
+    Both the PSUBSCRIBE event path and the periodic sweep call this.
+
+    ``event_type`` is one of:
+      - ``current_task_set`` / ``current_task_del``
+      - ``idle_set`` / ``idle_del``
+      - ``last_activity_set``
+      - ``sweep`` (called from periodic poll, treats node as a generic check)
+    """
+    # Refresh snapshot on any event so done-DEL has content to read.
+    task = get_current_task(r, node_id)
+    if task:
+        _TASK_SNAPSHOTS[node_id] = {
+            "task": task,
+            "supervisor": task.get("supervisor") or resolve_supervisor(r, node_id),
+        }
+
+    # Done-DEL handler: a current_task just disappeared. Was it because
+    # outcome=done? (Stop hook clears only on done; any other outcome
+    # leaves current_task in place.) If the snapshot exists and the key
+    # is now gone, treat as done-DEL.
+    if event_type == "current_task_del" and node_id in _TASK_SNAPSHOTS:
+        snapshot = _TASK_SNAPSHOTS.pop(node_id, None)
+        if snapshot:
+            handle_done_del(r, node_id, snapshot, readiness_checker, dedup_ttl_sec)
+        return
+
+    # Stuck-task check: worker idle + current_task present + age over
+    # threshold. Same logic as v0.2.0.
+    if not task:
+        return
+
     idle = r.get(f"taey:{node_id}:idle")
     if not idle:
         return
 
-    task = get_current_task(r, node_id)
-    if not task:
-        return  # No unresolved task → not stuck.
-
-    # If the last_outcome says "done", current_task should have been
-    # cleared by the Stop hook already. If it's still here with done,
-    # something is wrong but it's not "stuck" — it's a Stop hook bug.
-    # Don't escalate on this state; log only.
     last_outcome = get_last_outcome(r, node_id)
     if last_outcome and last_outcome.get("outcome") == "done":
         log.warning("State drift on %s: current_task set but outcome=done. "
                     "Stop hook should have cleared.", node_id)
         return
 
-    # Use task.started_at as the clock — how long since dispatch?
     started_at = task.get("started_at", 0)
     try:
         stuck_for = int(time.time() - float(started_at))
@@ -232,6 +375,26 @@ def check_stuck(r, node_id: str, stuck_threshold_sec: int,
                                 stuck_for, dedup_ttl_sec)
 
 
+def load_readiness_checker(spec):
+    """Resolve --readiness-checker spec ``path/to/file.py:function_name``
+    or ``module.path:function_name`` to a callable."""
+    if not spec:
+        return None
+    if ":" not in spec:
+        raise ValueError(f"--readiness-checker must be 'path:function', got {spec!r}")
+    module_spec, func_name = spec.rsplit(":", 1)
+    if os.path.isfile(module_spec):
+        import importlib.util
+        mod_name = os.path.splitext(os.path.basename(module_spec))[0]
+        spec_obj = importlib.util.spec_from_file_location(mod_name, module_spec)
+        module = importlib.util.module_from_spec(spec_obj)
+        spec_obj.loader.exec_module(module)
+    else:
+        import importlib
+        module = importlib.import_module(module_spec)
+    return getattr(module, func_name)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--redis-host", default=os.environ.get("REDIS_HOST", "127.0.0.1"))
@@ -240,10 +403,17 @@ def main():
     parser.add_argument("--stuck-threshold-sec", type=int, default=300,
                         help="Idle + unresolved current_task for this long → stuck alert.")
     parser.add_argument("--dedup-ttl-sec", type=int, default=3600,
-                        help="Don't re-fire the same stuck alert within this window.")
-    parser.add_argument("--sweep-interval-sec", type=int, default=600,
-                        help="Periodic safety-net sweep across all current_task keys, "
-                             "catches conditions that fired no event recently.")
+                        help="Don't re-fire the same alert (stuck or unblock) within this window.")
+    parser.add_argument("--sweep-interval-sec", type=int, default=1800,
+                        help="Periodic safety-net sweep across all current_task keys "
+                             "(default 30 min per Logos Phase B consultation: keyspace "
+                             "notifications are best-effort/at-most-once; the poll is "
+                             "the reliability backstop).")
+    parser.add_argument("--readiness-checker", default=None,
+                        help="Module:function for the done-DEL readiness checker. "
+                             "Spec format: '/path/to/file.py:check_readiness' or "
+                             "'package.module:check_readiness'. If unset, done-DEL "
+                             "events are logged and skipped.")
     args = parser.parse_args()
 
     r = redis_lib.Redis(host=args.redis_host, port=args.redis_port,
@@ -259,26 +429,48 @@ def main():
                     "setting Kgl$ (run CONFIG REWRITE to persist).", cfg, "".join(needed))
         r.config_set("notify-keyspace-events", "Kgl$")
 
+    readiness_checker = load_readiness_checker(args.readiness_checker)
+    if readiness_checker:
+        log.info("Loaded readiness checker: %s", args.readiness_checker)
+
+    # Bootstrap _TASK_SNAPSHOTS so done-DEL events for already-existing
+    # current_task keys have content to react to (the daemon may start
+    # mid-dispatch).
+    for k in r.scan_iter(match="taey:*:current_task"):
+        parts = k.split(":", 2)
+        if len(parts) == 3:
+            node = parts[1]
+            task = get_current_task(r, node)
+            if task:
+                _TASK_SNAPSHOTS[node] = {
+                    "task": task,
+                    "supervisor": task.get("supervisor") or resolve_supervisor(r, node),
+                }
+
     pubsub = r.pubsub()
     pubsub.psubscribe(*SUBSCRIBE_PATTERNS)
-    log.info("Started: subscribed to %s; stuck_threshold=%ss dedup_ttl=%ss",
-             SUBSCRIBE_PATTERNS, args.stuck_threshold_sec, args.dedup_ttl_sec)
+    log.info("Started: subscribed to %s; stuck_threshold=%ss dedup_ttl=%ss sweep=%ss",
+             SUBSCRIBE_PATTERNS, args.stuck_threshold_sec, args.dedup_ttl_sec,
+             args.sweep_interval_sec)
 
     last_sweep = 0.0
     for message in pubsub.listen():
         # Periodic safety-net sweep — catches conditions that fired no
-        # event recently (e.g., a worker that's been idle with stuck
-        # current_task for hours and no fresh activity is happening).
+        # event recently AND covers Redis keyspace notification's
+        # best-effort/at-most-once delivery semantics (subscriber death,
+        # network partition, Redis restart can silently drop events).
         now = time.time()
         if now - last_sweep > args.sweep_interval_sec:
             last_sweep = now
             try:
                 for k in r.scan_iter(match="taey:*:current_task"):
-                    # taey:<node>:current_task
                     parts = k.split(":", 2)
                     if len(parts) == 3:
                         node = parts[1]
-                        check_stuck(r, node, args.stuck_threshold_sec, args.dedup_ttl_sec)
+                        investigate(r, node, "sweep",
+                                    args.stuck_threshold_sec,
+                                    args.dedup_ttl_sec,
+                                    readiness_checker)
             except Exception as exc:
                 log.error("Sweep failed: %s", exc)
 
@@ -286,14 +478,22 @@ def main():
             continue
 
         channel = message.get("channel", "")
+        event_data = message.get("data", "")
         node_id, suffix = parse_node_from_channel(channel)
         if not node_id:
             continue
 
+        # The keyspace event_data tells us SET vs DEL vs EXPIRE etc.
+        # Map (suffix, event_data) → investigate's event_type label.
+        event_type = f"{suffix}_{event_data}" if event_data else suffix
+
         try:
-            check_stuck(r, node_id, args.stuck_threshold_sec, args.dedup_ttl_sec)
+            investigate(r, node_id, event_type,
+                        args.stuck_threshold_sec,
+                        args.dedup_ttl_sec,
+                        readiness_checker)
         except Exception as exc:
-            log.error("check_stuck failed for %s: %s", node_id, exc)
+            log.error("investigate failed for %s (%s): %s", node_id, event_type, exc)
 
 
 if __name__ == "__main__":
