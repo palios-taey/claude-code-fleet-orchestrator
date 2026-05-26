@@ -1,32 +1,113 @@
 # claude-code-fleet-orchestrator
 
-> Tmux-fleet orchestration: supervisor↔worker dispatch, plan/task tracking, recurring schedules, universal Stop+notify across Claude Code / codex / gemini / grok / any tmux-driven REPL CLI.
+> Tmux-fleet orchestration: supervisor↔worker dispatch, recurring schedules, universal Stop+notify across Claude Code / codex / gemini / grok / any tmux-driven REPL CLI.
 
-Built on top of [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (≥ v0.2.0), which provides the message transport (Redis inbox, daemon, tmux-send). This repo adds the supervisor-worker coordination layer.
+Current version: **v0.3.2** (Phase A + B + C shipped — see [`docs/STATUS.md`](docs/STATUS.md)).
+
+Built on top of [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (≥ v0.2.2), which provides the message transport (Redis inbox, daemon, tmux-send, per-CLI Stop hooks). This repo adds the supervisor-worker coordination layer.
 
 ## Why
 
 You spawn a worker CLI in another tmux pane (codex, gemini, grok, a second Claude Code, anything driven by a REPL prompt). You dispatch a task. Then nothing — the supervisor session doesn't know if the worker received the task, doesn't know when it starts, doesn't know when it finishes, doesn't see the outcome inline. So you keep tabbing between panes, or you give up and write everything from one session.
 
-This product closes that gap with one primitive: **the worker's Stop hook is the universal notifier**. Don't trust the worker to call `taey-notify` manually — make the Stop hook do it for every CLI, with the completed task's content embedded in the notify body. Supervisors see outcomes without context-switching.
+This product closes that gap with one primitive: **the worker's Stop hook is the universal notifier**. Don't trust the worker to call `taey-notify` manually — make the Stop hook do it for every CLI, with the completed task's content embedded in the notify body (the hook implementation lives in `fleet-notify`; this package adds the dispatcher-side `current_task` write so the hook has something to report).
 
-Layered on top: a plan/task tracker (Neo4j-backed OrchProject/Phase/Task DAG), a recurring-task runner (cron-fired but with state tracked in files referenced from the task itself), and an event-driven watchloop (Redis keyspace listener — fires only when state changes, not on a wall clock).
+Layered on top: an event-driven watchloop (Redis keyspace listener — fires only on state changes, no poll spam) and a recurring-task runner with file-tracked state + hash-on-fire provenance.
 
-## What's included
+## What's shipped (v0.3.x)
 
-| Component | Purpose |
-|---|---|
-| `hooks/stop_*.py` | Per-CLI Stop hook variants — set idle=1 + notify supervisor with completion content. Claude Code, codex, gemini handled directly; grok inherits Claude Code via `~/.claude/settings.json`. |
-| `lib/dispatch.py` | `dispatch(supervisor, worker, task_id, prompt)` — writes worker inbox, writes `taey:<worker>:current_task` so Stop hook has content to report. |
-| `lib/orch_schema.py` | Neo4j schema: OrchProject ←HAS_PHASE← OrchPhase ←HAS_TASK← OrchTask, with `kind ∈ {one_shot, recurring}` + `schedule` + `state_file` for x-claude-style file-tracked processes. |
-| `scripts/taey-plan` | CLI: project list/show/current/next-ready/ingest-md/assign. |
-| `scripts/taey-task` | CLI: task create/update/list/delegate. |
-| `scripts/orch-watch` | Event-driven watchloop. Subscribes to Redis keyspace notifications, wakes a supervisor only when its owned work changes state. |
-| `scripts/orch-cron` | Recurring runner — reads Neo4j for `kind=recurring` tasks, fires their wake prompts on schedule. Replaces the static `recurring_triggers.json` pattern. |
+| Component | Purpose | Phase |
+|---|---|---|
+| `lib/dispatch.py` | `dispatch()` / `record_outcome()` / `check_previous_task()` / `clear_current_task()`. Writes `taey:<worker>:current_task` atomically with stale-outcome + stuck-dedup clear, so the universal Stop hook has content to report and re-dispatches don't carry stale state. | A — v0.1.0 |
+| `scripts/orch-watch` | Event-driven supervisor wake daemon. PSUBSCRIBE on `current_task` / `idle` / `last_activity` keyspace notifications + 30-min safety-net sweep. Fires high-priority `peer_idle` escalations on stuck workers (idle + unresolved `current_task` for > threshold) and optional `wake` messages on done-DEL when a configurable readiness-checker says the completion unblocked an OrchTask the supervisor owns. | B — v0.2.0 / v0.2.1 |
+| `scripts/orch-cron` | Recurring-task runner. Drop-in replacement for static `recurring_triggers.json`-style cron runners. Adds optional `state_file` per trigger (append-only JSONL audit log) + SHA-256 hash-on-fire sidecar (`<state_file>.meta.json`) so the file pointer is tamper-evident. | C — v0.3.0 |
+| `docs/SCHEMA.md` | Task model spec. One `OrchTask` label, kind-aware status enum (`one_shot` ∈ {pending,in_progress,completed,failed,blocked}; `recurring` ∈ {active,paused,retired} — NEVER completed); reserves `(:OrchTask)-[:FIRED]->(:OrchRecurringFire)` for v0.4+ per-fire visibility. | C — v0.3.0 |
 
-## Status
+The Stop hook itself lives in [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (`hooks/_shared.py:action_stop` + per-CLI hook variants for Claude Code / codex / gemini; Grok inherits Claude Code automatically). This package is the dispatcher-side counterpart that writes the keys the hook reads.
 
-Pre-release. Currently building. See [`docs/STATUS.md`](docs/STATUS.md) for what's wired and what's still scaffold.
+## What's planned (v0.4.0)
+
+| Component | Purpose | Status |
+|---|---|---|
+| `lib/orch_schema.py` | Neo4j schema implementation of the spec in [`docs/SCHEMA.md`](docs/SCHEMA.md). | not yet shipped |
+| `scripts/taey-plan` | CLI: project list/show/current/next-ready/ingest-md/assign. | not yet shipped |
+| `scripts/taey-task` | CLI: task create/update/list/delegate. | not yet shipped |
+| `tasks_api` REST API | port 5002 API for plan / task CRUD + session-aware `current` and `next-ready` endpoints. | not yet shipped |
+| default readiness checker | Module that wires `orch-watch --readiness-checker` against the plan tracker so done-DEL events automatically check the supervisor's OrchTask graph. | not yet shipped |
+
+Until v0.4.0, the operator wires their own readiness checker (`--readiness-checker module:function`) or omits it — `orch-watch` runs fine without one (just no done-DEL unblock signal). See [`docs/STATUS.md`](docs/STATUS.md) for full phase map.
+
+## Install
+
+```bash
+# 1. Install the transport dependency first (covers Claude Code / codex / gemini / grok hooks)
+git clone https://github.com/palios-taey/claude-code-fleet-notify.git
+cd claude-code-fleet-notify
+sudo make install
+bash scripts/install-hooks.sh --all --apply
+bash scripts/start_notify_daemons.sh start
+
+# 2. Install this orchestrator
+cd ..
+git clone https://github.com/palios-taey/claude-code-fleet-orchestrator.git
+cd claude-code-fleet-orchestrator
+
+# 3. Enable Redis keyspace notifications for orch-watch
+redis-cli CONFIG SET notify-keyspace-events 'Kgl$'
+redis-cli CONFIG REWRITE   # persist
+
+# 4. Start orch-watch (one per machine)
+python3 scripts/orch-watch --redis-host 127.0.0.1 &
+```
+
+## Usage
+
+```python
+from lib.dispatch import dispatch, record_outcome, check_previous_task, clear_current_task
+
+# Supervisor side
+prev = check_previous_task('treasurer-codex')
+if prev:
+    # Previous dispatch did not complete cleanly (outcome != done left
+    # current_task in place). Decide: retry, investigate, or cancel.
+    ...
+
+dispatch(
+    worker='treasurer-codex',
+    task_id='scout-cycle-22',
+    description='Scout r/MachineLearning for acute-pain replies',
+    supervisor='treasurer',     # written to taey:treasurer-codex:parent
+)
+
+# Worker side, just before stopping
+record_outcome('treasurer-codex', 'done', 'found 3 qualifying targets, posted 2 replies')
+
+# When the worker stops, its Stop hook (in fleet-notify) reads current_task
+# + last_outcome and pushes a single peer_idle message to the supervisor's
+# inbox with outcome inline. Zero context-switch.
+```
+
+```bash
+# Recurring tasks via JSON registry (orch-cron)
+cat > /etc/orch/recurring.json <<EOF
+{
+  "triggers": [{
+    "id": "x-claude-cycle",
+    "session": "x-claude",
+    "tz": "America/New_York",
+    "minute": 9,
+    "hours": [8, 10, 12, 14, 16, 18, 20, 22],
+    "prompt_file": "/path/to/repo",
+    "state_file": "/var/log/orch/x-claude.jsonl",
+    "enabled": true,
+    "status": "active"
+  }]
+}
+EOF
+
+# Run from system cron (every minute) — exact-minute match
+* * * * * /usr/local/bin/orch-cron --registry /etc/orch/recurring.json
+```
 
 ## License
 
