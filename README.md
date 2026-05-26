@@ -2,7 +2,7 @@
 
 > Tmux-fleet orchestration: supervisor↔worker dispatch, recurring schedules, universal Stop+notify across Claude Code / codex / gemini / grok / any tmux-driven REPL CLI.
 
-Current version: **v0.3.2** (Phase A + B + C shipped — see [`docs/STATUS.md`](docs/STATUS.md)).
+Current version: **v0.4.0** (Phase A + B + C + D shipped — see [`docs/STATUS.md`](docs/STATUS.md)).
 
 Built on top of [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (≥ v0.2.2), which provides the message transport (Redis inbox, daemon, tmux-send, per-CLI Stop hooks). This repo adds the supervisor-worker coordination layer.
 
@@ -25,17 +25,30 @@ Layered on top: an event-driven watchloop (Redis keyspace listener — fires onl
 
 The Stop hook itself lives in [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (`hooks/_shared.py:action_stop` + per-CLI hook variants for Claude Code / codex / gemini; Grok inherits Claude Code automatically). This package is the dispatcher-side counterpart that writes the keys the hook reads.
 
-## What's planned (v0.4.0)
+## What shipped in v0.4.0 (Phase D — plan tracker + default readiness checker)
 
-| Component | Purpose | Status |
-|---|---|---|
-| `lib/orch_schema.py` | Neo4j schema implementation of the spec in [`docs/SCHEMA.md`](docs/SCHEMA.md). | not yet shipped |
-| `scripts/taey-plan` | CLI: project list/show/current/next-ready/ingest-md/assign. | not yet shipped |
-| `scripts/taey-task` | CLI: task create/update/list/delegate. | not yet shipped |
-| `tasks_api` REST API | port 5002 API for plan / task CRUD + session-aware `current` and `next-ready` endpoints. | not yet shipped |
-| default readiness checker | Module that wires `orch-watch --readiness-checker` against the plan tracker so done-DEL events automatically check the supervisor's OrchTask graph. | not yet shipped |
+| Component | Purpose |
+|---|---|
+| `lib/orch_schema.py` | Neo4j schema implementation of [`docs/SCHEMA.md`](docs/SCHEMA.md): OrchProject ↔ OrchPhase ↔ OrchTask DAG with kind-aware status, dependency ready-task discovery, phase-completion cascade, session current/next-ready. |
+| `lib/plan_loader.py` | Markdown plan ingest (idempotent, content-hash provenance). |
+| `lib/tasks_api.py` | FastAPI app on `:5002` — `/api/tasks`, `/api/projects`, `/api/projects/load-md`, `/api/sessions/{sid}/current\|next-ready`. |
+| `lib/config.py` | `OrchConfig` + Redis/Neo4j connection helpers; path-flexible `.env` loading. |
+| `lib/plan_readiness.py` | **Default readiness checker** for `orch-watch --readiness-checker`. LOOSE semantic (wake only on blocked→ready transition); self-loop exclusion; SETNX dedup for concurrent finals. |
+| `scripts/taey-plan` | CLI: project list / show / current / next-ready / ingest-md / assign. |
+| `scripts/taey-task` | CLI: task create / update / list / delegate. |
 
-Until v0.4.0, the operator wires their own readiness checker (`--readiness-checker module:function`) or omits it — `orch-watch` runs fine without one (just no done-DEL unblock signal). See [`docs/STATUS.md`](docs/STATUS.md) for full phase map.
+### Default readiness checker
+
+`orch-watch` v0.2.1+ accepts `--readiness-checker module_path_or_file:function`. Wiring it to the v0.4.0 default:
+
+```bash
+orch-watch \
+    --readiness-checker /path/to/claude-code-fleet-orchestrator/lib/plan_readiness.py:check_readiness
+```
+
+Now when a worker finishes cleanly (Stop hook CAS-clears `current_task` on outcome=done), `orch-watch` queries Neo4j: does any OrchTask owned by the supervisor have a `DEPENDS_ON` edge to the completed task AND all OTHER deps already complete? If yes AND supervisor is idle, page them. LOOSE semantics, so a task with N deps completing in sequence wakes the supervisor exactly once (on the Nth completion, not all N).
+
+> **v0.4.1 follow-ups**: zero-dep tasks need a separate creation-time wake path; already-completed deps at edge-creation need a write-time check in `add_dependency`. Both queued — additive features, not correctness gaps in v0.4.0's shipped path. Tracked in [`docs/STATUS.md`](docs/STATUS.md).
 
 ## Install
 
