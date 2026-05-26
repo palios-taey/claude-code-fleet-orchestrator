@@ -132,9 +132,29 @@ def dispatch(
             f"DISPATCH task={task_id}\n"
             f"description: {description}\n"
             f"(Recorded as your current_task in Redis. Your Stop hook will "
-            f"notify the supervisor when you finish. Optional: set "
-            f"taey:{worker}:last_outcome to include a short outcome in the "
-            f"notify body.)"
+            f"notify the supervisor when you finish.)"
+        )
+
+    # Standard record_outcome footer (Treasurer ergonomic finding 2026-
+    # 05-26): workers reliably forget to call record_outcome unless told
+    # explicitly. Without it, peer_idle reaches the supervisor with
+    # outcome=unknown and outcome_details=None — the supervisor can't
+    # tell clean-finish from error-restart from interrupted, and the
+    # CAS done-clear never fires so current_task persists as "previous
+    # dispatch did not complete cleanly" (Gaia persistence rule).
+    # Auto-append unless caller opts out by passing the footer themselves
+    # (we detect via 'record_outcome' substring already present).
+    if "record_outcome" not in prompt_body:
+        prompt_body = prompt_body.rstrip() + (
+            "\n\n---\nWHEN DONE — call record_outcome so the supervisor knows "
+            "the result (otherwise outcome=unknown + current_task persists as "
+            "'previous dispatch unresolved'). One line via bash tool:\n\n"
+            f"python3 -c \"import sys; sys.path.insert(0,'/path/to/repo'); "
+            f"from lib.dispatch import record_outcome; "
+            f"record_outcome('{worker}', 'done', '<short outcome summary>')\"\n\n"
+            "Replace 'done' with 'error' or 'interrupted' if the task did not "
+            "complete cleanly. The '<short outcome summary>' is your one-line "
+            "report — what landed, what's at /tmp/..., what's the verdict."
         )
 
     # Use the released taey-notify CLI so the message routes through the

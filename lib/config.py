@@ -37,12 +37,21 @@ for _env_path in _dotenv_candidates:
                     os.environ.setdefault(_k, _v.strip())
         break  # first found wins
 
-# Environment overrides
-ORCH_REDIS_HOST = os.environ["ORCH_REDIS_HOST"]
-ORCH_REDIS_PORT = int(os.environ["ORCH_REDIS_PORT"])
-ORCH_NEO4J_URI = os.environ["ORCH_NEO4J_URI"]
-ORCH_DASHBOARD_URL = os.environ["ORCH_DASHBOARD_URL"]
-ORCH_NEO4J_DB = os.environ["ORCH_NEO4J_DB"]
+# Environment overrides with sensible localhost defaults so module-level
+# imports don't KeyError if the .env loader missed a path (race condition
+# observed by x-claude 2026-05-26: first import of orch-watch failed with
+# KeyError ORCH_REDIS_HOST; subsequent loads succeeded). Defaults match
+# the typical single-machine fleet layout. Production deployments should
+# override via .env or environment; the default-presence is a safety
+# net that lets imports succeed even if config is missing, so the failure
+# manifests at OrchConfig() use time (with a clear connection error)
+# rather than at import time (with a cryptic KeyError that masks the
+# actual call site).
+ORCH_REDIS_HOST = os.environ.get("ORCH_REDIS_HOST", "127.0.0.1")
+ORCH_REDIS_PORT = int(os.environ.get("ORCH_REDIS_PORT", "6379"))
+ORCH_NEO4J_URI = os.environ.get("ORCH_NEO4J_URI", "bolt://localhost:7687")
+ORCH_DASHBOARD_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002")
+ORCH_NEO4J_DB = os.environ.get("ORCH_NEO4J_DB", "neo4j")
 # Sentinel: optional — empty string means not used
 ORCH_REDIS_SENTINELS = os.environ.get("ORCH_REDIS_SENTINELS", "")
 ORCH_REDIS_SENTINEL_MASTER = os.environ.get("ORCH_REDIS_SENTINEL_MASTER", "orch-master")

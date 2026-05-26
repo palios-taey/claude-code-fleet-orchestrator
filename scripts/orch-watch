@@ -399,8 +399,25 @@ def investigate(r, node_id: str, event_type: str,
 
     last_outcome = get_last_outcome(r, node_id)
     if last_outcome and last_outcome.get("outcome") == "done":
-        log.warning("State drift on %s: current_task set but outcome=done. "
-                    "Stop hook should have cleared.", node_id)
+        # Grace window (treasurer system-integration sign-off TIER-3,
+        # noise complaint): the Stop hook's CAS done-clear is async with
+        # respect to orch-watch's keyspace event arrival. The hook fires
+        # action_stop() which (a) sets idle=1 -> emits a keyspace event,
+        # (b) reads current_task + last_outcome, (c) runs the Lua
+        # compare-and-swap clear. orch-watch can see (a)'s event and
+        # call investigate() BEFORE (c) lands — meaning current_task is
+        # still set, last_outcome is already done, but the clear is
+        # genuinely in flight. Warning at that point is noise.
+        # Skip the warning if last_activity is within the last 10s
+        # (the CAS clear should have landed by then).
+        try:
+            la = float(r.get(f"taey:{node_id}:last_activity") or 0)
+        except Exception:
+            la = 0
+        if _redis_now(r) - la > 10:
+            log.warning("State drift on %s: current_task set but outcome=done "
+                        "(activity %ds ago — past grace window). Stop hook should "
+                        "have cleared.", node_id, int(_redis_now(r) - la))
         return
 
     # Audit fix #3 (Gaia, code audit 2026-05-26) + fix-of-fix (real-fleet
