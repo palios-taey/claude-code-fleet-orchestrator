@@ -110,10 +110,22 @@ def dispatch(
         "supervisor": supervisor,
         "started_at": time.time(),
     }
-    r.set(_state_key(worker, "current_task"), json.dumps(current_task))
 
+    # Audit fix (Gaia dispatch #1 + #2, code audit 2026-05-26): a re-
+    # dispatch MUST atomically clear the worker's stale last_outcome (so
+    # the next Stop hook reads the fresh outcome, not the previous error
+    # marker) AND clear the orch-watch stuck-dedup keys for the NEW
+    # task_id (so the watchloop fires a fresh alert if THIS dispatch
+    # stalls). We do all three writes in a MULTI block so the worker can
+    # never observe a half-state where current_task is new but
+    # last_outcome is stale (Stop hook would misreport).
+    pipe = r.pipeline(transaction=True)
+    pipe.delete(_state_key(worker, "last_outcome"))
+    pipe.delete(f"taey:orch-watch-stuck:{worker}:{task_id}")
+    pipe.set(_state_key(worker, "current_task"), json.dumps(current_task))
     if supervisor:
-        r.set(_state_key(worker, "parent"), supervisor)
+        pipe.set(_state_key(worker, "parent"), supervisor)
+    pipe.execute()
 
     if prompt_body is None:
         prompt_body = (

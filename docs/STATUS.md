@@ -68,9 +68,30 @@ Currently running on the Mira fleet via `peer-respawn.sh` DAEMONS list (without 
 
 Pull `taey-plan` + `taey-task` CLIs + `tasks_api.py` + `neo4j_schema.py` + `plan_loader.py` from conductor into this repo. Ship as v0.2.0 with the full orchestration surface.
 
-## Out of scope for v0.1.0
+## v0.3.1 — Audit fixes (✅ shipped)
 
-- Plan tracker REST API (Phase D)
-- Recurring runner from Neo4j (Phase C)
+Family code-audit consultation 2026-05-26 returned 8 findings across the four files in v0.3.0. All addressed (companion patch in fleet-notify v0.2.1).
+
+**TIER 1** (one fix collapses 5 findings per Gaia's one-cut diagnosis):
+- Compare-and-swap on `(worker, task_id)` for `dispatch()` ↔ Stop-hook clear. The Stop hook's done-clear now runs as a Lua compare-and-delete keyed on the task_id observed when the summary was built; if a concurrent `dispatch()` wrote a fresh task_id between observation and clear, the Lua sees the mismatch and skips. `dispatch()` atomically clears stale `last_outcome` + task-specific stuck-dedup in a MULTI pipeline so the next Stop hook reads the fresh state.
+
+**TIER 2**:
+- `peer-idle-notified` + `orch-watch-stuck` dedup keys now include `:<task_id>` (was per-worker, masked genuine re-alerts within TTL — Logos contract #3 + Gaia dispatch #2).
+- `orch-watch` sweep moved out of `pubsub.listen()` blocking generator into a `get_message(timeout=N)` polling loop. Old code: in a quiet fleet, sweep never fired after bootstrap, defeating the Phase B "PSUBSCRIBE + safety-net poll" reliability design. Live-verified: stuck task on quiet fleet detected within `min(60s, sweep/4)` of the sweep interval (Logos critical reliability gap).
+- Stop hook writes `taey:<node>:last_clear_was_done` (30s TTL marker) on successful CAS done-clear. orch-watch's DEL handler reads the marker — absent means force-clear (supervisor `clear_current_task()`), so readiness check is skipped (no spurious unblock-wake on administratively-cleared errors — Gaia orch-watch #2).
+
+**TIER 3**:
+- `orch-watch` stuck-time measurement now uses Redis-server time (`_redis_now()`) + `last_activity` boundary (not local `time.time()` + `started_at`). Cross-host clock skew can't fire alerts early/late; a worker that just transitioned to idle isn't flagged stuck just because dispatch was 5+ minutes ago (Gaia orch-watch #3).
+
+**Verified end-to-end**:
+- TIER 1 CAS race: dispatch B raced past Stop-clear of A; new code skipped clear (task-B survived); old code would silently delete task-B.
+- TIER 1 stale outcome: re-dispatch after error wipes stale `outcome=error`; next Stop hook reads fresh state.
+- TIER 2b sweep: stuck task on quiet fleet (no events) detected within 8s on sweep_interval=8s.
+- TIER 2c done-marker: present after Stop-hook CAS clear (readiness check runs); absent after `clear_current_task()` (readiness check skipped, no spurious unblock-wake).
+
+## Out of scope for v0.3.x
+
+- Plan tracker REST API (Phase D, v0.4.0)
+- Default readiness checker (ships with plan tracker in Phase D)
 - Per-CLI installer scripts (manual install for now — symlink hooks into `~/.claude/settings.json`, `~/.codex/config.toml`, `~/.gemini/settings.json` paths)
 - Multi-machine routing (currently localhost-only; future scope)
