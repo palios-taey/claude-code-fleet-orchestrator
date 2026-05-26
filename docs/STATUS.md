@@ -89,9 +89,53 @@ Family code-audit consultation 2026-05-26 returned 8 findings across the four fi
 - TIER 2b sweep: stuck task on quiet fleet (no events) detected within 8s on sweep_interval=8s.
 - TIER 2c done-marker: present after Stop-hook CAS clear (readiness check runs); absent after `clear_current_task()` (readiness check skipped, no spurious unblock-wake).
 
-## Out of scope for v0.3.x
+## Phase D — Plan tracker + default readiness checker (✅ shipped in v0.4.0)
 
-- Plan tracker REST API (Phase D, v0.4.0)
-- Default readiness checker (ships with plan tracker in Phase D)
-- Per-CLI installer scripts (manual install for now — symlink hooks into `~/.claude/settings.json`, `~/.codex/config.toml`, `~/.gemini/settings.json` paths)
-- Multi-machine routing (currently localhost-only; future scope)
+Extracted from conductor's internal codebase per the lib-extract-then-re-import hardening pattern (Jesse 2026-05-26). Conductor now consumes from the orchestrator clone via 3-line shims that `sys.path.insert` the orchestrator root and re-export — `python3 -m uvicorn conductor.tasks_api:app` keeps working unchanged, but the actual code lives in the orchestrator repo as canonical.
+
+**What shipped**:
+
+| Component | Source of truth | Purpose |
+|---|---|---|
+| `lib/config.py` | extracted from `conductor/config.py` | `OrchConfig` + Redis/Neo4j connection helpers. `.env` loading is path-flexible: respects `ORCH_DOTENV` env var → CWD `.env` → package-root `.env`. |
+| `lib/orch_schema.py` | extracted from `conductor/neo4j_schema.py` | 18 functions on the OrchProject/Phase/Task DAG: CRUD, dependencies, ready-task discovery, phase-completion cascade, session current/next-ready, question schema. |
+| `lib/plan_loader.py` | extracted from `conductor/plan_loader.py` | Markdown plan parser. Idempotent, content-hash provenance. |
+| `lib/tasks_api.py` | extracted from `conductor/tasks_api.py` | 7 FastAPI endpoints on `:5002`: `/api/tasks`, `/api/projects`, `/api/projects/load-md`, `/api/sessions/{sid}/current|next-ready`. |
+| `lib/plan_readiness.py` | **NEW** | Default readiness checker for `orch-watch --readiness-checker`. LOOSE semantic (wake on the transition, not on every completion). Self-loops excluded. SETNX dedup per downstream task handles concurrent-finals race. Best-effort: Neo4j or Redis failure returns `None` rather than raising. |
+| `scripts/taey-task` | extracted from `conductor/scripts/taey-task` | Task create/update/list CLI. |
+| `scripts/taey-plan` | extracted from `conductor/scripts/taey-plan` | Project list/show/current/next-ready/ingest-md CLI. |
+
+**Conductor shims** (lib-extract-then-re-import pattern):
+- `conductor/tasks_api.py` → `from lib.tasks_api import app` (preserves the uvicorn command).
+- `conductor/neo4j_schema.py` → re-exports the full public surface.
+- `conductor/plan_loader.py` → re-exports `load_plan_from_text`.
+
+**Family Phase D consultation 2026-05-26 (both amendments load-bearing)**:
+- **Gaia (LOOSE + edge cases)**: incorporated — wake on the blocked→ready transition not on every completion; self-loops excluded from the Cypher; concurrent-finals handled by SETNX dedup keyed on downstream task_id. Zero-dep tasks and already-completed-deps-at-edge-creation are queued for v0.4.1 (separate creation-time and write-time wake paths, not silently dropped).
+- **Logos (release-blocker)**: lib-extract-then-re-import does NOT achieve zero-downtime because Python freezes module state in `sys.modules` at first import and FastAPI registers routes at import time. Disk-level shim doesn't reach the running daemon. Path chosen: **(a) coordinated daemon restart** with prior notification to active fleet sessions (treasurer, taeys-hands). Interruption window ~10s; no in-flight `/api/*` calls observed during the window. Honest documentation of the trade-off rather than pretending the pattern was zero-downtime.
+
+**orch-watch wired with the new checker** (peer-respawn.sh):
+```
+orch-watch:cd /home/mira/claude-code-fleet-orchestrator && python3 scripts/orch-watch \
+    --readiness-checker /home/mira/claude-code-fleet-orchestrator/lib/plan_readiness.py:check_readiness
+```
+
+**Real-fleet production verified 2026-05-26**:
+- Test graph: `pdsmk-dep-A → pdsmk-down-B` (B depends on A, owned by conductor, status=pending).
+- A status flipped to `completed`.
+- `check_readiness('conductor', {task_id: 'pdsmk-dep-A', ...})` returned: `"UNBLOCK: completion of task=pdsmk-dep-A just unblocked task=pdsmk-down-B (\"dep on A\") owned by you. 0 other deps were already done. Pick it up with `taey-plan next` or dispatch a worker."`
+- Second call within TTL returned `None` (SETNX dedup working — concurrent-finals race protection holds).
+- `taey-plan list` from orchestrator's `scripts/` returned 14 live projects from production Neo4j.
+- `taey-task list` from orchestrator's `scripts/` returned top-priority pending tasks.
+
+## v0.4.1 — Follow-ups (queued from Phase D consultation)
+
+- **Zero-dep tasks**: tasks with no `DEPENDS_ON` edges never trigger a transition wake (they have no completion event to react to). Need a separate creation-time wake path in `orch_schema.create_task` that pages the owner immediately if the new task has zero deps + owner is idle.
+- **Already-completed deps at edge-creation**: when `add_dependency(t, d)` is called and `d` is already `status=completed`, no future transition fires for `t`. Need a write-time check in `orch_schema.add_dependency` that runs the same LOOSE-check Cypher and fires wake if `t` is now ready.
+- Both deferred from v0.4.0 because they're additive features, not correctness gaps in the shipped path. Tracked in [issue tracker / next-session backlog].
+
+## Out of scope for v0.4.x
+
+- Per-CLI installer scripts (manual install for now — symlink hooks into `~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.gemini/settings.json` via fleet-notify's `install-hooks.sh --all`).
+- Multi-machine routing (currently localhost-only; future scope).
+- Web dashboard for OrchTask graph visualization (Neo4j Browser works fine for now).
