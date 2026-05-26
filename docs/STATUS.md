@@ -12,23 +12,38 @@
 
 **Validated by Family:** Gaia (outcome-enum amendment, load-bearing) + Logos (two-mechanism resolver, optimal).
 
-## Phase B — Event-driven watchloop (✅ shipped in v0.2.0)
+## Phase B — Event-driven watchloop (✅ shipped in v0.2.1)
 
-`scripts/orch-watch` — replaces the 3-min-poll watchloop that was spamming supervisors with "CONTINUE" messages even when there was no work.
+`scripts/orch-watch` — replaces the 3-min-poll watchloop that was spamming supervisors with "CONTINUE" messages even when there was no work. PSUBSCRIBE to Redis keyspace notifications + 30-min safety-net sweep (hybrid per Logos Phase B consultation 2026-05-26: keyspace events are best-effort/at-most-once, the poll is the reliability backstop).
 
-Subscribes to Redis keyspace notifications on `taey:*:current_task`, `taey:*:idle`, `taey:*:last_activity` patterns. Fires a supervisor wake ONLY when:
+**Two signals it pages on** (both silent stalls no awake actor would notice, per Gaia same consultation):
 
-- A worker is idle AND has unresolved `current_task` (outcome != done) for longer than `--stuck-threshold-sec` (default 300s).
+1. **Stuck `current_task` while worker idle** — worker stopped, Stop hook sent its single peer_idle, supervisor missed/didn't act, unresolved task sits indefinitely. Threshold: `--stuck-threshold-sec` (default 300s).
+2. **Done-DEL that unblocks supervisor's OrchTask while supervisor is idle** — symmetric twin. When a worker finishes cleanly (outcome=done → Stop hook clears current_task), the readiness checker is invoked; if a previously-blocked task is now ready for an idle supervisor, page the supervisor. Requires `--readiness-checker module:function` to wire a real check; if unset, DEL events are logged and skipped.
 
-What this daemon does NOT handle (already covered):
+**Both signals route through a single `investigate()` handler.** The PSUBSCRIBE path (event-driven) and the periodic sweep (reliability backup) call the same function with the same semantics.
+
+**What it does NOT page on** (covered elsewhere):
 - `inbox > 0 + idle=1` → released fleet-notify daemon already injects via tmux.
-- `Worker just stopped, outcome enum set` → Stop hook already sent peer_idle to supervisor.
+- `Worker just stopped, outcome enum set` → Stop hook already sent peer_idle.
 
-Periodic safety-net sweep at `--sweep-interval-sec` (default 600s) catches conditions that don't fire fresh events (worker idle with stuck task for hours with no other activity).
+These are pulls, not pages — supervisors drain them on their next loop.
 
-Requires Redis `notify-keyspace-events` to include `Kgl$`. Daemon auto-sets this if missing; installer (Phase D) will make it permanent via `CONFIG REWRITE`.
+**Requires** Redis `notify-keyspace-events` to include `Kgl$`. Daemon auto-sets this if missing; installer (Phase D) will make it permanent via `CONFIG REWRITE`.
 
-Smoke-tested 2026-05-26: stale current_task (started 600s ago) on idle worker → orch-watch fired escalation to supervisor's inbox with full context (task_id, description, outcome, recovery instructions). Currently running on the Mira fleet via `peer-respawn.sh` DAEMONS list.
+**Readiness checker interface**:
+```python
+def check_readiness(supervisor: str, completed_task: dict) -> Optional[str]:
+    """Return a wake message body if this completion unblocked work
+    for an idle supervisor, else None."""
+```
+Plan tracker ships a default implementation in v0.4.0 (Phase D). For v0.2.x, operator wires their own.
+
+**Smoke-tested 2026-05-26**:
+- Stale current_task (600s old) on idle worker → STUCK escalation landed in supervisor inbox.
+- Done-DEL with synthetic readiness checker returning a wake message → UNBLOCK wake landed in supervisor inbox.
+
+Currently running on the Mira fleet via `peer-respawn.sh` DAEMONS list (without `--readiness-checker` for now; just stuck-detection).
 
 ## Phase C — Recurring task type (⏳ planned)
 
