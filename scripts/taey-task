@@ -147,7 +147,7 @@ def main():
 
     p_update = sub.add_parser("update", help="Update task status")
     p_update.add_argument("task_id", help="Task ID")
-    p_update.add_argument("status", choices=["completed", "failed", "in_progress"])
+    p_update.add_argument("status", choices=["completed", "failed", "in_progress", "interrupted"])
 
     args = parser.parse_args()
     if args.command == "create":

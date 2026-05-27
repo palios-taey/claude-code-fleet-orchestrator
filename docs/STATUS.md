@@ -1,5 +1,10 @@
 # Status — what's wired vs scaffold
 
+## v1.0.2
+
+- `fix(orch-watch): wake sessions on completion of self-owned taey-task work` — `taey-task update ... in_progress` now mirrors the dispatch wire by writing `taey:<session>:current_task`, and self-owned `completed|failed|interrupted` updates record the same `last_outcome` enum the Stop hook already consumes. Result: orch-watch is no longer blind to Claude Code sessions running their own OrchTasks; clean self-owned completions now clear through the existing Stop-hook CAS done-clear path and can fire normal UNBLOCK wakes.
+- PATCH `/api/task/{id}` now preserves the existing task owner when the caller omits `owner`, instead of blanking it on every status update.
+
 ## Phase A — Universal Stop+notify (✅ shipped in v0.1.0)
 
 **Done:**
