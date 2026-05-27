@@ -1,5 +1,11 @@
 # Status — what's wired vs scaffold
 
+## v1.0.4
+
+- `feat(dispatch): bug-lock pre-dispatch gate` — `lib.dispatch.dispatch()` now resolves a product id from the target worker session and checks `support:product:<id>:bug_lock` before the existing `bind_current_task()` / inbox write path. Active locks raise `BugLockActive` and abort dispatch before any `current_task`, `last_outcome`, or orch-watch dedup mutation.
+- `dispatch(..., is_bugfix=True)` bypasses that pre-check so bug-fix / mitigation work on the locked product can still proceed, matching architecture spec §3.1.
+- Initial resolver scope is intentionally minimal: `conductor-*` sessions map to product `the-conductor`. Unmapped sessions skip the check.
+
 ## v1.0.3
 
 - `fix(orch-watch): make repeated peer-idle wakes actionable` — idle-session wakes for unresolved in-progress tasks now query the session's next ready OrchTask (excluding the current one) and include a concrete continuation directive when other work exists. If no other ready task exists, the wake explicitly says there is no other ready work so the session can confirm it is genuinely waiting instead of stop-looping.
