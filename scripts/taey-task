@@ -108,6 +108,7 @@ def cmd_status(args):
     print(f"Task: {t.get('id', args.task_id)}")
     print(f"  Status: {t.get('status', '?')}")
     print(f"  Owner: {t.get('owner', 'unassigned')}")
+    print(f"  Blocked on: {t.get('blocked_on') or '-'}")
     print(f"  Priority: {t.get('priority', '?')}")
     print(f"  Description: {t.get('description', '?')[:200]}")
 
@@ -119,9 +120,15 @@ def cmd_update(args):
         "status": args.status,
         "from": sender,
     }
+    if args.clear_blocked_on:
+        data["blocked_on"] = ""
+    elif args.blocked_on is not None:
+        data["blocked_on"] = args.blocked_on
     result = api_call("PATCH", f"/api/task/{args.task_id}", data)
     if result.get("ok"):
-        print(f"OK: {args.task_id} → {args.status} (by {sender})")
+        blocked_on = result.get("blocked_on")
+        suffix = f" blocked_on={blocked_on}" if blocked_on else ""
+        print(f"OK: {args.task_id} → {args.status} (by {sender}){suffix}")
     else:
         print(f"ERROR: {result.get('error', 'unknown')}", file=sys.stderr)
         sys.exit(1)
@@ -148,6 +155,9 @@ def main():
     p_update = sub.add_parser("update", help="Update task status")
     p_update.add_argument("task_id", help="Task ID")
     p_update.add_argument("status", choices=["completed", "failed", "in_progress", "interrupted"])
+    p_update.add_argument("--blocked-on", help="Mark the in-progress task as waiting on an external signal")
+    p_update.add_argument("--clear-blocked-on", action="store_true",
+                          help="Clear the task's blocked_on marker")
 
     args = parser.parse_args()
     if args.command == "create":

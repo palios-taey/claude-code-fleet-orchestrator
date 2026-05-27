@@ -90,6 +90,10 @@ import sys
 import time
 from typing import Optional
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 # Make the released fleet-notify importable for identity + state_key
 for _path in (
     "/usr/local/lib/claude-code-fleet-notify",
@@ -170,6 +174,41 @@ def get_last_outcome(r, node_id: str):
         return {"outcome": "unknown", "details": raw}
 
 
+def _load_task_state(task_id: str):
+    from lib.config import OrchConfig
+    from lib.orch_schema import get_task
+
+    return get_task(task_id, config=OrchConfig())
+
+
+def _build_peer_idle_body(r, supervisor: str, node_id: str,
+                          task: dict, outcome: str,
+                          details: str, duration_sec: int) -> str:
+    from lib.plan_readiness import next_ready_for_session
+
+    task_id = task.get("task_id", "?")
+    desc = (task.get("description") or "")[:120]
+    body = (
+        f"[PEER_IDLE] {node_id} stopped — outcome={outcome}; "
+        f"task={task_id}; \"{desc}\"; duration={duration_sec}s."
+    )
+    if details:
+        body += f" details={details[:200]}."
+
+    next_task = next_ready_for_session(supervisor, exclude_task_id=task_id)
+    if next_task:
+        next_desc = (next_task.get("description") or "")[:120]
+        return (
+            f"{body} While waiting on {task_id}, the next ready task for you is: "
+            f"{next_task['task_id']} — {next_desc}. Pick this up to make progress."
+        )
+
+    return (
+        f"{body} No other ready work is available right now. "
+        f"Confirm you're correctly waiting on this task's unblock signal before you stop again."
+    )
+
+
 def notify_supervisor_of_stuck(r, supervisor: str, node_id: str,
                                 task: dict, stuck_for_sec: int,
                                 dedup_ttl_sec: int) -> bool:
@@ -191,27 +230,25 @@ def notify_supervisor_of_stuck(r, supervisor: str, node_id: str,
     outcome = last_outcome.get("outcome", "unknown")
     details = last_outcome.get("details", "")
     task_id = task.get("task_id", "?")
-    desc = (task.get("description") or "")[:120]
+    task_state = _load_task_state(task_id) if task_id != "?" else None
+    blocked_on = ((task_state or {}).get("blocked_on") or "").strip()
+    if blocked_on:
+        log.info("Suppressed PEER_IDLE wake: supervisor=%s worker=%s task=%s blocked_on=%s",
+                 supervisor, node_id, task_id, blocked_on)
+        return False
 
-    body_parts = [
-        f"STUCK: {node_id} idle for {stuck_for_sec}s with unresolved task={task_id}",
-        f"outcome={outcome}",
-    ]
-    if desc:
-        body_parts.append(f'"{desc}"')
-    if details:
-        body_parts.append(f"details={details[:200]}")
-    body_parts.append(
-        "Investigate the worker pane, retry with dispatch(), "
-        "or clear with clear_current_task() to acknowledge."
-    )
-    body = " | ".join(body_parts)
+    try:
+        started_at = float(task.get("started_at", 0) or 0)
+    except Exception:
+        started_at = 0.0
+    duration_sec = int(max(0.0, _redis_now(r) - started_at)) if started_at > 0 else stuck_for_sec
+    body = _build_peer_idle_body(r, supervisor, node_id, task, outcome, details, duration_sec)
 
     cli = "/usr/local/bin/taey-notify"
     if os.path.isfile(cli) and os.access(cli, os.X_OK):
         result = subprocess.run(
             [cli, supervisor, body, "--from", "orch-watch",
-             "--type", "escalation", "--priority", "high"],
+             "--type", "wake", "--priority", "high"],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -222,16 +259,16 @@ def notify_supervisor_of_stuck(r, supervisor: str, node_id: str,
         # Fallback direct push if CLI is missing
         msg = json.dumps({
             "from": "orch-watch",
-            "type": "escalation",
+            "type": "wake",
             "body": body,
             "priority": "high",
-            "msg_id": f"orch-watch-stuck-{node_id}-{int(time.time())}",
+            "msg_id": f"orch-watch-peer-idle-{node_id}-{int(time.time())}",
             "timestamp": time.time(),
         })
         r.lpush(f"taey:{supervisor}:inbox", msg)
 
     r.set(dedup_key, "1", ex=dedup_ttl_sec)
-    log.info("Sent STUCK alert: supervisor=%s worker=%s task=%s stuck_for=%ss",
+    log.info("Sent PEER_IDLE wake: supervisor=%s worker=%s task=%s stuck_for=%ss",
              supervisor, node_id, task_id, stuck_for_sec)
     return True
 
