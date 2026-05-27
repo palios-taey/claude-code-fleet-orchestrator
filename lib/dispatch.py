@@ -11,7 +11,8 @@ hook has something to report.
 
 Public API:
     dispatch(worker, task_id, description, supervisor=None,
-             prompt_body=None, priority="normal") -> None
+             prompt_body=None, priority="normal",
+             is_bugfix=False) -> None
 
 The ``supervisor`` argument is informational — it's stamped on the
 current_task payload so the Stop hook knows who to address even when
@@ -50,6 +51,26 @@ import subprocess
 import sys
 import time
 from typing import Optional
+
+
+PRODUCT_OWNER_MAP = {
+    "conductor": "the-conductor",
+}
+
+
+class BugLockActive(Exception):
+    """Dispatch blocked because the target product is under an active bug lock."""
+
+
+def _base_session_name(worker: str) -> str:
+    for suffix in ("-codex", "-gemini", "-grok", "-claude"):
+        if worker.endswith(suffix):
+            return worker[: -len(suffix)]
+    return worker
+
+
+def _resolve_product_id(worker: str) -> Optional[str]:
+    return PRODUCT_OWNER_MAP.get(_base_session_name(worker))
 
 
 def _redis_connect():
@@ -113,19 +134,24 @@ def dispatch(
     supervisor: Optional[str] = None,
     prompt_body: Optional[str] = None,
     priority: str = "normal",
+    is_bugfix: bool = False,
 ) -> None:
     """Record the task on the worker side and inject the prompt.
 
     Side effects (in order):
 
-    1. Write ``taey:<worker>:current_task`` JSON {task_id, description,
+    1. If the worker maps to a product in ``PRODUCT_OWNER_MAP`` and that
+       product has ``support:product:<id>:bug_lock == "true"``, raise
+       ``BugLockActive`` before any worker-state mutation unless
+       ``is_bugfix=True``.
+    2. Write ``taey:<worker>:current_task`` JSON {task_id, description,
        supervisor, started_at} — the universal Stop hook reads this to
        build its supervisor-notify body. Cleared by the Stop hook after
        the supervisor is notified.
-    2. If ``supervisor`` is provided, write ``taey:<worker>:parent`` so
+    3. If ``supervisor`` is provided, write ``taey:<worker>:parent`` so
        the Stop hook addresses notifications correctly even for multi-
        level trees (where suffix-strip wouldn't reach the right node).
-    3. Inject the prompt by invoking ``taey-notify <worker> <body>``,
+    4. Inject the prompt by invoking ``taey-notify <worker> <body>``,
        which the released fleet-notify daemon will pick up and deliver
        via tmux as soon as the worker is idle.
 
@@ -134,6 +160,16 @@ def dispatch(
     Pass ``prompt_body`` to override with custom text.
     """
     r = _redis_connect()
+    product_id = _resolve_product_id(worker)
+    if product_id and not is_bugfix:
+        bug_lock_key = f"support:product:{product_id}:bug_lock"
+        if r.get(bug_lock_key) == "true":
+            reason = (
+                r.get(f"support:product:{product_id}:bug_lock_reason")
+                or "(no reason recorded)"
+            )
+            raise BugLockActive(f"BUG_LOCK_ACTIVE for {product_id}: {reason}")
+
     bind_current_task(
         worker=worker,
         task_id=task_id,

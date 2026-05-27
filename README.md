@@ -2,7 +2,7 @@
 
 > Turn scattered AI terminals into a supervised tmux fleet: dispatch work to Claude Code / Codex / Gemini / Grok / any **hookable** REPL CLI, get `done`/`error`/`interrupted` outcomes back inline so the supervisor can update the plan instead of babysitting panes.
 
-Current version: **v1.0.2** (self-owned `taey-task` completions now ride the same Redis wire as dispatches, so orch-watch can wake idle sessions on next-task readiness — see [`docs/STATUS.md`](docs/STATUS.md)).
+Current version: **v1.0.4** (dispatch now honors active product bug locks before any worker-state mutation, with an explicit `is_bugfix=True` escape hatch for mitigation work — see [`docs/STATUS.md`](docs/STATUS.md)).
 
 Built on top of [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (≥ v1.0.0), which provides the message transport (Redis inbox, daemon, tmux-send, per-CLI Stop hooks). This repo adds the supervisor-worker coordination layer.
 
@@ -20,7 +20,7 @@ Layered on top: an event-driven watchloop (Redis keyspace listener — fires onl
 
 | Component | Purpose | Phase |
 |---|---|---|
-| `lib/dispatch.py` | `dispatch()` / `record_outcome()` / `check_previous_task()` / `clear_current_task()`. Writes `taey:<worker>:current_task` atomically with stale-outcome + stuck-dedup clear, so the universal Stop hook has content to report and re-dispatches don't carry stale state. | A — v0.1.0 |
+| `lib/dispatch.py` | `dispatch()` / `record_outcome()` / `check_previous_task()` / `clear_current_task()`. Writes `taey:<worker>:current_task` atomically with stale-outcome + stuck-dedup clear, and as of `v1.0.4` performs the spec §3.1 bug-lock pre-check before any worker-state mutation. | A — v0.1.0, updated in v1.0.4 |
 | `scripts/orch-watch` | Event-driven supervisor wake daemon. PSUBSCRIBE on `current_task` / `idle` / `last_activity` keyspace notifications + 30-min safety-net sweep. Fires high-priority `peer_idle` escalations on stuck workers (idle + unresolved `current_task` for > threshold) and optional `wake` messages on done-DEL when a configurable readiness-checker says the completion unblocked an OrchTask the supervisor owns. | B — v0.2.0 / v0.2.1 |
 | `scripts/orch-cron` | Recurring-task runner. Drop-in replacement for static `recurring_triggers.json`-style cron runners. Adds optional `state_file` per trigger (append-only JSONL audit log) + SHA-256 hash-on-fire sidecar (`<state_file>.meta.json`) so the file pointer is tamper-evident. | C — v0.3.0 |
 | `docs/SCHEMA.md` | Task model spec. One `OrchTask` label, kind-aware status enum (`one_shot` ∈ {pending,in_progress,completed,failed,blocked}; `recurring` ∈ {active,paused,retired} — NEVER completed); reserves `(:OrchTask)-[:FIRED]->(:OrchRecurringFire)` for v0.4+ per-fire visibility. | C — v0.3.0 |

@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.4 - 2026-05-27
+
+- Added the architecture spec §3.1 bug-lock pre-dispatch gate in `lib/dispatch.py` via `BugLockActive` plus a new `is_bugfix=False` kwarg that allows bug-fix dispatches to proceed under an active lock.
+- Added minimal session-to-product resolution for conductor-owned work so dispatches to `conductor-*` sessions check `support:product:the-conductor:bug_lock` before any Redis state mutation.
+- Production-verified the 5 spec-required conditions in live Redis/orch-watch state and recorded the exact evidence in `PHASE_BUGLOCK_VERIFICATION.md`.
+
 ## v1.0.3 - 2026-05-27
 
 - Fixed the `orch-watch` continuation gap where repeated PEER_IDLE wakes were informational only and could trap self-owned sessions in a wake/acknowledge/stop loop.
