@@ -65,9 +65,9 @@ For ad-hoc tasks not tied to a written plan: `taey-task create "..." --priority 
 
 ## Where to keep your plan files
 
-Wherever they already are. Examples already on Mira:
-- `/path/to/repo` — conductor-owned plans
-- `/path/to/repo` — treasurer consultations
+Wherever they already are — `taey-plan ingest` reads the file and stores `source_path` for provenance, so the file stays at its authoring location. Example layouts (from the Mira fleet that authored this format):
+- `<your-fleet-integration-repo>/plans/` — fleet-wide canonical plans
+- `<session-specific-repo>/plans/` or `<session>/consultations/` — per-session plan files
 - `/path/to/repo` — plan-mode outputs (ephemeral; copy to a stable home before ingesting if you want them tracked long-term)
 
 Just point `taey-plan ingest` at the file. The path is the link.
