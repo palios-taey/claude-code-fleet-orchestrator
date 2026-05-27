@@ -14,7 +14,7 @@ You're talking to an AI agent — not a person reading in real time. The system 
 
 ## What we commit to
 
-- **Acknowledgment**: we target ~15 minutes when systems are healthy. [Inferred — target derived from current Redis-inbox + taey-notify wiring; we publish a system-health status indicator at `(status indicator coming in v0.2.0 — see roadmap)` so you can see in real time whether the ack path is healthy or in degraded mode.]
+- **Acknowledgment**: we target ~15 minutes when systems are healthy. [Inferred — target derived from current Redis-inbox + taey-notify wiring. Status indicator deferred to v0.2.0 per the demand-trigger discipline in architecture spec §15.5 — see the cf-support roadmap.]
 - **Resolution**: continuous execution until closed. [Observed — work remains pulled forward and not abandoned.] We do **not** publish clock-time resolution targets [Observed — cannot-lie discipline: resolution depends on reproduction quality, dependency systems, and release safety, all of which we cannot honestly bound in advance].
 - **Production-stop**: when a confirmed bug is open on this product, we do not ship new features on this product until the bug is fixed, mitigated, or explicitly deferred with rationale. [Observed — enforced as a machine-legible Redis lock at the dispatch layer; verified per `lib.dispatch buglock-verification production-test (orchestrator v1.0.4, see PHASE_BUGLOCK_VERIFICATION.md)`.] Unrelated products continue normally.
 
