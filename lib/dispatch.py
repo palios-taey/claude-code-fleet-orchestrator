@@ -75,6 +75,37 @@ def _state_key(node_id: str, suffix: str) -> str:
     return f"{prefix}:{node_id}:{suffix}"
 
 
+def bind_current_task(
+    worker: str,
+    task_id: str,
+    description: str,
+    supervisor: Optional[str] = None,
+    set_parent: bool = False,
+) -> None:
+    """Write the canonical dispatch/current-task wire for ``worker``.
+
+    This is the Redis-side half of the dispatch primitive, factored out so
+    non-dispatch task flows (for example self-owned ``taey-task`` work) can
+    mirror the exact same state shape that the Stop hook and orch-watch
+    already understand.
+    """
+    r = _redis_connect()
+    current_task = {
+        "task_id": task_id,
+        "description": description,
+        "supervisor": supervisor,
+        "started_at": time.time(),
+    }
+
+    pipe = r.pipeline(transaction=True)
+    pipe.delete(_state_key(worker, "last_outcome"))
+    pipe.delete(f"taey:orch-watch-stuck:{worker}:{task_id}")
+    pipe.set(_state_key(worker, "current_task"), json.dumps(current_task))
+    if set_parent and supervisor:
+        pipe.set(_state_key(worker, "parent"), supervisor)
+    pipe.execute()
+
+
 def dispatch(
     worker: str,
     task_id: str,
@@ -103,29 +134,13 @@ def dispatch(
     Pass ``prompt_body`` to override with custom text.
     """
     r = _redis_connect()
-
-    current_task = {
-        "task_id": task_id,
-        "description": description,
-        "supervisor": supervisor,
-        "started_at": time.time(),
-    }
-
-    # Audit fix (Gaia dispatch #1 + #2, code audit 2026-05-26): a re-
-    # dispatch MUST atomically clear the worker's stale last_outcome (so
-    # the next Stop hook reads the fresh outcome, not the previous error
-    # marker) AND clear the orch-watch stuck-dedup keys for the NEW
-    # task_id (so the watchloop fires a fresh alert if THIS dispatch
-    # stalls). We do all three writes in a MULTI block so the worker can
-    # never observe a half-state where current_task is new but
-    # last_outcome is stale (Stop hook would misreport).
-    pipe = r.pipeline(transaction=True)
-    pipe.delete(_state_key(worker, "last_outcome"))
-    pipe.delete(f"taey:orch-watch-stuck:{worker}:{task_id}")
-    pipe.set(_state_key(worker, "current_task"), json.dumps(current_task))
-    if supervisor:
-        pipe.set(_state_key(worker, "parent"), supervisor)
-    pipe.execute()
+    bind_current_task(
+        worker=worker,
+        task_id=task_id,
+        description=description,
+        supervisor=supervisor,
+        set_parent=bool(supervisor),
+    )
 
     if prompt_body is None:
         prompt_body = (
