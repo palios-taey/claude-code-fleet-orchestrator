@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lib.config import OrchConfig
+from lib.dispatch import bind_current_task, record_outcome
 from lib.orch_schema import (
     assign_task_to_phase,
     check_phase_complete,
@@ -82,10 +83,9 @@ def _serialize_node(node: Any) -> Dict[str, Any]:
     return {k: _coerce_neo4j_value(v) for k, v in dict(node).items()}
 
 
-@app.get("/api/tasks/{task_id}")
-def get_task(task_id: str) -> Dict[str, Any]:
-    driver = get_neo4j_driver(_cfg())
-    with driver.session(database=_cfg().neo4j_db) as session:
+def _load_task(task_id: str, cfg: OrchConfig) -> Dict[str, Any]:
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
         result = session.run(
             "MATCH (t:OrchTask {id: $tid}) RETURN t",
             tid=task_id,
@@ -93,6 +93,11 @@ def get_task(task_id: str) -> Dict[str, Any]:
     if not result:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     return _serialize_node(result["t"])
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: str) -> Dict[str, Any]:
+    return _load_task(task_id, _cfg())
 
 
 @app.post("/api/task/create")
@@ -146,12 +151,33 @@ async def create(req: Request) -> Dict[str, Any]:
 async def update(task_id: str, req: Request) -> Dict[str, Any]:
     data = await req.json()
     status = data.get("status", "pending")
-    owner = data.get("owner", "")
+    sender = data.get("from", "")
     result = data.get("result", "")
 
     try:
         cfg = _cfg()
+        task_before = _load_task(task_id, cfg)
+        owner = data.get("owner")
+        if owner is None:
+            owner = task_before.get("owner", "")
+
         update_task_status(task_id, status, owner=owner, result=result, config=cfg)
+
+        if sender and owner == sender:
+            if status == "in_progress":
+                bind_current_task(
+                    worker=sender,
+                    task_id=task_id,
+                    description=task_before.get("description", ""),
+                    supervisor=sender,
+                    set_parent=True,
+                )
+            elif status == "completed":
+                record_outcome(sender, "done", result or None)
+            elif status == "failed":
+                record_outcome(sender, "error", result or None)
+            elif status == "interrupted":
+                record_outcome(sender, "interrupted", result or None)
 
         # Transitive completion: if task finished, check if its parent phase is now done.
         phase_completed = False

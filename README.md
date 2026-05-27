@@ -2,7 +2,7 @@
 
 > Turn scattered AI terminals into a supervised tmux fleet: dispatch work to Claude Code / Codex / Gemini / Grok / any **hookable** REPL CLI, get `done`/`error`/`interrupted` outcomes back inline so the supervisor can update the plan instead of babysitting panes.
 
-Current version: **v1.0.0** (Phase A + B + C + D shipped + audit fixes — see [`docs/STATUS.md`](docs/STATUS.md)).
+Current version: **v1.0.2** (self-owned `taey-task` completions now ride the same Redis wire as dispatches, so orch-watch can wake idle sessions on next-task readiness — see [`docs/STATUS.md`](docs/STATUS.md)).
 
 Built on top of [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (≥ v1.0.0), which provides the message transport (Redis inbox, daemon, tmux-send, per-CLI Stop hooks). This repo adds the supervisor-worker coordination layer.
 
