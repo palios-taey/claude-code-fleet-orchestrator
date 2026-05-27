@@ -46,7 +46,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from typing import Optional
+from typing import Any, Dict, Optional
 
 # Support being loaded as a sibling module by importlib.util.spec_from_file_location
 # (the path orch-watch's --readiness-checker uses) AND as part of the lib
@@ -57,6 +57,7 @@ if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
 
 from lib.config import OrchConfig, get_neo4j_session  # noqa: E402
+from lib.orch_schema import get_session_next_ready  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +127,13 @@ def _dedup_wake(redis_client, downstream_task_id: str, ttl_sec: int = 600) -> bo
         log.debug("wake dedup SETNX failed for %s: %s — allowing wake.",
                   downstream_task_id, exc)
         return True
+
+
+def next_ready_for_session(session_id: str,
+                           exclude_task_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Return the top ready task for a session, excluding one task if requested."""
+    cfg = OrchConfig()
+    return get_session_next_ready(session_id, exclude_task_id=exclude_task_id, config=cfg)
 
 
 def check_readiness(supervisor: str, completed_task: dict) -> Optional[str]:

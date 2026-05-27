@@ -38,9 +38,11 @@ from lib.orch_schema import (
     ensure_default_project,
     get_agent_tasks,
     get_neo4j_driver,
+    get_session_next_ready,
     get_project_summary,
     get_ready_tasks,
     get_session_current_work,
+    get_task as load_task_record,
     get_task_phase,
     update_task_status,
 )
@@ -97,7 +99,10 @@ def _load_task(task_id: str, cfg: OrchConfig) -> Dict[str, Any]:
 
 @app.get("/api/tasks/{task_id}")
 def get_task(task_id: str) -> Dict[str, Any]:
-    return _load_task(task_id, _cfg())
+    task = load_task_record(task_id, config=_cfg())
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    return task
 
 
 @app.post("/api/task/create")
@@ -160,8 +165,16 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         owner = data.get("owner")
         if owner is None:
             owner = task_before.get("owner", "")
+        blocked_on = data["blocked_on"] if "blocked_on" in data else None
 
-        update_task_status(task_id, status, owner=owner, result=result, config=cfg)
+        update_task_status(
+            task_id,
+            status,
+            owner=owner,
+            result=result,
+            blocked_on=blocked_on,
+            config=cfg,
+        )
 
         if sender and owner == sender:
             if status == "in_progress":
@@ -191,6 +204,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             "task_id": task_id,
             "status": status,
             "owner": owner,
+            "blocked_on": blocked_on if blocked_on is not None else task_before.get("blocked_on"),
             "phase_completed": phase_completed,
         }
     except Exception as e:
@@ -301,30 +315,10 @@ def session_current(session_id: str) -> Dict[str, Any]:
 @app.get("/api/sessions/{session_id}/next-ready")
 def session_next_ready(session_id: str) -> Dict[str, Any]:
     """Top pending task owned-by this session OR unowned-and-team-matched."""
-    cfg = _cfg()
-    driver = get_neo4j_driver(cfg)
-    with driver.session(database=cfg.neo4j_db) as session:
-        result = session.run("""
-            MATCH (t:OrchTask)
-            WHERE t.status = 'pending'
-              AND (t.owner = $sess OR t.owner = '' OR t.owner IS NULL)
-              AND NOT EXISTS {
-                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                  WHERE dep.status <> 'completed'
-              }
-            OPTIONAL MATCH (ph:OrchPhase)-[:HAS_TASK]->(t)
-            OPTIONAL MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph)
-            RETURN t.id AS task_id, t.description AS description,
-                   t.priority AS priority, t.owner AS owner,
-                   ph.id AS phase_id, ph.name AS phase_name,
-                   proj.id AS project_id, proj.name AS project_name
-            ORDER BY (CASE WHEN t.owner = $sess THEN 1 ELSE 0 END) DESC,
-                     t.priority DESC
-            LIMIT 1
-        """, sess=session_id).single()
+    result = get_session_next_ready(session_id, config=_cfg())
     if not result:
         return {"session": session_id, "next": None}
-    return {"session": session_id, "next": dict(result)}
+    return {"session": session_id, "next": result}
 
 
 @app.get("/health")

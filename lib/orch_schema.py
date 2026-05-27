@@ -213,28 +213,61 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
 
 def update_task_status(task_id: str, status: str, owner: str = "",
                        result: Optional[str] = None,
+                       blocked_on: Optional[str] = None,
                        config: Optional[OrchConfig] = None) -> bool:
     """Update task status, owner, and optional result."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
+    blocked_on_value = "__KEEP__" if blocked_on is None else blocked_on
     try:
         with driver.session(database=cfg.neo4j_db) as session:
             if result is None:
                 rec = session.run("""
                     MATCH (t:OrchTask {id: $task_id})
                     SET t.status = $status, t.owner = $owner,
+                        t.blocked_on = CASE
+                            WHEN $status <> 'in_progress' THEN NULL
+                            WHEN $blocked_on = '__KEEP__' THEN t.blocked_on
+                            WHEN $blocked_on = '' THEN NULL
+                            ELSE $blocked_on
+                        END,
                         t.updated_at = datetime()
                     RETURN t.id AS id
-                """, task_id=task_id, status=status, owner=owner)
+                """, task_id=task_id, status=status, owner=owner, blocked_on=blocked_on_value)
             else:
                 rec = session.run("""
                     MATCH (t:OrchTask {id: $task_id})
                     SET t.status = $status, t.owner = $owner,
                         t.result = $result,
+                        t.blocked_on = CASE
+                            WHEN $status <> 'in_progress' THEN NULL
+                            WHEN $blocked_on = '__KEEP__' THEN t.blocked_on
+                            WHEN $blocked_on = '' THEN NULL
+                            ELSE $blocked_on
+                        END,
                         t.updated_at = datetime()
                     RETURN t.id AS id
-                """, task_id=task_id, status=status, owner=owner, result=result)
+                """, task_id=task_id, status=status, owner=owner, result=result,
+                     blocked_on=blocked_on_value)
             return rec.single() is not None
+    finally:
+        pass  # Driver is singleton; do not close
+
+
+def get_task(task_id: str,
+             config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
+    """Return one OrchTask node as a plain dict."""
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    try:
+        with driver.session(database=cfg.neo4j_db) as session:
+            result = session.run("""
+                MATCH (t:OrchTask {id: $task_id})
+                RETURN t
+            """, task_id=task_id).single()
+            if not result:
+                return None
+            return _normalize_map(dict(result["t"]))
     finally:
         pass  # Driver is singleton; do not close
 
@@ -386,6 +419,38 @@ def get_session_current_work(session_id: str,
             """, session_id=session_id)
             record = result.single()
             return dict(record) if record else None
+    finally:
+        pass  # Driver is singleton; do not close
+
+
+def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = None,
+                           config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
+    """Return the top ready task for a session, excluding a specific task if requested."""
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    try:
+        with driver.session(database=cfg.neo4j_db) as session:
+            result = session.run("""
+                MATCH (t:OrchTask)
+                WHERE t.status = 'pending'
+                  AND (t.owner = $sess OR t.owner = '' OR t.owner IS NULL)
+                  AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)
+                  AND NOT EXISTS {
+                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+                      WHERE dep.status <> 'completed'
+                  }
+                OPTIONAL MATCH (ph:OrchPhase)-[:HAS_TASK]->(t)
+                OPTIONAL MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph)
+                RETURN t.id AS task_id, t.description AS description,
+                       t.priority AS priority, t.owner AS owner,
+                       t.blocked_on AS blocked_on,
+                       ph.id AS phase_id, ph.name AS phase_name,
+                       proj.id AS project_id, proj.name AS project_name
+                ORDER BY (CASE WHEN t.owner = $sess THEN 1 ELSE 0 END) DESC,
+                         t.priority DESC
+                LIMIT 1
+            """, sess=session_id, exclude_task_id=exclude_task_id).single()
+            return dict(result) if result else None
     finally:
         pass  # Driver is singleton; do not close
 

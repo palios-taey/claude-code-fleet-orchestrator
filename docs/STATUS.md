@@ -1,5 +1,11 @@
 # Status — what's wired vs scaffold
 
+## v1.0.3
+
+- `fix(orch-watch): make repeated peer-idle wakes actionable` — idle-session wakes for unresolved in-progress tasks now query the session's next ready OrchTask (excluding the current one) and include a concrete continuation directive when other work exists. If no other ready task exists, the wake explicitly says there is no other ready work so the session can confirm it is genuinely waiting instead of stop-looping.
+- `feat(tasks): blocked_on marker for genuine waits` — `OrchTask.blocked_on` can be set via PATCH `/api/task/{id}` and `taey-task update <id> in_progress --blocked-on <signal>`. `orch-watch` suppresses repeated peer-idle wakes for tasks carrying that marker.
+- `lib.orch_schema.get_session_next_ready()` is now the shared source of truth for session next-ready lookups across the API and readiness helpers.
+
 ## v1.0.2
 
 - `fix(orch-watch): wake sessions on completion of self-owned taey-task work` — `taey-task update ... in_progress` now mirrors the dispatch wire by writing `taey:<session>:current_task`, and self-owned `completed|failed|interrupted` updates record the same `last_outcome` enum the Stop hook already consumes. Result: orch-watch is no longer blind to Claude Code sessions running their own OrchTasks; clean self-owned completions now clear through the existing Stop-hook CAS done-clear path and can fire normal UNBLOCK wakes.
