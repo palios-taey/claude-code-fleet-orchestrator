@@ -8,6 +8,11 @@ Label convention: OrchProject, OrchPhase, OrchTask, OrchFileOwnership
 (memory labels: ISMAExchange, HMMTile, HMMMotif, Message, ChatSession)
 """
 
+import json
+import os
+import subprocess
+import sys
+import time
 from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, get_neo4j_driver
@@ -26,6 +31,85 @@ SCHEMA_INDEXES = [
     "CREATE INDEX orch_file_path IF NOT EXISTS FOR (f:OrchFileOwnership) ON (f.path)",
     "CREATE INDEX orch_question_status IF NOT EXISTS FOR (q:OrchQuestion) ON (q.status)",
 ]
+
+
+_ZERO_DEP_READY_CYPHER = """
+MATCH (t:OrchTask {id: $task_id})
+WHERE coalesce(t.owner, '') <> ''
+  AND NOT EXISTS {
+      MATCH (t)-[:DEPENDS_ON]->(:OrchTask)
+  }
+RETURN t.id AS task_id,
+       t.owner AS owner,
+       t.description AS description
+"""
+
+
+def _fleet_redis_connect():
+    for path in (
+        "/usr/local/lib/claude-code-fleet-notify",
+        "/path/to/repo",
+    ):
+        if os.path.isdir(path) and path not in sys.path:
+            sys.path.insert(0, path)
+    from identity import redis_connect  # type: ignore
+    return redis_connect()
+
+
+def _state_key(node_id: str, suffix: str) -> str:
+    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+    return f"{prefix}:{node_id}:{suffix}"
+
+
+def _send_wake(owner: str, body: str) -> None:
+    cli = "/usr/local/bin/taey-notify"
+    if os.path.isfile(cli) and os.access(cli, os.X_OK):
+        result = subprocess.run(
+            [cli, owner, body, "--from", "orch-create", "--type", "wake", "--priority", "normal"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "taey-notify failed")
+        return
+
+    redis_client = _fleet_redis_connect()
+    payload = json.dumps({
+        "from": "orch-create",
+        "type": "wake",
+        "body": body,
+        "priority": "normal",
+        "msg_id": f"orch-create-zero-dep-{owner}-{int(time.time())}",
+        "timestamp": time.time(),
+    })
+    redis_client.lpush(_state_key(owner, "inbox"), payload)
+
+
+def _wake_owner_for_zero_dep_task(task_id: str, cfg: OrchConfig) -> None:
+    from .plan_readiness import _dedup_wake
+
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run(_ZERO_DEP_READY_CYPHER, task_id=task_id).single()
+
+    if not record:
+        return
+
+    owner = record["owner"]
+    redis_client = _fleet_redis_connect()
+    if not redis_client.get(_state_key(owner, "idle")):
+        return
+    if redis_client.get(_state_key(owner, "current_task")):
+        return
+    if not _dedup_wake(redis_client, task_id):
+        return
+
+    body = (
+        f"WAKE: task={record['task_id']} "
+        f"(\"{(record.get('description') or '')[:80]}\") has zero dependencies "
+        f"and is ready now. Pick it up with `taey-plan next` or dispatch a worker."
+    )
+    _send_wake(owner, body)
 
 
 def init_schema(config: Optional[OrchConfig] = None) -> Dict[str, Any]:
@@ -133,9 +217,13 @@ def create_task(
     task_id: str,
     description: str,
     priority: int = 50,
+    owner: str = "",
+    created_by: str = "",
+    task_type: str = "standard",
     capability_tags: Optional[List[str]] = None,
     file_blast_radius: Optional[List[str]] = None,
     estimated_tokens: int = 50_000,
+    wake_owner_if_ready: bool = True,
     config: Optional[OrchConfig] = None,
 ) -> str:
     """Create an OrchTask linked to a phase."""
@@ -148,9 +236,18 @@ def create_task(
                 MERGE (t:OrchTask {id: $task_id})
                 ON CREATE SET t.created_at = datetime(),
                               t.status = 'pending',
-                              t.owner = ''
+                              t.owner = $owner
                 SET t.description = $description,
                     t.priority = $priority,
+                    t.owner = $owner,
+                    t.created_by = CASE
+                        WHEN $created_by = '' THEN t.created_by
+                        ELSE $created_by
+                    END,
+                    t.task_type = CASE
+                        WHEN $task_type = '' THEN t.task_type
+                        ELSE $task_type
+                    END,
                     t.capability_tags = $capability_tags,
                     t.file_blast_radius = $file_blast_radius,
                     t.estimated_tokens = $estimated_tokens
@@ -161,11 +258,17 @@ def create_task(
                 phase_id=phase_id,
                 description=description,
                 priority=priority,
+                owner=owner,
+                created_by=created_by,
+                task_type=task_type,
                 capability_tags=capability_tags or [],
                 file_blast_radius=file_blast_radius or [],
                 estimated_tokens=estimated_tokens,
             )
-            return result.single()["id"]
+            created_id = result.single()["id"]
+        if wake_owner_if_ready:
+            _wake_owner_for_zero_dep_task(created_id, cfg)
+        return created_id
     finally:
         pass  # Driver is singleton; do not close
 

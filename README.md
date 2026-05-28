@@ -2,7 +2,7 @@
 
 > Turn scattered AI terminals into a supervised tmux fleet: dispatch work to Claude Code / Codex / Gemini / Grok / any **hookable** REPL CLI, get `done`/`error`/`interrupted` outcomes back inline so the supervisor can update the plan instead of babysitting panes.
 
-Current version: **v1.0.4** (dispatch now honors active product bug locks before any worker-state mutation, with an explicit `is_bugfix=True` escape hatch for mitigation work — see [`docs/STATUS.md`](docs/STATUS.md)).
+Current version: **v1.0.5** (zero-dep owned tasks now wake their idle owner at creation time, and `dispatch()` now claims ready OrchTasks before any Redis `current_task` write so stale blocked tasks cannot be dispatched — see [`docs/STATUS.md`](docs/STATUS.md)).
 
 Built on top of [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (≥ v1.0.0), which provides the message transport (Redis inbox, daemon, tmux-send, per-CLI Stop hooks). This repo adds the supervisor-worker coordination layer.
 
@@ -20,7 +20,7 @@ Layered on top: an event-driven watchloop (Redis keyspace listener — fires onl
 
 | Component | Purpose | Phase |
 |---|---|---|
-| `lib/dispatch.py` | `dispatch()` / `record_outcome()` / `check_previous_task()` / `clear_current_task()`. Writes `taey:<worker>:current_task` atomically with stale-outcome + stuck-dedup clear, and as of `v1.0.4` performs the spec §3.1 bug-lock pre-check before any worker-state mutation. | A — v0.1.0, updated in v1.0.4 |
+| `lib/dispatch.py` | `dispatch()` / `record_outcome()` / `check_previous_task()` / `clear_current_task()`. Writes `taey:<worker>:current_task` atomically with stale-outcome + stuck-dedup clear, performs the spec §3.1 bug-lock pre-check before any worker-state mutation, and as of `v1.0.5` conditionally claims OrchTasks in Neo4j before the Redis write so blocked tasks cannot slip through on a stale readiness snapshot. | A — v0.1.0, updated in v1.0.5 |
 | `scripts/orch-watch` | Event-driven supervisor wake daemon. PSUBSCRIBE on `current_task` / `idle` / `last_activity` keyspace notifications + 30-min safety-net sweep. Fires high-priority `peer_idle` escalations on stuck workers (idle + unresolved `current_task` for > threshold) and optional `wake` messages on done-DEL when a configurable readiness-checker says the completion unblocked an OrchTask the supervisor owns. | B — v0.2.0 / v0.2.1 |
 | `scripts/orch-cron` | Recurring-task runner. Drop-in replacement for static `recurring_triggers.json`-style cron runners. Adds optional `state_file` per trigger (append-only JSONL audit log) + SHA-256 hash-on-fire sidecar (`<state_file>.meta.json`) so the file pointer is tamper-evident. | C — v0.3.0 |
 | `docs/SCHEMA.md` | Task model spec. One `OrchTask` label, kind-aware status enum (`one_shot` ∈ {pending,in_progress,completed,failed,blocked}; `recurring` ∈ {active,paused,retired} — NEVER completed); reserves `(:OrchTask)-[:FIRED]->(:OrchRecurringFire)` for v0.4+ per-fire visibility. | C — v0.3.0 |
@@ -31,7 +31,7 @@ The Stop hook itself lives in [`claude-code-fleet-notify`](https://github.com/pa
 
 | Component | Purpose |
 |---|---|
-| `lib/orch_schema.py` | Neo4j schema implementation of [`docs/SCHEMA.md`](docs/SCHEMA.md): OrchProject ↔ OrchPhase ↔ OrchTask DAG with kind-aware status, dependency ready-task discovery, phase-completion cascade, session current/next-ready. |
+| `lib/orch_schema.py` | Neo4j schema implementation of [`docs/SCHEMA.md`](docs/SCHEMA.md): OrchProject ↔ OrchPhase ↔ OrchTask DAG with kind-aware status, dependency ready-task discovery, phase-completion cascade, session current/next-ready, and creation-time zero-dep wake for idle owners. |
 | `lib/plan_loader.py` | Markdown plan ingest (idempotent, content-hash provenance). |
 | `lib/tasks_api.py` | FastAPI app on `:5002` — `/api/tasks`, `/api/projects`, `/api/projects/load-md`, `/api/sessions/{sid}/current\|next-ready`. |
 | `lib/config.py` | `OrchConfig` + Redis/Neo4j connection helpers; path-flexible `.env` loading. |
@@ -50,7 +50,7 @@ orch-watch \
 
 Now when a worker finishes cleanly (Stop hook CAS-clears `current_task` on outcome=done), `orch-watch` queries Neo4j: does any OrchTask owned by the supervisor have a `DEPENDS_ON` edge to the completed task AND all OTHER deps already complete? If yes AND supervisor is idle, page them. LOOSE semantics, so a task with N deps completing in sequence wakes the supervisor exactly once (on the Nth completion, not all N).
 
-> **v0.4.1 follow-ups**: zero-dep tasks need a separate creation-time wake path; already-completed deps at edge-creation need a write-time check in `add_dependency`. Both queued — additive features, not correctness gaps in v0.4.0's shipped path. Tracked in [`docs/STATUS.md`](docs/STATUS.md).
+> **v1.0.5 note**: the zero-dep wake gap from the original v0.4.1 follow-up plan is now closed. The remaining queued edge from that note is the already-completed-deps-at-edge-creation wake in `add_dependency`; the May 28 dispatch instead prioritized a stricter dispatch-time ready-claim guard so blocked tasks cannot be assigned from a stale view.
 
 ## Install
 
