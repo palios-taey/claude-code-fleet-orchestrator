@@ -2,7 +2,7 @@
 
 > Turn scattered AI terminals into a supervised tmux fleet: dispatch work to Claude Code / Codex / Gemini / Grok / any **hookable** REPL CLI, get `done`/`error`/`interrupted` outcomes back inline so the supervisor can update the plan instead of babysitting panes.
 
-Current version: **v1.0.5** (zero-dep owned tasks now wake their idle owner at creation time, and `dispatch()` now claims ready OrchTasks before any Redis `current_task` write so stale blocked tasks cannot be dispatched — see [`docs/STATUS.md`](docs/STATUS.md)).
+Current version: **v1.0.6** (`lib.config` now supports `ORCH_NEO4J_USER` and `ORCH_NEO4J_PASS` for auth-required Neo4j targets while preserving the existing no-auth default; the v1.0.5 zero-dep wake and dispatch claim guards remain in place — see [`docs/STATUS.md`](docs/STATUS.md)).
 
 Built on top of [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (≥ v1.0.0), which provides the message transport (Redis inbox, daemon, tmux-send, per-CLI Stop hooks). This repo adds the supervisor-worker coordination layer.
 
@@ -34,7 +34,7 @@ The Stop hook itself lives in [`claude-code-fleet-notify`](https://github.com/pa
 | `lib/orch_schema.py` | Neo4j schema implementation of [`docs/SCHEMA.md`](docs/SCHEMA.md): OrchProject ↔ OrchPhase ↔ OrchTask DAG with kind-aware status, dependency ready-task discovery, phase-completion cascade, session current/next-ready, and creation-time zero-dep wake for idle owners. |
 | `lib/plan_loader.py` | Markdown plan ingest (idempotent, content-hash provenance). |
 | `lib/tasks_api.py` | FastAPI app on `:5002` — `/api/tasks`, `/api/projects`, `/api/projects/load-md`, `/api/sessions/{sid}/current\|next-ready`. |
-| `lib/config.py` | `OrchConfig` + Redis/Neo4j connection helpers; path-flexible `.env` loading. |
+| `lib/config.py` | `OrchConfig` + Redis/Neo4j connection helpers; path-flexible `.env` loading. Supports `ORCH_NEO4J_URI`, optional `ORCH_NEO4J_USER`, and optional `ORCH_NEO4J_PASS`. If user/pass are unset, Neo4j remains no-auth by default. |
 | `lib/plan_readiness.py` | **Default readiness checker** for `orch-watch --readiness-checker`. LOOSE semantic (wake only on blocked→ready transition); self-loop exclusion; SETNX dedup for concurrent finals. |
 | `scripts/taey-plan` | CLI: project list / show / current / next-ready / ingest-md / assign. |
 | `scripts/taey-task` | CLI: task create / update / list / delegate. |

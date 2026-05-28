@@ -1,5 +1,11 @@
 # Status — what's wired vs scaffold
 
+## v1.0.6
+
+- `fix(config): optional Neo4j auth env support` — `lib.config.OrchConfig` now carries optional `neo4j_user` / `neo4j_pass` fields sourced from `ORCH_NEO4J_USER` and `ORCH_NEO4J_PASS`, and `get_neo4j_driver()` now uses those credentials when both are set.
+- No silent fallback was added: auth-configured runs use auth, auth-unconfigured runs use `auth=None`, and auth-required servers still fail loud when credentials are omitted.
+- Live verification is recorded in `PHASE_V106_NEO4J_AUTH_VERIFICATION.md`, including the current Mira host-state drift where `127.0.0.1:7689` is no-auth while `localhost:7687` is the auth-required endpoint that reproduced the original `Unsupported authentication token, missing key scheme` failure.
+
 ## v1.0.5
 
 - `feat(tasks): zero-dep owner wake at creation time` — `lib.orch_schema.create_task()` now writes `owner`, `created_by`, and `task_type` in the initial Neo4j mutation and immediately checks whether the new task has zero upstream dependencies. If the owner session is idle and has no live `current_task`, the orchestrator fires a `wake` notification right then, using the same `taey:orch-wake-fired:<task_id>` dedup key family as the readiness checker.

@@ -50,6 +50,8 @@ for _env_path in _dotenv_candidates:
 ORCH_REDIS_HOST = os.environ.get("ORCH_REDIS_HOST", "127.0.0.1")
 ORCH_REDIS_PORT = int(os.environ.get("ORCH_REDIS_PORT", "6379"))
 ORCH_NEO4J_URI = os.environ.get("ORCH_NEO4J_URI", "bolt://localhost:7687")
+ORCH_NEO4J_USER = os.environ.get("ORCH_NEO4J_USER")
+ORCH_NEO4J_PASS = os.environ.get("ORCH_NEO4J_PASS")
 ORCH_DASHBOARD_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002")
 ORCH_NEO4J_DB = os.environ.get("ORCH_NEO4J_DB", "neo4j")
 # Sentinel: optional — empty string means not used
@@ -81,6 +83,8 @@ class OrchConfig:
     redis_host: str = ORCH_REDIS_HOST
     redis_port: int = ORCH_REDIS_PORT
     neo4j_uri: str = ORCH_NEO4J_URI
+    neo4j_user: Optional[str] = ORCH_NEO4J_USER
+    neo4j_pass: Optional[str] = ORCH_NEO4J_PASS
     neo4j_db: str = ORCH_NEO4J_DB
     redis_sentinels: str = ORCH_REDIS_SENTINELS
     redis_sentinel_master: str = ORCH_REDIS_SENTINEL_MASTER
@@ -183,7 +187,13 @@ def get_neo4j_driver(config: Optional[OrchConfig] = None):
     if _neo4j_driver is None:
         from neo4j import GraphDatabase
         cfg = config or OrchConfig()
-        _neo4j_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=None)
+        if cfg.neo4j_user and cfg.neo4j_pass:
+            _neo4j_driver = GraphDatabase.driver(
+                cfg.neo4j_uri,
+                auth=(cfg.neo4j_user, cfg.neo4j_pass),
+            )
+        else:
+            _neo4j_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=None)
     return _neo4j_driver
 
 
