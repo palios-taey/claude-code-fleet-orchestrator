@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.5 - 2026-05-28
+
+- Closed Gaia's pending v0.4.1 zero-dependency wake gap from `/home/mira/the-conductor/plans/conductor_v041_followups.md`: `lib.orch_schema.create_task()` now carries owner metadata in the initial write and immediately wakes an idle owner when the new task has no upstream dependencies.
+- Added a dispatch-time OrchTask claim gate in `lib.dispatch.dispatch()`: if the `task_id` exists in Neo4j, dispatch now atomically re-checks `status='pending'` plus "all dependencies completed" in the same Cypher write that flips the task to `in_progress`, aborting with `OrchTaskNotReady` before any Redis `current_task` mutation when the task is stale or still blocked.
+- Recorded the live zero-dep wake proof and the dispatch race proof in `PHASE_V041_RACE_VERIFICATION.md`.
+
 ## v1.0.4 - 2026-05-27
 
 - Added the architecture spec §3.1 bug-lock pre-dispatch gate in `lib/dispatch.py` via `BugLockActive` plus a new `is_bugfix=False` kwarg that allows bug-fix dispatches to proceed under an active lock.

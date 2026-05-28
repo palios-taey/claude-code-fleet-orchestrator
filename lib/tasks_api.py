@@ -135,19 +135,14 @@ async def create(req: Request) -> Dict[str, Any]:
         task_id=task_id,
         description=description,
         priority=priority,
+        owner=owner,
+        created_by=sender,
+        task_type=task_type,
         capability_tags=capability_tags,
         file_blast_radius=file_blast_radius,
         estimated_tokens=estimated_tokens,
         config=cfg,
     )
-
-    # Stamp sender + owner on the node so the watchloop / UI can route correctly.
-    driver = get_neo4j_driver(cfg)
-    with driver.session(database=cfg.neo4j_db) as session:
-        session.run(
-            "MATCH (t:OrchTask {id: $tid}) SET t.created_by = $sender, t.owner = $owner, t.task_type = $ttype",
-            tid=task_id, sender=sender, owner=owner, ttype=task_type,
-        )
 
     return {"ok": True, "task_id": task_id, "from": sender, "owner": owner, "task_type": task_type}
 

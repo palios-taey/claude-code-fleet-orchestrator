@@ -52,6 +52,8 @@ import sys
 import time
 from typing import Optional
 
+from .config import OrchConfig, get_neo4j_session
+
 
 PRODUCT_OWNER_MAP = {
     "conductor": "the-conductor",
@@ -60,6 +62,10 @@ PRODUCT_OWNER_MAP = {
 
 class BugLockActive(Exception):
     """Dispatch blocked because the target product is under an active bug lock."""
+
+
+class OrchTaskNotReady(Exception):
+    """Dispatch blocked because the OrchTask is not ready at claim time."""
 
 
 def _base_session_name(worker: str) -> str:
@@ -127,6 +133,62 @@ def bind_current_task(
     pipe.execute()
 
 
+def _orch_task_exists(task_id: str) -> bool:
+    cfg = OrchConfig()
+    with get_neo4j_session(cfg) as session:
+        record = session.run(
+            "MATCH (t:OrchTask {id: $task_id}) RETURN t.id AS id",
+            task_id=task_id,
+        ).single()
+    return record is not None
+
+
+def _claim_ready_orch_task(task_id: str, worker: str) -> None:
+    if not _orch_task_exists(task_id):
+        return
+
+    cfg = OrchConfig()
+    with get_neo4j_session(cfg) as session:
+        record = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            WHERE coalesce(t.status, 'pending') = 'pending'
+              AND NOT EXISTS {
+                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+                  WHERE dep.status <> 'completed'
+              }
+            SET t.status = 'in_progress',
+                t.owner = $worker,
+                t.blocked_on = NULL,
+                t.updated_at = datetime()
+            RETURN t.id AS task_id
+            """,
+            task_id=task_id,
+            worker=worker,
+        ).single()
+
+        if record is not None:
+            return
+
+        detail = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+            RETURN coalesce(t.status, 'pending') AS status,
+                   count(CASE WHEN dep.status <> 'completed' THEN 1 END) AS incomplete_deps
+            """,
+            task_id=task_id,
+        ).single()
+
+    if detail is None:
+        return
+
+    raise OrchTaskNotReady(
+        f"ORCH_TASK_NOT_READY task={task_id} status={detail['status']} "
+        f"incomplete_deps={detail['incomplete_deps']}"
+    )
+
+
 def dispatch(
     worker: str,
     task_id: str,
@@ -169,6 +231,8 @@ def dispatch(
                 or "(no reason recorded)"
             )
             raise BugLockActive(f"BUG_LOCK_ACTIVE for {product_id}: {reason}")
+
+    _claim_ready_orch_task(task_id=task_id, worker=worker)
 
     bind_current_task(
         worker=worker,
