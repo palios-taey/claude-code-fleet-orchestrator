@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.6 - 2026-05-28
+
+- Fixed treasurer's reported `neo4j.exceptions.AuthError: Unsupported authentication token, missing key scheme` in the `lib.dispatch._orch_task_exists()` path by teaching `lib.config.get_neo4j_driver()` to honor `ORCH_NEO4J_USER` and `ORCH_NEO4J_PASS` when they are set.
+- Preserved backward compatibility for the existing no-auth default: if those env vars are unset, the driver is still created with `auth=None`.
+- Added live verification for the current no-auth conductor environment, an explicit auth-configured path, and a fail-loud auth omission case in `PHASE_V106_NEO4J_AUTH_VERIFICATION.md`, with the current Mira host-state drift called out explicitly.
+
 ## v1.0.5 - 2026-05-28
 
 - Closed Gaia's pending v0.4.1 zero-dependency wake gap from `/home/mira/the-conductor/plans/conductor_v041_followups.md`: `lib.orch_schema.create_task()` now carries owner metadata in the initial write and immediately wakes an idle owner when the new task has no upstream dependencies.
