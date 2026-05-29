@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.0 - 2026-05-29
+
+- Added project-level `user_stop_conditions` so plans can declare when a session is actually allowed to stop instead of reflexively halting after every wake or notification.
+- Extended `scripts/orch-watch` with an idle-time autonomy gate: if a session stops with an `in_progress` task and no `blocked_on`, the daemon now evaluates plan predicates, writes auditable `blocked_on=<condition>` when a stop condition matches, auto-continues the session with a concrete next-ready task when the plan still has work, or sends an explicit clarify-intent wake when the plan is silent.
+- Added `GET` / `POST /api/projects/{id}/user-stop-conditions`, markdown ingest support for a `## User Stop Conditions` section, and `taey-plan stop-conditions <project-id> get|set` for live plan control.
+
 ## v1.0.6 - 2026-05-28
 
 - Fixed treasurer's reported `neo4j.exceptions.AuthError: Unsupported authentication token, missing key scheme` in the `lib.dispatch._orch_task_exists()` path by teaching `lib.config.get_neo4j_driver()` to honor `ORCH_NEO4J_USER` and `ORCH_NEO4J_PASS` when they are set.

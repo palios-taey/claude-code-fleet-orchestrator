@@ -9,6 +9,8 @@ Usage:
     taey-plan next [session]
     taey-plan ingest /path/to/plan.md
     taey-plan assign <task-id> <session>
+    taey-plan stop-conditions <project-id> get
+    taey-plan stop-conditions <project-id> set <condition> [<condition> ...]
 """
 from __future__ import annotations
 
@@ -240,6 +242,20 @@ def cmd_assign(args: argparse.Namespace) -> None:
     print(f"OK: {args.task_id} assigned to {args.session} [{status}]")
 
 
+def cmd_stop_conditions_get(args: argparse.Namespace) -> None:
+    result = api_call("GET", f"/api/projects/{args.project_id}/user-stop-conditions")
+    print(json.dumps(result, indent=2))
+
+
+def cmd_stop_conditions_set(args: argparse.Namespace) -> None:
+    result = api_call(
+        "POST",
+        f"/api/projects/{args.project_id}/user-stop-conditions",
+        {"conditions": args.conditions},
+    )
+    print(json.dumps(result, indent=2))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Inspect and ingest execution-tracker projects via the tasks API"
@@ -264,6 +280,17 @@ def build_parser() -> argparse.ArgumentParser:
     assign.add_argument("task_id", help="Task ID")
     assign.add_argument("session", help="Session ID")
 
+    stop_conditions = sub.add_parser("stop-conditions", help="Read or set plan-level user stop conditions")
+    stop_conditions.add_argument("project_id", help="Project ID")
+    stop_conditions_sub = stop_conditions.add_subparsers(dest="stop_conditions_action")
+
+    stop_conditions_get = stop_conditions_sub.add_parser("get", help="Read stop conditions")
+    stop_conditions_get.set_defaults(func=cmd_stop_conditions_get)
+
+    stop_conditions_set = stop_conditions_sub.add_parser("set", help="Write stop conditions")
+    stop_conditions_set.add_argument("conditions", nargs="+", help="Condition names to persist")
+    stop_conditions_set.set_defaults(func=cmd_stop_conditions_set)
+
     return parser
 
 
@@ -282,6 +309,10 @@ def main() -> None:
         cmd_ingest(args)
     elif args.command == "assign":
         cmd_assign(args)
+    elif args.command == "stop-conditions":
+        if not getattr(args, "stop_conditions_action", None):
+            parser.error("stop-conditions requires get or set")
+        args.func(args)
     else:
         parser.print_help()
 
