@@ -145,6 +145,7 @@ def create_project(project_id: str, name: str, description: str = "",
                    source_kind: Optional[str] = None,
                    ingested_at: Optional[str] = None,
                    ingested_by: Optional[str] = None,
+                   user_stop_conditions: Optional[List[str]] = None,
                    config: Optional[OrchConfig] = None) -> str:
     """Create an OrchProject node."""
     cfg = config or OrchConfig()
@@ -156,6 +157,10 @@ def create_project(project_id: str, name: str, description: str = "",
                 ON CREATE SET p.created_at = datetime(), p.status = 'active'
                 SET p.name = $name,
                     p.description = $description,
+                    p.user_stop_conditions = CASE
+                        WHEN $user_stop_conditions IS NULL THEN coalesce(p.user_stop_conditions, [])
+                        ELSE $user_stop_conditions
+                    END,
                     p.source_path = CASE
                         WHEN $source_path IS NULL OR $source_path = '' THEN p.source_path
                         ELSE $source_path
@@ -186,6 +191,7 @@ def create_project(project_id: str, name: str, description: str = "",
                 source_kind=source_kind,
                 ingested_at=ingested_at,
                 ingested_by=ingested_by,
+                user_stop_conditions=user_stop_conditions,
             )
             return result.single()["id"]
     finally:
@@ -527,6 +533,7 @@ def get_session_current_work(session_id: str,
 
 
 def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = None,
+                           project_id: Optional[str] = None,
                            config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
     """Return the top ready task for a session, excluding a specific task if requested."""
     cfg = config or OrchConfig()
@@ -544,6 +551,7 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                   }
                 OPTIONAL MATCH (ph:OrchPhase)-[:HAS_TASK]->(t)
                 OPTIONAL MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph)
+                WHERE ($project_id IS NULL OR proj.id = $project_id)
                 RETURN t.id AS task_id, t.description AS description,
                        t.priority AS priority, t.owner AS owner,
                        t.blocked_on AS blocked_on,
@@ -552,8 +560,63 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                 ORDER BY (CASE WHEN t.owner = $sess THEN 1 ELSE 0 END) DESC,
                          t.priority DESC
                 LIMIT 1
-            """, sess=session_id, exclude_task_id=exclude_task_id).single()
+            """, sess=session_id, exclude_task_id=exclude_task_id, project_id=project_id).single()
             return dict(result) if result else None
+    finally:
+        pass  # Driver is singleton; do not close
+
+
+def get_project_user_stop_conditions(project_id: str,
+                                     config: Optional[OrchConfig] = None) -> Optional[List[str]]:
+    """Return the project's configured user-stop condition names."""
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    try:
+        with driver.session(database=cfg.neo4j_db) as session:
+            record = session.run("""
+                MATCH (p:OrchProject {id: $project_id})
+                RETURN coalesce(p.user_stop_conditions, []) AS user_stop_conditions
+            """, project_id=project_id).single()
+            if not record:
+                return None
+            return list(record["user_stop_conditions"] or [])
+    finally:
+        pass  # Driver is singleton; do not close
+
+
+def set_project_user_stop_conditions(project_id: str, user_stop_conditions: List[str],
+                                     config: Optional[OrchConfig] = None) -> List[str]:
+    """Persist the project's configured user-stop condition names."""
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    try:
+        with driver.session(database=cfg.neo4j_db) as session:
+            record = session.run("""
+                MATCH (p:OrchProject {id: $project_id})
+                SET p.user_stop_conditions = $user_stop_conditions,
+                    p.updated_at = datetime()
+                RETURN coalesce(p.user_stop_conditions, []) AS user_stop_conditions
+            """, project_id=project_id, user_stop_conditions=user_stop_conditions).single()
+            if not record:
+                raise ValueError(f"Project {project_id} not found")
+            return list(record["user_stop_conditions"] or [])
+    finally:
+        pass  # Driver is singleton; do not close
+
+
+def get_task_project(task_id: str,
+                     config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
+    """Return the project context for a task."""
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    try:
+        with driver.session(database=cfg.neo4j_db) as session:
+            record = session.run("""
+                MATCH (proj:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+                RETURN proj.id AS project_id, proj.name AS project_name,
+                       coalesce(proj.user_stop_conditions, []) AS user_stop_conditions
+            """, task_id=task_id).single()
+            return dict(record) if record else None
     finally:
         pass  # Driver is singleton; do not close
 

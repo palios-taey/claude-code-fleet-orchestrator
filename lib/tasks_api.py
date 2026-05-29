@@ -38,12 +38,14 @@ from lib.orch_schema import (
     ensure_default_project,
     get_agent_tasks,
     get_neo4j_driver,
+    get_project_user_stop_conditions,
     get_session_next_ready,
     get_project_summary,
     get_ready_tasks,
     get_session_current_work,
     get_task as load_task_record,
     get_task_phase,
+    set_project_user_stop_conditions,
     update_task_status,
 )
 from lib.plan_loader import load_plan_from_text
@@ -228,6 +230,7 @@ def list_projects() -> Dict[str, Any]:
             RETURN p.id AS id, p.name AS name, p.description AS description,
                    p.status AS status, p.source_path AS source_path,
                    p.source_kind AS source_kind, p.source_sha256 AS source_sha256,
+                   coalesce(p.user_stop_conditions, []) AS user_stop_conditions,
                    phase_count, task_total, pending, in_progress, completed, failed
             ORDER BY p.id
         """)
@@ -256,6 +259,7 @@ async def create_project_endpoint(req: Request) -> Dict[str, Any]:
         project_id=project_id,
         name=name,
         description=data.get("description", ""),
+        user_stop_conditions=data.get("user_stop_conditions"),
         source_path=data.get("source_path"),
         source_sha256=data.get("source_sha256"),
         source_kind=data.get("source_kind"),
@@ -263,6 +267,24 @@ async def create_project_endpoint(req: Request) -> Dict[str, Any]:
         config=_cfg(),
     )
     return {"ok": True, "project_id": pid}
+
+
+@app.get("/api/projects/{project_id}/user-stop-conditions")
+def get_project_user_stop_conditions_endpoint(project_id: str) -> Dict[str, Any]:
+    conditions = get_project_user_stop_conditions(project_id, config=_cfg())
+    if conditions is None:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    return {"project_id": project_id, "conditions": conditions}
+
+
+@app.post("/api/projects/{project_id}/user-stop-conditions")
+async def set_project_user_stop_conditions_endpoint(project_id: str, req: Request) -> Dict[str, Any]:
+    data = await req.json()
+    conditions = data.get("conditions")
+    if not isinstance(conditions, list) or any(not isinstance(item, str) for item in conditions):
+        raise HTTPException(status_code=400, detail="conditions must be a list of strings")
+    saved = set_project_user_stop_conditions(project_id, conditions, config=_cfg())
+    return {"ok": True, "project_id": project_id, "conditions": saved}
 
 
 @app.post("/api/projects/{project_id}/phases")

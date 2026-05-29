@@ -13,11 +13,16 @@ The execution tracker indexes plans wherever they live on disk. Source files don
 ### Task: <task-id> — <Task description>  [priority: 60] [owner: <session>] [tags: tag1,tag2] [depends: other-task-id]
 - Optional bullet body folded into the task description.
 - Multiple bullets become one description.
+
+## User Stop Conditions
+- stop_when_all_ready_tasks_dispatched
+- stop_when_user_explicit_decision_required_and_pending
 ```
 
 Rules:
 - Project, phase, and task IDs are arbitrary strings — short, kebab-case is the convention but not enforced. They become the Neo4j node `id`.
 - Each project file has exactly one `# Project:` header. Multiple `## Phase:` and `### Task:` headers are expected.
+- `## User Stop Conditions` is optional and may appear once at project scope. Each bullet under it is stored verbatim on the project as a named predicate the watcher can evaluate at stop time.
 - Header lines must use `—` (em dash) or `-` (hyphen) between id and name.
 - Bracketed metadata is optional. Recognized keys: `order` (int), `priority` (int), `owner` (string — session name), `tags` (comma-list), `depends` (comma-list of task ids).
 - Lines inside fenced code blocks (between triple-backtick) are skipped — useful for embedding format examples in plan docs.
@@ -45,14 +50,18 @@ taey-plan current                                # what this session is currentl
 taey-plan next [session]                         # top pending task owned-by-you or unowned-team-matched
 taey-plan ingest <path-to-md>                    # parse + load (or refresh) into Neo4j
 taey-plan assign <task-id> <session>             # change task owner
+taey-plan stop-conditions <project-id> get       # read stored stop conditions
+taey-plan stop-conditions <project-id> set <condition> [<condition> ...]
 ```
 
 ## API surface (port 5002)
 
 - `GET /api/projects` — list
 - `GET /api/projects/{id}` — summary
+- `GET /api/projects/{id}/user-stop-conditions` — read stop conditions
 - `POST /api/projects` — create empty project (with provenance)
 - `POST /api/projects/{id}/phases` — add a phase
+- `POST /api/projects/{id}/user-stop-conditions` — set stop conditions
 - `POST /api/projects/load-md` — body `{md_text, source_path, source_kind, ingested_by}`
 - `GET /api/sessions/{sess}/current` — current in_progress work for a session
 - `GET /api/sessions/{sess}/next-ready` — next ready task

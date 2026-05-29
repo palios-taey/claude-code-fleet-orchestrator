@@ -130,10 +130,16 @@ def _dedup_wake(redis_client, downstream_task_id: str, ttl_sec: int = 600) -> bo
 
 
 def next_ready_for_session(session_id: str,
-                           exclude_task_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                           exclude_task_id: Optional[str] = None,
+                           project_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Return the top ready task for a session, excluding one task if requested."""
     cfg = OrchConfig()
-    return get_session_next_ready(session_id, exclude_task_id=exclude_task_id, config=cfg)
+    return get_session_next_ready(
+        session_id,
+        exclude_task_id=exclude_task_id,
+        project_id=project_id,
+        config=cfg,
+    )
 
 
 def check_readiness(supervisor: str, completed_task: dict) -> Optional[str]:

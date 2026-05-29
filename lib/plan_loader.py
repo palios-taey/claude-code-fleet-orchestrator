@@ -93,10 +93,13 @@ def _parse_plan(md: str) -> Dict[str, Any]:
     phases: List[Dict[str, Any]] = []
     errors: List[str] = []
     description_lines: List[str] = []
+    user_stop_conditions: List[str] = []
     in_code_block = False
+    in_user_stop_conditions = False
 
     for line_no, raw_line in enumerate(md.splitlines(), start=1):
         line = raw_line.rstrip()
+        stripped = line.strip()
 
         if line.startswith("```"):
             in_code_block = not in_code_block
@@ -107,6 +110,7 @@ def _parse_plan(md: str) -> Dict[str, Any]:
 
         project_match = PROJECT_RE.match(line)
         if project_match:
+            in_user_stop_conditions = False
             if project is not None:
                 errors.append(f"line {line_no}: duplicate project heading ignored")
                 current_phase = None
@@ -120,6 +124,7 @@ def _parse_plan(md: str) -> Dict[str, Any]:
 
         phase_match = PHASE_RE.match(line)
         if phase_match:
+            in_user_stop_conditions = False
             if project is None:
                 errors.append(f"line {line_no}: phase declared before project")
                 continue
@@ -135,6 +140,7 @@ def _parse_plan(md: str) -> Dict[str, Any]:
 
         task_match = TASK_RE.match(line)
         if task_match:
+            in_user_stop_conditions = False
             if current_phase is None:
                 errors.append(f"line {line_no}: task declared before phase")
                 continue
@@ -151,12 +157,27 @@ def _parse_plan(md: str) -> Dict[str, Any]:
             current_phase["tasks"].append(current_task)
             continue
 
+        if stripped == "## User Stop Conditions":
+            if project is None:
+                errors.append(f"line {line_no}: user stop conditions declared before project")
+                continue
+            current_phase = None
+            current_task = None
+            in_user_stop_conditions = True
+            continue
+
+        if in_user_stop_conditions and stripped.startswith("- "):
+            user_stop_conditions.append(stripped[2:].strip())
+            continue
+
         if line.startswith("## "):
+            in_user_stop_conditions = False
             current_phase = None
             current_task = None
             continue
 
         if line.startswith("#"):
+            in_user_stop_conditions = False
             current_task = None
 
         if project is not None and current_phase is None and line.startswith(">"):
@@ -170,6 +191,7 @@ def _parse_plan(md: str) -> Dict[str, Any]:
 
     if project is not None:
         project["description"] = " ".join(part for part in description_lines if part).strip()
+        project["user_stop_conditions"] = user_stop_conditions
 
     for phase in phases:
         for task in phase["tasks"]:
@@ -209,6 +231,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
         project_id=project["id"],
         name=project["name"],
         description=project.get("description", ""),
+        user_stop_conditions=project.get("user_stop_conditions", []),
         source_path=source_path,
         source_sha256=source_sha256,
         source_kind=source_kind,
