@@ -741,6 +741,8 @@ def get_project_summary(project_id: str,
                 MATCH (p:OrchProject {id: $project_id})
                 OPTIONAL MATCH (p)-[:HAS_PHASE]->(ph:OrchPhase)
                 OPTIONAL MATCH (ph)-[:HAS_TASK]->(t:OrchTask)
+                WITH p, ph, t
+                ORDER BY coalesce(t.priority, 999999999) ASC, t.created_at ASC
                 WITH p, ph,
                      count(t) AS total_tasks,
                      sum(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END) AS pending,
