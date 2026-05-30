@@ -26,6 +26,7 @@ from lib.orch_schema import (
     create_task,
     edit_project_condition,
     get_project_ready_tasks,
+    get_project_summary,
     get_session_stop_status,
     preflight_supervisor_orphan_check,
     ready_work,
@@ -241,6 +242,25 @@ def main() -> int:
         if unknown_row and unknown_row["supervisor"] == "unknown"
         else f"FAIL preflight_unknown_orphan row={dict(unknown_row) if unknown_row else None}"
     )
+
+    # 16 get_project_summary tasks ordered by priority ASC (Jesse-caught UX bug — UI rendered DESC)
+    ordering_pid = f"{prefix}-ordering-probe"
+    create_project(project_id=ordering_pid, name="ordering probe", supervisor="conductor", priority=10)
+    ordering_phase = f"{ordering_pid}-phase"
+    create_phase(project_id=ordering_pid, phase_id=ordering_phase, name="ordering probe phase", order=0)
+    # Create tasks in REVERSE priority order so insertion order alone wouldn't pass
+    for pri, sfx in [(9, "z"), (5, "m"), (1, "a")]:
+        create_task(phase_id=ordering_phase, task_id=f"{ordering_pid}-task-{sfx}", description=f"task {sfx}", priority=pri, owner="conductor")
+    ordering_summary = get_project_summary(ordering_pid)
+    ordering_phases = ordering_summary.get("phases", []) if ordering_summary else []
+    ordering_tasks = ordering_phases[0].get("tasks", []) if ordering_phases else []
+    ordering_pris = [t["priority"] for t in ordering_tasks]
+    record(
+        f"PASS project_summary_task_ordering order={ordering_pris}"
+        if ordering_pris == [1, 5, 9]
+        else f"FAIL project_summary_task_ordering order={ordering_pris} expected [1, 5, 9]"
+    )
+
     failures = [line for line in lines if line.startswith("FAIL")]
     _cleanup(prefix)
     return 1 if failures else 0
