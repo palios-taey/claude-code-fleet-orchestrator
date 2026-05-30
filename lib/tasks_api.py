@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -51,6 +52,7 @@ from lib.orch_schema import (
 from lib.plan_loader import load_plan_from_text
 
 app = FastAPI(title="Conductor Tasks API", version="2.0")
+_UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
 
 
 def _cfg() -> OrchConfig:
@@ -345,3 +347,12 @@ def health() -> Dict[str, Any]:
         return {"ok": True, "service": "conductor-tasks-api", "ts": time.time()}
     except Exception as e:
         return JSONResponse(status_code=503, content={"ok": False, "error": str(e)})
+
+
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+def root_redirect() -> RedirectResponse:
+    return RedirectResponse(url="/ui/", status_code=302)
+
+
+app.mount("/ui/static", StaticFiles(directory=_UI_ROOT / "static"), name="ui-static")
+app.mount("/ui", StaticFiles(directory=_UI_ROOT, html=True), name="ui")
