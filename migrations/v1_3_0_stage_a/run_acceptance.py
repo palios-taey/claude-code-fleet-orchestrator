@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 import uuid
@@ -130,7 +131,21 @@ def main() -> int:
     record(f"PASS pause_meta source={pause_meta['pause_source']} cleared_by={cleared['cleared_by']}" if pause_meta["pause_source"] == "api" and cleared["cleared_by"] == "tester" else "FAIL pause_meta")
 
     # 8 preflight returns zero because legacy projects are migration_exempt
-    preflight = preflight_supervisor_orphan_check(config=CFG)
+    preflight_raw = subprocess.check_output(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json; "
+                "from lib.orch_schema import preflight_supervisor_orphan_check; "
+                "print(json.dumps(preflight_supervisor_orphan_check(), sort_keys=True))"
+            ),
+        ],
+        text=True,
+        env=os.environ.copy(),
+        cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    ).strip()
+    preflight = json.loads(preflight_raw)
     record(f"PASS preflight_zero count={preflight['count']}" if preflight["count"] == 0 and preflight["ok"] is True else f"FAIL preflight_zero count={preflight['count']} ok={preflight['ok']}")
 
     # 9 POST /api/projects without supervisor returns 400
