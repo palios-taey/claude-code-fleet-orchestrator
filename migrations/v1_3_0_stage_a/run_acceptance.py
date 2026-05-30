@@ -164,6 +164,21 @@ def main() -> int:
     update_task_status(task5, "in_progress", owner="conductor", blocked_on=None, config=CFG)
     task_payload = CLIENT.get(f"/api/tasks/{task5}").json()
     record(f"PASS blocked_on_preserved blocked_on={task_payload.get('blocked_on')}" if task_payload.get("blocked_on") == "waiting-x" else f"FAIL blocked_on_preserved blocked_on={task_payload.get('blocked_on')}")
+
+    # 12 forced continuation count round-trips through get_project_ready_tasks
+    project_id6, phase_id6 = _make_project("forced-count")
+    task6 = f"{project_id6}-task"
+    create_task(phase_id6, task6, "forced continuation task", owner="conductor", config=CFG)
+    driver = get_neo4j_driver(CFG)
+    with driver.session(database=CFG.neo4j_db) as session:
+        session.run(
+            "MATCH (t:OrchTask {id: $task_id}) SET t.forced_continuation_count = 7",
+            task_id=task6,
+        )
+    ready_tasks = get_project_ready_tasks(project_id6, owner="conductor", config=CFG)
+    forced_task = next((task for task in ready_tasks if task["id"] == task6), None)
+    forced_count = None if forced_task is None else forced_task.get("forced_continuation_count")
+    record(f"PASS forced_continuation_count value={forced_count}" if forced_count == 7 else f"FAIL forced_continuation_count value={forced_count}")
     failures = [line for line in lines if line.startswith("FAIL")]
     _cleanup(prefix)
     return 1 if failures else 0

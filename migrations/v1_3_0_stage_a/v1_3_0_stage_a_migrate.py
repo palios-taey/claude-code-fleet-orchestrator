@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import os
 import sys
+import uuid
 from typing import Any, Dict, List
 
 from neo4j import GraphDatabase
@@ -13,6 +14,7 @@ from neo4j import GraphDatabase
 
 DEFAULT_SOURCE_URI = os.environ.get("ORCH_NEO4J_URI", "bolt://10.0.0.163:7689")
 DEFAULT_TARGET_URI = os.environ.get("STAGE_A_TEST_NEO4J_URI", "bolt://127.0.0.1:7691")
+SAFE_RESET_TARGETS = {"bolt://127.0.0.1:7691", "bolt://localhost:7691"}
 
 
 def _driver(uri: str):
@@ -54,7 +56,7 @@ def _normalize_conditions(raw: Any) -> str:
     for item in parsed or []:
         if isinstance(item, str):
             normalized.append({
-                "id": f"migrated-{abs(hash(item))}",
+                "id": f"migrated-{uuid.uuid5(uuid.NAMESPACE_OID, item)}",
                 "label": item,
                 "version": 1,
                 "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -67,7 +69,16 @@ def _normalize_conditions(raw: Any) -> str:
     return json.dumps(normalized, separators=(",", ":"), sort_keys=True)
 
 
-def reset_target(uri: str) -> None:
+def _assert_safe_reset_target(uri: str, override: bool) -> None:
+    if override or uri in SAFE_RESET_TARGETS:
+        return
+    raise ValueError(
+        f"Refusing to reset non-test target_uri={uri}. Use 127.0.0.1:7691/localhost:7691 or pass --i-know-what-im-doing."
+    )
+
+
+def reset_target(uri: str, override: bool = False) -> None:
+    _assert_safe_reset_target(uri, override)
     with _driver(uri).session(database="neo4j") as session:
         session.run("MATCH (n) DETACH DELETE n")
 
@@ -113,8 +124,8 @@ def _copy_relationships(source_uri: str, target_uri: str) -> int:
     return count
 
 
-def seed_target(source_uri: str, target_uri: str) -> Dict[str, int]:
-    reset_target(target_uri)
+def seed_target(source_uri: str, target_uri: str, override_reset: bool = False) -> Dict[str, int]:
+    reset_target(target_uri, override=override_reset)
     return {
         "projects": _copy_nodes(source_uri, target_uri, "OrchProject"),
         "phases": _copy_nodes(source_uri, target_uri, "OrchPhase"),
@@ -238,10 +249,15 @@ def main() -> int:
     parser.add_argument("--target-uri", default=DEFAULT_TARGET_URI)
     parser.add_argument("--seed-from-source", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--i-know-what-im-doing", action="store_true")
     args = parser.parse_args()
 
     if args.seed_from_source:
-        print(json.dumps({"seeded": seed_target(args.source_uri, args.target_uri), "source_uri": args.source_uri, "target_uri": args.target_uri}, sort_keys=True))
+        print(json.dumps({
+            "seeded": seed_target(args.source_uri, args.target_uri, override_reset=args.i_know_what_im_doing),
+            "source_uri": args.source_uri,
+            "target_uri": args.target_uri,
+        }, sort_keys=True))
     print(json.dumps(apply_migration(args.target_uri, dry_run=args.dry_run), sort_keys=True))
     return 0
 
