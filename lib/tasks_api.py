@@ -16,6 +16,7 @@ Run:
 """
 from __future__ import annotations
 
+import json
 import sys
 import subprocess
 import time
@@ -32,22 +33,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lib.config import OrchConfig
 from lib.dispatch import bind_current_task, record_outcome
 from lib.orch_schema import (
+    ConditionValidationError,
+    PauseValidationError,
+    PriorityAuditError,
+    ProjectNotFoundError,
+    ReadyWorkConflictError,
+    add_project_condition,
     assign_task_to_phase,
     check_phase_complete,
+    clear_project_stop_reason,
+    clear_session_pause,
     create_phase,
     create_project,
     create_task,
+    edit_project_condition,
     ensure_default_project,
     get_agent_tasks,
     get_neo4j_driver,
     get_project_user_stop_conditions,
+    get_session_stop_status,
+    get_session_supervised_projects,
     get_session_next_ready,
     get_project_summary,
     get_ready_tasks,
     get_session_current_work,
     get_task as load_task_record,
     get_task_phase,
+    set_project_stop_reason,
+    set_session_pause,
     set_project_user_stop_conditions,
+    update_project_priority,
     update_task_status,
 )
 from lib.plan_loader import load_plan_from_text
@@ -75,6 +90,50 @@ ALLOWED_NOTIFY_TYPES = {
 
 def _cfg() -> OrchConfig:
     return OrchConfig()
+
+
+def _decode_json(raw: Any, default: Any) -> Any:
+    if raw in (None, ""):
+        return default
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw
+
+
+def _project_counts(project_id: str) -> Dict[str, int]:
+    summary = get_project_summary(project_id, config=_cfg())
+    phases = summary.get("phases", []) if summary else []
+    counts = {"phase_count": len(phases), "task_total": 0, "pending": 0, "in_progress": 0, "completed": 0, "failed": 0}
+    for phase in phases:
+        task_counts = phase.get("task_counts", {})
+        counts["task_total"] += int(task_counts.get("total", 0) or 0)
+        counts["pending"] += int(task_counts.get("pending", 0) or 0)
+        counts["in_progress"] += int(task_counts.get("in_progress", 0) or 0)
+        counts["completed"] += int(task_counts.get("completed", 0) or 0)
+        counts["failed"] += int(task_counts.get("failed", 0) or 0)
+    return counts
+
+
+def _project_row(project: Dict[str, Any]) -> Dict[str, Any]:
+    counts = _project_counts(project["id"])
+    return {
+        "id": project.get("id"),
+        "name": project.get("name"),
+        "description": project.get("description"),
+        "status": project.get("status"),
+        "source_path": project.get("source_path"),
+        "source_kind": project.get("source_kind"),
+        "source_sha256": project.get("source_sha256"),
+        "user_stop_conditions": project.get("user_stop_conditions", []),
+        "supervisor": project.get("supervisor"),
+        "priority": project.get("priority"),
+        "migration_exempt": bool(project.get("migration_exempt")),
+        "stop_reason_current": project.get("stop_reason_current"),
+        "stop_reason_history": project.get("stop_reason_history", []),
+        "priority_history": project.get("priority_history", []),
+        "stop_reason_orphaned": bool(project.get("stop_reason_orphaned")),
+        **counts,
+    }
 
 
 @app.get("/api/tasks")
@@ -233,28 +292,20 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
 
 @app.get("/api/projects")
 def list_projects() -> Dict[str, Any]:
-    """List all OrchProject nodes with phase counts and aggregate task status counts."""
+    """List all OrchProject nodes with decoded Stage A fields and aggregate task status counts."""
     cfg = _cfg()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
-        result = session.run("""
-            MATCH (p:OrchProject)
-            OPTIONAL MATCH (p)-[:HAS_PHASE]->(ph:OrchPhase)
-            OPTIONAL MATCH (ph)-[:HAS_TASK]->(t:OrchTask)
-            WITH p, count(DISTINCT ph) AS phase_count,
-                 count(DISTINCT t) AS task_total,
-                 count(DISTINCT CASE WHEN t.status = 'pending' THEN t END) AS pending,
-                 count(DISTINCT CASE WHEN t.status = 'in_progress' THEN t END) AS in_progress,
-                 count(DISTINCT CASE WHEN t.status = 'completed' THEN t END) AS completed,
-                 count(DISTINCT CASE WHEN t.status = 'failed' THEN t END) AS failed
-            RETURN p.id AS id, p.name AS name, p.description AS description,
-                   p.status AS status, p.source_path AS source_path,
-                   p.source_kind AS source_kind, p.source_sha256 AS source_sha256,
-                   coalesce(p.user_stop_conditions, []) AS user_stop_conditions,
-                   phase_count, task_total, pending, in_progress, completed, failed
-            ORDER BY p.id
-        """)
-        projects = [dict(r) for r in result]
+        result = session.run("MATCH (p:OrchProject) RETURN p ORDER BY p.id")
+        projects = []
+        for record in result:
+            project = _serialize_node(record["p"])
+            project["user_stop_conditions"] = _decode_json(project.get("user_stop_conditions"), [])
+            project["stop_reason_current"] = _decode_json(project.get("stop_reason_current"), None)
+            project["stop_reason_history"] = _decode_json(project.get("stop_reason_history"), [])
+            project["priority_history"] = _decode_json(project.get("priority_history"), [])
+            project["stop_reason_orphaned"] = False
+            projects.append(_project_row(project))
     return {"projects": projects}
 
 
@@ -275,11 +326,16 @@ async def create_project_endpoint(req: Request) -> Dict[str, Any]:
     name = data.get("name", project_id)
     if not project_id:
         raise HTTPException(status_code=400, detail="id required")
+    supervisor = (data.get("supervisor") or "").strip()
+    if not supervisor or supervisor == "unassigned":
+        raise HTTPException(status_code=400, detail="supervisor must be non-empty and not 'unassigned'")
     pid = create_project(
         project_id=project_id,
         name=name,
         description=data.get("description", ""),
         user_stop_conditions=data.get("user_stop_conditions"),
+        supervisor=supervisor,
+        priority=data.get("priority"),
         source_path=data.get("source_path"),
         source_sha256=data.get("source_sha256"),
         source_kind=data.get("source_kind"),
@@ -291,10 +347,11 @@ async def create_project_endpoint(req: Request) -> Dict[str, Any]:
 
 @app.get("/api/projects/{project_id}/user-stop-conditions")
 def get_project_user_stop_conditions_endpoint(project_id: str) -> Dict[str, Any]:
+    """Backward-compatible surface returning active condition labels only."""
     conditions = get_project_user_stop_conditions(project_id, config=_cfg())
     if conditions is None:
         raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
-    return {"project_id": project_id, "conditions": conditions}
+    return {"project_id": project_id, "conditions": [condition["label"] for condition in conditions if not condition.get("deprecated_at")]}
 
 
 @app.post("/api/projects/{project_id}/user-stop-conditions")
@@ -303,8 +360,13 @@ async def set_project_user_stop_conditions_endpoint(project_id: str, req: Reques
     conditions = data.get("conditions")
     if not isinstance(conditions, list) or any(not isinstance(item, str) for item in conditions):
         raise HTTPException(status_code=400, detail="conditions must be a list of strings")
-    saved = set_project_user_stop_conditions(project_id, conditions, config=_cfg())
-    return {"ok": True, "project_id": project_id, "conditions": saved}
+    saved = set_project_user_stop_conditions(
+        project_id,
+        conditions,
+        config=_cfg(),
+        created_by=data.get("from", "legacy-api"),
+    )
+    return {"ok": True, "project_id": project_id, "conditions": [condition["label"] for condition in saved if not condition.get("deprecated_at")]}
 
 
 @app.post("/api/projects/{project_id}/phases")
@@ -332,11 +394,17 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
     md_text = data.get("md_text")
     if not md_text:
         raise HTTPException(status_code=400, detail="md_text required")
+    supervisor = (data.get("supervisor") or "").strip()
+    if supervisor in {"", "unassigned", "unknown"}:
+        raise HTTPException(status_code=400, detail="supervisor required for non-exempt project ingest (must not be unassigned or unknown)")
     return load_plan_from_text(
         md=md_text,
         source_path=data.get("source_path", ""),
         source_kind=data.get("source_kind", "markdown"),
         ingested_by=data.get("ingested_by", "unknown"),
+        supervisor=supervisor,
+        priority=data.get("priority"),
+        migration_exempt=bool(data.get("migration_exempt", False)),
     )
 
 
@@ -351,7 +419,7 @@ def session_current(session_id: str) -> Dict[str, Any]:
 
 @app.get("/api/sessions/{session_id}/next-ready")
 def session_next_ready(session_id: str) -> Dict[str, Any]:
-    """Top pending task owned-by this session OR unowned-and-team-matched."""
+    """Top pending task owned-by this session only — under single-supervisor scope there is no claim-from-unowned-pool path."""
     result = get_session_next_ready(session_id, config=_cfg())
     if not result:
         return {"session": session_id, "next": None}
@@ -360,29 +428,123 @@ def session_next_ready(session_id: str) -> Dict[str, Any]:
 
 @app.get("/api/sessions/{session_id}/projects")
 def session_projects(session_id: str) -> Dict[str, Any]:
-    cfg = _cfg()
-    driver = get_neo4j_driver(cfg)
-    with driver.session(database=cfg.neo4j_db) as session:
-        result = session.run("""
-            MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(owned:OrchTask {owner: $session_id})
-            OPTIONAL MATCH (p)-[:HAS_PHASE]->(all_ph:OrchPhase)
-            OPTIONAL MATCH (all_ph)-[:HAS_TASK]->(all_t:OrchTask)
-            WITH p,
-                 count(DISTINCT all_ph) AS phase_count,
-                 count(DISTINCT all_t) AS task_total,
-                 count(DISTINCT CASE WHEN all_t.status = 'pending' THEN all_t END) AS pending,
-                 count(DISTINCT CASE WHEN all_t.status = 'in_progress' THEN all_t END) AS in_progress,
-                 count(DISTINCT CASE WHEN all_t.status = 'completed' THEN all_t END) AS completed,
-                 count(DISTINCT CASE WHEN all_t.status = 'failed' THEN all_t END) AS failed
-            RETURN p.id AS id, p.name AS name, p.description AS description,
-                   p.status AS status, p.source_path AS source_path,
-                   p.source_kind AS source_kind, p.source_sha256 AS source_sha256,
-                   coalesce(p.user_stop_conditions, []) AS user_stop_conditions,
-                   phase_count, task_total, pending, in_progress, completed, failed
-            ORDER BY p.id
-        """, session_id=session_id)
-        projects = [dict(r) for r in result]
+    """Supervisor-based listing; replaces the earlier task-owner-based semantics."""
+    projects = [_project_row(project) for project in get_session_supervised_projects(session_id, config=_cfg())]
     return {"session": session_id, "projects": projects}
+
+
+@app.get("/api/sessions/{session_id}/stop-status")
+def session_stop_status(session_id: str) -> Dict[str, Any]:
+    result = get_session_stop_status(session_id, config=_cfg())
+    return {"session": session_id, **result}
+
+
+@app.post("/api/projects/{project_id}/stop-reason")
+async def set_project_stop_reason_endpoint(project_id: str, req: Request) -> Dict[str, Any]:
+    data = await req.json()
+    try:
+        current = set_project_stop_reason(
+            project_id,
+            condition_id=str(data.get("condition_id") or ""),
+            condition_version=int(data.get("condition_version")),
+            detail=data.get("detail", ""),
+            set_by=data.get("set_by") or data.get("from") or "unknown",
+            config=_cfg(),
+        )
+    except ReadyWorkConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except (ConditionValidationError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {
+        "ok": True,
+        "cited_condition_label": current.get("label_snapshot"),
+        "history_id": f"{project_id}:{current.get('condition_id')}:{current.get('condition_version')}",
+    }
+
+
+@app.delete("/api/projects/{project_id}/stop-reason")
+async def clear_project_stop_reason_endpoint(project_id: str, req: Request) -> Dict[str, Any]:
+    data = await req.json() if req.headers.get("content-type", "").startswith("application/json") else {}
+    try:
+        ok = clear_project_stop_reason(project_id, cleared_by=data.get("cleared_by") or data.get("from") or "unknown", config=_cfg())
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"ok": ok}
+
+
+@app.patch("/api/projects/{project_id}")
+async def patch_project_endpoint(project_id: str, req: Request) -> Dict[str, Any]:
+    data = await req.json()
+    if "priority" not in data:
+        raise HTTPException(status_code=400, detail="priority required")
+    try:
+        updated = update_project_priority(
+            project_id,
+            int(data["priority"]),
+            set_by=data.get("set_by") or data.get("from") or "",
+            source_surface=data.get("source_surface") or "",
+            reason=data.get("reason") or "",
+            config=_cfg(),
+        )
+    except PriorityAuditError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"ok": True, "project_id": project_id, **updated}
+
+
+@app.post("/api/projects/{project_id}/conditions")
+async def add_project_condition_endpoint(project_id: str, req: Request) -> Dict[str, Any]:
+    data = await req.json()
+    label = (data.get("label") or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="label required")
+    try:
+        condition = add_project_condition(project_id, label, created_by=data.get("created_by") or data.get("from") or "unknown", config=_cfg())
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"ok": True, "condition": condition}
+
+
+@app.patch("/api/projects/{project_id}/conditions/{condition_id}")
+async def edit_project_condition_endpoint(project_id: str, condition_id: str, req: Request) -> Dict[str, Any]:
+    data = await req.json()
+    label = (data.get("label") or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="label required")
+    try:
+        condition = edit_project_condition(project_id, condition_id, label, edited_by=data.get("edited_by") or data.get("from") or "unknown", config=_cfg())
+    except ConditionValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"ok": True, "condition": condition}
+
+
+@app.post("/api/sessions/{session_id}/pause")
+async def pause_session_endpoint(session_id: str, req: Request) -> Dict[str, Any]:
+    data = await req.json()
+    try:
+        meta = set_session_pause(
+            session_id,
+            pause_source=data.get("pause_source") or "",
+            pause_reason=data.get("pause_reason") or "",
+            pause_expires_at=data.get("pause_expires_at"),
+            paused_by=data.get("paused_by") or data.get("from") or session_id,
+            config=_cfg(),
+        )
+    except PauseValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "pause_meta": meta}
+
+
+@app.delete("/api/sessions/{session_id}/pause")
+async def clear_pause_session_endpoint(session_id: str, req: Request) -> Dict[str, Any]:
+    data = await req.json() if req.headers.get("content-type", "").startswith("application/json") else {}
+    meta = clear_session_pause(session_id, cleared_by=data.get("cleared_by") or data.get("from") or session_id, config=_cfg())
+    return {"ok": True, "pause_meta": meta}
 
 
 @app.post("/api/sessions/{target}/notify")
