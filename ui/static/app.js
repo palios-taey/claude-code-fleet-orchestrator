@@ -1,9 +1,10 @@
-const PROJECTS_ENDPOINT = "/api/projects";
 const PROJECT_DETAIL_ENDPOINT = (projectId) => `/api/projects/${encodeURIComponent(projectId)}`;
 const PROJECT_STOP_CONDITIONS_ENDPOINT = (projectId) =>
   `/api/projects/${encodeURIComponent(projectId)}/user-stop-conditions`;
 const SESSION_CURRENT_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/current`;
 const SESSION_NEXT_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/next-ready`;
+const SESSION_PROJECTS_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/projects`;
+const SESSION_NOTIFY_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/notify`;
 const POLL_INTERVAL_MS = 5000;
 const SESSIONS = [
   "conductor",
@@ -19,10 +20,11 @@ const SESSIONS = [
 
 const state = {
   paused: false,
-  selectedProjectId: null,
-  highlightedProjectId: null,
-  projects: [],
+  selectedSessionId: SESSIONS[0],
+  selectedProjectIdBySession: new Map(),
   sessionCards: new Map(),
+  sessionProjects: new Map(),
+  notifyStatusTimeoutId: null,
 };
 
 const elements = {
@@ -31,14 +33,13 @@ const elements = {
   sessionsStrip: document.getElementById("sessions-strip"),
   lastUpdated: document.getElementById("last-updated"),
   pauseToggle: document.getElementById("pause-toggle"),
+  notifyForm: document.getElementById("notify-form"),
+  notifyTarget: document.getElementById("notify-target"),
+  notifyType: document.getElementById("notify-type"),
+  notifyInput: document.getElementById("notify-input"),
+  notifySubmit: document.getElementById("notify-submit"),
+  notifyStatus: document.getElementById("notify-status"),
 };
-
-function shortHash(value) {
-  if (!value) {
-    return "n/a";
-  }
-  return String(value).slice(0, 12);
-}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -49,12 +50,33 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText} for ${url}`);
+function shortHash(value) {
+  if (!value) {
+    return "n/a";
   }
-  return response.json();
+  return String(value).slice(0, 12);
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, {
+    cache: "no-store",
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    ...options,
+  });
+  const rawText = await response.text();
+  let data = null;
+  if (rawText) {
+    try {
+      data = JSON.parse(rawText);
+    } catch (error) {
+      throw new Error(`${response.status} ${response.statusText} for ${url}`);
+    }
+  }
+  if (!response.ok) {
+    const detail = data?.detail || data?.error || `${response.status} ${response.statusText}`;
+    throw new Error(String(detail));
+  }
+  return data;
 }
 
 function renderStatusBadge(status) {
@@ -62,20 +84,38 @@ function renderStatusBadge(status) {
   return `<span class="status-badge ${escapeHtml(safeStatus)}">${escapeHtml(safeStatus)}</span>`;
 }
 
+function selectedSessionProjects() {
+  return state.sessionProjects.get(state.selectedSessionId) || [];
+}
+
+function selectedProjectId() {
+  return state.selectedProjectIdBySession.get(state.selectedSessionId) || null;
+}
+
+function ensureSelectedProject() {
+  const projects = selectedSessionProjects();
+  const currentSelection = selectedProjectId();
+  if (!projects.length) {
+    state.selectedProjectIdBySession.delete(state.selectedSessionId);
+    return;
+  }
+  if (currentSelection && projects.some((project) => project.id === currentSelection)) {
+    return;
+  }
+  state.selectedProjectIdBySession.set(state.selectedSessionId, projects[0].id);
+}
+
 function renderProjectList() {
-  if (!state.projects.length) {
-    elements.projectsList.innerHTML = '<p class="empty-hint">No projects found.</p>';
+  const projects = selectedSessionProjects();
+  const currentSelection = selectedProjectId();
+
+  if (!projects.length) {
+    elements.projectsList.innerHTML = '<p class="empty-hint">(no projects with tasks owned by this session)</p>';
     return;
   }
 
-  elements.projectsList.innerHTML = state.projects.map((project) => {
-    const activeClass = project.id === state.selectedProjectId ? "active" : "";
-    const taskCounts = [
-      `pending ${project.pending ?? 0}`,
-      `doing ${project.in_progress ?? 0}`,
-      `done ${project.completed ?? 0}`,
-      `failed ${project.failed ?? 0}`,
-    ];
+  elements.projectsList.innerHTML = projects.map((project) => {
+    const activeClass = project.id === currentSelection ? "active" : "";
     return `
       <article class="project-card ${activeClass}" data-project-id="${escapeHtml(project.id)}">
         <div class="status-row">
@@ -88,7 +128,10 @@ function renderProjectList() {
           <span>${project.task_total ?? 0} tasks</span>
         </div>
         <div class="project-stats">
-          ${taskCounts.map((count) => `<span>${escapeHtml(count)}</span>`).join("")}
+          <span>pending ${project.pending ?? 0}</span>
+          <span>doing ${project.in_progress ?? 0}</span>
+          <span>done ${project.completed ?? 0}</span>
+          <span>failed ${project.failed ?? 0}</span>
         </div>
       </article>
     `;
@@ -96,24 +139,20 @@ function renderProjectList() {
 
   for (const card of elements.projectsList.querySelectorAll(".project-card")) {
     card.addEventListener("click", () => {
-      state.selectedProjectId = card.dataset.projectId;
-      state.highlightedProjectId = card.dataset.projectId;
+      state.selectedProjectIdBySession.set(state.selectedSessionId, card.dataset.projectId);
       renderProjectList();
       loadSelectedProject();
-      renderSessionCards();
     });
   }
 }
 
 function renderSessionCards() {
   elements.sessionsStrip.innerHTML = "";
-
   for (const sessionId of SESSIONS) {
     const session = state.sessionCards.get(sessionId) || {};
     const current = session.current?.current;
     const nextReady = session.next?.next;
-    const projectHint = current?.project_id || nextReady?.project_id || null;
-    const activeClass = projectHint && projectHint === state.highlightedProjectId ? "active" : "";
+    const activeClass = sessionId === state.selectedSessionId ? "active" : "";
 
     const card = document.createElement("article");
     card.className = `session-card ${activeClass}`.trim();
@@ -128,17 +167,15 @@ function renderSessionCards() {
         ${nextReady ? escapeHtml(nextReady.task_id) : '<span class="muted">none</span>'}
       </div>
     `;
-
-    if (projectHint) {
-      card.addEventListener("click", () => {
-        state.highlightedProjectId = projectHint;
-        state.selectedProjectId = projectHint;
-        renderProjectList();
-        renderSessionCards();
-        loadSelectedProject();
-      });
-    }
-
+    card.addEventListener("click", () => {
+      state.selectedSessionId = sessionId;
+      syncNotifyTarget();
+      ensureSelectedProject();
+      renderSessionCards();
+      renderProjectList();
+      renderSessionSummary();
+      loadSelectedProject();
+    });
     elements.sessionsStrip.appendChild(card);
   }
 }
@@ -205,6 +242,36 @@ function renderPhaseCards(phases) {
   }).join("");
 }
 
+function renderSessionSummary() {
+  const session = state.sessionCards.get(state.selectedSessionId) || {};
+  const current = session.current?.current;
+  const nextReady = session.next?.next;
+
+  elements.projectDetail.classList.remove("empty-state");
+  elements.projectDetail.innerHTML = `
+    <section class="project-header">
+      <div class="status-row">
+        <div>
+          <p class="eyebrow">session ${escapeHtml(state.selectedSessionId)}</p>
+          <h2>${escapeHtml(state.selectedSessionId)}</h2>
+        </div>
+      </div>
+      <div class="summary-grid">
+        <div class="summary-card">
+          <h3>Current</h3>
+          <p>${current ? escapeHtml(current.top_task_id) : '<span class="muted">idle</span>'}</p>
+          <p class="muted">${current ? escapeHtml(current.top_task_desc || "") : "No in-progress task."}</p>
+        </div>
+        <div class="summary-card">
+          <h3>Next ready</h3>
+          <p>${nextReady ? escapeHtml(nextReady.task_id) : '<span class="muted">none</span>'}</p>
+          <p class="muted">${nextReady ? escapeHtml(nextReady.description || "") : "No ready task exposed by the API."}</p>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderProjectDetail(projectSummary, stopConditions) {
   const project = projectSummary.project || {};
   const phases = projectSummary.phases || [];
@@ -215,13 +282,14 @@ function renderProjectDetail(projectSummary, stopConditions) {
     <section class="project-header">
       <div class="status-row">
         <div>
-          <p class="eyebrow">project ${escapeHtml(project.id || "")}</p>
+          <p class="eyebrow">session ${escapeHtml(state.selectedSessionId)}</p>
           <h2>${escapeHtml(project.name || project.id || "Project")}</h2>
         </div>
         ${renderStatusBadge(project.status || "active")}
       </div>
       <p>${escapeHtml(project.description || "(no description)")}</p>
       <div class="project-meta">
+        <span>project: ${escapeHtml(project.id || "")}</span>
         <span>source: ${escapeHtml(project.source_path || "n/a")}</span>
         <span>sha: ${escapeHtml(shortHash(project.source_sha256))}</span>
       </div>
@@ -243,37 +311,57 @@ function renderProjectError(error) {
   elements.projectDetail.innerHTML = `<p class="empty-hint">Failed to load project: ${escapeHtml(error.message)}</p>`;
 }
 
-async function loadProjects() {
-  try {
-    const data = await fetchJson(PROJECTS_ENDPOINT);
-    state.projects = data.projects || [];
-    if (!state.selectedProjectId && state.projects.length) {
-      state.selectedProjectId = state.projects[0].id;
-      state.highlightedProjectId = state.projects[0].id;
-    }
-    renderProjectList();
-    if (state.selectedProjectId) {
-      await loadSelectedProject();
-    }
-  } catch (error) {
-    elements.projectsList.innerHTML = `<p class="empty-hint">Failed to load projects: ${escapeHtml(error.message)}</p>`;
+function syncNotifyTarget() {
+  elements.notifyTarget.textContent = state.selectedSessionId;
+  elements.notifyInput.placeholder = `Message to ${state.selectedSessionId}...`;
+}
+
+function setNotifyStatus(message, kind, durationMs) {
+  elements.notifyStatus.textContent = message;
+  elements.notifyStatus.className = `notify-status ${kind}`.trim();
+  if (state.notifyStatusTimeoutId) {
+    window.clearTimeout(state.notifyStatusTimeoutId);
+  }
+  if (durationMs > 0) {
+    state.notifyStatusTimeoutId = window.setTimeout(() => {
+      elements.notifyStatus.textContent = "";
+      elements.notifyStatus.className = "notify-status";
+    }, durationMs);
   }
 }
 
+function updateNotifyButtonState() {
+  elements.notifySubmit.disabled = !elements.notifyInput.value.trim();
+}
+
 async function loadSelectedProject() {
-  if (!state.selectedProjectId) {
+  ensureSelectedProject();
+  const projectId = selectedProjectId();
+  if (!projectId) {
+    renderSessionSummary();
     return;
   }
 
   try {
     const [summary, stopConditions] = await Promise.all([
-      fetchJson(PROJECT_DETAIL_ENDPOINT(state.selectedProjectId)),
-      fetchJson(PROJECT_STOP_CONDITIONS_ENDPOINT(state.selectedProjectId)),
+      fetchJson(PROJECT_DETAIL_ENDPOINT(projectId)),
+      fetchJson(PROJECT_STOP_CONDITIONS_ENDPOINT(projectId)),
     ]);
     renderProjectDetail(summary, stopConditions);
   } catch (error) {
     renderProjectError(error);
   }
+}
+
+async function loadSessionProjects() {
+  await Promise.all(SESSIONS.map(async (sessionId) => {
+    try {
+      const result = await fetchJson(SESSION_PROJECTS_ENDPOINT(sessionId));
+      state.sessionProjects.set(sessionId, result.projects || []);
+    } catch (error) {
+      state.sessionProjects.set(sessionId, []);
+    }
+  }));
 }
 
 async function loadSessions() {
@@ -292,8 +380,6 @@ async function loadSessions() {
       });
     }
   }));
-
-  renderSessionCards();
 }
 
 async function refresh() {
@@ -301,7 +387,11 @@ async function refresh() {
     return;
   }
 
-  await Promise.all([loadProjects(), loadSessions()]);
+  await Promise.all([loadSessions(), loadSessionProjects()]);
+  ensureSelectedProject();
+  renderSessionCards();
+  renderProjectList();
+  await loadSelectedProject();
   elements.lastUpdated.textContent = new Date().toLocaleTimeString();
 }
 
@@ -309,5 +399,35 @@ elements.pauseToggle.addEventListener("change", (event) => {
   state.paused = event.target.checked;
 });
 
+elements.notifyInput.addEventListener("input", updateNotifyButtonState);
+
+elements.notifyForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const message = elements.notifyInput.value.trim();
+  if (!message) {
+    return;
+  }
+
+  elements.notifySubmit.disabled = true;
+  setNotifyStatus("Sending...", "pending", 0);
+  try {
+    await fetchJson(SESSION_NOTIFY_ENDPOINT(state.selectedSessionId), {
+      method: "POST",
+      body: JSON.stringify({
+        type: elements.notifyType.value,
+        message,
+      }),
+    });
+    elements.notifyInput.value = "";
+    updateNotifyButtonState();
+    setNotifyStatus("Sent ✓", "success", 5000);
+  } catch (error) {
+    updateNotifyButtonState();
+    setNotifyStatus(error.message, "error", 8000);
+  }
+});
+
+syncNotifyTarget();
+updateNotifyButtonState();
 refresh();
 window.setInterval(refresh, POLL_INTERVAL_MS);
