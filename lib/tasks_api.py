@@ -394,11 +394,17 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
     md_text = data.get("md_text")
     if not md_text:
         raise HTTPException(status_code=400, detail="md_text required")
+    supervisor = (data.get("supervisor") or "").strip()
+    if supervisor in {"", "unassigned", "unknown"}:
+        raise HTTPException(status_code=400, detail="supervisor required for non-exempt project ingest (must not be unassigned or unknown)")
     return load_plan_from_text(
         md=md_text,
         source_path=data.get("source_path", ""),
         source_kind=data.get("source_kind", "markdown"),
         ingested_by=data.get("ingested_by", "unknown"),
+        supervisor=supervisor,
+        priority=data.get("priority"),
+        migration_exempt=bool(data.get("migration_exempt", False)),
     )
 
 
@@ -413,7 +419,7 @@ def session_current(session_id: str) -> Dict[str, Any]:
 
 @app.get("/api/sessions/{session_id}/next-ready")
 def session_next_ready(session_id: str) -> Dict[str, Any]:
-    """Top pending task owned-by this session OR unowned-and-team-matched."""
+    """Top pending task owned-by this session only — under single-supervisor scope there is no claim-from-unowned-pool path."""
     result = get_session_next_ready(session_id, config=_cfg())
     if not result:
         return {"session": session_id, "next": None}

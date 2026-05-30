@@ -851,6 +851,7 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                       WHERE dep.status <> 'completed'
                   }
                   AND coalesce(proj.status, 'active') <> 'stopped'
+                  AND coalesce(proj.status, 'active') <> 'completed'
                 RETURN t.id AS task_id, t.description AS description,
                        t.priority AS priority, t.owner AS owner,
                        t.blocked_on AS blocked_on,
@@ -1227,7 +1228,7 @@ def preflight_supervisor_orphan_check(config: Optional[OrchConfig] = None) -> Di
                 MATCH (p:OrchProject)
                 WHERE coalesce(p.status, 'active') = 'active'
                   AND coalesce(p.migration_exempt, false) = false
-                  AND (p.supervisor IS NULL OR p.supervisor = '' OR p.supervisor = 'unassigned')
+                  AND (p.supervisor IS NULL OR p.supervisor = '' OR p.supervisor = 'unassigned' OR p.supervisor = 'unknown')
                 RETURN p.id AS project_id, p.name AS name, p.status AS status, p.supervisor AS supervisor
                 ORDER BY p.id
             """)
