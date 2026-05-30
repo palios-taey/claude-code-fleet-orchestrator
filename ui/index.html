@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orchestrator Plan UI</title>
+  <link rel="stylesheet" href="/ui/static/app.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">claude-code-fleet-orchestrator</p>
+        <h1>Read-only Plan UI</h1>
+      </div>
+      <div class="topbar-controls">
+        <div class="last-updated">
+          <span>Last refresh</span>
+          <strong id="last-updated">never</strong>
+        </div>
+        <label class="pause-toggle">
+          <input type="checkbox" id="pause-toggle">
+          <span>Paused</span>
+        </label>
+      </div>
+    </header>
+
+    <section class="sessions-panel panel">
+      <div class="panel-header">
+        <h2>Sessions</h2>
+        <p>Current task and next ready task for the first-cut fleet sessions.</p>
+      </div>
+      <div id="sessions-strip" class="sessions-strip"></div>
+    </section>
+
+    <main class="workspace">
+      <aside class="projects-panel panel">
+        <div class="panel-header">
+          <h2>Projects</h2>
+          <p>Active plan inventory from <code>/api/projects</code>.</p>
+        </div>
+        <div id="projects-list" class="projects-list"></div>
+      </aside>
+
+      <section class="details-panel panel">
+        <div id="project-detail" class="project-detail empty-state">
+          Select a project to inspect its phases, tasks, and user-stop-conditions.
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <template id="status-badge-template">
+    <span class="status-badge"></span>
+  </template>
+
+  <script src="/ui/static/app.js"></script>
+</body>
+</html>
