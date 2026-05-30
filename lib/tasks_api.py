@@ -17,6 +17,7 @@ Run:
 from __future__ import annotations
 
 import sys
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -53,6 +54,23 @@ from lib.plan_loader import load_plan_from_text
 
 app = FastAPI(title="Conductor Tasks API", version="2.0")
 _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
+ALLOWED_UI_SESSIONS = (
+    "conductor",
+    "weaver",
+    "tutor",
+    "infra",
+    "taeys-hands",
+    "treasurer",
+    "hunter",
+    "taey-ed",
+    "x-claude",
+)
+ALLOWED_NOTIFY_TYPES = {
+    "standard": "message",
+    "escalation": "escalation",
+    "command": "command",
+    "response_ready": "response_ready",
+}
 
 
 def _cfg() -> OrchConfig:
@@ -338,6 +356,61 @@ def session_next_ready(session_id: str) -> Dict[str, Any]:
     if not result:
         return {"session": session_id, "next": None}
     return {"session": session_id, "next": result}
+
+
+@app.get("/api/sessions/{session_id}/projects")
+def session_projects(session_id: str) -> Dict[str, Any]:
+    cfg = _cfg()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(owned:OrchTask {owner: $session_id})
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(all_ph:OrchPhase)
+            OPTIONAL MATCH (all_ph)-[:HAS_TASK]->(all_t:OrchTask)
+            WITH p,
+                 count(DISTINCT all_ph) AS phase_count,
+                 count(DISTINCT all_t) AS task_total,
+                 count(DISTINCT CASE WHEN all_t.status = 'pending' THEN all_t END) AS pending,
+                 count(DISTINCT CASE WHEN all_t.status = 'in_progress' THEN all_t END) AS in_progress,
+                 count(DISTINCT CASE WHEN all_t.status = 'completed' THEN all_t END) AS completed,
+                 count(DISTINCT CASE WHEN all_t.status = 'failed' THEN all_t END) AS failed
+            RETURN p.id AS id, p.name AS name, p.description AS description,
+                   p.status AS status, p.source_path AS source_path,
+                   p.source_kind AS source_kind, p.source_sha256 AS source_sha256,
+                   coalesce(p.user_stop_conditions, []) AS user_stop_conditions,
+                   phase_count, task_total, pending, in_progress, completed, failed
+            ORDER BY p.id
+        """, session_id=session_id)
+        projects = [dict(r) for r in result]
+    return {"session": session_id, "projects": projects}
+
+
+@app.post("/api/sessions/{target}/notify")
+async def session_notify(target: str, req: Request) -> Dict[str, Any]:
+    if target not in ALLOWED_UI_SESSIONS:
+        raise HTTPException(status_code=400, detail="target must be an allowed session")
+
+    data = await req.json()
+    notify_type = data.get("type", "standard")
+    message = (data.get("message") or "").strip()
+
+    if notify_type not in ALLOWED_NOTIFY_TYPES:
+        raise HTTPException(status_code=400, detail="type must be one of standard, escalation, command, response_ready")
+    if not message:
+        raise HTTPException(status_code=400, detail="message must be non-empty")
+
+    result = subprocess.run(
+        ["taey-notify", target, message, "--type", ALLOWED_NOTIFY_TYPES[notify_type]],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=502,
+            detail=result.stderr.strip() or "taey-notify failed",
+        )
+    return {"ok": True}
 
 
 @app.get("/health")

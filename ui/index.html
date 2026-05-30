@@ -11,7 +11,7 @@
     <header class="topbar">
       <div>
         <p class="eyebrow">claude-code-fleet-orchestrator</p>
-        <h1>Read-only Plan UI</h1>
+        <h1>Session-first Plan UI</h1>
       </div>
       <div class="topbar-controls">
         <div class="last-updated">
@@ -48,6 +48,32 @@
         </div>
       </section>
     </main>
+
+    <footer class="notify-bar panel">
+      <form id="notify-form" class="notify-form">
+        <div class="notify-meta">
+          <span class="notify-target-label">Send to:</span>
+          <strong id="notify-target">conductor</strong>
+        </div>
+        <label class="notify-type">
+          <span>Type</span>
+          <select id="notify-type">
+            <option value="standard">standard</option>
+            <option value="escalation">escalation</option>
+            <option value="command">command</option>
+            <option value="response_ready">response_ready</option>
+          </select>
+        </label>
+        <label class="notify-input-wrap">
+          <span class="visually-hidden">Session message</span>
+          <textarea id="notify-input" rows="5" placeholder="Message to conductor..."></textarea>
+        </label>
+        <div class="notify-actions">
+          <button id="notify-submit" type="submit" disabled>Send</button>
+          <span id="notify-status" class="notify-status" aria-live="polite"></span>
+        </div>
+      </form>
+    </footer>
   </div>
 
   <template id="status-badge-template">
