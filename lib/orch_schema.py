@@ -351,6 +351,8 @@ def create_project(project_id: str, name: str, description: str = "",
     driver = get_neo4j_driver(cfg)
     created_by = ingested_by or "unknown"
     supervisor_value = supervisor or _normalize_owner_session(created_by) or "unassigned"
+    if (not migration_exempt) and supervisor_value == "unassigned":
+        raise ValueError("supervisor must be non-empty and not 'unassigned' unless migration_exempt=true")
     priority_value = int(priority if priority is not None else _next_project_priority(supervisor_value, cfg))
     conditions_value = _normalize_user_stop_conditions(user_stop_conditions, created_by)
     priority_history = [{
@@ -1024,6 +1026,7 @@ def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
                        t.description AS description,
                        t.priority AS priority,
                        t.owner AS owner,
+                       t.forced_continuation_count AS forced_continuation_count,
                        t.task_type AS task_type,
                        t.required_credentials AS required_credentials,
                        t.credentials_available AS credentials_available,
