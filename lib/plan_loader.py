@@ -204,6 +204,9 @@ def _parse_plan(md: str) -> Dict[str, Any]:
 
 def load_plan_from_text(md: str, source_path: str, source_kind: str,
                         ingested_by: str,
+                        supervisor: Optional[str] = None,
+                        priority: Optional[int] = None,
+                        migration_exempt: bool = False,
                         config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     parsed = _parse_plan(md)
     project = parsed["project"]
@@ -232,6 +235,9 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
         name=project["name"],
         description=project.get("description", ""),
         user_stop_conditions=project.get("user_stop_conditions", []),
+        supervisor=supervisor,
+        priority=priority,
+        migration_exempt=migration_exempt,
         source_path=source_path,
         source_sha256=source_sha256,
         source_kind=source_kind,

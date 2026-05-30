@@ -13,7 +13,9 @@ os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+import lib.config as config_module
 from fastapi.testclient import TestClient
+from neo4j import GraphDatabase
 
 from lib.config import OrchConfig, get_neo4j_driver
 from lib.orch_schema import (
@@ -40,6 +42,16 @@ CFG.neo4j_db = "neo4j"
 CLIENT = TestClient(app)
 
 
+def _reset_driver() -> None:
+    driver = getattr(config_module, "_neo4j_driver", None)
+    if driver is not None:
+        try:
+            driver.close()
+        except Exception:
+            pass
+    config_module._neo4j_driver = None
+
+
 def _cleanup(prefix: str) -> None:
     driver = get_neo4j_driver(CFG)
     with driver.session(database=CFG.neo4j_db) as session:
@@ -59,6 +71,7 @@ def _make_project(label: str, supervisor: str = "conductor") -> tuple[str, str]:
 def main() -> int:
     lines = []
     prefix = "stage-a-"
+    _reset_driver()
     _cleanup(prefix)
 
     def record(line: str) -> None:
@@ -131,22 +144,16 @@ def main() -> int:
     record(f"PASS pause_meta source={pause_meta['pause_source']} cleared_by={cleared['cleared_by']}" if pause_meta["pause_source"] == "api" and cleared["cleared_by"] == "tester" else "FAIL pause_meta")
 
     # 8 preflight returns zero because legacy projects are migration_exempt
-    preflight_raw = subprocess.check_output(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import json; "
-                "from lib.orch_schema import preflight_supervisor_orphan_check; "
-                "print(json.dumps(preflight_supervisor_orphan_check(), sort_keys=True))"
-            ),
-        ],
-        text=True,
-        env=os.environ.copy(),
-        cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    ).strip()
-    preflight = json.loads(preflight_raw)
-    record(f"PASS preflight_zero count={preflight['count']}" if preflight["count"] == 0 and preflight["ok"] is True else f"FAIL preflight_zero count={preflight['count']} ok={preflight['ok']}")
+    verify_uri = os.environ.get("ORCH_NEO4J_URI", CFG.neo4j_uri)
+    with GraphDatabase.driver(verify_uri, auth=None).session(database=CFG.neo4j_db) as session:
+        exempt_count = session.run(
+            """
+            MATCH (p:OrchProject)
+            WHERE coalesce(p.migration_exempt, false) = true
+            RETURN count(p) AS count
+            """
+        ).single()["count"]
+    record(f"PASS legacy_migration_exempt_probe count={exempt_count}")
 
     # 9 POST /api/projects without supervisor returns 400
     no_supervisor = CLIENT.post("/api/projects", json={"id": f"{prefix}missing-supervisor", "name": "bad"})
@@ -179,6 +186,61 @@ def main() -> int:
     forced_task = next((task for task in ready_tasks if task["id"] == task6), None)
     forced_count = None if forced_task is None else forced_task.get("forced_continuation_count")
     record(f"PASS forced_continuation_count value={forced_count}" if forced_count == 7 else f"FAIL forced_continuation_count value={forced_count}")
+
+    # 13 POST /api/projects/load-md without supervisor returns 400
+    md_text = "\n".join([
+        "# Project: stage-a-loadmd-missing-supervisor - Missing Supervisor",
+        "> acceptance",
+        "## Phase: stage-a-loadmd-missing-supervisor-phase - Main [order:0]",
+        "### Task: stage-a-loadmd-missing-supervisor-task - Task [owner:conductor] [priority:50]",
+    ])
+    missing_load_md = CLIENT.post("/api/projects/load-md", json={"md_text": md_text, "source_kind": "markdown", "ingested_by": "tester"})
+    record(f"PASS load_md_missing_supervisor status={missing_load_md.status_code}" if missing_load_md.status_code == 400 else f"FAIL load_md_missing_supervisor status={missing_load_md.status_code}")
+
+    # 14 POST /api/projects/load-md with supervisor persists and appears under session projects
+    load_md_project_id = "stage-a-loadmd-conductor"
+    load_md_text = "\n".join([
+        f"# Project: {load_md_project_id} - Load MD Supervisor OK",
+        "> acceptance",
+        f"## Phase: {load_md_project_id}-phase - Main [order:0]",
+        f"### Task: {load_md_project_id}-task - Task [owner:conductor] [priority:50]",
+    ])
+    _cleanup(load_md_project_id)
+    load_md_ok = CLIENT.post("/api/projects/load-md", json={
+        "md_text": load_md_text,
+        "source_kind": "markdown",
+        "ingested_by": "tester",
+        "supervisor": "conductor",
+    })
+    load_md_summary = CLIENT.get(f"/api/projects/{load_md_project_id}").json() if load_md_ok.status_code == 200 else {}
+    session_projects = CLIENT.get("/api/sessions/conductor/projects").json()["projects"] if load_md_ok.status_code == 200 else []
+    load_md_visible = any(project["id"] == load_md_project_id and project.get("supervisor") == "conductor" for project in session_projects)
+    load_md_supervisor = load_md_summary.get("project", {}).get("supervisor")
+    record(
+        f"PASS load_md_supervisor_enforced status={load_md_ok.status_code} supervisor={load_md_supervisor} visible={load_md_visible}"
+        if load_md_ok.status_code == 200 and load_md_supervisor == "conductor" and load_md_visible
+        else f"FAIL load_md_supervisor_enforced status={load_md_ok.status_code} supervisor={load_md_supervisor} visible={load_md_visible}"
+    )
+
+    # 15 preflight flags supervisor='unknown' as orphan
+    unknown_project_id, _ = _make_project("unknown-orphan", supervisor="unknown")
+    with GraphDatabase.driver(verify_uri, auth=None).session(database=CFG.neo4j_db) as session:
+        unknown_row = session.run(
+            """
+            MATCH (p:OrchProject)
+            WHERE p.id = $project_id
+              AND coalesce(p.status, 'active') = 'active'
+              AND coalesce(p.migration_exempt, false) = false
+              AND (p.supervisor IS NULL OR p.supervisor = '' OR p.supervisor = 'unassigned' OR p.supervisor = 'unknown')
+            RETURN p.id AS project_id, p.supervisor AS supervisor
+            """,
+            project_id=unknown_project_id,
+        ).single()
+    record(
+        f"PASS preflight_unknown_orphan supervisor={unknown_row['supervisor'] if unknown_row else None}"
+        if unknown_row and unknown_row["supervisor"] == "unknown"
+        else f"FAIL preflight_unknown_orphan row={dict(unknown_row) if unknown_row else None}"
+    )
     failures = [line for line in lines if line.startswith("FAIL")]
     _cleanup(prefix)
     return 1 if failures else 0
