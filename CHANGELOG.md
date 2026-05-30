@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.1 - 2026-05-30
+
+- Fixed the v1.2.0 session-card selection bug by making the active state session-based instead of project-based, so idle sessions sharing a default project no longer co-highlight.
+- Reworked the `/ui/` surface into a session-first layout: the left sidebar now shows only projects owned by the selected session, and the main area falls back to a current/next-ready summary when that session owns no projects.
+- Added `GET /api/sessions/{id}/projects` plus `POST /api/sessions/{id}/notify`, and surfaced the notify endpoint through a fixed bottom-bar form in the UI.
+
 ## v1.2.0 - 2026-05-30
 
 - Added a read-only browser UI at `/ui/` with three polling panels: project inventory, project drill-down, and per-session current/next-ready cards.
