@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.0 - 2026-05-30
+
+- Added a read-only browser UI at `/ui/` with three polling panels: project inventory, project drill-down, and per-session current/next-ready cards.
+- Mounted static UI assets directly from FastAPI via `StaticFiles` with a root redirect from `/` to `/ui/`, preserving the existing write surfaces as CLI/API-only.
+- Extended `GET /api/projects/{id}` to include per-phase task rows so the UI can render task id, status, owner, priority, and `blocked_on` without adding new write endpoints.
+
 ## v1.1.0 - 2026-05-29
 
 - Added project-level `user_stop_conditions` so plans can declare when a session is actually allowed to stop instead of reflexively halting after every wake or notification.
