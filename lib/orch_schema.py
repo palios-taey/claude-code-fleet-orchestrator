@@ -453,7 +453,7 @@ def _normalize_map(values: Dict[str, Any]) -> Dict[str, Any]:
 
 def get_project_summary(project_id: str,
                         config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
-    """Return a project with its phases and per-phase task status counts."""
+    """Return a project with its phases, tasks, and per-phase task status counts."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     try:
@@ -467,7 +467,20 @@ def get_project_summary(project_id: str,
                      sum(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END) AS pending,
                      sum(CASE WHEN t.status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
                      sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS completed,
-                     sum(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed
+                     sum(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                     collect(
+                         CASE
+                             WHEN t IS NULL THEN NULL
+                             ELSE {
+                                 id: t.id,
+                                 description: t.description,
+                                 status: t.status,
+                                 owner: t.owner,
+                                 priority: t.priority,
+                                 blocked_on: t.blocked_on
+                             }
+                         END
+                     ) AS tasks
                 ORDER BY ph.order ASC, ph.name ASC
                 RETURN p, collect(
                     CASE
@@ -480,7 +493,8 @@ def get_project_summary(project_id: str,
                                 in_progress: in_progress,
                                 completed: completed,
                                 failed: failed
-                            }
+                            },
+                            tasks: tasks
                         }
                     END
                 ) AS phases
@@ -494,9 +508,15 @@ def get_project_summary(project_id: str,
                 if item is None:
                     continue
                 phase = _normalize_map(dict(item["phase"]))
+                tasks = []
+                for task in item["tasks"]:
+                    if task is None:
+                        continue
+                    tasks.append(_normalize_map(dict(task)))
                 phases.append({
                     "phase": phase,
                     "task_counts": dict(item["task_counts"]),
+                    "tasks": tasks,
                 })
 
             return {
