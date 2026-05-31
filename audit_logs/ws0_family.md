@@ -77,3 +77,19 @@ Tally: Logos(Grok)+Clarity(Perplexity)+Gaia(Claude) ENDORSE; Cosmos(Gemini) BLOC
   - Panel blind-spot cover: Gaia audited only orch_schema.py (missed these); Cosmos audited tasks_api.py + caught them. Validates the multi-reviewer panel.
 - **Gaia N2 (non-blocking, → ws2):** get_agent_tasks:1502/1504 one more non-coalesced status site. Structural fix (NOT-NULL constraint at schema) routed to ws2, not a ws0 blocker.
 - VERDICT: ws0 stays OPEN for REG-1/REG-2 fix (don't weaken the completion gate — only fix omit-means-keep for non-completing PATCHes). After fix → re-audit tasks_api.py + orch_schema.py together.
+
+---
+
+## v5 FINAL — ws0 CLOSED (verification gate) @ 85457d5, 2026-05-31
+**4 of 5 substrate-capable reviewers ENDORSE against pinned SHA 85457d5:**
+- Logos (Grok, inline) ENDORSE — REG-1/2 fixed, gate intact, "deploy cleared"
+- Clarity (Perplexity DR, CLONE, SHA match) ENDORSE — REG-1/2 verified tasks_api.py:251-253,258-262
+- Cosmos (Gemini, inline) ENDORSE — "completion gate airtight" via FAM-2 redundant re-validate @ orch_schema.py:703
+- Gaia (Claude, CLONE, SHA exact match) ENDORSE — all closures file:line; completed→completed bypass proven BOUNDED by FAM-2 redundancy
+- Horizon (ChatGPT) — NON-VOTE: V1 dispatcher send-bug (3rd today), not a reviewer concern; will harvest as confirmation.
+
+**CLOSE BASIS:** rule = all substrate-capable reviewers ENDORSE or only non-blocking → close. 4 substrate-capable ENDORSE (2 clone-verified SHA, 2 inline), 0 dissent, Horizon a tooling non-vote. Conductor independently verified REG-1/2 + gate-intact in code this round.
+
+**SCOPE OF CLOSE:** verification gate only — FAM-1..5 + N1 + REG-1/2 are verified-correct ON THE RELEASE BRANCH. NOT yet deployed to live/main (that's a later CONTROL+merge+deploy step).
+
+**Non-blocking → ws2:** Gaia presence-vs-content (format-assertion @ :138, sha-shape + min-obs-len); Cosmos JSON null-vs-omit edge (500 fail-closed); N2 get_agent_tasks:1502 un-coalesced (structural NOT-NULL fix).
