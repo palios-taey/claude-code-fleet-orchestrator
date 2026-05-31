@@ -93,7 +93,7 @@ from typing import Dict, Optional
 # Make the released fleet-notify importable for identity + state_key
 for _path in (
     "/usr/local/lib/claude-code-fleet-notify",
-    "/path/to/repo",
+    "/path/to/repo",  # lint-allow: fleet-notify ships as a separate runtime dependency with a canonical checkout path on Mira hosts
 ):
     # KEEP: orch-watch imports fleet-notify's runtime-only ``identity``
     # module, which is outside this package and must be discovered dynamically.
@@ -124,6 +124,7 @@ SUBSCRIBE_PATTERNS = (
 
 # Extract <node> from "__keyspace@0__:taey:<node>:<suffix>"
 _KEY_RE = re.compile(r"^__keyspace@\d+__:taey:(.+):([a-z_]+)$")
+_BLOCKED_PID_RE = re.compile(r"\bPID\s+(\d+)\b")
 
 
 def resolve_supervisor(r, node_id: str) -> Optional[str]:
@@ -197,6 +198,64 @@ def _set_task_blocked_on(task_id: str, owner: str, reason: str) -> None:
         blocked_on=reason,
         config=OrchConfig(),
     )
+
+
+def _clear_task_blocked_on(task_id: str, owner: str) -> None:
+    from fleet_orchestrator.config import OrchConfig
+    from fleet_orchestrator.orch_schema import update_task_status
+
+    update_task_status(
+        task_id,
+        "in_progress",
+        owner=owner,
+        blocked_on="",
+        config=OrchConfig(),
+    )
+
+
+def _blocked_pid(task_state: dict) -> Optional[int]:
+    blocked_on = (task_state.get("blocked_on") or "").strip()
+    if not blocked_on:
+        return None
+    match = _BLOCKED_PID_RE.search(blocked_on)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _pid_alive(pid: int) -> bool:
+    proc_stat = f"/proc/{pid}/stat"
+    try:
+        with open(proc_stat, "r", encoding="utf-8") as fh:
+            fields = fh.read().split()
+        if len(fields) >= 3 and fields[2] == "Z":
+            return False
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        pass
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _clear_dead_pid_block(task_state: dict) -> bool:
+    pid = _blocked_pid(task_state)
+    if pid is None or _pid_alive(pid):
+        return False
+    task_id = task_state.get("id") or task_state.get("task_id")
+    owner = task_state.get("owner") or ""
+    if not task_id or not owner:
+        return False
+    _clear_task_blocked_on(task_id, owner=owner)
+    log.info("Cleared blocked_on after PID exit: task=%s pid=%s", task_id, pid)
+    return True
 
 
 def _send_wake(r, target: str, body: str, priority: str, msg_id: str) -> bool:
@@ -292,6 +351,10 @@ def _handle_user_stop_gate(r, node_id: str, task: dict) -> bool:
         return False
     if task_state.get("status") != "in_progress":
         return False
+    if _clear_dead_pid_block(task_state):
+        task_state = _load_task_state(task_id)
+        if not task_state:
+            return False
     if ((task_state.get("blocked_on") or "").strip()):
         return False
 
