@@ -53,9 +53,11 @@ Canonical source of the F-series: `the-conductor/plans/v1_4_0_findings.md`
 ## Engine bugs (found post-audit — NEW vs the F-table)
 | id | severity | status | summary |
 |---|---|---|---|
+| ENG-DEPENDS | CRITICAL | OPEN | **next-ready / surfacing query ignores `depends:` entirely.** Observed 2026-05-31 by taeys-hands (production): ingested a 32-task plan; within seconds the engine surfaced `p0-grok-audit` + `p2-grok-audit` to taeys-hands-grok despite explicit `depends:` on tasks that don't exist yet. Grok honestly refused to fabricate. This breaks the core promise (dependency-ordered surfacing) AND defeats audit-gate rails that rely on depends. Same query path as F33. Fix in ws0-engine-owner. |
 | GH#11 | HIGH | OPEN | No wake-on-PID-exit: task blocked_on an external PID never wakes when the PID exits. Hunter sat stuck after codex finished + committed. https://github.com/palios-taey/claude-code-fleet-notify/issues/11 |
 | F33 | HIGH | OPEN | Engine surfaces tasks to wrong-owner sessions (auto-claim via unowned/team-matched fallback). |
 | F34 | HIGH | OPEN | WAKE_REASON_REQUIRED fires on non-supervisor sessions. |
+| ENG-STALE-SUPERSEDED | MEDIUM | OPEN | Observed 2026-05-31 (taeys-hands): engine re-surfaces tasks from a superseded plan (g2-production-grep-doc from taeys-hands-consolidation) after the plan was replaced. Stale tasks from prior ingest are not retired when a new plan supersedes; need archive-on-supersede or stale-task suppression. |
 
 ## Docs / cleanup
 | id | severity | status | summary |
