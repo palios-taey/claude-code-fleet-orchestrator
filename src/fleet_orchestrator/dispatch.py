@@ -52,12 +52,7 @@ import sys
 import time
 from typing import Optional
 
-from .config import OrchConfig, get_neo4j_session
-
-
-PRODUCT_OWNER_MAP = {
-    "conductor": "the-conductor",
-}
+from .config import OrchConfig, get_configured_product_owner_map, get_neo4j_session
 
 
 class BugLockActive(Exception):
@@ -75,8 +70,9 @@ def _base_session_name(worker: str) -> str:
     return worker
 
 
-def _resolve_product_id(worker: str) -> Optional[str]:
-    return PRODUCT_OWNER_MAP.get(_base_session_name(worker))
+def _resolve_product_id(worker: str, config: Optional[OrchConfig] = None) -> Optional[str]:
+    cfg = config or OrchConfig()
+    return get_configured_product_owner_map(cfg).get(_base_session_name(worker))
 
 
 def _redis_connect():
@@ -239,7 +235,8 @@ def dispatch(
     Pass ``prompt_body`` to override with custom text.
     """
     r = _redis_connect()
-    product_id = _resolve_product_id(worker)
+    cfg = OrchConfig()
+    product_id = _resolve_product_id(worker, config=cfg)
     if product_id and not is_bugfix:
         bug_lock_key = f"support:product:{product_id}:bug_lock"
         if r.get(bug_lock_key) == "true":

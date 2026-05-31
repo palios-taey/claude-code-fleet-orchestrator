@@ -7,6 +7,7 @@ All Redis keys are prefixed with 'orch:'. Neo4j uses 'orchestration' database.
 ISOLATION: Zero shared state with memory infrastructure (ISMA, HMM, Weaviate).
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -99,6 +100,8 @@ ORCH_NEO4J_DB = os.environ.get("ORCH_NEO4J_DB", "neo4j")
 # Sentinel: optional — empty string means not used
 ORCH_REDIS_SENTINELS = os.environ.get("ORCH_REDIS_SENTINELS", "")
 ORCH_REDIS_SENTINEL_MASTER = os.environ.get("ORCH_REDIS_SENTINEL_MASTER", "orch-master")
+ORCH_SESSION_IDS = os.environ.get("ORCH_SESSION_IDS", "")
+ORCH_PRODUCT_OWNER_MAP = os.environ.get("ORCH_PRODUCT_OWNER_MAP", "")
 
 # Redis key prefix - ALL orchestration keys MUST use this
 KEY_PREFIX = "orch:"
@@ -139,6 +142,8 @@ class OrchConfig:
     neo4j_db: str = ORCH_NEO4J_DB
     redis_sentinels: str = ORCH_REDIS_SENTINELS
     redis_sentinel_master: str = ORCH_REDIS_SENTINEL_MASTER
+    session_ids: str = ORCH_SESSION_IDS
+    product_owner_map: str = ORCH_PRODUCT_OWNER_MAP
 
     # Heartbeat (optimal: T=12s, TTL=3T=36s)
     heartbeat_interval_s: float = 12.0
@@ -170,6 +175,68 @@ class OrchConfig:
 def key(suffix: str) -> str:
     """Generate a namespaced Redis key. All orch keys go through here."""
     return f"{KEY_PREFIX}{suffix}"
+
+
+_DEFAULT_SESSION_IDS = (
+    "conductor",
+    "weaver",
+    "tutor",
+    "infra",
+    "taeys-hands",
+    "treasurer",
+    "hunter",
+    "taey-ed",
+    "x-claude",
+)
+
+
+def _parse_session_ids(raw: str) -> list[str]:
+    sessions: list[str] = []
+    for item in raw.split(","):
+        session_id = item.strip()
+        if session_id and session_id not in sessions:
+            sessions.append(session_id)
+    return sessions
+
+
+def get_configured_session_ids(config: Optional[OrchConfig] = None) -> list[str]:
+    cfg = config or OrchConfig()
+    configured = _parse_session_ids(cfg.session_ids)
+    if configured:
+        return configured
+    return list(_DEFAULT_SESSION_IDS)
+
+
+def _parse_product_owner_map(raw: str) -> dict[str, str]:
+    if not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return {
+            str(key).strip(): str(value).strip()
+            for key, value in parsed.items()
+            if str(key).strip() and str(value).strip()
+        }
+
+    mapping: dict[str, str] = {}
+    for item in raw.split(","):
+        pair = item.strip()
+        if not pair or "=" not in pair:
+            continue
+        key, value = pair.split("=", 1)
+        session_id = key.strip()
+        product_id = value.strip()
+        if session_id and product_id:
+            mapping[session_id] = product_id
+    return mapping
+
+
+def get_configured_product_owner_map(config: Optional[OrchConfig] = None) -> dict[str, str]:
+    cfg = config or OrchConfig()
+    return _parse_product_owner_map(cfg.product_owner_map)
 
 
 # --- Redis connection pool (singleton) ---
