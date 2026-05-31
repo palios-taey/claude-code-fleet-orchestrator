@@ -90,15 +90,13 @@ import sys
 import time
 from typing import Dict, Optional
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-
 # Make the released fleet-notify importable for identity + state_key
 for _path in (
     "/usr/local/lib/claude-code-fleet-notify",
     "/path/to/repo",
 ):
+    # KEEP: orch-watch imports fleet-notify's runtime-only ``identity``
+    # module, which is outside this package and must be discovered dynamically.
     if os.path.isdir(_path):
         sys.path.insert(0, _path)
         break
@@ -175,22 +173,22 @@ def get_last_outcome(r, node_id: str):
 
 
 def _load_task_state(task_id: str):
-    from lib.config import OrchConfig
-    from lib.orch_schema import get_task
+    from fleet_orchestrator.config import OrchConfig
+    from fleet_orchestrator.orch_schema import get_task
 
     return get_task(task_id, config=OrchConfig())
 
 
 def _task_project_context(task_id: str) -> Optional[Dict[str, object]]:
-    from lib.config import OrchConfig
-    from lib.orch_schema import get_task_project
+    from fleet_orchestrator.config import OrchConfig
+    from fleet_orchestrator.orch_schema import get_task_project
 
     return get_task_project(task_id, config=OrchConfig())
 
 
 def _set_task_blocked_on(task_id: str, owner: str, reason: str) -> None:
-    from lib.config import OrchConfig
-    from lib.orch_schema import update_task_status
+    from fleet_orchestrator.config import OrchConfig
+    from fleet_orchestrator.orch_schema import update_task_status
 
     update_task_status(
         task_id,
@@ -241,7 +239,7 @@ def _stop_gate_dedup(r, node_id: str, current_task_id: str, decision_key: str,
 
 
 def _resolve_affected_product(node_id: str, project_id: Optional[str]) -> Optional[str]:
-    from lib.dispatch import _resolve_product_id
+    from fleet_orchestrator.dispatch import _resolve_product_id
 
     product_id = _resolve_product_id(node_id)
     if product_id:
@@ -253,7 +251,7 @@ def _resolve_affected_product(node_id: str, project_id: Optional[str]) -> Option
 
 def _evaluate_user_stop_conditions(r, node_id: str, task_state: dict,
                                    project_context: Optional[Dict[str, object]]) -> tuple[Optional[str], Optional[dict]]:
-    from lib.plan_readiness import next_ready_for_session
+    from fleet_orchestrator.plan_readiness import next_ready_for_session
 
     task_id = task_state.get("id") or task_state.get("task_id")
     project_id = (project_context or {}).get("project_id")
@@ -351,7 +349,7 @@ def _handle_user_stop_gate(r, node_id: str, task: dict) -> bool:
 def _build_peer_idle_body(r, supervisor: str, node_id: str,
                           task: dict, outcome: str,
                           details: str, duration_sec: int) -> str:
-    from lib.plan_readiness import next_ready_for_session
+    from fleet_orchestrator.plan_readiness import next_ready_for_session
 
     task_id = task.get("task_id", "?")
     desc = (task.get("description") or "")[:120]

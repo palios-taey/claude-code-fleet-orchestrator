@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fleet-orchestrator"
+version = "1.4.0"
+description = "Fleet orchestration runtime for PALIOS-TAEY"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "redis>=4.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "neo4j>=5.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+orch-cron = "fleet_orchestrator.scripts.orch_cron:main"
+orch-watch = "fleet_orchestrator.scripts.orch_watch:main"
+taey-plan = "fleet_orchestrator.scripts.taey_plan:main"
+taey-task = "fleet_orchestrator.scripts.taey_task:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+fleet_orchestrator = ["ui/index.html", "ui/static/*.css", "ui/static/*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

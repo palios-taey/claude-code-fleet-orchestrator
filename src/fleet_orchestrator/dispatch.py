@@ -22,7 +22,7 @@ For single-level use, leave it None and the Stop hook uses
 
 Usage from a Python supervisor session::
 
-    from lib.dispatch import dispatch
+    from fleet_orchestrator.dispatch import dispatch
 
     dispatch(
         worker="treasurer-codex",
@@ -87,6 +87,8 @@ def _redis_connect():
         "/usr/local/lib/claude-code-fleet-notify",
         "/path/to/repo",
     ):
+        # KEEP: ``identity`` is owned by fleet-notify and loaded at runtime
+        # from that external install; this package cannot import it directly.
         if os.path.isdir(path):
             sys.path.insert(0, path)
             break
@@ -264,8 +266,7 @@ def dispatch(
             "\n\n---\nWHEN DONE — call record_outcome so the supervisor knows "
             "the result (otherwise outcome=unknown + current_task persists as "
             "'previous dispatch unresolved'). One line via bash tool:\n\n"
-            f"python3 -c \"import sys; sys.path.insert(0,'/path/to/repo'); "
-            f"from lib.dispatch import record_outcome; "
+            f"python3 -c \"from fleet_orchestrator.dispatch import record_outcome; "
             f"record_outcome('{worker}', 'done', '<short outcome summary>')\"\n\n"
             "Replace 'done' with 'error' or 'interrupted' if the task did not "
             "complete cleanly. The '<short outcome summary>' is your one-line "

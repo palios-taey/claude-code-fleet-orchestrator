@@ -1,6 +1,6 @@
 [Observed] Verification date: 2026-05-28 UTC.
 
-[Observed] Repo under verification: `claude-code-fleet-orchestrator` with the v1.0.6 auth fix in `lib/config.py`.
+[Observed] Repo under verification: `claude-code-fleet-orchestrator` with the v1.0.6 auth fix in `src/fleet_orchestrator/config.py`.
 
 [Observed] Root-cause fix shipped:
 - `ORCH_NEO4J_USER = os.environ.get("ORCH_NEO4J_USER")`
@@ -20,8 +20,7 @@
 ```bash
 python3 - <<'PY'
 import sys
-sys.path.insert(0, '/path/to/repo')
-from lib.dispatch import _orch_task_exists
+from fleet_orchestrator.dispatch import _orch_task_exists
 print(_orch_task_exists('nonexistent'))
 PY
 ```
@@ -44,8 +43,7 @@ ORCH_NEO4J_USER=neo4j \
 ORCH_NEO4J_PASS=REDACTED \
 python3 - <<'PY'
 import sys
-sys.path.insert(0, '/path/to/repo')
-from lib.dispatch import _orch_task_exists
+from fleet_orchestrator.dispatch import _orch_task_exists
 print(_orch_task_exists('nonexistent'))
 PY
 ```
@@ -68,8 +66,7 @@ ORCH_NEO4J_URI=bolt://localhost:7687 \
 env -u ORCH_NEO4J_USER -u ORCH_NEO4J_PASS \
 python3 - <<'PY'
 import sys
-sys.path.insert(0, '/path/to/repo')
-from lib.dispatch import _orch_task_exists
+from fleet_orchestrator.dispatch import _orch_task_exists
 try:
     print(_orch_task_exists('nonexistent'))
 except Exception as exc:

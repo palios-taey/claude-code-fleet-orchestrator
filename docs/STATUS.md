@@ -2,19 +2,19 @@
 
 ## v1.0.6
 
-- `fix(config): optional Neo4j auth env support` — `lib.config.OrchConfig` now carries optional `neo4j_user` / `neo4j_pass` fields sourced from `ORCH_NEO4J_USER` and `ORCH_NEO4J_PASS`, and `get_neo4j_driver()` now uses those credentials when both are set.
+- `fix(config): optional Neo4j auth env support` — `fleet_orchestrator.config.OrchConfig` now carries optional `neo4j_user` / `neo4j_pass` fields sourced from `ORCH_NEO4J_USER` and `ORCH_NEO4J_PASS`, and `get_neo4j_driver()` now uses those credentials when both are set.
 - No silent fallback was added: auth-configured runs use auth, auth-unconfigured runs use `auth=None`, and auth-required servers still fail loud when credentials are omitted.
 - Live verification is recorded in `PHASE_V106_NEO4J_AUTH_VERIFICATION.md`, including the current Mira host-state drift where `127.0.0.1:7689` is no-auth while `localhost:7687` is the auth-required endpoint that reproduced the original `Unsupported authentication token, missing key scheme` failure.
 
 ## v1.0.5
 
-- `feat(tasks): zero-dep owner wake at creation time` — `lib.orch_schema.create_task()` now writes `owner`, `created_by`, and `task_type` in the initial Neo4j mutation and immediately checks whether the new task has zero upstream dependencies. If the owner session is idle and has no live `current_task`, the orchestrator fires a `wake` notification right then, using the same `taey:orch-wake-fired:<task_id>` dedup key family as the readiness checker.
-- `fix(dispatch): claim ready OrchTasks before Redis dispatch state` — `lib.dispatch.dispatch()` now treats an existing Neo4j `OrchTask` as claimable work, not just an opaque string id. The dispatch path conditionally flips the task from `pending` to `in_progress` only when all dependencies are completed; otherwise it raises `OrchTaskNotReady` before any `current_task`, `last_outcome`, or stuck-dedup Redis mutation occurs.
+- `feat(tasks): zero-dep owner wake at creation time` — `fleet_orchestrator.orch_schema.create_task()` now writes `owner`, `created_by`, and `task_type` in the initial Neo4j mutation and immediately checks whether the new task has zero upstream dependencies. If the owner session is idle and has no live `current_task`, the orchestrator fires a `wake` notification right then, using the same `taey:orch-wake-fired:<task_id>` dedup key family as the readiness checker.
+- `fix(dispatch): claim ready OrchTasks before Redis dispatch state` — `fleet_orchestrator.dispatch.dispatch()` now treats an existing Neo4j `OrchTask` as claimable work, not just an opaque string id. The dispatch path conditionally flips the task from `pending` to `in_progress` only when all dependencies are completed; otherwise it raises `OrchTaskNotReady` before any `current_task`, `last_outcome`, or stuck-dedup Redis mutation occurs.
 - Live evidence for both behaviors is recorded in `PHASE_V041_RACE_VERIFICATION.md`.
 
 ## v1.0.4
 
-- `feat(dispatch): bug-lock pre-dispatch gate` — `lib.dispatch.dispatch()` now resolves a product id from the target worker session and checks `support:product:<id>:bug_lock` before the existing `bind_current_task()` / inbox write path. Active locks raise `BugLockActive` and abort dispatch before any `current_task`, `last_outcome`, or orch-watch dedup mutation.
+- `feat(dispatch): bug-lock pre-dispatch gate` — `fleet_orchestrator.dispatch.dispatch()` now resolves a product id from the target worker session and checks `support:product:<id>:bug_lock` before the existing `bind_current_task()` / inbox write path. Active locks raise `BugLockActive` and abort dispatch before any `current_task`, `last_outcome`, or orch-watch dedup mutation.
 - `dispatch(..., is_bugfix=True)` bypasses that pre-check so bug-fix / mitigation work on the locked product can still proceed, matching architecture spec §3.1.
 - Initial resolver scope is intentionally minimal: `conductor-*` sessions map to product `the-conductor`. Unmapped sessions skip the check.
 
@@ -22,7 +22,7 @@
 
 - `fix(orch-watch): make repeated peer-idle wakes actionable` — idle-session wakes for unresolved in-progress tasks now query the session's next ready OrchTask (excluding the current one) and include a concrete continuation directive when other work exists. If no other ready task exists, the wake explicitly says there is no other ready work so the session can confirm it is genuinely waiting instead of stop-looping.
 - `feat(tasks): blocked_on marker for genuine waits` — `OrchTask.blocked_on` can be set via PATCH `/api/task/{id}` and `taey-task update <id> in_progress --blocked-on <signal>`. `orch-watch` suppresses repeated peer-idle wakes for tasks carrying that marker.
-- `lib.orch_schema.get_session_next_ready()` is now the shared source of truth for session next-ready lookups across the API and readiness helpers.
+- `fleet_orchestrator.orch_schema.get_session_next_ready()` is now the shared source of truth for session next-ready lookups across the API and readiness helpers.
 
 ## v1.0.2
 
@@ -32,7 +32,7 @@
 ## Phase A — Universal Stop+notify (✅ shipped in v0.1.0)
 
 **Done:**
-- `lib/dispatch.py` with `dispatch()`, `record_outcome()`, `check_previous_task()`, `clear_current_task()`.
+- `src/fleet_orchestrator/dispatch.py` with `dispatch()`, `record_outcome()`, `check_previous_task()`, `clear_current_task()`.
 - Companion hook upgrade in `claude-code-fleet-notify` v0.2.0 (`hooks/_shared.py` enhanced `action_stop` + `_resolve_supervisor` + `_current_task_summary` + `_notify_supervisor_of_stop`).
 - Outcome enum: `done | error | interrupted | unknown`. Dispatcher clears `current_task` only when outcome is explicitly `done`.
 - Supervisor resolution: explicit `taey:<node>:parent` Redis key OR suffix-strip (`<name>-codex` / `<name>-gemini` / `<name>-grok`).
@@ -43,7 +43,7 @@
 
 ## Phase B — Event-driven watchloop (✅ shipped in v0.2.1)
 
-`scripts/orch-watch` — replaces the 3-min-poll watchloop that was spamming supervisors with "CONTINUE" messages even when there was no work. PSUBSCRIBE to Redis keyspace notifications + 30-min safety-net sweep (hybrid per Logos Phase B consultation 2026-05-26: keyspace events are best-effort/at-most-once, the poll is the reliability backstop).
+`src/fleet_orchestrator/scripts/orch_watch.py` — replaces the 3-min-poll watchloop that was spamming supervisors with "CONTINUE" messages even when there was no work. PSUBSCRIBE to Redis keyspace notifications + 30-min safety-net sweep (hybrid per Logos Phase B consultation 2026-05-26: keyspace events are best-effort/at-most-once, the poll is the reliability backstop).
 
 **Two signals it pages on** (both silent stalls no awake actor would notice, per Gaia same consultation):
 
@@ -76,10 +76,10 @@ Currently running on the Mira fleet via `peer-respawn.sh` DAEMONS list (without 
 
 ## Phase C — Recurring task type (✅ shipped in v0.3.0)
 
-`scripts/orch-cron` + [`docs/SCHEMA.md`](SCHEMA.md) — first-class recurring tasks with file-tracked state and tamper-evident hash provenance.
+`src/fleet_orchestrator/scripts/orch_cron.py` + [`docs/SCHEMA.md`](SCHEMA.md) — first-class recurring tasks with file-tracked state and tamper-evident hash provenance.
 
 **What ships**:
-- `scripts/orch-cron` — drop-in replacement for static `recurring_triggers.json`-style runners. Backward-compatible with existing JSON registry format; adds optional `state_file` per trigger that becomes an append-only JSONL audit log of fires.
+- `src/fleet_orchestrator/scripts/orch_cron.py` — drop-in replacement for static `recurring_triggers.json`-style runners. Backward-compatible with existing JSON registry format; adds optional `state_file` per trigger that becomes an append-only JSONL audit log of fires.
 - `docs/SCHEMA.md` — formal task model. One `OrchTask` label, kind-aware status enum (`one_shot` → `{pending,in_progress,completed,failed,blocked}`; `recurring` → `{active,paused,retired}` NEVER `completed`). Reserves `(:OrchTask)-[:FIRED]->(:OrchRecurringFire)` for v0.4+ per-fire visibility.
 - Hash-on-fire sidecar — every fire that writes the state file also writes `<state_file>.meta.json` with `last_fire_log_hash` (SHA-256 of the full appended file), `last_fire_ts`, `last_fire_id`, `last_fire_size_bytes`. Tamper-evident integrity without graph bloat.
 
@@ -126,16 +126,16 @@ Extracted from conductor's internal codebase per the lib-extract-then-re-import 
 
 | Component | Source of truth | Purpose |
 |---|---|---|
-| `lib/config.py` | extracted from `conductor/config.py` | `OrchConfig` + Redis/Neo4j connection helpers. `.env` loading is path-flexible: respects `ORCH_DOTENV` env var → CWD `.env` → package-root `.env`. |
-| `lib/orch_schema.py` | extracted from `conductor/neo4j_schema.py` | 18 functions on the OrchProject/Phase/Task DAG: CRUD, dependencies, ready-task discovery, phase-completion cascade, session current/next-ready, question schema. |
-| `lib/plan_loader.py` | extracted from `conductor/plan_loader.py` | Markdown plan parser. Idempotent, content-hash provenance. |
-| `lib/tasks_api.py` | extracted from `conductor/tasks_api.py` | 7 FastAPI endpoints on `:5002`: `/api/tasks`, `/api/projects`, `/api/projects/load-md`, `/api/sessions/{sid}/current|next-ready`. |
-| `lib/plan_readiness.py` | **NEW** | Default readiness checker for `orch-watch --readiness-checker`. LOOSE semantic (wake on the transition, not on every completion). Self-loops excluded. SETNX dedup per downstream task handles concurrent-finals race. Best-effort: Neo4j or Redis failure returns `None` rather than raising. |
-| `scripts/taey-task` | extracted from `conductor/scripts/taey-task` | Task create/update/list CLI. |
-| `scripts/taey-plan` | extracted from `conductor/scripts/taey-plan` | Project list/show/current/next-ready/ingest-md CLI. |
+| `src/fleet_orchestrator/config.py` | extracted from `conductor/config.py` | `OrchConfig` + Redis/Neo4j connection helpers. `.env` loading is path-flexible: respects `ORCH_DOTENV` env var → CWD `.env` → package-root `.env`. |
+| `src/fleet_orchestrator/orch_schema.py` | extracted from `conductor/neo4j_schema.py` | 18 functions on the OrchProject/Phase/Task DAG: CRUD, dependencies, ready-task discovery, phase-completion cascade, session current/next-ready, question schema. |
+| `src/fleet_orchestrator/plan_loader.py` | extracted from `conductor/plan_loader.py` | Markdown plan parser. Idempotent, content-hash provenance. |
+| `src/fleet_orchestrator/tasks_api.py` | extracted from `conductor/tasks_api.py` | 7 FastAPI endpoints on `:5002`: `/api/tasks`, `/api/projects`, `/api/projects/load-md`, `/api/sessions/{sid}/current|next-ready`. |
+| `src/fleet_orchestrator/plan_readiness.py` | **NEW** | Default readiness checker for `orch-watch --readiness-checker`. LOOSE semantic (wake on the transition, not on every completion). Self-loops excluded. SETNX dedup per downstream task handles concurrent-finals race. Best-effort: Neo4j or Redis failure returns `None` rather than raising. |
+| `src/fleet_orchestrator/scripts/taey_task.py` | extracted from `conductor/scripts/taey-task` | Task create/update/list CLI. |
+| `src/fleet_orchestrator/scripts/taey_plan.py` | extracted from `conductor/scripts/taey-plan` | Project list/show/current/next-ready/ingest-md CLI. |
 
 **Conductor shims** (lib-extract-then-re-import pattern):
-- `conductor/tasks_api.py` → `from lib.tasks_api import app` (preserves the uvicorn command).
+- `conductor/tasks_api.py` → `from fleet_orchestrator.tasks_api import app` (preserves the uvicorn command).
 - `conductor/neo4j_schema.py` → re-exports the full public surface.
 - `conductor/plan_loader.py` → re-exports `load_plan_from_text`.
 
@@ -145,8 +145,8 @@ Extracted from conductor's internal codebase per the lib-extract-then-re-import 
 
 **orch-watch wired with the new checker** (peer-respawn.sh):
 ```
-orch-watch:cd /path/to/repo && python3 scripts/orch-watch \
-    --readiness-checker /path/to/repo:check_readiness
+orch-watch:cd /path/to/repo && orch-watch \
+    --readiness-checker fleet_orchestrator.plan_readiness:check_readiness
 ```
 
 **Real-fleet production verified 2026-05-26**:

@@ -246,6 +246,8 @@ def _fleet_redis_connect():
         "/usr/local/lib/claude-code-fleet-notify",
         "/path/to/repo",
     ):
+        # KEEP: fleet-notify's ``identity`` module is an external runtime
+        # dependency, so we must discover its install root before importing.
         if os.path.isdir(path) and path not in sys.path:
             sys.path.insert(0, path)
     from identity import redis_connect  # type: ignore

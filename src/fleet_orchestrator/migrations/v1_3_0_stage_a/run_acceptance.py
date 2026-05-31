@@ -7,18 +7,21 @@ import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
 
 os.environ.setdefault("ORCH_NEO4J_URI", os.environ.get("STAGE_A_TEST_NEO4J_URI", "bolt://127.0.0.1:7691"))
 os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# KEEP: this harness is run directly by file path from an unpackaged checkout,
+# so it must add ``src/`` to sys.path before importing the package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-import lib.config as config_module
+import fleet_orchestrator.config as config_module
 from fastapi.testclient import TestClient
 from neo4j import GraphDatabase
 
-from lib.config import OrchConfig, get_neo4j_driver
-from lib.orch_schema import (
+from fleet_orchestrator.config import OrchConfig, get_neo4j_driver
+from fleet_orchestrator.orch_schema import (
     add_dependency,
     clear_project_stop_reason,
     create_phase,
@@ -35,7 +38,7 @@ from lib.orch_schema import (
     clear_session_pause,
     update_task_status,
 )
-from lib.tasks_api import app
+from fleet_orchestrator.tasks_api import app
 
 
 CFG = OrchConfig()
@@ -265,7 +268,7 @@ def main() -> int:
     # Test get_session_next_ready returns priorities 1, 2, 6 in that exact order
     # (lowest = highest convention). Also exercises created_at tie-break + dependency
     # exclusion + stopped/completed project exclusion.
-    from lib.orch_schema import get_session_next_ready, update_task_status
+    from fleet_orchestrator.orch_schema import get_session_next_ready, update_task_status
     import time as _time
     queue_pid = f"{prefix}-queue-order-probe"
     create_project(project_id=queue_pid, name="queue order probe", supervisor="conductor", priority=10)

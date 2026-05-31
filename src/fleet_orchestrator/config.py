@@ -14,6 +14,7 @@ from typing import Optional
 
 import redis
 import redis.asyncio as aioredis
+from dotenv import load_dotenv
 
 # Load .env from a few standard locations (priority order):
 #   1. Explicit ORCH_DOTENV env var (full path)
@@ -24,17 +25,11 @@ import redis.asyncio as aioredis
 _dotenv_candidates = [
     Path(os.environ["ORCH_DOTENV"]) if os.environ.get("ORCH_DOTENV") else None,
     Path.cwd() / ".env",
-    Path(__file__).resolve().parent.parent / ".env",
+    Path(__file__).resolve().parents[2] / ".env",
 ]
 for _env_path in _dotenv_candidates:
     if _env_path and _env_path.is_file():
-        with open(_env_path) as _f:
-            for _line in _f:
-                _line = _line.strip()
-                if _line and not _line.startswith("#") and "=" in _line:
-                    _k, _, _v = _line.partition("=")
-                    _k = _k.replace("export ", "").strip()
-                    os.environ.setdefault(_k, _v.strip())
+        load_dotenv(_env_path, override=False)
         break  # first found wins
 
 # Environment overrides with sensible localhost defaults so module-level

@@ -28,11 +28,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from lib.config import OrchConfig
-from lib.dispatch import bind_current_task, record_outcome
-from lib.orch_schema import (
+from fleet_orchestrator.config import OrchConfig
+from fleet_orchestrator.dispatch import bind_current_task, record_outcome
+from fleet_orchestrator.orch_schema import (
     ConditionValidationError,
     PauseValidationError,
     PriorityAuditError,
@@ -65,10 +63,10 @@ from lib.orch_schema import (
     update_project_priority,
     update_task_status,
 )
-from lib.plan_loader import load_plan_from_text
+from fleet_orchestrator.plan_loader import load_plan_from_text
 
 app = FastAPI(title="Conductor Tasks API", version="2.0")
-_UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
+_UI_ROOT = Path(__file__).resolve().parent / "ui"
 ALLOWED_UI_SESSIONS = (
     "conductor",
     "weaver",
