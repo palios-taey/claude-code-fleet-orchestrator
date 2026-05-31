@@ -14,23 +14,69 @@ from typing import Optional
 
 import redis
 import redis.asyncio as aioredis
-from dotenv import load_dotenv
 
-# Load .env from a few standard locations (priority order):
-#   1. Explicit ORCH_DOTENV env var (full path)
-#   2. CWD/.env — supports the lib-extract-then-re-import pattern where
-#      conductor's tasks-api daemon runs from /path/to/repo
-#      and its .env should still be read.
-#   3. Orchestrator package root's .env — standalone orchestrator deploys.
-_dotenv_candidates = [
-    Path(os.environ["ORCH_DOTENV"]) if os.environ.get("ORCH_DOTENV") else None,
-    Path.cwd() / ".env",
-    Path(__file__).resolve().parents[2] / ".env",
-]
-for _env_path in _dotenv_candidates:
-    if _env_path and _env_path.is_file():
-        load_dotenv(_env_path, override=False)
-        break  # first found wins
+from neo4j import basic_auth
+
+def _parse_env_file(env_path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    with env_path.open() as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.replace("export ", "", 1).strip()
+            value = value.strip().strip("\"'")
+            if key:
+                values[key] = value
+    return values
+
+
+def _candidate_env_paths() -> list[Path]:
+    repo_root = Path(__file__).resolve().parents[2]
+    home_root = Path.home()
+    explicit = Path(os.environ["ORCH_DOTENV"]) if os.environ.get("ORCH_DOTENV") else None
+    candidates: list[Path] = [
+        path for path in (
+            explicit,
+            Path.cwd() / ".env",
+            repo_root / ".env",
+            home_root / ".env",
+            home_root / "the-conductor" / ".env",
+            home_root / "claude-code-fleet-orchestrator" / ".env",
+            home_root / "treasurer" / ".env",
+        )
+        if path is not None
+    ]
+    try:
+        candidates.extend(sorted(home_root.glob("*/.env")))
+    except OSError:
+        pass
+    return candidates
+
+
+def _load_env_defaults() -> None:
+    seen: set[Path] = set()
+    for env_path in _candidate_env_paths():
+        try:
+            resolved = env_path.resolve()
+        except OSError:
+            resolved = env_path
+        if resolved in seen or not env_path.is_file():
+            continue
+        seen.add(resolved)
+        for key, value in _parse_env_file(env_path).items():
+            os.environ.setdefault(key, value)
+
+        if (
+            os.environ.get("ORCH_NEO4J_URI")
+            and os.environ.get("ORCH_NEO4J_USER")
+            and os.environ.get("ORCH_NEO4J_PASS")
+        ):
+            break
+
+
+_load_env_defaults()
 
 # Environment overrides with sensible localhost defaults so module-level
 # imports don't KeyError if the .env loader missed a path (race condition
@@ -44,9 +90,10 @@ for _env_path in _dotenv_candidates:
 # actual call site).
 ORCH_REDIS_HOST = os.environ.get("ORCH_REDIS_HOST", "127.0.0.1")
 ORCH_REDIS_PORT = int(os.environ.get("ORCH_REDIS_PORT", "6379"))
-ORCH_NEO4J_URI = os.environ.get("ORCH_NEO4J_URI", "bolt://localhost:7687")
+ORCH_NEO4J_URI = os.environ.get("ORCH_NEO4J_URI")
 ORCH_NEO4J_USER = os.environ.get("ORCH_NEO4J_USER")
 ORCH_NEO4J_PASS = os.environ.get("ORCH_NEO4J_PASS")
+ORCH_NEO4J_NOAUTH = os.environ.get("ORCH_NEO4J_NOAUTH", "")
 ORCH_DASHBOARD_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002")
 ORCH_NEO4J_DB = os.environ.get("ORCH_NEO4J_DB", "neo4j")
 # Sentinel: optional — empty string means not used
@@ -55,6 +102,14 @@ ORCH_REDIS_SENTINEL_MASTER = os.environ.get("ORCH_REDIS_SENTINEL_MASTER", "orch-
 
 # Redis key prefix - ALL orchestration keys MUST use this
 KEY_PREFIX = "orch:"
+
+
+class OrchConfigError(RuntimeError):
+    """Raised when required orchestration configuration is missing."""
+
+
+def _is_truthy(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_sentinels(raw: str):
@@ -77,9 +132,10 @@ class OrchConfig:
     """Orchestration layer configuration."""
     redis_host: str = ORCH_REDIS_HOST
     redis_port: int = ORCH_REDIS_PORT
-    neo4j_uri: str = ORCH_NEO4J_URI
+    neo4j_uri: Optional[str] = ORCH_NEO4J_URI
     neo4j_user: Optional[str] = ORCH_NEO4J_USER
     neo4j_pass: Optional[str] = ORCH_NEO4J_PASS
+    neo4j_noauth: bool = field(default_factory=lambda: _is_truthy(ORCH_NEO4J_NOAUTH))
     neo4j_db: str = ORCH_NEO4J_DB
     redis_sentinels: str = ORCH_REDIS_SENTINELS
     redis_sentinel_master: str = ORCH_REDIS_SENTINEL_MASTER
@@ -182,13 +238,19 @@ def get_neo4j_driver(config: Optional[OrchConfig] = None):
     if _neo4j_driver is None:
         from neo4j import GraphDatabase
         cfg = config or OrchConfig()
-        if cfg.neo4j_user and cfg.neo4j_pass:
+        if not cfg.neo4j_uri:
+            raise OrchConfigError("ORCH_NEO4J_URI must be set")
+        if cfg.neo4j_noauth:
+            _neo4j_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=None)
+        elif cfg.neo4j_user and cfg.neo4j_pass:
             _neo4j_driver = GraphDatabase.driver(
                 cfg.neo4j_uri,
-                auth=(cfg.neo4j_user, cfg.neo4j_pass),
+                auth=basic_auth(cfg.neo4j_user, cfg.neo4j_pass),
             )
         else:
-            _neo4j_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=None)
+            raise OrchConfigError(
+                "ORCH_NEO4J_USER and ORCH_NEO4J_PASS must be set unless ORCH_NEO4J_NOAUTH=1"
+            )
     return _neo4j_driver
 
 
