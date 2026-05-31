@@ -145,8 +145,10 @@ def list_tasks() -> Dict[str, Any]:
 @app.get("/api/tasks/ranked")
 def list_ranked() -> Dict[str, Any]:
     tasks = get_ready_tasks(_cfg())
-    # Sort by priority desc (schema helper already does this, but belt-and-suspenders)
-    tasks.sort(key=lambda t: t.get("priority", 0), reverse=True)
+    # Sort by priority ASC (lowest number = highest priority per Jesse convention).
+    # Schema helper already does this; this is belt-and-suspenders for any path that
+    # bypasses the helper. Missing priority sorts last via large default.
+    tasks.sort(key=lambda t: t.get("priority") if t.get("priority") is not None else 999999999)
     # Normalize field name the CLI expects
     for t in tasks:
         t["task_id"] = t.get("id", t.get("task_id"))
