@@ -134,22 +134,25 @@ def fire_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> s
             return "skipped:already_fired"
         r.set(dedup_key, "1", ex=DEDUP_TTL_SEC)
 
-    cli = "/usr/local/bin/taey-notify"
-    if os.path.isfile(cli) and os.access(cli, os.X_OK):
-        subprocess.run([cli, session, prompt, "--from", "orch-cron",
-                        "--type", "wake"], check=False, capture_output=True)
-    else:
-        # Fallback direct push
-        if r is None:
-            return "skipped:no_taey_notify_and_no_redis"
-        msg = json.dumps({
-            "from": "orch-cron",
-            "type": "wake",
-            "body": prompt,
-            "msg_id": fire_id,
-            "timestamp": time.time(),
-        })
-        r.lpush(f"taey:{session}:inbox", msg)
+    try:
+        cli = "/usr/local/bin/taey-notify"
+        if not (os.path.isfile(cli) and os.access(cli, os.X_OK)):
+            raise RuntimeError(f"taey-notify missing or not executable: {cli}")
+        subprocess.run(
+            [cli, session, prompt, "--from", "orch-cron", "--type", "wake"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except RuntimeError:
+        if r is not None:
+            r.delete(dedup_key)
+        raise
+    except subprocess.CalledProcessError as exc:
+        if r is not None:
+            r.delete(dedup_key)
+        stderr = (exc.stderr or "").strip()
+        raise RuntimeError(stderr or f"taey-notify failed for trigger {trig_id}") from exc
 
     log.info("FIRE %s session=%s (%d char prompt, hash=%s)",
              trig_id, session, len(prompt), prompt_hash)

@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 os.environ.setdefault("ORCH_NEO4J_URI", os.environ.get("STAGE_A_TEST_NEO4J_URI", "bolt://127.0.0.1:7691"))
+os.environ.setdefault("ORCH_NEO4J_NOAUTH", "1")
 os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 # KEEP: this harness is run directly by file path from an unpackaged checkout,

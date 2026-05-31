@@ -2,8 +2,8 @@
 
 ## v1.0.6
 
-- `fix(config): optional Neo4j auth env support` — `fleet_orchestrator.config.OrchConfig` now carries optional `neo4j_user` / `neo4j_pass` fields sourced from `ORCH_NEO4J_USER` and `ORCH_NEO4J_PASS`, and `get_neo4j_driver()` now uses those credentials when both are set.
-- No silent fallback was added: auth-configured runs use auth, auth-unconfigured runs use `auth=None`, and auth-required servers still fail loud when credentials are omitted.
+- `fix(config): explicit Neo4j auth contract` — `fleet_orchestrator.config.OrchConfig` carries `neo4j_user` / `neo4j_pass` plus explicit `neo4j_noauth`, and `get_neo4j_driver()` now fails loud when `ORCH_NEO4J_URI` is unset or credentials are missing without `ORCH_NEO4J_NOAUTH=1`.
+- Auth-configured runs now use explicit `neo4j.basic_auth(...)`; no-auth is only entered by opt-in.
 - Live verification is recorded in `PHASE_V106_NEO4J_AUTH_VERIFICATION.md`, including the current Mira host-state drift where `127.0.0.1:7689` is no-auth while `localhost:7687` is the auth-required endpoint that reproduced the original `Unsupported authentication token, missing key scheme` failure.
 
 ## v1.0.5

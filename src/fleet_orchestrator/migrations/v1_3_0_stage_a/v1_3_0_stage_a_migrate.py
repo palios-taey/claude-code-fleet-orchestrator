@@ -12,7 +12,7 @@ from typing import Any, Dict, List
 from neo4j import GraphDatabase
 
 
-DEFAULT_SOURCE_URI = os.environ.get("ORCH_NEO4J_URI", "bolt://127.0.0.1:7689")
+DEFAULT_SOURCE_URI = os.environ.get("ORCH_NEO4J_URI")
 DEFAULT_TARGET_URI = os.environ.get("STAGE_A_TEST_NEO4J_URI", "bolt://127.0.0.1:7691")
 SAFE_RESET_TARGETS = {"bolt://127.0.0.1:7691", "bolt://localhost:7691"}
 
@@ -253,6 +253,8 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.seed_from_source:
+        if not args.source_uri:
+            raise SystemExit("--source-uri or ORCH_NEO4J_URI is required with --seed-from-source")
         print(json.dumps({
             "seeded": seed_target(args.source_uri, args.target_uri, override_reset=args.i_know_what_im_doing),
             "source_uri": args.source_uri,

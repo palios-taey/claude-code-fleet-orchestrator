@@ -260,25 +260,17 @@ def _clear_dead_pid_block(task_state: dict) -> bool:
 
 def _send_wake(r, target: str, body: str, priority: str, msg_id: str) -> bool:
     cli = "/usr/local/bin/taey-notify"
-    if os.path.isfile(cli) and os.access(cli, os.X_OK):
-        result = subprocess.run(
-            [cli, target, body, "--from", "orch-watch", "--type", "wake", "--priority", priority],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            log.error("taey-notify failed for %s: %s", target, result.stderr.strip())
-            return False
-        return True
+    if not (os.path.isfile(cli) and os.access(cli, os.X_OK)):
+        log.error("taey-notify missing or not executable: %s", cli)
+        return False
 
-    msg = json.dumps({
-        "from": "orch-watch",
-        "type": "wake",
-        "body": body,
-        "priority": priority,
-        "msg_id": msg_id,
-        "timestamp": time.time(),
-    })
-    r.lpush(f"taey:{target}:inbox", msg)
+    result = subprocess.run(
+        [cli, target, body, "--from", "orch-watch", "--type", "wake", "--priority", priority],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        log.error("taey-notify failed for %s: %s", target, result.stderr.strip())
+        return False
     return True
 
 
