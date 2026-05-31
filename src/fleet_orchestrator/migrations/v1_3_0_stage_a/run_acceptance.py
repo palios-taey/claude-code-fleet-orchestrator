@@ -400,6 +400,42 @@ def main() -> int:
         else f"FAIL wake_reason_supervisor_only supervisor={supervisor_stop['decision']} worker={worker_stop['decision']}"
     )
 
+    # 22 evidence-gated completion and canonical transition matrix
+    transition_project = f"{prefix}-transition"
+    transition_phase = f"{transition_project}-phase"
+    transition_task = f"{transition_project}-task"
+    create_project(project_id=transition_project, name="transition probe", supervisor="conductor", priority=10)
+    create_phase(project_id=transition_project, phase_id=transition_phase, name="transition phase", order=0)
+    create_task(
+        phase_id=transition_phase,
+        task_id=transition_task,
+        description="transition task",
+        priority=1,
+        owner="conductor",
+        config=CFG,
+    )
+    completed_without_evidence = CLIENT.patch(
+        f"/api/task/{transition_task}",
+        json={"status": "completed", "from": "conductor"},
+    )
+    completed_with_sha = CLIENT.patch(
+        f"/api/task/{transition_task}",
+        json={"status": "completed", "from": "conductor", "commit_sha": "abc1234", "note": "verified in prod"},
+    )
+    task_after_completion = CLIENT.get(f"/api/tasks/{transition_task}").json()
+    completed_to_in_progress = CLIENT.patch(
+        f"/api/task/{transition_task}",
+        json={"status": "in_progress", "from": "conductor"},
+    )
+    record(
+        f"PASS completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} with_sha={completed_with_sha.status_code} commit_sha={task_after_completion.get('closeout_commit_sha')} revive={completed_to_in_progress.status_code}"
+        if completed_without_evidence.status_code == 409
+        and completed_with_sha.status_code == 200
+        and task_after_completion.get("closeout_commit_sha") == "abc1234"
+        and completed_to_in_progress.status_code == 409
+        else f"FAIL completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} with_sha={completed_with_sha.status_code} task={task_after_completion} revive={completed_to_in_progress.status_code}"
+    )
+
     failures = [line for line in lines if line.startswith("FAIL")]
     _cleanup(prefix)
     return 1 if failures else 0

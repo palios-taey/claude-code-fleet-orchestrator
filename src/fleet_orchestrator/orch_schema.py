@@ -59,7 +59,19 @@ class PauseValidationError(ValueError):
     pass
 
 
+class TaskTransitionError(ValueError):
+    pass
+
+
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
+_TASK_TERMINAL_STATUSES = {"completed", "failed", "interrupted"}
+_TASK_ALLOWED_TRANSITIONS = {
+    "pending": {"pending", "in_progress", "completed", "failed", "interrupted"},
+    "in_progress": {"in_progress", "completed", "failed", "interrupted"},
+    "completed": {"completed"},
+    "failed": {"failed"},
+    "interrupted": {"interrupted"},
+}
 
 
 _DECLARED_DEPS_EXPR = """
@@ -77,6 +89,24 @@ def _utc_now_iso() -> str:
 
 def _json_encode(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def validate_task_transition(current_status: str, next_status: str,
+                             commit_sha: str = "",
+                             production_observation: str = "") -> None:
+    current = (current_status or "pending").strip()
+    target = (next_status or "").strip()
+    allowed = _TASK_ALLOWED_TRANSITIONS.get(current)
+    if not target or allowed is None or target not in allowed:
+        raise TaskTransitionError(
+            f"invalid status transition {current}->{target}; allowed transitions from {current}: "
+            + ", ".join(sorted(_TASK_ALLOWED_TRANSITIONS.get(current, [])))
+        )
+    if target == "completed":
+        if not (commit_sha or "").strip() and not (production_observation or "").strip():
+            raise TaskTransitionError(
+                "completed transition requires close-out evidence: provide commit_sha and/or production_observation"
+            )
 
 
 def _decode_json_field(raw: Any, default: Any) -> Any:
@@ -592,11 +622,17 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
 def update_task_status(task_id: str, status: str, owner: str = "",
                        result: Optional[str] = None,
                        blocked_on: Optional[str] = None,
+                       commit_sha: Optional[str] = None,
+                       production_observation: Optional[str] = None,
+                       evidence_note: Optional[str] = None,
                        config: Optional[OrchConfig] = None) -> bool:
     """Update task status, owner, and optional result."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     blocked_on_value = "__KEEP__" if blocked_on is None else blocked_on
+    commit_sha_value = "__KEEP__" if commit_sha is None else commit_sha.strip()
+    production_observation_value = "__KEEP__" if production_observation is None else production_observation.strip()
+    evidence_note_value = "__KEEP__" if evidence_note is None else evidence_note.strip()
     try:
         with driver.session(database=cfg.neo4j_db) as session:
             if result is None:
@@ -622,9 +658,32 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                             ) THEN 0
                             ELSE coalesce(t.forced_continuation_count, 0)
                         END,
+                        t.closeout_commit_sha = CASE
+                            WHEN $commit_sha = '__KEEP__' THEN t.closeout_commit_sha
+                            WHEN $commit_sha = '' THEN NULL
+                            ELSE $commit_sha
+                        END,
+                        t.closeout_production_observation = CASE
+                            WHEN $production_observation = '__KEEP__' THEN t.closeout_production_observation
+                            WHEN $production_observation = '' THEN NULL
+                            ELSE $production_observation
+                        END,
+                        t.closeout_evidence_note = CASE
+                            WHEN $evidence_note = '__KEEP__' THEN t.closeout_evidence_note
+                            WHEN $evidence_note = '' THEN NULL
+                            ELSE $evidence_note
+                        END,
                         t.updated_at = datetime()
                     RETURN t.id AS id
-                """, task_id=task_id, status=status, owner=owner, blocked_on=blocked_on_value)
+                """,
+                    task_id=task_id,
+                    status=status,
+                    owner=owner,
+                    blocked_on=blocked_on_value,
+                    commit_sha=commit_sha_value,
+                    production_observation=production_observation_value,
+                    evidence_note=evidence_note_value,
+                )
             else:
                 rec = session.run("""
                     MATCH (t:OrchTask {id: $task_id})
@@ -649,10 +708,33 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                             ) THEN 0
                             ELSE coalesce(t.forced_continuation_count, 0)
                         END,
+                        t.closeout_commit_sha = CASE
+                            WHEN $commit_sha = '__KEEP__' THEN t.closeout_commit_sha
+                            WHEN $commit_sha = '' THEN NULL
+                            ELSE $commit_sha
+                        END,
+                        t.closeout_production_observation = CASE
+                            WHEN $production_observation = '__KEEP__' THEN t.closeout_production_observation
+                            WHEN $production_observation = '' THEN NULL
+                            ELSE $production_observation
+                        END,
+                        t.closeout_evidence_note = CASE
+                            WHEN $evidence_note = '__KEEP__' THEN t.closeout_evidence_note
+                            WHEN $evidence_note = '' THEN NULL
+                            ELSE $evidence_note
+                        END,
                         t.updated_at = datetime()
                     RETURN t.id AS id
-                """, task_id=task_id, status=status, owner=owner, result=result,
-                     blocked_on=blocked_on_value)
+                """,
+                    task_id=task_id,
+                    status=status,
+                    owner=owner,
+                    result=result,
+                    blocked_on=blocked_on_value,
+                    commit_sha=commit_sha_value,
+                    production_observation=production_observation_value,
+                    evidence_note=evidence_note_value,
+                )
             if rec.single() is None:
                 return False
             session.run("""

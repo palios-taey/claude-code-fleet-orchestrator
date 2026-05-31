@@ -12,7 +12,7 @@ Endpoints:
   PATCH /api/task/{task_id}        — update status/owner
 
 Run:
-  python3 -m uvicorn conductor.tasks_api:app --host 0.0.0.0 --port 5002
+  python3 -m uvicorn conductor.tasks_api:app --host 127.0.0.1 --port 5002
 """
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ from fleet_orchestrator.orch_schema import (
     PriorityAuditError,
     ProjectNotFoundError,
     ReadyWorkConflictError,
+    TaskTransitionError,
     add_project_condition,
     assign_task_to_phase,
     check_phase_complete,
@@ -62,6 +63,7 @@ from fleet_orchestrator.orch_schema import (
     set_project_user_stop_conditions,
     update_project_priority,
     update_task_status,
+    validate_task_transition,
 )
 from fleet_orchestrator.plan_loader import load_plan_from_text
 
@@ -251,6 +253,16 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         if owner is None:
             owner = task_before.get("owner", "")
         blocked_on = data["blocked_on"] if "blocked_on" in data else None
+        commit_sha = (data.get("commit_sha") or "").strip()
+        production_observation = (data.get("production_observation") or "").strip()
+        evidence_note = (data.get("evidence_note") or data.get("note") or "").strip()
+
+        validate_task_transition(
+            str(task_before.get("status") or "pending"),
+            str(status),
+            commit_sha=commit_sha,
+            production_observation=production_observation,
+        )
 
         update_task_status(
             task_id,
@@ -258,6 +270,9 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             owner=owner,
             result=result,
             blocked_on=blocked_on,
+            commit_sha=commit_sha if ("commit_sha" in data or commit_sha) else None,
+            production_observation=production_observation if ("production_observation" in data or production_observation) else None,
+            evidence_note=evidence_note if ("evidence_note" in data or "note" in data or evidence_note) else None,
             config=cfg,
         )
 
@@ -290,13 +305,17 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             "status": status,
             "owner": owner,
             "blocked_on": blocked_on if blocked_on is not None else task_before.get("blocked_on"),
+            "commit_sha": commit_sha or task_before.get("closeout_commit_sha"),
+            "production_observation": production_observation or task_before.get("closeout_production_observation"),
+            "evidence_note": evidence_note or task_before.get("closeout_evidence_note"),
             "phase_completed": phase_completed,
         }
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"ok": False, "error": str(e)},
-        )
+    except HTTPException:
+        raise
+    except TaskTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/projects")

@@ -11,7 +11,7 @@ Usage:
     taey-task create "Enhancement: add retry logic to consultation pipeline" --from weaver
     taey-task list                    # Show pending tasks
     taey-task status <task-id>        # Check a task's status
-    taey-task update <task-id> completed   # Mark task done
+    taey-task update <task-id> completed --commit-sha <sha>   # Mark task done
 """
 import argparse
 import json
@@ -110,6 +110,9 @@ def cmd_status(args):
     print(f"  Owner: {t.get('owner', 'unassigned')}")
     print(f"  Blocked on: {t.get('blocked_on') or '-'}")
     print(f"  Priority: {t.get('priority', '?')}")
+    print(f"  Commit SHA: {t.get('closeout_commit_sha') or '-'}")
+    print(f"  Production observation: {t.get('closeout_production_observation') or '-'}")
+    print(f"  Evidence note: {t.get('closeout_evidence_note') or '-'}")
     print(f"  Description: {t.get('description', '?')[:200]}")
 
 
@@ -124,6 +127,14 @@ def cmd_update(args):
         data["blocked_on"] = ""
     elif args.blocked_on is not None:
         data["blocked_on"] = args.blocked_on
+    if args.result is not None:
+        data["result"] = args.result
+    if args.commit_sha is not None:
+        data["commit_sha"] = args.commit_sha
+    if args.production_observation is not None:
+        data["production_observation"] = args.production_observation
+    if args.note is not None:
+        data["note"] = args.note
     result = api_call("PATCH", f"/api/task/{args.task_id}", data)
     if result.get("ok"):
         blocked_on = result.get("blocked_on")
@@ -155,6 +166,10 @@ def main():
     p_update = sub.add_parser("update", help="Update task status")
     p_update.add_argument("task_id", help="Task ID")
     p_update.add_argument("status", choices=["completed", "failed", "in_progress", "interrupted"])
+    p_update.add_argument("--result", help="One-line outcome summary")
+    p_update.add_argument("--commit-sha", help="Git commit SHA for close-out evidence")
+    p_update.add_argument("--production-observation", help="Observed production result for close-out evidence")
+    p_update.add_argument("--note", help="Supplemental evidence note")
     p_update.add_argument("--blocked-on", help="Mark the in-progress task as waiting on an external signal")
     p_update.add_argument("--clear-blocked-on", action="store_true",
                           help="Clear the task's blocked_on marker")
