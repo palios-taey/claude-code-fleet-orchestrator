@@ -28,7 +28,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from fleet_orchestrator.config import OrchConfig
+from fleet_orchestrator.config import OrchConfig, get_configured_session_ids
 from fleet_orchestrator.dispatch import bind_current_task, record_outcome
 from fleet_orchestrator.orch_schema import (
     ConditionValidationError,
@@ -70,17 +70,6 @@ from fleet_orchestrator.plan_loader import load_plan_from_text
 
 app = FastAPI(title="Conductor Tasks API", version="2.0")
 _UI_ROOT = Path(__file__).resolve().parent / "ui"
-ALLOWED_UI_SESSIONS = (
-    "conductor",
-    "weaver",
-    "tutor",
-    "infra",
-    "taeys-hands",
-    "treasurer",
-    "hunter",
-    "taey-ed",
-    "x-claude",
-)
 ALLOWED_NOTIFY_TYPES = {
     "standard": "message",
     "escalation": "escalation",
@@ -91,6 +80,10 @@ ALLOWED_NOTIFY_TYPES = {
 
 def _cfg() -> OrchConfig:
     return OrchConfig()
+
+
+def _configured_sessions() -> List[str]:
+    return get_configured_session_ids(_cfg())
 
 
 def _decode_json(raw: Any, default: Any) -> Any:
@@ -359,6 +352,11 @@ def get_project(project_id: str) -> Dict[str, Any]:
     return summary
 
 
+@app.get("/api/sessions")
+def list_sessions() -> Dict[str, Any]:
+    return {"sessions": _configured_sessions()}
+
+
 @app.post("/api/projects")
 async def create_project_endpoint(req: Request) -> Dict[str, Any]:
     """Create an OrchProject."""
@@ -604,7 +602,7 @@ async def clear_pause_session_endpoint(session_id: str, req: Request) -> Dict[st
 
 @app.post("/api/sessions/{target}/notify")
 async def session_notify(target: str, req: Request) -> Dict[str, Any]:
-    if target not in ALLOWED_UI_SESSIONS:
+    if target not in _configured_sessions():
         raise HTTPException(status_code=400, detail="target must be an allowed session")
 
     data = await req.json()

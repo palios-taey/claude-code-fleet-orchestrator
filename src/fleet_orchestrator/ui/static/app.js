@@ -5,22 +5,13 @@ const SESSION_CURRENT_ENDPOINT = (sessionId) => `/api/sessions/${encodeURICompon
 const SESSION_NEXT_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/next-ready`;
 const SESSION_PROJECTS_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/projects`;
 const SESSION_NOTIFY_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/notify`;
+const SESSIONS_ENDPOINT = "/api/sessions";
 const POLL_INTERVAL_MS = 5000;
-const SESSIONS = [
-  "conductor",
-  "weaver",
-  "tutor",
-  "infra",
-  "taeys-hands",
-  "treasurer",
-  "hunter",
-  "taey-ed",
-  "x-claude",
-];
 
 const state = {
   paused: false,
-  selectedSessionId: SESSIONS[0],
+  sessions: [],
+  selectedSessionId: null,
   selectedProjectIdBySession: new Map(),
   sessionCards: new Map(),
   sessionProjects: new Map(),
@@ -85,10 +76,16 @@ function renderStatusBadge(status) {
 }
 
 function selectedSessionProjects() {
+  if (!state.selectedSessionId) {
+    return [];
+  }
   return state.sessionProjects.get(state.selectedSessionId) || [];
 }
 
 function selectedProjectId() {
+  if (!state.selectedSessionId) {
+    return null;
+  }
   return state.selectedProjectIdBySession.get(state.selectedSessionId) || null;
 }
 
@@ -108,6 +105,11 @@ function ensureSelectedProject() {
 function renderProjectList() {
   const projects = selectedSessionProjects();
   const currentSelection = selectedProjectId();
+
+  if (!state.selectedSessionId) {
+    elements.projectsList.innerHTML = '<p class="empty-hint">(no configured sessions)</p>';
+    return;
+  }
 
   if (!projects.length) {
     elements.projectsList.innerHTML = '<p class="empty-hint">(no projects with tasks owned by this session)</p>';
@@ -148,7 +150,11 @@ function renderProjectList() {
 
 function renderSessionCards() {
   elements.sessionsStrip.innerHTML = "";
-  for (const sessionId of SESSIONS) {
+  if (!state.sessions.length) {
+    elements.sessionsStrip.innerHTML = '<p class="empty-hint">(no configured sessions)</p>';
+    return;
+  }
+  for (const sessionId of state.sessions) {
     const session = state.sessionCards.get(sessionId) || {};
     const current = session.current?.current;
     const nextReady = session.next?.next;
@@ -243,6 +249,11 @@ function renderPhaseCards(phases) {
 }
 
 function renderSessionSummary() {
+  if (!state.selectedSessionId) {
+    elements.projectDetail.classList.add("empty-state");
+    elements.projectDetail.innerHTML = "No configured sessions available.";
+    return;
+  }
   const session = state.sessionCards.get(state.selectedSessionId) || {};
   const current = session.current?.current;
   const nextReady = session.next?.next;
@@ -312,8 +323,9 @@ function renderProjectError(error) {
 }
 
 function syncNotifyTarget() {
-  elements.notifyTarget.textContent = state.selectedSessionId;
-  elements.notifyInput.placeholder = `Message to ${state.selectedSessionId}...`;
+  const target = state.selectedSessionId || "(none)";
+  elements.notifyTarget.textContent = target;
+  elements.notifyInput.placeholder = state.selectedSessionId ? `Message to ${state.selectedSessionId}...` : "No configured sessions available.";
 }
 
 function setNotifyStatus(message, kind, durationMs) {
@@ -331,7 +343,7 @@ function setNotifyStatus(message, kind, durationMs) {
 }
 
 function updateNotifyButtonState() {
-  elements.notifySubmit.disabled = !elements.notifyInput.value.trim();
+  elements.notifySubmit.disabled = !state.selectedSessionId || !elements.notifyInput.value.trim();
 }
 
 async function loadSelectedProject() {
@@ -354,7 +366,7 @@ async function loadSelectedProject() {
 }
 
 async function loadSessionProjects() {
-  await Promise.all(SESSIONS.map(async (sessionId) => {
+  await Promise.all(state.sessions.map(async (sessionId) => {
     try {
       const result = await fetchJson(SESSION_PROJECTS_ENDPOINT(sessionId));
       state.sessionProjects.set(sessionId, result.projects || []);
@@ -365,7 +377,7 @@ async function loadSessionProjects() {
 }
 
 async function loadSessions() {
-  await Promise.all(SESSIONS.map(async (sessionId) => {
+  await Promise.all(state.sessions.map(async (sessionId) => {
     try {
       const [current, next] = await Promise.all([
         fetchJson(SESSION_CURRENT_ENDPOINT(sessionId)),
@@ -393,6 +405,17 @@ async function refresh() {
   renderProjectList();
   await loadSelectedProject();
   elements.lastUpdated.textContent = new Date().toLocaleTimeString();
+}
+
+async function loadConfiguredSessions() {
+  const result = await fetchJson(SESSIONS_ENDPOINT);
+  state.sessions = Array.isArray(result.sessions) ? result.sessions : [];
+  if (state.sessions.length && !state.selectedSessionId) {
+    state.selectedSessionId = state.sessions[0];
+  }
+  if (state.selectedSessionId && !state.sessions.includes(state.selectedSessionId)) {
+    state.selectedSessionId = state.sessions[0] || null;
+  }
 }
 
 elements.pauseToggle.addEventListener("change", (event) => {
@@ -427,7 +450,19 @@ elements.notifyForm.addEventListener("submit", async (event) => {
   }
 });
 
-syncNotifyTarget();
-updateNotifyButtonState();
-refresh();
-window.setInterval(refresh, POLL_INTERVAL_MS);
+async function bootstrap() {
+  syncNotifyTarget();
+  updateNotifyButtonState();
+  try {
+    await loadConfiguredSessions();
+    syncNotifyTarget();
+    updateNotifyButtonState();
+    await refresh();
+  } catch (error) {
+    elements.projectDetail.classList.add("empty-state");
+    elements.projectDetail.innerHTML = `<p class="empty-hint">Failed to load sessions: ${escapeHtml(error.message)}</p>`;
+  }
+  window.setInterval(refresh, POLL_INTERVAL_MS);
+}
+
+bootstrap();
