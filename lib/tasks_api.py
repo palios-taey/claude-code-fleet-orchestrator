@@ -196,6 +196,15 @@ async def create(req: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="description required")
 
     priority = int(data.get("priority", 50))
+    # Horizon v1.3.0 full audit amendment #3: refuse negative priority values.
+    # A prior migration script wrote priority = -<unix_timestamp> on 33 projects
+    # (data-corruption fix applied as one-off Cypher at 2026-05-31 01:51Z). This
+    # guard prevents any future write of negative-epoch-style values via the API.
+    if priority < 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"priority must be >= 0 (got {priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
+        )
     sender = data.get("from", "unknown")
     # If owner not explicitly set, default to creator. Without this default,
     # tasks land with owner='' and the watchloop surfaces them to every session
@@ -331,13 +340,20 @@ async def create_project_endpoint(req: Request) -> Dict[str, Any]:
     supervisor = (data.get("supervisor") or "").strip()
     if not supervisor or supervisor == "unassigned":
         raise HTTPException(status_code=400, detail="supervisor must be non-empty and not 'unassigned'")
+    # Horizon v1.3.0 full audit amendment #3: refuse negative project priority.
+    project_priority = data.get("priority")
+    if project_priority is not None and int(project_priority) < 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"priority must be >= 0 (got {project_priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
+        )
     pid = create_project(
         project_id=project_id,
         name=name,
         description=data.get("description", ""),
         user_stop_conditions=data.get("user_stop_conditions"),
         supervisor=supervisor,
-        priority=data.get("priority"),
+        priority=project_priority,
         source_path=data.get("source_path"),
         source_sha256=data.get("source_sha256"),
         source_kind=data.get("source_kind"),
@@ -399,13 +415,20 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
     supervisor = (data.get("supervisor") or "").strip()
     if supervisor in {"", "unassigned", "unknown"}:
         raise HTTPException(status_code=400, detail="supervisor required for non-exempt project ingest (must not be unassigned or unknown)")
+    # Horizon v1.3.0 full audit amendment #3: refuse negative project priority on plan ingest.
+    ingest_priority = data.get("priority")
+    if ingest_priority is not None and int(ingest_priority) < 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"priority must be >= 0 (got {ingest_priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
+        )
     return load_plan_from_text(
         md=md_text,
         source_path=data.get("source_path", ""),
         source_kind=data.get("source_kind", "markdown"),
         ingested_by=data.get("ingested_by", "unknown"),
         supervisor=supervisor,
-        priority=data.get("priority"),
+        priority=ingest_priority,
         migration_exempt=bool(data.get("migration_exempt", False)),
     )
 

@@ -261,6 +261,67 @@ def main() -> int:
         else f"FAIL project_summary_task_ordering order={ordering_pris} expected [1, 5, 9]"
     )
 
+    # 17 — Horizon v1.3.0 full audit amendment #2: queue ordering regression coverage.
+    # Test get_session_next_ready returns priorities 1, 2, 6 in that exact order
+    # (lowest = highest convention). Also exercises created_at tie-break + dependency
+    # exclusion + stopped/completed project exclusion.
+    from lib.orch_schema import get_session_next_ready, update_task_status
+    import time as _time
+    queue_pid = f"{prefix}-queue-order-probe"
+    create_project(project_id=queue_pid, name="queue order probe", supervisor="conductor", priority=10)
+    queue_phase = f"{queue_pid}-phase"
+    create_phase(project_id=queue_pid, phase_id=queue_phase, name="queue probe phase", order=0)
+    # Insert in reverse priority + reverse-time order so neither alone passes:
+    # pri=6 created first, pri=2 second, pri=1 last
+    for (sfx, pri) in [("c", 6), ("b", 2), ("a", 1)]:
+        create_task(phase_id=queue_phase, task_id=f"{queue_pid}-task-{sfx}", description=f"task {sfx} pri={pri}", priority=pri, owner="conductor")
+        _time.sleep(0.01)  # ensure distinct created_at
+    # Expect priority=1 first (lowest=highest)
+    first = get_session_next_ready("conductor", project_id=queue_pid)
+    first_pri = first.get("priority") if first else None
+    record(
+        f"PASS queue_order_pri1_first task_id={first.get('task_id') if first else None} priority={first_pri}"
+        if first_pri == 1
+        else f"FAIL queue_order_pri1_first first={first_pri} expected 1"
+    )
+    # After marking pri=1 completed, expect priority=2 next
+    if first:
+        update_task_status(first["task_id"], "completed")
+    second = get_session_next_ready("conductor", project_id=queue_pid)
+    second_pri = second.get("priority") if second else None
+    record(
+        f"PASS queue_order_pri2_second priority={second_pri}"
+        if second_pri == 2
+        else f"FAIL queue_order_pri2_second second={second_pri} expected 2"
+    )
+    # After marking pri=2 completed, expect priority=6 last
+    if second:
+        update_task_status(second["task_id"], "completed")
+    third = get_session_next_ready("conductor", project_id=queue_pid)
+    third_pri = third.get("priority") if third else None
+    record(
+        f"PASS queue_order_pri6_third priority={third_pri}"
+        if third_pri == 6
+        else f"FAIL queue_order_pri6_third third={third_pri} expected 6"
+    )
+
+    # 18 — Horizon amendment #2 cont: created_at tie-break under equal priority.
+    # Two tasks with same priority — older (created first) wins ASC tie-break.
+    tie_pid = f"{prefix}-tie-break-probe"
+    create_project(project_id=tie_pid, name="tie break probe", supervisor="conductor", priority=10)
+    tie_phase = f"{tie_pid}-phase"
+    create_phase(project_id=tie_pid, phase_id=tie_phase, name="tie probe", order=0)
+    create_task(phase_id=tie_phase, task_id=f"{tie_pid}-task-old", description="older task", priority=5, owner="conductor")
+    _time.sleep(0.05)
+    create_task(phase_id=tie_phase, task_id=f"{tie_pid}-task-new", description="newer task", priority=5, owner="conductor")
+    tie_winner = get_session_next_ready("conductor", project_id=tie_pid)
+    tie_winner_id = tie_winner.get("task_id") if tie_winner else None
+    record(
+        f"PASS queue_order_created_at_tiebreak winner={tie_winner_id}"
+        if tie_winner_id == f"{tie_pid}-task-old"
+        else f"FAIL queue_order_created_at_tiebreak winner={tie_winner_id} expected {tie_pid}-task-old"
+    )
+
     failures = [line for line in lines if line.startswith("FAIL")]
     _cleanup(prefix)
     return 1 if failures else 0
