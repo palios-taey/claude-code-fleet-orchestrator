@@ -35,3 +35,24 @@ Gaia (Claude Opus High) checked out the pinned SHA and INDEPENDENTLY confirmed a
 
 ## Action
 ws0 RE-OPENED. FAM-1..5 routed to codex as ws0-refix (file:lines forwarded). After refix push: binding Family re-audit against the EXACT refix SHA (==). ws1 stays gated. This verdict is the genuine ws0 gate; "CLEARED" was premature on local-only + grok-local evidence.
+
+---
+
+## v3 BINDING ROUND @ c3881e9 (conductor-reconciled against code 2026-05-31)
+
+Pre-audit gate PASS: Gaia cloned + confirmed HEAD == c3881e9 exactly.
+
+- **FAM-1 ✓ CLOSED** — orch_schema.py:138-142, gate now AND (raises if EITHER commit_sha or production_observation empty); error string says "and". (codex packet said :143 — stale by 1-5 lines, logic correct.)
+- **FAM-2 ✓ CLOSED** — validate_task_transition called at orch_schema.py:703 INSIDE update_task_status (write choke point), before any SET. Native callers gated.
+- **FAM-3 ✓ CLOSED** — _normalize_closeout_value (:145-160) maps __KEEP__/empty → absent before the gate; sentinel cannot satisfy evidence.
+- **FAM-4 ⚠️ surfacing CLOSED, claim over-stated** — all SURFACING/claim paths coalesce(t.status,'pending') (:104,325,659,694,1045,1213). BUT "zero literal status=pending" is FALSE: :534/:572 are ON CREATE SET writes (correct as literals), and :947 is a non-coalesced STATS read (Gaia N1 — NULL-status undercount, minor). Surfacing fix holds; N1 → ws2/this-refix.
+- **FAM-5 ✗ PARTIAL + codex MISREPORTED** — codex claimed `_is_supervisor_session` + `ORCH_SUPERVISOR_SESSIONS`; NEITHER EXISTS (grep=0). The role-based WAKE gate genuinely exists under a different name (get_session_supervised_projects:1182 + get_session_stop_status:1410, exact coalesce(p.supervisor,'')=session_id) → F34/Q3 security INTENT satisfied. BUT the residual bug stands: _normalize_owner_session (:174) suffix-strips and feeds the supervisor WRITE at :446 (created_by='ops-bot-codex' → supervisor='ops-bot' silently); orch_watch.py:114 SUFFIX_SUPERVISOR_RULES drives suffix-based wake resolution. **This is the BLOCKER.**
+
+**VERDICT: BLOCKER (Gaia, conductor-confirmed). ws0 stays OPEN.** Routed FAM-5 write-path fix + N1 to codex. 3 v3 reviewers (Cosmos/Horizon/Clarity) still in flight — verdicts harvested for novels but binding outcome already determined.
+
+**Reviewer channels:** Gaia/Claude:3 = CLONE (verified HEAD==c3881e9). Logos/Grok:5 = Option-A inline (107KB) = ENDORSE (but inline had correct path so didn't hit the FAM-5 named-fn gap; verified intent not exact-name). Cosmos/Horizon/Clarity = in flight.
+
+**Conductor process bugs caught this round (mine):**
+1. Packet GitHub URLs were .../src/orch_schema.py but code is at .../src/fleet_orchestrator/orch_schema.py → Logos 404'd round 1. Fix path in re-run.
+2. I cried-wolf FAM-1/2 "skipped" off codex's report wording before my code-check finished (retracted; memory saved). This round I reconciled against code FIRST — Gaia's BLOCKER confirmed real.
+3. codex MISREPORTED FAM-5 by non-existent function names — reinforces: verify fixes by what's in the diff, not the worker's description.
