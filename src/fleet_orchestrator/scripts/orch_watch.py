@@ -109,10 +109,6 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Reuse fleet-notify's supervisor resolution rule so this daemon and the
-# Stop hook never disagree about who to address.
-SUFFIX_SUPERVISOR_RULES = ("-codex", "-gemini", "-grok")
-
 # Redis key patterns the daemon subscribes to. KEYSPACE notifications
 # arrive on channels named __keyspace@<db>__:<key>. We subscribe via
 # PSUBSCRIBE with glob patterns.
@@ -127,16 +123,20 @@ _KEY_RE = re.compile(r"^__keyspace@\d+__:taey:(.+):([a-z_]+)$")
 _BLOCKED_PID_RE = re.compile(r"\bPID\s+(\d+)\b")
 
 
+def _configured_supervisor_suffix_rules() -> tuple[str, ...]:
+    raw = os.environ.get("ORCH_SUPERVISOR_SUFFIX_RULES", "")
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
 def resolve_supervisor(r, node_id: str) -> Optional[str]:
-    """Mirror fleet-notify's _resolve_supervisor: explicit override wins,
-    else suffix-strip, else None."""
+    """Prefer explicit parent mapping; optional suffix fallback is opt-in."""
     try:
         explicit = r.get(f"taey:{node_id}:parent")
         if explicit:
             return explicit
     except Exception:
         pass
-    for suffix in SUFFIX_SUPERVISOR_RULES:
+    for suffix in _configured_supervisor_suffix_rules():
         if node_id.endswith(suffix):
             return node_id[: -len(suffix)]
     return None

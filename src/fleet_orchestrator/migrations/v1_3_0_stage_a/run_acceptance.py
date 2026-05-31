@@ -530,7 +530,37 @@ def main() -> int:
         else f"FAIL wake_reason_supervisor_only supervisor={supervisor_stop['decision']} worker={worker_stop['decision']} suffixed={suffixed_supervisor_stop['decision']} unrelated={unrelated_worker_stop['decision']}"
     )
 
-    # 25 evidence-gated completion and canonical transition matrix
+    # 25 orch-watch suffix fallback is opt-in; explicit parent still wins
+    from fleet_orchestrator.scripts.orch_watch import resolve_supervisor
+
+    class _FakeRedis:
+        def __init__(self, values):
+            self._values = values
+
+        def get(self, key):
+            return self._values.get(key)
+
+    prior_suffix_rules = os.environ.get("ORCH_SUPERVISOR_SUFFIX_RULES")
+    try:
+        os.environ.pop("ORCH_SUPERVISOR_SUFFIX_RULES", None)
+        no_parent = resolve_supervisor(_FakeRedis({}), "worker-codex")
+        explicit_parent = resolve_supervisor(_FakeRedis({"taey:worker-codex:parent": "supervisor-explicit"}), "worker-codex")
+        os.environ["ORCH_SUPERVISOR_SUFFIX_RULES"] = "-codex,-gemini"
+        configured_suffix = resolve_supervisor(_FakeRedis({}), "worker-codex")
+    finally:
+        if prior_suffix_rules is None:
+            os.environ.pop("ORCH_SUPERVISOR_SUFFIX_RULES", None)
+        else:
+            os.environ["ORCH_SUPERVISOR_SUFFIX_RULES"] = prior_suffix_rules
+    record(
+        f"PASS orch_watch_supervisor_resolution no_parent={no_parent} explicit={explicit_parent} configured={configured_suffix}"
+        if no_parent is None
+        and explicit_parent == "supervisor-explicit"
+        and configured_suffix == "worker"
+        else f"FAIL orch_watch_supervisor_resolution no_parent={no_parent} explicit={explicit_parent} configured={configured_suffix}"
+    )
+
+    # 26 evidence-gated completion and canonical transition matrix
     transition_project = f"{prefix}-transition"
     transition_phase = f"{transition_project}-phase"
     transition_task = f"{transition_project}-task"
