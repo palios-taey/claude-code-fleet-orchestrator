@@ -443,7 +443,7 @@ def create_project(project_id: str, name: str, description: str = "",
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     created_by = ingested_by or "unknown"
-    supervisor_value = supervisor or _normalize_owner_session(created_by) or "unassigned"
+    supervisor_value = supervisor or created_by or "unassigned"
     if (not migration_exempt) and supervisor_value == "unassigned":
         raise ValueError("supervisor must be non-empty and not 'unassigned' unless migration_exempt=true")
     priority_value = int(priority if priority is not None else _next_project_priority(supervisor_value, cfg))
@@ -944,10 +944,10 @@ def get_project_summary(project_id: str,
                 ORDER BY coalesce(t.priority, 999999999) ASC, t.created_at ASC
                 WITH p, ph,
                      count(t) AS total_tasks,
-                     sum(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END) AS pending,
-                     sum(CASE WHEN t.status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
-                     sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS completed,
-                     sum(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                     sum(CASE WHEN coalesce(t.status, 'pending') = 'pending' THEN 1 ELSE 0 END) AS pending,
+                     sum(CASE WHEN coalesce(t.status, 'pending') = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
+                     sum(CASE WHEN coalesce(t.status, 'pending') = 'completed' THEN 1 ELSE 0 END) AS completed,
+                     sum(CASE WHEN coalesce(t.status, 'pending') = 'failed' THEN 1 ELSE 0 END) AS failed,
                      collect(
                          CASE
                              WHEN t IS NULL THEN NULL

@@ -279,7 +279,56 @@ def main() -> int:
         else f"FAIL project_summary_task_ordering order={ordering_pris} expected [1, 5, 9]"
     )
 
-    # 17 — Horizon v1.3.0 full audit amendment #2: queue ordering regression coverage.
+    # 17 supervisor write path preserves created_by as-is; no suffix stripping on project ownership
+    created_by_project = f"{prefix}-created-by-supervisor"
+    created_by_phase = f"{created_by_project}-phase"
+    create_project(
+        project_id=created_by_project,
+        name="created_by supervisor probe",
+        ingested_by="ops-bot-codex",
+        priority=10,
+        config=CFG,
+    )
+    create_phase(project_id=created_by_project, phase_id=created_by_phase, name="created_by phase", order=0)
+    created_by_summary = get_project_summary(created_by_project, config=CFG)
+    created_by_supervisor = (created_by_summary or {}).get("project", {}).get("supervisor")
+    record(
+        f"PASS supervisor_write_preserves_created_by supervisor={created_by_supervisor}"
+        if created_by_supervisor == "ops-bot-codex"
+        else f"FAIL supervisor_write_preserves_created_by supervisor={created_by_supervisor}"
+    )
+
+    # 18 NULL-status tasks count as pending in project summary stats
+    summary_null_project = f"{prefix}-summary-null-status"
+    summary_null_phase = f"{summary_null_project}-phase"
+    summary_null_task = f"{summary_null_project}-task"
+    create_project(project_id=summary_null_project, name="summary null probe", supervisor="conductor", priority=10)
+    create_phase(project_id=summary_null_project, phase_id=summary_null_phase, name="summary null phase", order=0)
+    create_task(
+        phase_id=summary_null_phase,
+        task_id=summary_null_task,
+        description="summary null task",
+        priority=1,
+        owner="conductor",
+        config=CFG,
+    )
+    with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+        session.run(
+            "MATCH (t:OrchTask {id: $task_id}) SET t.status = NULL",
+            task_id=summary_null_task,
+        )
+    summary_null = get_project_summary(summary_null_project, config=CFG)
+    summary_null_counts = summary_null["phases"][0]["task_counts"] if summary_null and summary_null.get("phases") else {}
+    record(
+        f"PASS project_summary_null_status_counts counts={summary_null_counts}"
+        if summary_null_counts.get("pending") == 1
+        and summary_null_counts.get("in_progress") == 0
+        and summary_null_counts.get("completed") == 0
+        and summary_null_counts.get("failed") == 0
+        else f"FAIL project_summary_null_status_counts counts={summary_null_counts}"
+    )
+
+    # 19 — Horizon v1.3.0 full audit amendment #2: queue ordering regression coverage.
     # Test get_session_next_ready returns priorities 1, 2, 6 in that exact order
     # (lowest = highest convention). Also exercises created_at tie-break + dependency
     # exclusion + stopped/completed project exclusion.
@@ -323,7 +372,7 @@ def main() -> int:
         else f"FAIL queue_order_pri6_third third={third_pri} expected 6"
     )
 
-    # 18 — Horizon amendment #2 cont: created_at tie-break under equal priority.
+    # 20 — Horizon amendment #2 cont: created_at tie-break under equal priority.
     # Two tasks with same priority — older (created first) wins ASC tie-break.
     tie_pid = f"{prefix}-tie-break-probe"
     create_project(project_id=tie_pid, name="tie break probe", supervisor="conductor", priority=10)
@@ -340,7 +389,7 @@ def main() -> int:
         else f"FAIL queue_order_created_at_tiebreak winner={tie_winner_id} expected {tie_pid}-task-old"
     )
 
-    # 19 missing declared dependency blocks readiness and surfaces an ingest warning
+    # 21 missing declared dependency blocks readiness and surfaces an ingest warning
     missing_dep_project = f"{prefix}-missing-dep"
     missing_dep_md = "\n".join([
         f"# Project: {missing_dep_project} - Missing dep probe",
@@ -379,7 +428,7 @@ def main() -> int:
         else f"FAIL missing_dependency_zero_dep_hidden record={dict(missing_zero_dep)}"
     )
 
-    # 20 wrong-owner sessions do not surface another owner's task
+    # 22 wrong-owner sessions do not surface another owner's task
     wrong_owner_project = f"{prefix}-wrong-owner"
     wrong_owner_phase = f"{wrong_owner_project}-phase"
     create_project(project_id=wrong_owner_project, name="wrong owner probe", supervisor="conductor", priority=10)
@@ -400,7 +449,7 @@ def main() -> int:
         else f"FAIL wrong_owner_hidden conductor={conductor_next} grok={grok_next}"
     )
 
-    # 21 NULL-status tasks stay ready across all surfacing paths and the claim path
+    # 23 NULL-status tasks stay ready across all surfacing paths and the claim path
     null_status_project = f"{prefix}-null-status"
     null_status_phase = f"{null_status_project}-phase"
     null_status_task = f"{null_status_project}-task"
@@ -438,7 +487,7 @@ def main() -> int:
         else f"FAIL null_status_ready_consistent session={session_ready} project={project_ready} global={global_ready} zero_dep={dict(zero_dep_ready) if zero_dep_ready else None} task={null_status_payload}"
     )
 
-    # 22 stop-status follows actual supervised projects, even for suffixed supervisor ids
+    # 24 stop-status follows actual supervised projects, even for suffixed supervisor ids
     wake_reason_project = f"{prefix}-wake-reason"
     wake_reason_phase = f"{wake_reason_project}-phase"
     create_project(project_id=wake_reason_project, name="wake reason probe", supervisor="conductor", priority=10)
@@ -481,7 +530,7 @@ def main() -> int:
         else f"FAIL wake_reason_supervisor_only supervisor={supervisor_stop['decision']} worker={worker_stop['decision']} suffixed={suffixed_supervisor_stop['decision']} unrelated={unrelated_worker_stop['decision']}"
     )
 
-    # 23 evidence-gated completion and canonical transition matrix
+    # 25 evidence-gated completion and canonical transition matrix
     transition_project = f"{prefix}-transition"
     transition_phase = f"{transition_project}-phase"
     transition_task = f"{transition_project}-task"
