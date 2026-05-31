@@ -64,6 +64,7 @@ from fleet_orchestrator.orch_schema import (
     update_project_priority,
     update_task_status,
     validate_task_transition,
+    _effective_closeout_value,
 )
 from fleet_orchestrator.plan_loader import load_plan_from_text
 
@@ -260,8 +261,11 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         validate_task_transition(
             str(task_before.get("status") or "pending"),
             str(status),
-            commit_sha=commit_sha,
-            production_observation=production_observation,
+            commit_sha=_effective_closeout_value(task_before.get("closeout_commit_sha"), commit_sha) or "",
+            production_observation=_effective_closeout_value(
+                task_before.get("closeout_production_observation"),
+                production_observation,
+            ) or "",
         )
 
         update_task_status(

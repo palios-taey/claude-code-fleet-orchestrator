@@ -141,6 +141,24 @@ def validate_task_transition(current_status: str, next_status: str,
             )
 
 
+def _normalize_closeout_value(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized
+
+
+def _effective_closeout_value(existing_value: Optional[str], incoming_value: Optional[str]) -> Optional[str]:
+    normalized_incoming = _normalize_closeout_value(incoming_value)
+    if incoming_value is None:
+        return _normalize_closeout_value(existing_value)
+    if incoming_value == "__KEEP__":
+        return _normalize_closeout_value(existing_value)
+    return normalized_incoming
+
+
 def _decode_json_field(raw: Any, default: Any) -> Any:
     if raw in (None, ""):
         return copy.deepcopy(default)
@@ -675,6 +693,31 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     evidence_note_value = "__KEEP__" if evidence_note is None else evidence_note.strip()
     try:
         with driver.session(database=cfg.neo4j_db) as session:
+            current_record = session.run(
+                """
+                MATCH (t:OrchTask {id: $task_id})
+                RETURN coalesce(t.status, 'pending') AS status,
+                       t.closeout_commit_sha AS closeout_commit_sha,
+                       t.closeout_production_observation AS closeout_production_observation
+                """,
+                task_id=task_id,
+            ).single()
+            if current_record is None:
+                return False
+
+            validate_task_transition(
+                str(current_record["status"] or "pending"),
+                status,
+                commit_sha=_effective_closeout_value(
+                    current_record.get("closeout_commit_sha"),
+                    commit_sha_value,
+                ) or "",
+                production_observation=_effective_closeout_value(
+                    current_record.get("closeout_production_observation"),
+                    production_observation_value,
+                ) or "",
+            )
+
             if result is None:
                 rec = session.run("""
                     MATCH (t:OrchTask {id: $task_id})
@@ -775,7 +818,8 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                     production_observation=production_observation_value,
                     evidence_note=evidence_note_value,
                 )
-            if rec.single() is None:
+            rec_record = rec.single()
+            if rec_record is None:
                 return False
             session.run("""
                 MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})

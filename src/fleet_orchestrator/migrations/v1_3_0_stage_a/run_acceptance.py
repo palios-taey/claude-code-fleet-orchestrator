@@ -75,6 +75,16 @@ def _make_project(label: str, supervisor: str = "conductor") -> tuple[str, str]:
     return project_id, phase_id
 
 
+def _complete_task_native(task_id: str) -> None:
+    update_task_status(
+        task_id,
+        "completed",
+        commit_sha=f"{task_id[:7]}sha",
+        production_observation=f"validated {task_id}",
+        config=CFG,
+    )
+
+
 def main() -> int:
     lines = []
     prefix = "stage-a-"
@@ -292,7 +302,7 @@ def main() -> int:
     )
     # After marking pri=1 completed, expect priority=2 next
     if first:
-        update_task_status(first["task_id"], "completed")
+        _complete_task_native(first["task_id"])
     second = get_session_next_ready("conductor", project_id=queue_pid)
     second_pri = second.get("priority") if second else None
     record(
@@ -302,7 +312,7 @@ def main() -> int:
     )
     # After marking pri=2 completed, expect priority=6 last
     if second:
-        update_task_status(second["task_id"], "completed")
+        _complete_task_native(second["task_id"])
     third = get_session_next_ready("conductor", project_id=queue_pid)
     third_pri = third.get("priority") if third else None
     record(
@@ -346,7 +356,7 @@ def main() -> int:
         config=CFG,
     )
     missing_first = get_session_next_ready("conductor", project_id=missing_dep_project)
-    update_task_status(f"{missing_dep_project}-a", "completed", config=CFG)
+    _complete_task_native(f"{missing_dep_project}-a")
     missing_second = get_session_next_ready("conductor", project_id=missing_dep_project)
     missing_errors = list(load_result.get("errors") or [])
     record(
@@ -443,15 +453,34 @@ def main() -> int:
         f"/api/task/{transition_task}",
         json={"status": "completed", "from": "conductor", "commit_sha": "abc1234"},
     )
+    native_without_evidence_error = ""
+    try:
+        native_project = f"{transition_project}-native"
+        native_phase = f"{native_project}-phase"
+        native_task = f"{native_project}-task"
+        create_project(project_id=native_project, name="native transition probe", supervisor="conductor", priority=10)
+        create_phase(project_id=native_project, phase_id=native_phase, name="native transition phase", order=0)
+        create_task(
+            phase_id=native_phase,
+            task_id=native_task,
+            description="native transition task",
+            priority=1,
+            owner="conductor",
+            config=CFG,
+        )
+        update_task_status(native_task, "completed", owner="conductor", config=CFG)
+    except Exception as exc:
+        native_without_evidence_error = f"{type(exc).__name__}: {exc}"
     record(
-        f"PASS completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} sha_only={sha_only_rejected.status_code} with_both={completed_with_sha.status_code} commit_sha={task_after_completion.get('closeout_commit_sha')} revive={completed_to_in_progress.status_code}"
+        f"PASS completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} sha_only={sha_only_rejected.status_code} with_both={completed_with_sha.status_code} commit_sha={task_after_completion.get('closeout_commit_sha')} revive={completed_to_in_progress.status_code} native={native_without_evidence_error}"
         if completed_without_evidence.status_code == 409
         and sha_only_rejected.status_code == 409
         and completed_with_sha.status_code == 200
         and task_after_completion.get("closeout_commit_sha") == "abc1234"
         and task_after_completion.get("closeout_production_observation") == "verified in prod"
         and completed_to_in_progress.status_code == 409
-        else f"FAIL completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} sha_only={sha_only_rejected.status_code} with_both={completed_with_sha.status_code} task={task_after_completion} revive={completed_to_in_progress.status_code}"
+        and native_without_evidence_error.startswith("TaskTransitionError:")
+        else f"FAIL completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} sha_only={sha_only_rejected.status_code} with_both={completed_with_sha.status_code} task={task_after_completion} revive={completed_to_in_progress.status_code} native={native_without_evidence_error}"
     )
 
     failures = [line for line in lines if line.startswith("FAIL")]
