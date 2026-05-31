@@ -20,5 +20,18 @@ ChatGPT + Gemini audited the actual fixed code (they cite `_zero_declared_depend
 ## Known items the panel correctly noted (NOT novel; tracked)
 - F1 (0.0.0.0 + unauth PATCH): real, but ws3-security. The panel is right it compounds every gate bypass — an open socket + bypassable gate = anyone closes any task. SEQUENCING IMPLICATION: F1/auth may need to move BEFORE ws0 can be claimed "accountable."
 
+## v2 baseline (Gaia clone-confirmed at pinned 5a3ac54 — NON-binding, pre-refix)
+Gaia (Claude Opus High) checked out the pinned SHA and INDEPENDENTLY confirmed all 5 FAM at exact file:line — this is the precise refix target list:
+- FAM-1: orch_schema.py:137-141 (`not A and not B`; error string says "and/or")
+- FAM-2: tasks_api.py:260 only gate; orch_schema.py:662 update_task_status unguarded (orch_watch + acceptance call it direct)
+- FAM-3: orch_schema.py:672-675,702,707 (__KEEP__ sentinel passes gate, Cypher discards)
+- FAM-4 (SHARPENED): orch_schema.py:313 zero-dep gates `coalesce(status,'pending')` vs `_ready_task_clause` callers :646/:1006/:1174 use LITERAL `status='pending'` → NULL-status tasks surface in one path only. Unify on coalesce everywhere (or normalize status non-null at write).
+- FAM-5: _is_supervisor_session:163-172 hardcoded suffix denylist.
+
+**Bonus findings (carry forward):**
+- **CREDIT:** transition matrix orch_schema.py:72-78 CORRECTLY blocks completed→revival — F14 *revival* path genuinely closed. The weakness is gate CONTENT, not the matrix. (codex: do NOT touch the matrix.)
+- **SHA-GATE-INVERSE-GAP:** the cloned-SHA-echo verification only catches STALE clones, not a NEWER HEAD. Gaia's packet pinned 5a3ac54 but live was f745e9f (one ahead). Re-audit must pin reviewers to the EXACT refix SHA with `==` equality, not "contains/at-least."
+- Cosmos (Gemini) procedural BLOCK §6.2 (substrate-isolated, no egress) — correct discipline, no engineering signal. Perplexity DR pending. ChatGPT+Grok failed V1 mode_select — retry post-refix.
+
 ## Action
-ws0 RE-OPENED. FAM-1..5 routed to codex as ws0-refix batch. Re-audit (Family, against pushed clone) after refix. ws1 stays gated. This verdict is the genuine ws0 gate; "CLEARED" was premature on local-only + grok-local evidence.
+ws0 RE-OPENED. FAM-1..5 routed to codex as ws0-refix (file:lines forwarded). After refix push: binding Family re-audit against the EXACT refix SHA (==). ws1 stays gated. This verdict is the genuine ws0 gate; "CLEARED" was premature on local-only + grok-local evidence.
