@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from neo4j import GraphDatabase
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver
+from fleet_orchestrator.dispatch import _claim_ready_orch_task
 from fleet_orchestrator.plan_loader import load_plan_from_text
 from fleet_orchestrator.orch_schema import (
     _ZERO_DEP_READY_CYPHER,
@@ -31,6 +32,7 @@ from fleet_orchestrator.orch_schema import (
     create_project,
     create_task,
     edit_project_condition,
+    get_ready_tasks,
     get_project_ready_tasks,
     get_project_summary,
     get_session_stop_status,
@@ -398,7 +400,45 @@ def main() -> int:
         else f"FAIL wrong_owner_hidden conductor={conductor_next} grok={grok_next}"
     )
 
-    # 21 WAKE_REASON_REQUIRED is gated to base supervisor sessions only
+    # 21 NULL-status tasks stay ready across all surfacing paths and the claim path
+    null_status_project = f"{prefix}-null-status"
+    null_status_phase = f"{null_status_project}-phase"
+    null_status_task = f"{null_status_project}-task"
+    create_project(project_id=null_status_project, name="null status probe", supervisor="conductor", priority=10)
+    create_phase(project_id=null_status_project, phase_id=null_status_phase, name="null status phase", order=0)
+    create_task(
+        phase_id=null_status_phase,
+        task_id=null_status_task,
+        description="null status task",
+        priority=1,
+        owner="conductor",
+        config=CFG,
+    )
+    with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+        session.run(
+            "MATCH (t:OrchTask {id: $task_id}) SET t.status = NULL",
+            task_id=null_status_task,
+        )
+        zero_dep_ready = session.run(
+            _ZERO_DEP_READY_CYPHER,
+            task_id=null_status_task,
+        ).single()
+    session_ready = get_session_next_ready("conductor", project_id=null_status_project)
+    project_ready = get_project_ready_tasks(null_status_project, owner="conductor", config=CFG)
+    global_ready = next((task for task in get_ready_tasks(config=CFG) if task["id"] == null_status_task), None)
+    _claim_ready_orch_task(null_status_task, "conductor")
+    null_status_payload = CLIENT.get(f"/api/tasks/{null_status_task}").json()
+    record(
+        f"PASS null_status_ready_consistent session={session_ready.get('task_id') if session_ready else None} project={project_ready[0]['id'] if project_ready else None} global={global_ready.get('id') if global_ready else None} zero_dep={dict(zero_dep_ready) if zero_dep_ready else None} claimed_status={null_status_payload.get('status')}"
+        if session_ready and session_ready.get("task_id") == null_status_task
+        and project_ready and project_ready[0]["id"] == null_status_task
+        and global_ready and global_ready.get("id") == null_status_task
+        and zero_dep_ready and zero_dep_ready["task_id"] == null_status_task
+        and null_status_payload.get("status") == "in_progress"
+        else f"FAIL null_status_ready_consistent session={session_ready} project={project_ready} global={global_ready} zero_dep={dict(zero_dep_ready) if zero_dep_ready else None} task={null_status_payload}"
+    )
+
+    # 22 stop-status follows actual supervised projects, even for suffixed supervisor ids
     wake_reason_project = f"{prefix}-wake-reason"
     wake_reason_phase = f"{wake_reason_project}-phase"
     create_project(project_id=wake_reason_project, name="wake reason probe", supervisor="conductor", priority=10)
@@ -414,15 +454,34 @@ def main() -> int:
     update_task_status(f"{wake_reason_project}-task", "in_progress", owner="conductor", config=CFG)
     supervisor_stop = get_session_stop_status("conductor", config=CFG)
     worker_stop = get_session_stop_status("conductor-codex", config=CFG)
+    suffixed_supervisor_project = f"{prefix}-wake-reason-suffixed"
+    suffixed_phase = f"{suffixed_supervisor_project}-phase"
+    suffixed_task = f"{suffixed_supervisor_project}-task"
+    create_project(project_id=suffixed_supervisor_project, name="wake reason suffixed", supervisor="conductor-codex", priority=10)
+    create_phase(project_id=suffixed_supervisor_project, phase_id=suffixed_phase, name="wake reason suffixed phase", order=0)
+    create_task(
+        phase_id=suffixed_phase,
+        task_id=suffixed_task,
+        description="suffixed supervisor task",
+        priority=1,
+        owner="conductor-codex",
+        config=CFG,
+    )
+    add_dependency(suffixed_task, f"{suffixed_task}-ghost", config=CFG)
+    suffixed_supervisor_stop = get_session_stop_status("conductor-codex", config=CFG)
+    unrelated_worker_stop = get_session_stop_status("conductor-gemini", config=CFG)
     record(
-        f"PASS wake_reason_supervisor_only supervisor={supervisor_stop['decision']} worker={worker_stop['decision']}"
+        f"PASS wake_reason_supervisor_only supervisor={supervisor_stop['decision']} worker={worker_stop['decision']} suffixed={suffixed_supervisor_stop['decision']} unrelated={unrelated_worker_stop['decision']}"
         if supervisor_stop["decision"].get("wake_type") == "WAKE_REASON_REQUIRED"
         and worker_stop["decision"].get("can_stop") is True
         and worker_stop["decision"].get("wake_type") is None
-        else f"FAIL wake_reason_supervisor_only supervisor={supervisor_stop['decision']} worker={worker_stop['decision']}"
+        and suffixed_supervisor_stop["decision"].get("wake_type") == "WAKE_REASON_REQUIRED"
+        and unrelated_worker_stop["decision"].get("can_stop") is True
+        and unrelated_worker_stop["decision"].get("wake_type") is None
+        else f"FAIL wake_reason_supervisor_only supervisor={supervisor_stop['decision']} worker={worker_stop['decision']} suffixed={suffixed_supervisor_stop['decision']} unrelated={unrelated_worker_stop['decision']}"
     )
 
-    # 22 evidence-gated completion and canonical transition matrix
+    # 23 evidence-gated completion and canonical transition matrix
     transition_project = f"{prefix}-transition"
     transition_phase = f"{transition_project}-phase"
     transition_task = f"{transition_project}-task"
@@ -453,6 +512,23 @@ def main() -> int:
         f"/api/task/{transition_task}",
         json={"status": "completed", "from": "conductor", "commit_sha": "abc1234"},
     )
+    sentinel_project = f"{transition_project}-keep"
+    sentinel_phase = f"{sentinel_project}-phase"
+    sentinel_task = f"{sentinel_project}-task"
+    create_project(project_id=sentinel_project, name="sentinel probe", supervisor="conductor", priority=10)
+    create_phase(project_id=sentinel_project, phase_id=sentinel_phase, name="sentinel phase", order=0)
+    create_task(
+        phase_id=sentinel_phase,
+        task_id=sentinel_task,
+        description="sentinel keep task",
+        priority=1,
+        owner="conductor",
+        config=CFG,
+    )
+    sentinel_keep_rejected = CLIENT.patch(
+        f"/api/task/{sentinel_task}",
+        json={"status": "completed", "from": "conductor", "commit_sha": "__KEEP__"},
+    )
     native_without_evidence_error = ""
     try:
         native_project = f"{transition_project}-native"
@@ -472,15 +548,16 @@ def main() -> int:
     except Exception as exc:
         native_without_evidence_error = f"{type(exc).__name__}: {exc}"
     record(
-        f"PASS completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} sha_only={sha_only_rejected.status_code} with_both={completed_with_sha.status_code} commit_sha={task_after_completion.get('closeout_commit_sha')} revive={completed_to_in_progress.status_code} native={native_without_evidence_error}"
+        f"PASS completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} sha_only={sha_only_rejected.status_code} with_both={completed_with_sha.status_code} commit_sha={task_after_completion.get('closeout_commit_sha')} revive={completed_to_in_progress.status_code} keep={sentinel_keep_rejected.status_code} native={native_without_evidence_error}"
         if completed_without_evidence.status_code == 409
         and sha_only_rejected.status_code == 409
         and completed_with_sha.status_code == 200
         and task_after_completion.get("closeout_commit_sha") == "abc1234"
         and task_after_completion.get("closeout_production_observation") == "verified in prod"
         and completed_to_in_progress.status_code == 409
+        and sentinel_keep_rejected.status_code == 409
         and native_without_evidence_error.startswith("TaskTransitionError:")
-        else f"FAIL completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} sha_only={sha_only_rejected.status_code} with_both={completed_with_sha.status_code} task={task_after_completion} revive={completed_to_in_progress.status_code} native={native_without_evidence_error}"
+        else f"FAIL completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} sha_only={sha_only_rejected.status_code} with_both={completed_with_sha.status_code} task={task_after_completion} revive={completed_to_in_progress.status_code} keep={sentinel_keep_rejected.status_code} native={native_without_evidence_error}"
     )
 
     failures = [line for line in lines if line.startswith("FAIL")]

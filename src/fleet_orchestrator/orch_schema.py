@@ -100,7 +100,8 @@ WITH {passthrough_prefix}{task_alias}, {deps_alias}, CASE
     ELSE size({task_alias}.declared_dependencies)
 END AS declared_dep_count
 WHERE size({deps_alias}) = declared_dep_count
-  AND ALL(dep IN {deps_alias} WHERE dep.status = 'completed')
+  AND coalesce({task_alias}.status, 'pending') = 'pending'
+  AND ALL(dep IN {deps_alias} WHERE coalesce(dep.status, 'pending') = 'completed')
 """
 
 
@@ -145,7 +146,7 @@ def _normalize_closeout_value(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
     normalized = value.strip()
-    if not normalized:
+    if not normalized or normalized == "__KEEP__":
         return None
     return normalized
 
@@ -154,7 +155,7 @@ def _effective_closeout_value(existing_value: Optional[str], incoming_value: Opt
     normalized_incoming = _normalize_closeout_value(incoming_value)
     if incoming_value is None:
         return _normalize_closeout_value(existing_value)
-    if incoming_value == "__KEEP__":
+    if isinstance(incoming_value, str) and incoming_value.strip() == "__KEEP__":
         return _normalize_closeout_value(existing_value)
     return normalized_incoming
 
@@ -176,13 +177,6 @@ def _normalize_owner_session(owner: str) -> str:
         if owner.endswith(suffix):
             return owner[: -len(suffix)]
     return owner
-
-
-def _is_supervisor_session(session_id: str) -> bool:
-    normalized = _normalize_owner_session(session_id)
-    if normalized != session_id:
-        return False
-    return not session_id.endswith("-claude")
 
 
 def _condition_view(condition: Dict[str, Any]) -> Dict[str, Any]:
@@ -661,7 +655,8 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
     try:
         with driver.session(database=cfg.neo4j_db) as session:
             result = session.run("""
-                MATCH (t:OrchTask {status: 'pending'})
+                MATCH (t:OrchTask)
+                WHERE coalesce(t.status, 'pending') = 'pending'
                 OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
                 WITH t, collect(dep) AS deps
                 """ + _ready_task_clause() + """
@@ -1047,7 +1042,7 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
         with driver.session(database=cfg.neo4j_db) as session:
             result = session.run("""
                 MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
-                WHERE t.status = 'pending'
+                WHERE coalesce(t.status, 'pending') = 'pending'
                   AND coalesce(t.owner, '') = $sess
                   AND coalesce(t.blocked_on, '') = ''
                   AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)
@@ -1215,7 +1210,7 @@ def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
     with driver.session(database=cfg.neo4j_db) as session:
         result = session.run("""
             MATCH (p:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
-            WHERE t.status = 'pending'
+            WHERE coalesce(t.status, 'pending') = 'pending'
               AND coalesce(t.owner, '') = $owner
               AND coalesce(t.blocked_on, '') = ''
             OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
@@ -1414,10 +1409,10 @@ def preflight_supervisor_orphan_check(config: Optional[OrchConfig] = None) -> Di
         return {"ok": len(rows) == 0, "count": len(rows), "rows": rows}
 def get_session_stop_status(session_id: str,
                             config: Optional[OrchConfig] = None) -> Dict[str, Any]:
-    if not _is_supervisor_session(session_id):
-        return {"projects": [], "decision": {"can_stop": True}}
     cfg = config or OrchConfig()
     projects = get_session_supervised_projects(session_id, config=cfg)
+    if not projects:
+        return {"projects": [], "decision": {"can_stop": True}}
     project_statuses: List[Dict[str, Any]] = []
     decision: Dict[str, Any] = {"can_stop": True}
     for project in projects:
