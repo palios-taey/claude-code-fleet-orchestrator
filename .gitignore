@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 .venv/
+
+# Local deployment config — secrets/topology. Use .env.example as template.
+.env
+.env.local
+.env.*.local
