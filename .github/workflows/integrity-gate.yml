@@ -1,0 +1,44 @@
+name: integrity-gate
+
+# The authoritative, human-independent accountability layer. Runs on every
+# push and PR. A red run blocks merge — and merge is the 6SIGMA CONTROL
+# gate, so nothing reaches main with a silent fallback, an operator-specific
+# hardcode, or a package that does not actually install. This is NOT a unit
+# test suite (those can be authored to pass): it is a static constraint plus
+# a real install, both of which fail loud on reality.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  no-silent-fallbacks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Integrity gate (no silent fallbacks / no operator umbilical)
+        run: python3 tools/lint_no_silent_fallbacks.py --all
+
+  installs-clean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Package installs from a clean checkout
+        # Production-shaped check, not a test: a stranger must be able to
+        # `pip install .` and get the four CLIs on PATH. Fails loud if the
+        # packaging is broken.
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install .
+          for cli in orch-cron orch-watch taey-plan taey-task; do
+            command -v "$cli" >/dev/null || { echo "MISSING entry point: $cli"; exit 1; }
+          done
+          python3 -c "import fleet_orchestrator; print('import OK')"

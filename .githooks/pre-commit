@@ -1,0 +1,14 @@
+#!/bin/bash
+# Fleet-orchestrator integrity gate — local pre-commit enforcement.
+#
+# This is the "accountability without a human" mechanism: it runs on every
+# commit and BLOCKS the commit if staged python introduces a silent
+# fallback / error swallow / operator-specific hardcode. No reviewer
+# required — the gate cannot be charmed.
+#
+# Activate once per clone:   git config core.hooksPath .githooks
+# CI runs the same gate in --all mode (.github/workflows/integrity-gate.yml),
+# so even if a contributor skips local hooks, the merge is still gated.
+set -euo pipefail
+repo_root="$(git rev-parse --show-toplevel)"
+python3 "$repo_root/tools/lint_no_silent_fallbacks.py" --staged
