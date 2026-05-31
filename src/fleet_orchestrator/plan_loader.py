@@ -272,6 +272,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
                 owner=task.get("owner", ""),
                 capability_tags=task.get("tags", []),
                 file_blast_radius=[],
+                declared_dependencies=task.get("depends", []),
                 estimated_tokens=50_000,
                 config=cfg,
             )
@@ -287,7 +288,10 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
                 dependency_pairs.append((task["id"], depends_on))
 
     for task_id, depends_on in dependency_pairs:
-        add_dependency(task_id, depends_on, config=cfg)
+        if not add_dependency(task_id, depends_on, config=cfg):
+            errors.append(
+                f"task {task_id} declares missing dependency {depends_on}"
+            )
 
     stale_tasks = sorted(task_id for task_id in existing_task_phase if task_id not in parsed_task_ids)
 

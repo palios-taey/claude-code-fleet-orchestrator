@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 
 # Cypher: find tasks T newly-unblocked by ``completed_task_id``'s completion.
 #
-#   - T is owned by the supervisor (or unowned)
+#   - T is explicitly owned by the supervisor
 #   - T has a DEPENDS_ON edge to the completed task
 #   - T's status is pending or blocked (not already in_progress / completed)
 #   - All of T's OTHER dependencies are status=completed
@@ -71,14 +71,21 @@ log = logging.getLogger(__name__)
 _READY_TRANSITION_CYPHER = """
 MATCH (completed:OrchTask {id: $completed_task_id})
 MATCH (t:OrchTask)-[:DEPENDS_ON]->(completed)
-WHERE (t.owner = $supervisor OR t.owner IS NULL OR t.owner = '')
+WHERE t.owner = $supervisor
   AND (t.status IS NULL OR t.status IN ['pending', 'blocked'])
   AND t.id <> $completed_task_id
 WITH t, completed
 OPTIONAL MATCH (t)-[:DEPENDS_ON]->(other:OrchTask)
 WHERE other.id <> $completed_task_id AND other.id <> t.id
 WITH t, completed, collect(other) AS others
-WHERE ALL(o IN others WHERE o.status = 'completed')
+WITH t, completed, others,
+     CASE
+         WHEN t.declared_dependencies IS NULL OR size(t.declared_dependencies) = 0
+         THEN size(others) + 1
+         ELSE size(t.declared_dependencies)
+     END AS declared_dep_count
+WHERE size(others) + 1 = declared_dep_count
+  AND ALL(o IN others WHERE o.status = 'completed')
 RETURN
   t.id          AS task_id,
   t.description AS description,
@@ -190,7 +197,7 @@ def check_readiness(supervisor: str, completed_task: dict) -> Optional[str]:
         # orchestrator component uses for local Redis access.
         for _p in (
             "/usr/local/lib/claude-code-fleet-notify",
-            "/path/to/repo",
+            "/path/to/repo",  # lint-allow: fleet-notify ships as a separate runtime dependency with a canonical checkout path on Mira hosts
         ):
             # KEEP: fleet-notify's ``identity`` module is provided by a
             # separate runtime install, so packaging-native imports cannot

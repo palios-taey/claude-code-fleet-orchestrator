@@ -28,7 +28,7 @@ Usage from a Python supervisor session::
         worker="treasurer-codex",
         task_id="reddit-scout-cycle-22",
         description="Scout r/MachineLearning for acute-pain replies",
-        prompt_body="Run the scout per /path/to/repo ...",
+        prompt_body="Run the scout per /path/to/repo ...",  # lint-allow: cross-repo treasurer scout path is the current operator-visible handoff surface until ws1-config centralizes product tool roots
     )
 
 CLI equivalent::
@@ -85,7 +85,7 @@ def _redis_connect():
     # Try the installed fleet-notify path first, fall back to canonical clone.
     for path in (
         "/usr/local/lib/claude-code-fleet-notify",
-        "/path/to/repo",
+        "/path/to/repo",  # lint-allow: fleet-notify is a separately deployed runtime dependency with a canonical checkout path on Mira hosts
     ):
         # KEEP: ``identity`` is owned by fleet-notify and loaded at runtime
         # from that external install; this package cannot import it directly.
@@ -155,10 +155,16 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
             """
             MATCH (t:OrchTask {id: $task_id})
             WHERE coalesce(t.status, 'pending') = 'pending'
-              AND NOT EXISTS {
-                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                  WHERE dep.status <> 'completed'
-              }
+            OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+            WITH t, collect(dep) AS deps
+            WITH t, deps,
+                 CASE
+                     WHEN t.declared_dependencies IS NULL OR size(t.declared_dependencies) = 0
+                     THEN size(deps)
+                     ELSE size(t.declared_dependencies)
+                 END AS declared_dep_count
+            WHERE size(deps) = declared_dep_count
+              AND ALL(dep IN deps WHERE dep.status = 'completed')
             SET t.status = 'in_progress',
                 t.owner = $worker,
                 t.blocked_on = NULL,
@@ -176,8 +182,16 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
             """
             MATCH (t:OrchTask {id: $task_id})
             OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+            WITH t, collect(dep) AS deps
+            WITH t, deps,
+                 CASE
+                     WHEN t.declared_dependencies IS NULL OR size(t.declared_dependencies) = 0
+                     THEN size(deps)
+                     ELSE size(t.declared_dependencies)
+                 END AS declared_dep_count
             RETURN coalesce(t.status, 'pending') AS status,
-                   count(CASE WHEN dep.status <> 'completed' THEN 1 END) AS incomplete_deps
+                   declared_dep_count - size(deps) AS missing_deps,
+                   size([dep IN deps WHERE dep.status <> 'completed']) AS incomplete_deps
             """,
             task_id=task_id,
         ).single()
@@ -187,6 +201,7 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
 
     raise OrchTaskNotReady(
         f"ORCH_TASK_NOT_READY task={task_id} status={detail['status']} "
+        f"missing_deps={detail['missing_deps']} "
         f"incomplete_deps={detail['incomplete_deps']}"
     )
 
@@ -282,7 +297,7 @@ def dispatch(
         subprocess.run(
             [cli, worker, prompt_body, "--from", from_session,
              "--type", "command", "--priority", priority],
-            check=False,
+            check=True,
         )
     else:
         msg = json.dumps({

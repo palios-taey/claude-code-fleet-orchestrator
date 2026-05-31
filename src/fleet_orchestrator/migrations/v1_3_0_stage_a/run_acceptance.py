@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from neo4j import GraphDatabase
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver
+from fleet_orchestrator.plan_loader import load_plan_from_text
 from fleet_orchestrator.orch_schema import (
     add_dependency,
     clear_project_stop_reason,
@@ -268,7 +269,7 @@ def main() -> int:
     # Test get_session_next_ready returns priorities 1, 2, 6 in that exact order
     # (lowest = highest convention). Also exercises created_at tie-break + dependency
     # exclusion + stopped/completed project exclusion.
-    from fleet_orchestrator.orch_schema import get_session_next_ready, update_task_status
+    from fleet_orchestrator.orch_schema import get_session_next_ready
     import time as _time
     queue_pid = f"{prefix}-queue-order-probe"
     create_project(project_id=queue_pid, name="queue order probe", supervisor="conductor", priority=10)
@@ -323,6 +324,56 @@ def main() -> int:
         f"PASS queue_order_created_at_tiebreak winner={tie_winner_id}"
         if tie_winner_id == f"{tie_pid}-task-old"
         else f"FAIL queue_order_created_at_tiebreak winner={tie_winner_id} expected {tie_pid}-task-old"
+    )
+
+    # 19 missing declared dependency blocks readiness and surfaces an ingest warning
+    missing_dep_project = f"{prefix}-missing-dep"
+    missing_dep_md = "\n".join([
+        f"# Project: {missing_dep_project} - Missing dep probe",
+        "> acceptance",
+        f"## Phase: {missing_dep_project}-phase - Main [order:0]",
+        f"### Task: {missing_dep_project}-a - upstream [owner:conductor] [priority:1]",
+        f"### Task: {missing_dep_project}-b - downstream [owner:conductor] [priority:2] [depends:{missing_dep_project}-ghost]",
+    ])
+    load_result = load_plan_from_text(
+        missing_dep_md,
+        source_path="/tmp/missing-dep.md",
+        source_kind="markdown",
+        ingested_by="tester",
+        supervisor="conductor",
+        config=CFG,
+    )
+    missing_first = get_session_next_ready("conductor", project_id=missing_dep_project)
+    update_task_status(f"{missing_dep_project}-a", "completed", config=CFG)
+    missing_second = get_session_next_ready("conductor", project_id=missing_dep_project)
+    missing_errors = list(load_result.get("errors") or [])
+    record(
+        f"PASS missing_dependency_blocks first={missing_first.get('task_id') if missing_first else None} second={missing_second.get('task_id') if missing_second else None} errors={missing_errors}"
+        if missing_first and missing_first.get("task_id") == f"{missing_dep_project}-a"
+        and missing_second is None
+        and any(f"{missing_dep_project}-ghost" in err for err in missing_errors)
+        else f"FAIL missing_dependency_blocks first={missing_first} second={missing_second} errors={missing_errors}"
+    )
+
+    # 20 wrong-owner sessions do not surface another owner's task
+    wrong_owner_project = f"{prefix}-wrong-owner"
+    wrong_owner_phase = f"{wrong_owner_project}-phase"
+    create_project(project_id=wrong_owner_project, name="wrong owner probe", supervisor="conductor", priority=10)
+    create_phase(project_id=wrong_owner_project, phase_id=wrong_owner_phase, name="wrong owner phase", order=0)
+    create_task(
+        phase_id=wrong_owner_phase,
+        task_id=f"{wrong_owner_project}-task",
+        description="conductor only",
+        priority=1,
+        owner="conductor",
+        config=CFG,
+    )
+    conductor_next = get_session_next_ready("conductor", project_id=wrong_owner_project)
+    grok_next = get_session_next_ready("grok", project_id=wrong_owner_project)
+    record(
+        f"PASS wrong_owner_hidden conductor={conductor_next.get('task_id') if conductor_next else None} grok={grok_next}"
+        if conductor_next and conductor_next.get("task_id") == f"{wrong_owner_project}-task" and grok_next is None
+        else f"FAIL wrong_owner_hidden conductor={conductor_next} grok={grok_next}"
     )
 
     failures = [line for line in lines if line.startswith("FAIL")]

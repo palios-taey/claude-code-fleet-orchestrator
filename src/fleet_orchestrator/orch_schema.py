@@ -62,6 +62,15 @@ class PauseValidationError(ValueError):
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 
 
+_DECLARED_DEPS_EXPR = """
+CASE
+    WHEN t.declared_dependencies IS NULL OR size(t.declared_dependencies) = 0
+    THEN size(deps)
+    ELSE size(t.declared_dependencies)
+END
+"""
+
+
 def _utc_now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -244,7 +253,7 @@ RETURN t.id AS task_id,
 def _fleet_redis_connect():
     for path in (
         "/usr/local/lib/claude-code-fleet-notify",
-        "/path/to/repo",
+        "/path/to/repo",  # lint-allow: fleet-notify ships as a separate runtime dependency with a canonical checkout path on Mira hosts
     ):
         # KEEP: fleet-notify's ``identity`` module is an external runtime
         # dependency, so we must discover its install root before importing.
@@ -457,6 +466,7 @@ def create_task(
     task_type: str = "standard",
     capability_tags: Optional[List[str]] = None,
     file_blast_radius: Optional[List[str]] = None,
+    declared_dependencies: Optional[List[str]] = None,
     estimated_tokens: int = 50_000,
     heartbeat_exempt_secs: Optional[int] = None,
     wake_owner_if_ready: bool = True,
@@ -487,6 +497,10 @@ def create_task(
                     END,
                     t.capability_tags = $capability_tags,
                     t.file_blast_radius = $file_blast_radius,
+                    t.declared_dependencies = CASE
+                        WHEN $declared_dependencies IS NULL THEN t.declared_dependencies
+                        ELSE $declared_dependencies
+                    END,
                     t.estimated_tokens = $estimated_tokens,
                     t.heartbeat_exempt_secs = $heartbeat_exempt_secs
                 MERGE (ph)-[:HAS_TASK]->(t)
@@ -501,6 +515,9 @@ def create_task(
                 task_type=task_type,
                 capability_tags=capability_tags or [],
                 file_blast_radius=file_blast_radius or [],
+                declared_dependencies=(
+                    None if declared_dependencies is None else sorted(set(declared_dependencies))
+                ),
                 estimated_tokens=estimated_tokens,
                 heartbeat_exempt_secs=heartbeat_exempt_secs,
             )
@@ -519,12 +536,23 @@ def add_dependency(task_id: str, depends_on_id: str,
     driver = get_neo4j_driver(cfg)
     try:
         with driver.session(database=cfg.neo4j_db) as session:
-            session.run("""
+            record = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
-                MATCH (dep:OrchTask {id: $depends_on_id})
-                MERGE (t)-[:DEPENDS_ON]->(dep)
-            """, task_id=task_id, depends_on_id=depends_on_id)
-            return True
+                SET t.declared_dependencies = CASE
+                    WHEN t.declared_dependencies IS NULL THEN [$depends_on_id]
+                    WHEN $depends_on_id IN t.declared_dependencies THEN t.declared_dependencies
+                    ELSE t.declared_dependencies + $depends_on_id
+                END
+                WITH t
+                OPTIONAL MATCH (dep:OrchTask {id: $depends_on_id})
+                FOREACH (_ IN CASE WHEN dep IS NULL THEN [] ELSE [1] END |
+                    MERGE (t)-[:DEPENDS_ON]->(dep)
+                )
+                RETURN t.id AS task_id, dep IS NOT NULL AS dependency_exists
+            """, task_id=task_id, depends_on_id=depends_on_id).single()
+            if record is None:
+                raise ValueError(f"Task {task_id} not found")
+            return bool(record["dependency_exists"])
     finally:
         pass  # Driver is singleton; do not close
 
@@ -537,10 +565,11 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
         with driver.session(database=cfg.neo4j_db) as session:
             result = session.run("""
                 MATCH (t:OrchTask {status: 'pending'})
-                WHERE NOT EXISTS {
-                    MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                    WHERE dep.status <> 'completed'
-                }
+                OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+                WITH t, collect(dep) AS deps
+                WITH t, deps, """ + _DECLARED_DEPS_EXPR + """ AS declared_dep_count
+                WHERE size(deps) = declared_dep_count
+                  AND ALL(dep IN deps WHERE dep.status = 'completed')
                 RETURN t.id AS id, t.description AS description,
                        t.priority AS priority, t.owner AS owner,
                        t.capability_tags AS capability_tags,
@@ -850,12 +879,13 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                   AND coalesce(t.blocked_on, '') = ''
                   AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)
                   AND ($project_id IS NULL OR proj.id = $project_id)
-                  AND NOT EXISTS {
-                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                      WHERE dep.status <> 'completed'
-                  }
                   AND coalesce(proj.status, 'active') <> 'stopped'
                   AND coalesce(proj.status, 'active') <> 'completed'
+                OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+                WITH proj, ph, t, collect(dep) AS deps
+                WITH proj, ph, t, deps, """ + _DECLARED_DEPS_EXPR + """ AS declared_dep_count
+                WHERE size(deps) = declared_dep_count
+                  AND ALL(dep IN deps WHERE dep.status = 'completed')
                 RETURN t.id AS task_id, t.description AS description,
                        t.priority AS priority, t.owner AS owner,
                        t.blocked_on AS blocked_on,
@@ -987,20 +1017,15 @@ def get_session_supervised_projects(session_id: str,
                                     config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (p:OrchProject)
-                WHERE coalesce(p.supervisor, '') = $session_id
-                  AND coalesce(p.migration_exempt, false) = false
-                RETURN p
-                ORDER BY coalesce(p.priority, 999999999) ASC, p.created_at ASC
-            """, session_id=session_id)
-            return [_decode_project_node(dict(record["p"])) for record in result]
-    finally:
-        pass
-
-
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject)
+            WHERE coalesce(p.supervisor, '') = $session_id
+              AND coalesce(p.migration_exempt, false) = false
+            RETURN p
+            ORDER BY coalesce(p.priority, 999999999) ASC, p.created_at ASC
+        """, session_id=session_id)
+        return [_decode_project_node(dict(record["p"])) for record in result]
 def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
                             config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
     cfg = config or OrchConfig()
@@ -1016,44 +1041,40 @@ def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
     if not owner_value:
         return []
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (p:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
-                WHERE t.status = 'pending'
-                  AND coalesce(t.owner, '') = $owner
-                  AND coalesce(t.blocked_on, '') = ''
-                  AND NOT EXISTS {
-                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                      WHERE dep.status <> 'completed'
-                  }
-                RETURN t.id AS id,
-                       t.description AS description,
-                       t.priority AS priority,
-                       t.owner AS owner,
-                       t.forced_continuation_count AS forced_continuation_count,
-                       t.task_type AS task_type,
-                       t.required_credentials AS required_credentials,
-                       t.credentials_available AS credentials_available,
-                       t.permissions_available AS permissions_available,
-                       ph.id AS phase_id,
-                       ph.name AS phase_name
-                ORDER BY coalesce(t.priority, 999999999) ASC, t.created_at ASC
-            """, project_id=project_id, owner=owner_value)
-            ready = []
-            for record in result:
-                task = _normalize_map(dict(record))
-                task["forced_continuation_count"] = int(task.get("forced_continuation_count", 0) or 0)
-                required = task.get("required_credentials")
-                if required:
-                    if not bool(task.get("credentials_available")) and not bool(task.get("permissions_available")):
-                        continue
-                ready.append(task)
-            return ready
-    finally:
-        pass
-
-
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE t.status = 'pending'
+              AND coalesce(t.owner, '') = $owner
+              AND coalesce(t.blocked_on, '') = ''
+            OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+            WITH ph, t, collect(dep) AS deps
+            WITH ph, t, deps, """ + _DECLARED_DEPS_EXPR + """ AS declared_dep_count
+            WHERE size(deps) = declared_dep_count
+              AND ALL(dep IN deps WHERE dep.status = 'completed')
+            RETURN t.id AS id,
+                   t.description AS description,
+                   t.priority AS priority,
+                   t.owner AS owner,
+                   t.forced_continuation_count AS forced_continuation_count,
+                   t.task_type AS task_type,
+                   t.required_credentials AS required_credentials,
+                   t.credentials_available AS credentials_available,
+                   t.permissions_available AS permissions_available,
+                   ph.id AS phase_id,
+                   ph.name AS phase_name
+            ORDER BY coalesce(t.priority, 999999999) ASC, t.created_at ASC
+        """, project_id=project_id, owner=owner_value)
+        ready = []
+        for record in result:
+            task = _normalize_map(dict(record))
+            task["forced_continuation_count"] = int(task.get("forced_continuation_count", 0) or 0)
+            required = task.get("required_credentials")
+            if required:
+                if not bool(task.get("credentials_available")) and not bool(task.get("permissions_available")):
+                    continue
+            ready.append(task)
+        return ready
 def ready_work(project_id: str, session_id: Optional[str] = None,
                config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
     return get_project_ready_tasks(project_id, owner=session_id, config=config)
@@ -1090,25 +1111,20 @@ def set_project_stop_reason(project_id: str, condition_id: str, condition_versio
         "set_at": entry["set_at"],
     }
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            record = session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                SET p.stop_reason_current = $stop_reason_current,
-                    p.stop_reason_history = $stop_reason_history,
-                    p.status = 'stopped',
-                    p.updated_at = datetime()
-                RETURN p.stop_reason_current AS stop_reason_current
-            """,
-                project_id=project_id,
-                stop_reason_current=_json_encode(entry),
-                stop_reason_history=_append_history(list(project.get("stop_reason_history") or []), history_entry),
-            ).single()
-            return _decode_json_field(record["stop_reason_current"], {})
-    finally:
-        pass
-
-
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            SET p.stop_reason_current = $stop_reason_current,
+                p.stop_reason_history = $stop_reason_history,
+                p.status = 'stopped',
+                p.updated_at = datetime()
+            RETURN p.stop_reason_current AS stop_reason_current
+        """,
+            project_id=project_id,
+            stop_reason_current=_json_encode(entry),
+            stop_reason_history=_append_history(list(project.get("stop_reason_history") or []), history_entry),
+        ).single()
+        return _decode_json_field(record["stop_reason_current"], {})
 def clear_project_stop_reason(project_id: str, cleared_by: str,
                               config: Optional[OrchConfig] = None) -> bool:
     cfg = config or OrchConfig()
@@ -1124,27 +1140,22 @@ def clear_project_stop_reason(project_id: str, cleared_by: str,
         "cleared_at": _utc_now_iso(),
     }
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            record = session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                SET p.stop_reason_current = '',
-                    p.stop_reason_history = $stop_reason_history,
-                    p.status = CASE
-                        WHEN p.status = 'stopped' THEN 'active'
-                        ELSE p.status
-                    END,
-                    p.updated_at = datetime()
-                RETURN p.id AS id
-            """,
-                project_id=project_id,
-                stop_reason_history=_append_history(list(project.get("stop_reason_history") or []), history_entry),
-            ).single()
-            return record is not None
-    finally:
-        pass
-
-
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            SET p.stop_reason_current = '',
+                p.stop_reason_history = $stop_reason_history,
+                p.status = CASE
+                    WHEN p.status = 'stopped' THEN 'active'
+                    ELSE p.status
+                END,
+                p.updated_at = datetime()
+            RETURN p.id AS id
+        """,
+            project_id=project_id,
+            stop_reason_history=_append_history(list(project.get("stop_reason_history") or []), history_entry),
+        ).single()
+        return record is not None
 def update_project_priority(project_id: str, new_priority: int, set_by: str,
                             source_surface: str, reason: str,
                             config: Optional[OrchConfig] = None) -> Dict[str, Any]:
@@ -1162,27 +1173,22 @@ def update_project_priority(project_id: str, new_priority: int, set_by: str,
         "reason": reason,
     }
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            record = session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                SET p.priority = $new_priority,
-                    p.priority_history = $priority_history,
-                    p.updated_at = datetime()
-                RETURN p.priority AS priority, p.priority_history AS priority_history
-            """,
-                project_id=project_id,
-                new_priority=int(new_priority),
-                priority_history=_append_history(list(project.get("priority_history") or []), history_entry),
-            ).single()
-            return {
-                "priority": int(record["priority"]),
-                "priority_history": _decode_json_field(record["priority_history"], []),
-            }
-    finally:
-        pass
-
-
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            SET p.priority = $new_priority,
+                p.priority_history = $priority_history,
+                p.updated_at = datetime()
+            RETURN p.priority AS priority, p.priority_history AS priority_history
+        """,
+            project_id=project_id,
+            new_priority=int(new_priority),
+            priority_history=_append_history(list(project.get("priority_history") or []), history_entry),
+        ).single()
+        return {
+            "priority": int(record["priority"]),
+            "priority_history": _decode_json_field(record["priority_history"], []),
+        }
 def add_project_condition(project_id: str, label: str, created_by: str,
                           config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     cfg = config or OrchConfig()
@@ -1226,22 +1232,17 @@ def edit_project_condition(project_id: str, condition_id: str, label: str, edite
 def preflight_supervisor_orphan_check(config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (p:OrchProject)
-                WHERE coalesce(p.status, 'active') = 'active'
-                  AND coalesce(p.migration_exempt, false) = false
-                  AND (p.supervisor IS NULL OR p.supervisor = '' OR p.supervisor = 'unassigned' OR p.supervisor = 'unknown')
-                RETURN p.id AS project_id, p.name AS name, p.status AS status, p.supervisor AS supervisor
-                ORDER BY p.id
-            """)
-            rows = [dict(record) for record in result]
-            return {"ok": len(rows) == 0, "count": len(rows), "rows": rows}
-    finally:
-        pass
-
-
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject)
+            WHERE coalesce(p.status, 'active') = 'active'
+              AND coalesce(p.migration_exempt, false) = false
+              AND (p.supervisor IS NULL OR p.supervisor = '' OR p.supervisor = 'unassigned' OR p.supervisor = 'unknown')
+            RETURN p.id AS project_id, p.name AS name, p.status AS status, p.supervisor AS supervisor
+            ORDER BY p.id
+        """)
+        rows = [dict(record) for record in result]
+        return {"ok": len(rows) == 0, "count": len(rows), "rows": rows}
 def get_session_stop_status(session_id: str,
                             config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     cfg = config or OrchConfig()
@@ -1349,67 +1350,53 @@ def create_question(question_id: str, text: str, context: str = "",
     """Create an OrchQuestion node linked to a task."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            # Link to task if provided
-            task_clause = ""
-            if task_id:
-                task_clause = """
-                WITH q
-                MATCH (t:OrchTask {id: $task_id})
-                MERGE (q)-[:CONCERNS_TASK]->(t)
-                """
-            
-            result = session.run(f"""
-                MERGE (q:OrchQuestion {{id: $id}})
-                SET q.text = $text,
-                    q.context = $context,
-                    q.task_id = $task_id,
-                    q.asked_by = $asked_by,
-                    q.status = 'open',
-                    q.created_at = datetime()
-                {task_clause}
-                RETURN q.id AS id
-            """, id=question_id, text=text, context=context, 
-                task_id=task_id, asked_by=asked_by)
-            return result.single()["id"]
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        task_clause = ""
+        if task_id:
+            task_clause = """
+            WITH q
+            MATCH (t:OrchTask {id: $task_id})
+            MERGE (q)-[:CONCERNS_TASK]->(t)
+            """
 
-
+        result = session.run(f"""
+            MERGE (q:OrchQuestion {{id: $id}})
+            SET q.text = $text,
+                q.context = $context,
+                q.task_id = $task_id,
+                q.asked_by = $asked_by,
+                q.status = 'open',
+                q.created_at = datetime()
+            {task_clause}
+            RETURN q.id AS id
+        """, id=question_id, text=text, context=context,
+            task_id=task_id, asked_by=asked_by)
+        return result.single()["id"]
 def answer_question(question_id: str, answer: str, answered_by: str,
                     config: Optional[OrchConfig] = None) -> bool:
     """Provide an answer to an open question."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (q:OrchQuestion {id: $id})
-                SET q.answer = $answer,
-                    q.answered_by = $answered_by,
-                    q.status = 'answered',
-                    q.answered_at = datetime()
-                RETURN q.id AS id
-            """, id=question_id, answer=answer, answered_by=answered_by)
-            return result.single() is not None
-    finally:
-        pass
-
-
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (q:OrchQuestion {id: $id})
+            SET q.answer = $answer,
+                q.answered_by = $answered_by,
+                q.status = 'answered',
+                q.answered_at = datetime()
+            RETURN q.id AS id
+        """, id=question_id, answer=answer, answered_by=answered_by)
+        return result.single() is not None
 def get_open_questions(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
     """Get all questions with status 'open'."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (q:OrchQuestion {status: 'open'})
-                RETURN q.id AS id, q.text AS text, q.context AS context,
-                       q.task_id AS task_id, q.asked_by AS asked_by,
-                       q.created_at AS created_at
-                ORDER BY q.created_at ASC
-            """)
-            return [dict(r) for r in result]
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (q:OrchQuestion {status: 'open'})
+            RETURN q.id AS id, q.text AS text, q.context AS context,
+                   q.task_id AS task_id, q.asked_by AS asked_by,
+                   q.created_at AS created_at
+            ORDER BY q.created_at ASC
+        """)
+        return [dict(r) for r in result]
