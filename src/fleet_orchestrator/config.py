@@ -93,7 +93,7 @@ ORCH_REDIS_PORT = int(os.environ.get("ORCH_REDIS_PORT", "6379"))
 ORCH_NEO4J_URI = os.environ.get("ORCH_NEO4J_URI")
 ORCH_NEO4J_USER = os.environ.get("ORCH_NEO4J_USER")
 ORCH_NEO4J_PASS = os.environ.get("ORCH_NEO4J_PASS")
-ORCH_NEO4J_NOAUTH = os.environ.get("ORCH_NEO4J_NOAUTH", "")
+ORCH_NEO4J_REQUIRE_AUTH = os.environ.get("ORCH_NEO4J_REQUIRE_AUTH", "")
 ORCH_DASHBOARD_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002")
 ORCH_NEO4J_DB = os.environ.get("ORCH_NEO4J_DB", "neo4j")
 # Sentinel: optional — empty string means not used
@@ -135,7 +135,7 @@ class OrchConfig:
     neo4j_uri: Optional[str] = ORCH_NEO4J_URI
     neo4j_user: Optional[str] = ORCH_NEO4J_USER
     neo4j_pass: Optional[str] = ORCH_NEO4J_PASS
-    neo4j_noauth: bool = field(default_factory=lambda: _is_truthy(ORCH_NEO4J_NOAUTH))
+    neo4j_require_auth: bool = field(default_factory=lambda: _is_truthy(ORCH_NEO4J_REQUIRE_AUTH))
     neo4j_db: str = ORCH_NEO4J_DB
     redis_sentinels: str = ORCH_REDIS_SENTINELS
     redis_sentinel_master: str = ORCH_REDIS_SENTINEL_MASTER
@@ -240,17 +240,17 @@ def get_neo4j_driver(config: Optional[OrchConfig] = None):
         cfg = config or OrchConfig()
         if not cfg.neo4j_uri:
             raise OrchConfigError("ORCH_NEO4J_URI must be set")
-        if cfg.neo4j_noauth:
-            _neo4j_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=None)
-        elif cfg.neo4j_user and cfg.neo4j_pass:
+        if cfg.neo4j_user and cfg.neo4j_pass:
             _neo4j_driver = GraphDatabase.driver(
                 cfg.neo4j_uri,
                 auth=basic_auth(cfg.neo4j_user, cfg.neo4j_pass),
             )
-        else:
+        elif cfg.neo4j_require_auth:
             raise OrchConfigError(
-                "ORCH_NEO4J_USER and ORCH_NEO4J_PASS must be set unless ORCH_NEO4J_NOAUTH=1"
+                "ORCH_NEO4J_USER and ORCH_NEO4J_PASS must be set when ORCH_NEO4J_REQUIRE_AUTH=1"
             )
+        else:
+            _neo4j_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=None)
     return _neo4j_driver
 
 
