@@ -201,12 +201,17 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     md_text = path.read_text()
     sha256 = hashlib.sha256(md_text.encode("utf-8")).hexdigest()
     source_kind = detect_kind(path)
+    supervisor = (args.supervisor or session).strip()
     payload = {
         "md_text": md_text,
         "source_path": str(path),
         "source_kind": source_kind,
         "ingested_by": session,
+        "supervisor": supervisor,
+        "migration_exempt": bool(args.migration_exempt),
     }
+    if args.priority is not None:
+        payload["priority"] = args.priority
     result = api_call("POST", "/api/projects/load-md", payload)
     print(f"project: {result.get('project_id', '?')}")
     print(f"source_kind: {source_kind}")
@@ -275,6 +280,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     ingest = sub.add_parser("ingest", help="Ingest a markdown plan into Neo4j")
     ingest.add_argument("path", help="Path to plan markdown")
+    ingest.add_argument(
+        "--supervisor",
+        default=None,
+        help="Session that owns this project for stop-discipline (default: current session)",
+    )
+    ingest.add_argument(
+        "--priority",
+        type=int,
+        default=None,
+        help="Initial project priority (lower=higher priority; default left to backend)",
+    )
+    ingest.add_argument(
+        "--migration-exempt",
+        action="store_true",
+        help="Mark project as exempt from v1.3.0 stop-discipline (legacy/seed projects only)",
+    )
 
     assign = sub.add_parser("assign", help="Assign a task to a session")
     assign.add_argument("task_id", help="Task ID")
