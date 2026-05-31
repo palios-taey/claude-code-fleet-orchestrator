@@ -544,7 +544,7 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
                        t.capability_tags AS capability_tags,
                        t.file_blast_radius AS file_blast_radius,
                        t.estimated_tokens AS estimated_tokens
-                ORDER BY t.priority DESC
+                ORDER BY t.priority ASC
             """)
             return [dict(r) for r in result]
     finally:
@@ -824,7 +824,7 @@ def get_session_current_work(session_id: str,
                        ph.name AS phase_name,
                        t.id AS top_task_id,
                        t.description AS top_task_desc
-                ORDER BY coalesce(p.priority, 999999999) ASC, t.priority DESC, ph.order ASC, t.created_at ASC
+                ORDER BY coalesce(p.priority, 999999999) ASC, t.priority ASC, ph.order ASC, t.created_at ASC
                 LIMIT 1
             """, session_id=session_id)
             record = result.single()
@@ -860,7 +860,7 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                        ph.id AS phase_id, ph.name AS phase_name,
                        proj.id AS project_id, proj.name AS project_name
                 ORDER BY coalesce(proj.priority, 999999999) ASC,
-                         t.priority DESC,
+                         t.priority ASC,
                          t.created_at ASC
                 LIMIT 1
             """, sess=session_id, exclude_task_id=exclude_task_id, project_id=project_id).single()
@@ -1036,7 +1036,7 @@ def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
                        t.permissions_available AS permissions_available,
                        ph.id AS phase_id,
                        ph.name AS phase_name
-                ORDER BY t.priority DESC, t.created_at ASC
+                ORDER BY t.priority ASC, t.created_at ASC
             """, project_id=project_id, owner=owner_value)
             ready = []
             for record in result:
@@ -1333,7 +1333,7 @@ def get_agent_tasks(agent_id: str, config: Optional[OrchConfig] = None) -> List[
                   AND t.status IN ['pending', 'in_progress']
                 RETURN t.id AS id, t.description AS description,
                        t.status AS status, t.priority AS priority
-                ORDER BY t.priority DESC
+                ORDER BY t.priority ASC
                 LIMIT 10
             """, agent_id=agent_id)
             return [dict(r) for r in result]
