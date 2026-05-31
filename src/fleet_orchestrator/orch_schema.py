@@ -63,6 +63,10 @@ class TaskTransitionError(ValueError):
     pass
 
 
+class TaskWriteError(ValueError):
+    pass
+
+
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _TASK_TERMINAL_STATUSES = {"completed", "failed", "interrupted"}
 _TASK_ALLOWED_TRANSITIONS = {
@@ -497,7 +501,10 @@ def create_project(project_id: str, name: str, description: str = "",
                 priority_history=_json_encode(priority_history),
                 migration_exempt=bool(migration_exempt),
             )
-            return result.single()["id"]
+            record = result.single()
+            if not record:
+                raise ProjectNotFoundError(f"Unable to create or update project {project_id}")
+            return record["id"]
     finally:
         pass  # Driver is singleton; do not close
 
@@ -517,7 +524,10 @@ def create_phase(project_id: str, phase_id: str, name: str,
                 MERGE (p)-[:HAS_PHASE]->(ph)
                 RETURN ph.id AS id
             """, project_id=project_id, phase_id=phase_id, name=name, order=order)
-            return result.single()["id"]
+            record = result.single()
+            if not record:
+                raise ProjectNotFoundError(f"Project {project_id} not found for phase {phase_id}")
+            return record["id"]
     finally:
         pass  # Driver is singleton; do not close
 
@@ -587,7 +597,10 @@ def create_task(
                 estimated_tokens=estimated_tokens,
                 heartbeat_exempt_secs=heartbeat_exempt_secs,
             )
-            created_id = result.single()["id"]
+            record = result.single()
+            if not record:
+                raise TaskWriteError(f"Phase {phase_id} not found for task {task_id}")
+            created_id = record["id"]
         if wake_owner_if_ready:
             _wake_owner_for_zero_dep_task(created_id, cfg)
         return created_id
@@ -1485,7 +1498,10 @@ def create_question(question_id: str, text: str, context: str = "",
             RETURN q.id AS id
         """, id=question_id, text=text, context=context,
             task_id=task_id, asked_by=asked_by)
-        return result.single()["id"]
+        record = result.single()
+        if not record:
+            raise TaskWriteError(f"Unable to create question {question_id}")
+        return record["id"]
 def answer_question(question_id: str, answer: str, answered_by: str,
                     config: Optional[OrchConfig] = None) -> bool:
     """Provide an answer to an open question."""
