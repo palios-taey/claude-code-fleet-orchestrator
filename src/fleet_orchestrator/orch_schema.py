@@ -98,6 +98,13 @@ def _normalize_owner_session(owner: str) -> str:
     return owner
 
 
+def _is_supervisor_session(session_id: str) -> bool:
+    normalized = _normalize_owner_session(session_id)
+    if normalized != session_id:
+        return False
+    return not session_id.endswith("-claude")
+
+
 def _condition_view(condition: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "condition_id": condition["id"],
@@ -1245,6 +1252,8 @@ def preflight_supervisor_orphan_check(config: Optional[OrchConfig] = None) -> Di
         return {"ok": len(rows) == 0, "count": len(rows), "rows": rows}
 def get_session_stop_status(session_id: str,
                             config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    if not _is_supervisor_session(session_id):
+        return {"projects": [], "decision": {"can_stop": True}}
     cfg = config or OrchConfig()
     projects = get_session_supervised_projects(session_id, config=cfg)
     project_statuses: List[Dict[str, Any]] = []

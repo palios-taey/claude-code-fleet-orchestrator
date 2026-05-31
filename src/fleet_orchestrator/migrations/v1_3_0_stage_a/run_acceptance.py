@@ -376,6 +376,30 @@ def main() -> int:
         else f"FAIL wrong_owner_hidden conductor={conductor_next} grok={grok_next}"
     )
 
+    # 21 WAKE_REASON_REQUIRED is gated to base supervisor sessions only
+    wake_reason_project = f"{prefix}-wake-reason"
+    wake_reason_phase = f"{wake_reason_project}-phase"
+    create_project(project_id=wake_reason_project, name="wake reason probe", supervisor="conductor", priority=10)
+    create_phase(project_id=wake_reason_project, phase_id=wake_reason_phase, name="wake reason phase", order=0)
+    create_task(
+        phase_id=wake_reason_phase,
+        task_id=f"{wake_reason_project}-task",
+        description="requires stop reason",
+        priority=1,
+        owner="conductor",
+        config=CFG,
+    )
+    update_task_status(f"{wake_reason_project}-task", "in_progress", owner="conductor", config=CFG)
+    supervisor_stop = get_session_stop_status("conductor", config=CFG)
+    worker_stop = get_session_stop_status("conductor-codex", config=CFG)
+    record(
+        f"PASS wake_reason_supervisor_only supervisor={supervisor_stop['decision']} worker={worker_stop['decision']}"
+        if supervisor_stop["decision"].get("wake_type") == "WAKE_REASON_REQUIRED"
+        and worker_stop["decision"].get("can_stop") is True
+        and worker_stop["decision"].get("wake_type") is None
+        else f"FAIL wake_reason_supervisor_only supervisor={supervisor_stop['decision']} worker={worker_stop['decision']}"
+    )
+
     failures = [line for line in lines if line.startswith("FAIL")]
     _cleanup(prefix)
     return 1 if failures else 0
