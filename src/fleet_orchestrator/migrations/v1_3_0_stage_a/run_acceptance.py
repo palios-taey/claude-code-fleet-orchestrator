@@ -432,20 +432,26 @@ def main() -> int:
     )
     completed_with_sha = CLIENT.patch(
         f"/api/task/{transition_task}",
-        json={"status": "completed", "from": "conductor", "commit_sha": "abc1234", "note": "verified in prod"},
+        json={"status": "completed", "from": "conductor", "commit_sha": "abc1234", "production_observation": "verified in prod"},
     )
     task_after_completion = CLIENT.get(f"/api/tasks/{transition_task}").json()
     completed_to_in_progress = CLIENT.patch(
         f"/api/task/{transition_task}",
         json={"status": "in_progress", "from": "conductor"},
     )
+    sha_only_rejected = CLIENT.patch(
+        f"/api/task/{transition_task}",
+        json={"status": "completed", "from": "conductor", "commit_sha": "abc1234"},
+    )
     record(
-        f"PASS completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} with_sha={completed_with_sha.status_code} commit_sha={task_after_completion.get('closeout_commit_sha')} revive={completed_to_in_progress.status_code}"
+        f"PASS completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} sha_only={sha_only_rejected.status_code} with_both={completed_with_sha.status_code} commit_sha={task_after_completion.get('closeout_commit_sha')} revive={completed_to_in_progress.status_code}"
         if completed_without_evidence.status_code == 409
+        and sha_only_rejected.status_code == 409
         and completed_with_sha.status_code == 200
         and task_after_completion.get("closeout_commit_sha") == "abc1234"
+        and task_after_completion.get("closeout_production_observation") == "verified in prod"
         and completed_to_in_progress.status_code == 409
-        else f"FAIL completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} with_sha={completed_with_sha.status_code} task={task_after_completion} revive={completed_to_in_progress.status_code}"
+        else f"FAIL completion_evidence_and_matrix no_evidence={completed_without_evidence.status_code} sha_only={sha_only_rejected.status_code} with_both={completed_with_sha.status_code} task={task_after_completion} revive={completed_to_in_progress.status_code}"
     )
 
     failures = [line for line in lines if line.startswith("FAIL")]

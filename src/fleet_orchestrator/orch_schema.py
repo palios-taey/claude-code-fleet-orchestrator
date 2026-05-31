@@ -135,9 +135,9 @@ def validate_task_transition(current_status: str, next_status: str,
             + ", ".join(sorted(_TASK_ALLOWED_TRANSITIONS.get(current, [])))
         )
     if target == "completed":
-        if not (commit_sha or "").strip() and not (production_observation or "").strip():
+        if not (commit_sha or "").strip() or not (production_observation or "").strip():
             raise TaskTransitionError(
-                "completed transition requires close-out evidence: provide commit_sha and/or production_observation"
+                "completed transition requires close-out evidence: provide commit_sha and production_observation"
             )
 
 
