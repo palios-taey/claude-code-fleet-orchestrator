@@ -243,30 +243,39 @@ async def create(req: Request) -> Dict[str, Any]:
 @app.patch("/api/task/{task_id}")
 async def update(task_id: str, req: Request) -> Dict[str, Any]:
     data = await req.json()
-    status = data.get("status", "pending")
     sender = data.get("from", "")
     result = data.get("result", "")
 
     try:
         cfg = _cfg()
         task_before = _load_task(task_id, cfg)
+        current_status = str(task_before.get("status") or "pending")
+        status = data.get("status", current_status)
         owner = data.get("owner")
         if owner is None:
             owner = task_before.get("owner", "")
         blocked_on = data["blocked_on"] if "blocked_on" in data else None
-        commit_sha = (data.get("commit_sha") or "").strip()
-        production_observation = (data.get("production_observation") or "").strip()
-        evidence_note = (data.get("evidence_note") or data.get("note") or "").strip()
-
-        validate_task_transition(
-            str(task_before.get("status") or "pending"),
-            str(status),
-            commit_sha=_effective_closeout_value(task_before.get("closeout_commit_sha"), commit_sha) or "",
-            production_observation=_effective_closeout_value(
-                task_before.get("closeout_production_observation"),
-                production_observation,
-            ) or "",
+        commit_sha = data["commit_sha"].strip() if "commit_sha" in data else None
+        production_observation = (
+            data["production_observation"].strip() if "production_observation" in data else None
         )
+        if "evidence_note" in data:
+            evidence_note = data["evidence_note"].strip()
+        elif "note" in data:
+            evidence_note = data["note"].strip()
+        else:
+            evidence_note = None
+
+        if not (current_status == "completed" and str(status) == "completed"):
+            validate_task_transition(
+                current_status,
+                str(status),
+                commit_sha=_effective_closeout_value(task_before.get("closeout_commit_sha"), commit_sha) or "",
+                production_observation=_effective_closeout_value(
+                    task_before.get("closeout_production_observation"),
+                    production_observation,
+                ) or "",
+            )
 
         update_task_status(
             task_id,
@@ -274,9 +283,9 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             owner=owner,
             result=result,
             blocked_on=blocked_on,
-            commit_sha=commit_sha if ("commit_sha" in data or commit_sha) else None,
-            production_observation=production_observation if ("production_observation" in data or production_observation) else None,
-            evidence_note=evidence_note if ("evidence_note" in data or "note" in data or evidence_note) else None,
+            commit_sha=commit_sha,
+            production_observation=production_observation,
+            evidence_note=evidence_note,
             config=cfg,
         )
 

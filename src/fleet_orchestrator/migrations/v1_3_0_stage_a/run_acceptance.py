@@ -560,7 +560,63 @@ def main() -> int:
         else f"FAIL orch_watch_supervisor_resolution no_parent={no_parent} explicit={explicit_parent} configured={configured_suffix}"
     )
 
-    # 26 evidence-gated completion and canonical transition matrix
+    # 26 PATCH omit=keep semantics preserve current status and existing evidence
+    patch_keep_project = f"{prefix}-patch-keep"
+    patch_keep_phase = f"{patch_keep_project}-phase"
+    owner_only_task = f"{patch_keep_project}-owner-only"
+    create_project(project_id=patch_keep_project, name="patch keep probe", supervisor="conductor", priority=10)
+    create_phase(project_id=patch_keep_project, phase_id=patch_keep_phase, name="patch keep phase", order=0)
+    create_task(
+        phase_id=patch_keep_phase,
+        task_id=owner_only_task,
+        description="owner only patch task",
+        priority=1,
+        owner="conductor",
+        config=CFG,
+    )
+    update_task_status(owner_only_task, "in_progress", owner="conductor", config=CFG)
+    owner_only_patch = CLIENT.patch(
+        f"/api/task/{owner_only_task}",
+        json={"owner": "grok", "from": "conductor"},
+    )
+    owner_only_after = CLIENT.get(f"/api/tasks/{owner_only_task}").json()
+
+    evidence_only_task = f"{patch_keep_project}-evidence-only"
+    create_task(
+        phase_id=patch_keep_phase,
+        task_id=evidence_only_task,
+        description="evidence only patch task",
+        priority=2,
+        owner="conductor",
+        config=CFG,
+    )
+    update_task_status(
+        evidence_only_task,
+        "completed",
+        owner="conductor",
+        commit_sha="keep1234",
+        production_observation="keep observed",
+        config=CFG,
+    )
+    evidence_only_patch = CLIENT.patch(
+        f"/api/task/{evidence_only_task}",
+        json={"evidence_note": "added later", "from": "conductor"},
+    )
+    evidence_only_after = CLIENT.get(f"/api/tasks/{evidence_only_task}").json()
+    record(
+        f"PASS patch_omit_keeps_status_and_evidence owner_status={owner_only_after.get('status')} owner={owner_only_after.get('owner')} evidence_status={evidence_only_after.get('status')} sha={evidence_only_after.get('closeout_commit_sha')} obs={evidence_only_after.get('closeout_production_observation')} note={evidence_only_after.get('closeout_evidence_note')}"
+        if owner_only_patch.status_code == 200
+        and owner_only_after.get("status") == "in_progress"
+        and owner_only_after.get("owner") == "grok"
+        and evidence_only_patch.status_code == 200
+        and evidence_only_after.get("status") == "completed"
+        and evidence_only_after.get("closeout_commit_sha") == "keep1234"
+        and evidence_only_after.get("closeout_production_observation") == "keep observed"
+        and evidence_only_after.get("closeout_evidence_note") == "added later"
+        else f"FAIL patch_omit_keeps_status_and_evidence owner_patch={owner_only_patch.status_code} owner_task={owner_only_after} evidence_patch={evidence_only_patch.status_code} evidence_task={evidence_only_after}"
+    )
+
+    # 27 evidence-gated completion and canonical transition matrix
     transition_project = f"{prefix}-transition"
     transition_phase = f"{transition_project}-phase"
     transition_task = f"{transition_project}-task"
@@ -587,8 +643,21 @@ def main() -> int:
         f"/api/task/{transition_task}",
         json={"status": "in_progress", "from": "conductor"},
     )
+    sha_only_project = f"{transition_project}-sha-only"
+    sha_only_phase = f"{sha_only_project}-phase"
+    sha_only_task = f"{sha_only_project}-task"
+    create_project(project_id=sha_only_project, name="sha only probe", supervisor="conductor", priority=10)
+    create_phase(project_id=sha_only_project, phase_id=sha_only_phase, name="sha only phase", order=0)
+    create_task(
+        phase_id=sha_only_phase,
+        task_id=sha_only_task,
+        description="sha only transition task",
+        priority=1,
+        owner="conductor",
+        config=CFG,
+    )
     sha_only_rejected = CLIENT.patch(
-        f"/api/task/{transition_task}",
+        f"/api/task/{sha_only_task}",
         json={"status": "completed", "from": "conductor", "commit_sha": "abc1234"},
     )
     sentinel_project = f"{transition_project}-keep"
