@@ -23,6 +23,7 @@ from neo4j import GraphDatabase
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver
 from fleet_orchestrator.plan_loader import load_plan_from_text
 from fleet_orchestrator.orch_schema import (
+    _ZERO_DEP_READY_CYPHER,
     add_dependency,
     clear_project_stop_reason,
     create_phase,
@@ -353,6 +354,16 @@ def main() -> int:
         and missing_second is None
         and any(f"{missing_dep_project}-ghost" in err for err in missing_errors)
         else f"FAIL missing_dependency_blocks first={missing_first} second={missing_second} errors={missing_errors}"
+    )
+    with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+        missing_zero_dep = session.run(
+            _ZERO_DEP_READY_CYPHER,
+            task_id=f"{missing_dep_project}-b",
+        ).single()
+    record(
+        f"PASS missing_dependency_zero_dep_hidden record={missing_zero_dep}"
+        if missing_zero_dep is None
+        else f"FAIL missing_dependency_zero_dep_hidden record={dict(missing_zero_dep)}"
     )
 
     # 20 wrong-owner sessions do not surface another owner's task

@@ -83,6 +83,34 @@ END
 """
 
 
+def _ready_task_clause(task_alias: str = "t", deps_alias: str = "deps",
+                       passthrough: Optional[List[str]] = None) -> str:
+    passthrough_vars = list(passthrough or [])
+    passthrough_prefix = ", ".join(passthrough_vars)
+    if passthrough_prefix:
+        passthrough_prefix += ", "
+    return f"""
+WITH {passthrough_prefix}{task_alias}, {deps_alias}, CASE
+    WHEN {task_alias}.declared_dependencies IS NULL OR size({task_alias}.declared_dependencies) = 0
+    THEN size({deps_alias})
+    ELSE size({task_alias}.declared_dependencies)
+END AS declared_dep_count
+WHERE size({deps_alias}) = declared_dep_count
+  AND ALL(dep IN {deps_alias} WHERE dep.status = 'completed')
+"""
+
+
+def _zero_declared_dependency_clause(task_alias: str = "t", deps_alias: str = "deps") -> str:
+    return f"""
+WITH {task_alias}, {deps_alias}, CASE
+    WHEN {task_alias}.declared_dependencies IS NULL THEN []
+    ELSE {task_alias}.declared_dependencies
+END AS declared_dependencies
+WHERE size(declared_dependencies) = 0
+  AND size({deps_alias}) = 0
+"""
+
+
 def _utc_now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -278,9 +306,10 @@ def _project_record(project_id: str, config: Optional[OrchConfig] = None) -> Dic
 _ZERO_DEP_READY_CYPHER = """
 MATCH (t:OrchTask {id: $task_id})
 WHERE coalesce(t.owner, '') <> ''
-  AND NOT EXISTS {
-      MATCH (t)-[:DEPENDS_ON]->(:OrchTask)
-  }
+  AND coalesce(t.status, 'pending') = 'pending'
+OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+WITH t, collect(dep) AS deps
+""" + _zero_declared_dependency_clause() + """
 RETURN t.id AS task_id,
        t.owner AS owner,
        t.description AS description
@@ -604,9 +633,7 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
                 MATCH (t:OrchTask {status: 'pending'})
                 OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
                 WITH t, collect(dep) AS deps
-                WITH t, deps, """ + _DECLARED_DEPS_EXPR + """ AS declared_dep_count
-                WHERE size(deps) = declared_dep_count
-                  AND ALL(dep IN deps WHERE dep.status = 'completed')
+                """ + _ready_task_clause() + """
                 RETURN t.id AS id, t.description AS description,
                        t.priority AS priority, t.owner AS owner,
                        t.capability_tags AS capability_tags,
@@ -972,9 +999,7 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                   AND coalesce(proj.status, 'active') <> 'completed'
                 OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
                 WITH proj, ph, t, collect(dep) AS deps
-                WITH proj, ph, t, deps, """ + _DECLARED_DEPS_EXPR + """ AS declared_dep_count
-                WHERE size(deps) = declared_dep_count
-                  AND ALL(dep IN deps WHERE dep.status = 'completed')
+                """ + _ready_task_clause(passthrough=["proj", "ph"]) + """
                 RETURN t.id AS task_id, t.description AS description,
                        t.priority AS priority, t.owner AS owner,
                        t.blocked_on AS blocked_on,
@@ -1138,9 +1163,7 @@ def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
               AND coalesce(t.blocked_on, '') = ''
             OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
             WITH ph, t, collect(dep) AS deps
-            WITH ph, t, deps, """ + _DECLARED_DEPS_EXPR + """ AS declared_dep_count
-            WHERE size(deps) = declared_dep_count
-              AND ALL(dep IN deps WHERE dep.status = 'completed')
+            """ + _ready_task_clause(passthrough=["ph"]) + """
             RETURN t.id AS id,
                    t.description AS description,
                    t.priority AS priority,
