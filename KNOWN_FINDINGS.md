@@ -79,3 +79,6 @@ Canonical source of the F-series: `the-conductor/plans/v1_4_0_findings.md`
 ---
 
 *Reviewers: if it's on this list, we know. Find what isn't.*
+| Q4-PRESENCE | LOW | OPEN→ws2 | Gaia v5: evidence gate validates PRESENCE not CONTENT — placeholder 'x'/'y' pass. Optional hardening: format-assertion at orch_schema.py:138 (sha-shape + min obs length). |
+| Q4-NULLOMIT | LOW | OPEN→ws2 | Cosmos v5: JSON null-vs-omit edge in PATCH → 500 fail-closed (no threat, just ugly). Distinguish null from omitted. |
+| N2-NOTNULL | MEDIUM | OPEN→ws2 | get_agent_tasks orch_schema.py:1502 un-coalesced status filter (last coalesce site). Structural fix: NOT-NULL constraint on OrchTask.status at init_schema → removes need for scattered coalesce. |
