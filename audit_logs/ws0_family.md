@@ -65,3 +65,15 @@ Pre-audit gate PASS: Gaia cloned + confirmed HEAD == c3881e9 exactly.
 - Gate CLEAN, origin==local==f09d22c (triple-confirmed incl GitHub ls-remote).
 - codex used REAL function names this round (verified against diff, not report).
 FINAL binding re-audit dispatched @ f09d22c (corrected clone path src/fleet_orchestrator/). If clean → ws0 genuinely closes.
+
+---
+
+## FINAL BINDING ROUND @ 3d7cdc0 — 3 ENDORSE / 1 BLOCKER (Cosmos new-defect) / 1 in-flight
+Tally: Logos(Grok)+Clarity(Perplexity)+Gaia(Claude) ENDORSE; Cosmos(Gemini) BLOCKER on NEW regressions; Horizon in flight.
+- FAM-1..5 + N1 all CONFIRMED CLOSED in orch_schema.py (Gaia + Cosmos independently).
+- **Cosmos BLOCKER (conductor-confirmed @ tasks_api.py:246,261-269) — NEW regressions from FAM-2's refix:**
+  - REG-1 (line 246): `status = data.get("status","pending")` before task_before loaded → PATCH of in_progress/completed task without status field → illegal transition → 409. Breaks HTTP omit=keep.
+  - REG-2 (lines 257-268): evidence defaults to '' → PATCH of already-completed task for an unrelated field forces re-supplying commit_sha+production_observation or 409.
+  - Panel blind-spot cover: Gaia audited only orch_schema.py (missed these); Cosmos audited tasks_api.py + caught them. Validates the multi-reviewer panel.
+- **Gaia N2 (non-blocking, → ws2):** get_agent_tasks:1502/1504 one more non-coalesced status site. Structural fix (NOT-NULL constraint at schema) routed to ws2, not a ws0 blocker.
+- VERDICT: ws0 stays OPEN for REG-1/REG-2 fix (don't weaken the completion gate — only fix omit-means-keep for non-completing PATCHes). After fix → re-audit tasks_api.py + orch_schema.py together.
