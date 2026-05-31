@@ -93,7 +93,7 @@ RETURN
   t.priority    AS priority,
   t.owner       AS owner,
   size(others)  AS other_dep_count
-ORDER BY coalesce(t.priority, 50) DESC, t.id
+ORDER BY coalesce(t.priority, 999999999) ASC, t.id
 LIMIT 5
 """
 
