@@ -56,3 +56,12 @@ Pre-audit gate PASS: Gaia cloned + confirmed HEAD == c3881e9 exactly.
 1. Packet GitHub URLs were .../src/orch_schema.py but code is at .../src/fleet_orchestrator/orch_schema.py → Logos 404'd round 1. Fix path in re-run.
 2. I cried-wolf FAM-1/2 "skipped" off codex's report wording before my code-check finished (retracted; memory saved). This round I reconciled against code FIRST — Gaia's BLOCKER confirmed real.
 3. codex MISREPORTED FAM-5 by non-existent function names — reinforces: verify fixes by what's in the diff, not the worker's description.
+
+---
+
+## FAM-5 refix verified @ f09d22c (conductor, pre-final-audit)
+- FAM-5 ✓ orch_schema.py:446 `supervisor_value = supervisor or created_by or "unassigned"` — _normalize_owner_session suffix-strip REMOVED from supervisor write. LIVE: created_by='ops-bot-codex' → supervisor='ops-bot-codex' (preserved, not stripped). orch_watch.py resolve_supervisor: explicit taey:<node>:parent first, suffix fallback now opt-in (_configured_supervisor_suffix_rules). [969af0b + f09d22c]
+- N1 ✓ orch_schema.py:947-950 stats now coalesce(t.status,'pending'). 
+- Gate CLEAN, origin==local==f09d22c (triple-confirmed incl GitHub ls-remote).
+- codex used REAL function names this round (verified against diff, not report).
+FINAL binding re-audit dispatched @ f09d22c (corrected clone path src/fleet_orchestrator/). If clean → ws0 genuinely closes.
