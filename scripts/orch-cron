@@ -63,6 +63,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -74,6 +75,8 @@ try:
     from zoneinfo import ZoneInfo
 except ImportError:  # py<3.9
     from backports.zoneinfo import ZoneInfo  # type: ignore
+
+from lib.config import OrchConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -134,22 +137,18 @@ def fire_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> s
             return "skipped:already_fired"
         r.set(dedup_key, "1", ex=DEDUP_TTL_SEC)
 
-    cli = "/usr/local/bin/taey-notify"
-    if os.path.isfile(cli) and os.access(cli, os.X_OK):
-        subprocess.run([cli, session, prompt, "--from", "orch-cron",
-                        "--type", "wake"], check=False, capture_output=True)
-    else:
-        # Fallback direct push
-        if r is None:
-            return "skipped:no_taey_notify_and_no_redis"
-        msg = json.dumps({
-            "from": "orch-cron",
-            "type": "wake",
-            "body": prompt,
-            "msg_id": fire_id,
-            "timestamp": time.time(),
-        })
-        r.lpush(f"taey:{session}:inbox", msg)
+    cli = OrchConfig().notify_cli_path
+    cli_path = shutil.which(cli) or (cli if os.path.isfile(cli) and os.access(cli, os.X_OK) else None)
+    if cli_path is None:
+        raise SystemExit(f"notify CLI not found: {cli}")
+    result = subprocess.run(
+        [cli_path, session, prompt, "--from", "orch-cron", "--type", "wake"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(result.stderr.strip() or f"{cli_path} failed")
 
     log.info("FIRE %s session=%s (%d char prompt, hash=%s)",
              trig_id, session, len(prompt), prompt_hash)

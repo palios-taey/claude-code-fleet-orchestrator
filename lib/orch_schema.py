@@ -18,7 +18,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from .config import OrchConfig, get_neo4j_driver
+from .config import OrchConfig, ensure_notify_importable, get_neo4j_driver
 
 
 SCHEMA_CONSTRAINTS = [
@@ -242,12 +242,7 @@ RETURN t.id AS task_id,
 
 
 def _fleet_redis_connect():
-    for path in (
-        "/usr/local/lib/claude-code-fleet-notify",
-        "/path/to/repo",
-    ):
-        if os.path.isdir(path) and path not in sys.path:
-            sys.path.insert(0, path)
+    ensure_notify_importable()
     from identity import redis_connect  # type: ignore
     return redis_connect()
 
@@ -258,27 +253,14 @@ def _state_key(node_id: str, suffix: str) -> str:
 
 
 def _send_wake(owner: str, body: str) -> None:
-    cli = "/usr/local/bin/taey-notify"
-    if os.path.isfile(cli) and os.access(cli, os.X_OK):
-        result = subprocess.run(
-            [cli, owner, body, "--from", "orch-create", "--type", "wake", "--priority", "normal"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "taey-notify failed")
-        return
-
-    redis_client = _fleet_redis_connect()
-    payload = json.dumps({
-        "from": "orch-create",
-        "type": "wake",
-        "body": body,
-        "priority": "normal",
-        "msg_id": f"orch-create-zero-dep-{owner}-{int(time.time())}",
-        "timestamp": time.time(),
-    })
-    redis_client.lpush(_state_key(owner, "inbox"), payload)
+    cli = OrchConfig().notify_cli_path
+    result = subprocess.run(
+        [cli, owner, body, "--from", "orch-create", "--type", "wake", "--priority", "normal"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"{cli} failed")
 
 
 def _wake_owner_for_zero_dep_task(task_id: str, cfg: OrchConfig) -> None:
@@ -944,7 +926,8 @@ def ensure_default_project(config: Optional[OrchConfig] = None) -> str:
     """Ensure a default project and phase exist for ad-hoc tasks. Returns phase_id."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    default_priority = _next_project_priority("conductor", cfg)
+    default_supervisor = "system"
+    default_priority = _next_project_priority(default_supervisor, cfg)
     try:
         with driver.session(database=cfg.neo4j_db) as session:
             session.run("""
@@ -952,7 +935,7 @@ def ensure_default_project(config: Optional[OrchConfig] = None) -> str:
                 ON CREATE SET p.name = 'Default Project',
                               p.description = 'Auto-created for ad-hoc tasks',
                               p.created_at = datetime(), p.status = 'active'
-                SET p.supervisor = coalesce(p.supervisor, 'conductor'),
+                SET p.supervisor = coalesce(p.supervisor, $default_supervisor),
                     p.priority = coalesce(p.priority, $priority),
                     p.migration_exempt = coalesce(p.migration_exempt, false),
                     p.user_stop_conditions = coalesce(p.user_stop_conditions, '[]'),
@@ -966,6 +949,7 @@ def ensure_default_project(config: Optional[OrchConfig] = None) -> str:
                 ON CREATE SET ph.name = 'Main', ph.order = 0, ph.status = 'active'
                 MERGE (p)-[:HAS_PHASE]->(ph)
             """,
+                default_supervisor=default_supervisor,
                 priority=default_priority,
                 priority_history=_json_encode([{
                     "priority_before": None,

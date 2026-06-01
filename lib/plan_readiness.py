@@ -194,29 +194,14 @@ def check_readiness(supervisor: str, completed_task: dict) -> Optional[str]:
     # stack uses (orch-watch / lib/dispatch / fleet-notify daemon).
     redis_client = None
     try:
-        # Try fleet-notify's identity module first — same primitive every
-        # orchestrator component uses for local Redis access.
-        for _p in (
-            "/usr/local/lib/claude-code-fleet-notify",
-            "/path/to/repo",
-        ):
-            if os.path.isdir(_p) and _p not in sys.path:
-                sys.path.insert(0, _p)
+        from lib.config import ensure_notify_importable  # noqa: E402
+
+        ensure_notify_importable()
         from identity import redis_connect  # type: ignore
+
         redis_client = redis_connect()
     except Exception:
-        # Fall back to a direct local-Redis client if fleet-notify isn't
-        # installed at the standard paths.
-        try:
-            import redis as _redis
-            redis_client = _redis.Redis(
-                host=os.environ.get("REDIS_HOST", "127.0.0.1"),
-                port=int(os.environ.get("REDIS_PORT", "6379")),
-                decode_responses=True,
-                socket_timeout=2,
-            )
-        except Exception:
-            redis_client = None
+        redis_client = None
 
     owned = [t for t in newly_ready if _dedup_wake(redis_client, t["task_id"])]
     if not owned:

@@ -85,6 +85,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -94,14 +95,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-# Make the released fleet-notify importable for identity + state_key
-for _path in (
-    "/usr/local/lib/claude-code-fleet-notify",
-    "/path/to/repo",
-):
-    if os.path.isdir(_path):
-        sys.path.insert(0, _path)
-        break
+from lib.config import OrchConfig
 
 import redis as redis_lib
 
@@ -202,26 +196,19 @@ def _set_task_blocked_on(task_id: str, owner: str, reason: str) -> None:
 
 
 def _send_wake(r, target: str, body: str, priority: str, msg_id: str) -> bool:
-    cli = "/usr/local/bin/taey-notify"
-    if os.path.isfile(cli) and os.access(cli, os.X_OK):
-        result = subprocess.run(
-            [cli, target, body, "--from", "orch-watch", "--type", "wake", "--priority", priority],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            log.error("taey-notify failed for %s: %s", target, result.stderr.strip())
-            return False
-        return True
-
-    msg = json.dumps({
-        "from": "orch-watch",
-        "type": "wake",
-        "body": body,
-        "priority": priority,
-        "msg_id": msg_id,
-        "timestamp": time.time(),
-    })
-    r.lpush(f"taey:{target}:inbox", msg)
+    del r, msg_id
+    cli = OrchConfig().notify_cli_path
+    cli_path = shutil.which(cli) or (cli if os.path.isfile(cli) and os.access(cli, os.X_OK) else None)
+    if cli_path is None:
+        raise RuntimeError(f"notify CLI not found: {cli}")
+    result = subprocess.run(
+        [cli_path, target, body, "--from", "orch-watch", "--type", "wake", "--priority", priority],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log.error("taey-notify failed for %s: %s", target, result.stderr.strip())
+        return False
     return True
 
 

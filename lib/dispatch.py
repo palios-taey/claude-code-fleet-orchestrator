@@ -28,7 +28,7 @@ Usage from a Python supervisor session::
         worker="treasurer-codex",
         task_id="reddit-scout-cycle-22",
         description="Scout r/MachineLearning for acute-pain replies",
-        prompt_body="Run the scout per /path/to/repo ...",
+        prompt_body="Run the deployment's scout workflow.",
     )
 
 CLI equivalent::
@@ -52,12 +52,7 @@ import sys
 import time
 from typing import Optional
 
-from .config import OrchConfig, get_neo4j_session
-
-
-PRODUCT_OWNER_MAP = {
-    "conductor": "the-conductor",
-}
+from .config import OrchConfig, ensure_notify_importable, get_neo4j_session
 
 
 class BugLockActive(Exception):
@@ -76,20 +71,12 @@ def _base_session_name(worker: str) -> str:
 
 
 def _resolve_product_id(worker: str) -> Optional[str]:
-    return PRODUCT_OWNER_MAP.get(_base_session_name(worker))
+    return OrchConfig().product_owner_map.get(_base_session_name(worker))
 
 
 def _redis_connect():
-    """Connect to Redis via the fleet-notify identity module so we honor
-    REDIS_HOST / REDIS_PORT / NOTIFY_KEY_PREFIX the same way hooks do."""
-    # Try the installed fleet-notify path first, fall back to canonical clone.
-    for path in (
-        "/usr/local/lib/claude-code-fleet-notify",
-        "/path/to/repo",
-    ):
-        if os.path.isdir(path):
-            sys.path.insert(0, path)
-            break
+    """Connect to Redis via the fleet-notify identity module."""
+    ensure_notify_importable()
     from identity import redis_connect
     return redis_connect()
 
@@ -202,7 +189,7 @@ def dispatch(
 
     Side effects (in order):
 
-    1. If the worker maps to a product in ``PRODUCT_OWNER_MAP`` and that
+    1. If the worker maps to a product in ``ORCH_PRODUCT_OWNER_MAP`` / ``PRODUCT_OWNER_MAP`` and that
        product has ``support:product:<id>:bug_lock == "true"``, raise
        ``BugLockActive`` before any worker-state mutation unless
        ``is_bugfix=True``.
@@ -264,35 +251,23 @@ def dispatch(
             "\n\n---\nWHEN DONE — call record_outcome so the supervisor knows "
             "the result (otherwise outcome=unknown + current_task persists as "
             "'previous dispatch unresolved'). One line via bash tool:\n\n"
-            f"python3 -c \"import sys; sys.path.insert(0,'/path/to/repo'); "
-            f"from lib.dispatch import record_outcome; "
+            f"python3 -c \"from fleet_orchestrator import record_outcome; "
             f"record_outcome('{worker}', 'done', '<short outcome summary>')\"\n\n"
             "Replace 'done' with 'error' or 'interrupted' if the task did not "
             "complete cleanly. The '<short outcome summary>' is your one-line "
             "report — what landed, what's at /tmp/..., what's the verdict."
         )
 
-    # Use the released taey-notify CLI so the message routes through the
-    # canonical inbox + daemon path. Falls back to direct Redis push if
-    # the CLI is missing (e.g., in a stripped test environment).
-    cli = "/usr/local/bin/taey-notify"
-    if os.path.isfile(cli) and os.access(cli, os.X_OK):
-        from_session = supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")
-        subprocess.run(
-            [cli, worker, prompt_body, "--from", from_session,
-             "--type", "command", "--priority", priority],
-            check=False,
-        )
-    else:
-        msg = json.dumps({
-            "from": supervisor or "dispatch",
-            "type": "command",
-            "body": prompt_body,
-            "priority": priority,
-            "msg_id": f"dispatch-{task_id}-{int(time.time())}",
-            "timestamp": time.time(),
-        })
-        r.lpush(_state_key(worker, "inbox"), msg)
+    cli = OrchConfig().notify_cli_path
+    from_session = supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")
+    result = subprocess.run(
+        [cli, worker, prompt_body, "--from", from_session, "--type", "command", "--priority", priority],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"{cli} failed")
 
 
 _VALID_OUTCOMES = ("done", "error", "interrupted")

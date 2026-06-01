@@ -1,8 +1,4 @@
-"""Minimal OrchTask API — standalone service on port 5002.
-
-Separate from the Taey dashboard (infra-soul v3.1 on :5001). This service
-only exposes the endpoints the taey-task CLI calls, backed by the same
-Neo4j OrchTask nodes.
+"""Minimal standalone API for OrchTask and project operations.
 
 Endpoints:
   GET  /api/tasks                  — all pending tasks
@@ -12,7 +8,7 @@ Endpoints:
   PATCH /api/task/{task_id}        — update status/owner
 
 Run:
-  python3 -m uvicorn conductor.tasks_api:app --host 0.0.0.0 --port 5002
+  python3 -m uvicorn lib.tasks_api:app --host 127.0.0.1 --port 5002
 """
 from __future__ import annotations
 
@@ -67,19 +63,8 @@ from lib.orch_schema import (
 )
 from lib.plan_loader import load_plan_from_text
 
-app = FastAPI(title="Conductor Tasks API", version="2.0")
+app = FastAPI(title="Fleet Orchestrator API", version="2.0")
 _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
-ALLOWED_UI_SESSIONS = (
-    "conductor",
-    "weaver",
-    "tutor",
-    "infra",
-    "taeys-hands",
-    "treasurer",
-    "hunter",
-    "taey-ed",
-    "x-claude",
-)
 ALLOWED_NOTIFY_TYPES = {
     "standard": "message",
     "escalation": "escalation",
@@ -206,12 +191,7 @@ async def create(req: Request) -> Dict[str, Any]:
             detail=f"priority must be >= 0 (got {priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
         )
     sender = data.get("from", "unknown")
-    # If owner not explicitly set, default to creator. Without this default,
-    # tasks land with owner='' and the watchloop surfaces them to every session
-    # (the unassigned-pending fallback only conductor sees), so nobody owns the
-    # work — orphans accumulate. Explicit `owner` in the request body still
-    # wins for cross-session task creation (e.g. weaver creating a task for
-    # codex-1 to do).
+    # If owner not explicitly set, default to creator so the task is not orphaned.
     owner = data.get("owner") or sender
     task_type = data.get("task_type", "standard")
     capability_tags = data.get("capability_tags", [])
@@ -574,8 +554,11 @@ async def clear_pause_session_endpoint(session_id: str, req: Request) -> Dict[st
 
 @app.post("/api/sessions/{target}/notify")
 async def session_notify(target: str, req: Request) -> Dict[str, Any]:
-    if target not in ALLOWED_UI_SESSIONS:
-        raise HTTPException(status_code=400, detail="target must be an allowed session")
+    configured_targets = set(_cfg().session_ids)
+    if configured_targets and target not in configured_targets:
+        raise HTTPException(status_code=400, detail="target must be listed in ORCH_SESSION_IDS")
+    if not target.strip():
+        raise HTTPException(status_code=400, detail="target must be non-empty")
 
     data = await req.json()
     notify_type = data.get("type", "standard")
@@ -604,7 +587,7 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
 def health() -> Dict[str, Any]:
     try:
         _ = get_ready_tasks(_cfg())
-        return {"ok": True, "service": "conductor-tasks-api", "ts": time.time()}
+        return {"ok": True, "service": "fleet-orchestrator-api", "ts": time.time()}
     except Exception as e:
         return JSONResponse(status_code=503, content={"ok": False, "error": str(e)})
 

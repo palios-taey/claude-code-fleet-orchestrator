@@ -1,137 +1,216 @@
-"""
-Orchestration Configuration
+"""Standalone configuration for claude-code-fleet-orchestrator."""
 
-Orch-specific Redis/Neo4j connections with strict namespace isolation.
-All Redis keys are prefixed with 'orch:'. Neo4j uses 'orchestration' database.
-
-ISOLATION: Zero shared state with memory infrastructure (ISMA, HMM, Weaviate).
-"""
+from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import redis
 import redis.asyncio as aioredis
 
-# Load .env from a few standard locations (priority order):
-#   1. Explicit ORCH_DOTENV env var (full path)
-#   2. CWD/.env — supports the lib-extract-then-re-import pattern where
-#      conductor's tasks-api daemon runs from /path/to/repo
-#      and its .env should still be read.
-#   3. Orchestrator package root's .env — standalone orchestrator deploys.
-_dotenv_candidates = [
-    Path(os.environ["ORCH_DOTENV"]) if os.environ.get("ORCH_DOTENV") else None,
-    Path.cwd() / ".env",
-    Path(__file__).resolve().parent.parent / ".env",
-]
-for _env_path in _dotenv_candidates:
-    if _env_path and _env_path.is_file():
-        with open(_env_path) as _f:
-            for _line in _f:
-                _line = _line.strip()
-                if _line and not _line.startswith("#") and "=" in _line:
-                    _k, _, _v = _line.partition("=")
-                    _k = _k.replace("export ", "").strip()
-                    os.environ.setdefault(_k, _v.strip())
-        break  # first found wins
 
-# Environment overrides with sensible localhost defaults so module-level
-# imports don't KeyError if the .env loader missed a path (race condition
-# observed by x-claude 2026-05-26: first import of orch-watch failed with
-# KeyError ORCH_REDIS_HOST; subsequent loads succeeded). Defaults match
-# the typical single-machine fleet layout. Production deployments should
-# override via .env or environment; the default-presence is a safety
-# net that lets imports succeed even if config is missing, so the failure
-# manifests at OrchConfig() use time (with a clear connection error)
-# rather than at import time (with a cryptic KeyError that masks the
-# actual call site).
-ORCH_REDIS_HOST = os.environ.get("ORCH_REDIS_HOST", "127.0.0.1")
-ORCH_REDIS_PORT = int(os.environ.get("ORCH_REDIS_PORT", "6379"))
-ORCH_NEO4J_URI = os.environ.get("ORCH_NEO4J_URI", "bolt://localhost:7687")
-ORCH_NEO4J_USER = os.environ.get("ORCH_NEO4J_USER")
-ORCH_NEO4J_PASS = os.environ.get("ORCH_NEO4J_PASS")
-ORCH_DASHBOARD_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002")
-ORCH_NEO4J_DB = os.environ.get("ORCH_NEO4J_DB", "neo4j")
-# Sentinel: optional — empty string means not used
-ORCH_REDIS_SENTINELS = os.environ.get("ORCH_REDIS_SENTINELS", "")
-ORCH_REDIS_SENTINEL_MASTER = os.environ.get("ORCH_REDIS_SENTINEL_MASTER", "orch-master")
+class OrchConfigError(ValueError):
+    """Raised when required orchestrator configuration is missing or invalid."""
 
-# Redis key prefix - ALL orchestration keys MUST use this
+
+def _load_dotenv_candidates() -> None:
+    candidates = []
+    explicit = os.environ.get("ORCH_DOTENV")
+    if explicit:
+        candidates.append(Path(explicit))
+    candidates.append(Path.cwd() / ".env")
+    candidates.append(Path(__file__).resolve().parent.parent / ".env")
+
+    for env_path in candidates:
+        if not env_path.is_file():
+            continue
+        with env_path.open(encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.replace("export ", "").strip()
+                os.environ.setdefault(key, value.strip())
+        break
+
+
+_load_dotenv_candidates()
+
 KEY_PREFIX = "orch:"
 
 
-def _parse_sentinels(raw: str):
-    """Parse 'host:port,host:port' into [(host, port), ...]."""
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        raise OrchConfigError(f"{name} must be set")
+    return value.strip()
+
+
+def _optional_env(name: str, default: Optional[str] = None) -> Optional[str]:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value if value else default
+
+
+def _int_env(name: str, default: Optional[int] = None) -> int:
+    raw = _optional_env(name)
+    if raw is None:
+        if default is None:
+            raise OrchConfigError(f"{name} must be set")
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise OrchConfigError(f"{name} must be an integer") from exc
+
+
+def _parse_sentinels(raw: str) -> list[tuple[str, int]]:
     if not raw.strip():
         return []
-    pairs = []
+    pairs: list[tuple[str, int]] = []
     for entry in raw.split(","):
-        entry = entry.strip()
-        if ":" in entry:
-            h, p = entry.rsplit(":", 1)
-            pairs.append((h, int(p)))
+        item = entry.strip()
+        if not item:
+            continue
+        if ":" in item:
+            host, port = item.rsplit(":", 1)
+            try:
+                pairs.append((host, int(port)))
+            except ValueError as exc:
+                raise OrchConfigError("ORCH_REDIS_SENTINELS must use host:port pairs") from exc
         else:
-            pairs.append((entry, 26379))
+            pairs.append((item, 26379))
     return pairs
+
+
+def _parse_product_owner_map() -> Dict[str, str]:
+    raw = _optional_env("ORCH_PRODUCT_OWNER_MAP")
+    if raw is None:
+        raw = _optional_env("PRODUCT_OWNER_MAP", "")
+    if not raw:
+        return {}
+
+    try:
+        import json
+
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict):
+        result = {}
+        for key, value in parsed.items():
+            key_s = str(key).strip()
+            value_s = str(value).strip()
+            if key_s and value_s:
+                result[key_s] = value_s
+        if result:
+            return result
+
+    result: Dict[str, str] = {}
+    for item in raw.replace(";", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise OrchConfigError("ORCH_PRODUCT_OWNER_MAP must be JSON or key=value pairs")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            raise OrchConfigError("ORCH_PRODUCT_OWNER_MAP contains an empty key or value")
+        result[key] = value
+    return result
+
+
+def _parse_session_ids() -> list[str]:
+    raw = _optional_env("ORCH_SESSION_IDS", "")
+    if not raw:
+        return []
+    items = [item.strip() for item in raw.replace(";", ",").split(",")]
+    return [item for item in items if item]
+
+
+def ensure_notify_importable() -> None:
+    try:
+        import identity  # noqa: F401
+        return
+    except ImportError as first_error:
+        notify_root = _optional_env("ORCH_NOTIFY_LIB_ROOT")
+        if notify_root is None:
+            raise OrchConfigError(
+                "ORCH_NOTIFY_LIB_ROOT must be set when fleet-notify is not already importable"
+            ) from first_error
+        notify_path = Path(notify_root)
+        if not notify_path.is_dir():
+            raise OrchConfigError("ORCH_NOTIFY_LIB_ROOT must point to a directory")
+        if str(notify_path) not in sys.path:
+            sys.path.insert(0, str(notify_path))
+        try:
+            import identity  # noqa: F401
+        except ImportError as second_error:
+            raise OrchConfigError(
+                "ORCH_NOTIFY_LIB_ROOT does not contain an importable fleet-notify installation"
+            ) from second_error
+
+
+def notify_cli() -> str:
+    return _optional_env("ORCH_NOTIFY_CLI", "taey-notify") or "taey-notify"
 
 
 @dataclass
 class OrchConfig:
-    """Orchestration layer configuration."""
-    redis_host: str = ORCH_REDIS_HOST
-    redis_port: int = ORCH_REDIS_PORT
-    neo4j_uri: str = ORCH_NEO4J_URI
-    neo4j_user: Optional[str] = ORCH_NEO4J_USER
-    neo4j_pass: Optional[str] = ORCH_NEO4J_PASS
-    neo4j_db: str = ORCH_NEO4J_DB
-    redis_sentinels: str = ORCH_REDIS_SENTINELS
-    redis_sentinel_master: str = ORCH_REDIS_SENTINEL_MASTER
+    """Configuration loaded from environment variables."""
 
-    # Heartbeat (optimal: T=12s, TTL=3T=36s)
+    redis_host: str = field(default_factory=lambda: _require_env("ORCH_REDIS_HOST"))
+    redis_port: int = field(default_factory=lambda: _int_env("ORCH_REDIS_PORT"))
+    neo4j_uri: str = field(default_factory=lambda: _require_env("ORCH_NEO4J_URI"))
+    neo4j_user: Optional[str] = field(default_factory=lambda: _optional_env("ORCH_NEO4J_USER"))
+    neo4j_pass: Optional[str] = field(default_factory=lambda: _optional_env("ORCH_NEO4J_PASS"))
+    neo4j_db: str = field(default_factory=lambda: _require_env("ORCH_NEO4J_DB"))
+    dashboard_url: str = field(default_factory=lambda: _require_env("ORCH_DASHBOARD_URL"))
+    redis_sentinels: str = field(default_factory=lambda: _optional_env("ORCH_REDIS_SENTINELS", "") or "")
+    redis_sentinel_master: str = field(default_factory=lambda: _optional_env("ORCH_REDIS_SENTINEL_MASTER", "orch-master") or "orch-master")
+    notify_lib_root: Optional[str] = field(default_factory=lambda: _optional_env("ORCH_NOTIFY_LIB_ROOT"))
+    notify_cli_path: str = field(default_factory=notify_cli)
+    product_owner_map: Dict[str, str] = field(default_factory=_parse_product_owner_map)
+    session_ids: list[str] = field(default_factory=_parse_session_ids)
+
     heartbeat_interval_s: float = 12.0
     heartbeat_ttl_s: int = 36
-
-    # Task queue
     task_stream: str = f"{KEY_PREFIX}streams:tasks"
     event_stream: str = f"{KEY_PREFIX}streams:events"
     consumer_group: str = "conductors"
     stream_maxlen: int = 100_000
-
-    # File locks
-    file_lock_ttl_s: int = 1800  # 30 minutes
+    file_lock_ttl_s: int = 1800
     file_lock_prefix: str = f"{KEY_PREFIX}lock:file:"
-
-    # Agent registry
     agent_prefix: str = f"{KEY_PREFIX}agent:"
     heartbeat_prefix: str = f"{KEY_PREFIX}heartbeat:"
     activity_prefix: str = f"{KEY_PREFIX}activity:"
-
-    # Notifications
     notify_prefix: str = f"{KEY_PREFIX}notify:"
     alert_channel: str = f"{KEY_PREFIX}notify:alerts"
-
-    # Suspected dead agents set
     suspected_dead_key: str = f"{KEY_PREFIX}suspected_dead"
 
 
 def key(suffix: str) -> str:
-    """Generate a namespaced Redis key. All orch keys go through here."""
     return f"{KEY_PREFIX}{suffix}"
 
 
-# --- Redis connection pool (singleton) ---
-
 _sync_pool: Optional[redis.ConnectionPool] = None
 _async_pool: Optional[aioredis.ConnectionPool] = None
-
-
 _sentinel_sync = None
+_sentinel_async = None
+_neo4j_driver = None
+_neo4j_driver_config: Optional[tuple[str, Optional[str], Optional[str], str]] = None
 
 
 def get_redis_sync(config: Optional[OrchConfig] = None) -> redis.Redis:
-    """Get synchronous Redis client. Uses Sentinel if configured, direct otherwise."""
     global _sync_pool, _sentinel_sync
     cfg = config or OrchConfig()
     sentinels = _parse_sentinels(cfg.redis_sentinels)
@@ -139,6 +218,7 @@ def get_redis_sync(config: Optional[OrchConfig] = None) -> redis.Redis:
     if sentinels:
         if _sentinel_sync is None:
             from redis.sentinel import Sentinel
+
             _sentinel_sync = Sentinel(sentinels, socket_timeout=3, decode_responses=True)
         return _sentinel_sync.master_for(cfg.redis_sentinel_master, socket_timeout=3)
 
@@ -152,19 +232,15 @@ def get_redis_sync(config: Optional[OrchConfig] = None) -> redis.Redis:
     return redis.Redis(connection_pool=_sync_pool)
 
 
-_sentinel_async = None
-
-
 def get_redis_async(config: Optional[OrchConfig] = None) -> aioredis.Redis:
-    """Get async Redis client. Uses Sentinel if configured, direct otherwise."""
     global _async_pool, _sentinel_async
     cfg = config or OrchConfig()
     sentinels = _parse_sentinels(cfg.redis_sentinels)
 
     if sentinels:
-        # redis-py async Sentinel support
         if _sentinel_async is None:
             from redis.asyncio.sentinel import Sentinel as AsyncSentinel
+
             _sentinel_async = AsyncSentinel(sentinels, socket_timeout=3, decode_responses=True)
         return _sentinel_async.master_for(cfg.redis_sentinel_master, socket_timeout=3)
 
@@ -178,27 +254,25 @@ def get_redis_async(config: Optional[OrchConfig] = None) -> aioredis.Redis:
     return aioredis.Redis(connection_pool=_async_pool)
 
 
-_neo4j_driver = None
-
-
 def get_neo4j_driver(config: Optional[OrchConfig] = None):
-    """Get Neo4j driver for the orchestration database (singleton)."""
-    global _neo4j_driver
+    global _neo4j_driver, _neo4j_driver_config
+    from neo4j import GraphDatabase
+
+    cfg = config or OrchConfig()
+    config_tuple = (cfg.neo4j_uri, cfg.neo4j_user, cfg.neo4j_pass, cfg.neo4j_db)
+    if _neo4j_driver is not None and _neo4j_driver_config != config_tuple:
+        raise OrchConfigError(
+            "Neo4j driver already initialized with a different configuration; restart the process to change ORCH_NEO4J_*"
+        )
     if _neo4j_driver is None:
-        from neo4j import GraphDatabase
-        cfg = config or OrchConfig()
         if cfg.neo4j_user and cfg.neo4j_pass:
-            _neo4j_driver = GraphDatabase.driver(
-                cfg.neo4j_uri,
-                auth=(cfg.neo4j_user, cfg.neo4j_pass),
-            )
+            _neo4j_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=(cfg.neo4j_user, cfg.neo4j_pass))
         else:
             _neo4j_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=None)
+        _neo4j_driver_config = config_tuple
     return _neo4j_driver
 
 
 def get_neo4j_session(config: Optional[OrchConfig] = None):
-    """Get a Neo4j session targeting the orchestration database."""
     cfg = config or OrchConfig()
-    driver = get_neo4j_driver(cfg)
-    return driver.session(database=cfg.neo4j_db)
+    return get_neo4j_driver(cfg).session(database=cfg.neo4j_db)
