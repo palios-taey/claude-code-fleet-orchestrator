@@ -997,7 +997,6 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                   AND coalesce(t.blocked_on, '') = ''
                   AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)
                   AND ($project_id IS NULL OR proj.id = $project_id)
-                  AND coalesce(proj.status, 'active') <> 'stopped'
                   AND coalesce(proj.status, 'active') <> 'completed'
                 OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
                 WITH proj, ph, t, collect(dep) AS deps
@@ -1005,14 +1004,30 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                 RETURN t.id AS task_id, t.description AS description,
                        t.priority AS priority, t.owner AS owner,
                        t.blocked_on AS blocked_on,
+                       proj.status AS project_status,
+                       proj.user_stop_conditions AS project_user_stop_conditions,
+                       proj.stop_reason_current AS project_stop_reason_current,
                        ph.id AS phase_id, ph.name AS phase_name,
                        proj.id AS project_id, proj.name AS project_name
                 ORDER BY coalesce(proj.priority, 999999999) ASC,
                          coalesce(t.priority, 999999999) ASC,
                          t.created_at ASC
-                LIMIT 1
-            """, sess=session_id, exclude_task_id=exclude_task_id, project_id=project_id).single()
-        return dict(result) if result else None
+            """, sess=session_id, exclude_task_id=exclude_task_id, project_id=project_id)
+        for record in result:
+            candidate = dict(record)
+            project = {
+                "status": candidate.get("project_status"),
+                "user_stop_conditions": _decode_json_field(candidate.get("project_user_stop_conditions"), []),
+                "stop_reason_current": _decode_json_field(candidate.get("project_stop_reason_current"), None),
+            }
+            stop_state = _project_stop_reason_state(project)
+            if candidate.get("project_status") == "stopped" and stop_state["valid"]:
+                continue
+            candidate.pop("project_status", None)
+            candidate.pop("project_user_stop_conditions", None)
+            candidate.pop("project_stop_reason_current", None)
+            return candidate
+        return None
 
 
 def get_project_user_stop_conditions(project_id: str,
@@ -1450,29 +1465,31 @@ def create_question(question_id: str, text: str, context: str = "",
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
-        task_clause = ""
-        if task_id:
-            task_clause = """
-            WITH q
-            MATCH (t:OrchTask {id: $task_id})
-            MERGE (q)-[:CONCERNS_TASK]->(t)
-            """
-
-        result = session.run(f"""
-            MERGE (q:OrchQuestion {{id: $id}})
+        result = session.run("""
+            MERGE (q:OrchQuestion {id: $id})
             SET q.text = $text,
                 q.context = $context,
                 q.task_id = $task_id,
                 q.asked_by = $asked_by,
                 q.status = 'open',
                 q.created_at = datetime()
-            {task_clause}
-            RETURN q.id AS id
+            WITH q
+            OPTIONAL MATCH (t:OrchTask {id: $task_id})
+            FOREACH (_ IN CASE WHEN $task_id <> '' AND t IS NOT NULL THEN [1] ELSE [] END |
+                MERGE (q)-[:CONCERNS_TASK]->(t)
+            )
+            RETURN q.id AS id,
+                   CASE
+                       WHEN $task_id = '' THEN true
+                       ELSE t IS NOT NULL
+                   END AS task_exists
         """, id=question_id, text=text, context=context,
             task_id=task_id, asked_by=asked_by)
         record = result.single()
         if not record:
             raise TaskWriteError(f"Unable to create question {question_id}")
+        if task_id and not record["task_exists"]:
+            raise TaskWriteError(f"Task {task_id} not found for question {question_id}")
         return record["id"]
 def answer_question(question_id: str, answer: str, answered_by: str,
                     config: Optional[OrchConfig] = None) -> bool:

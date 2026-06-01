@@ -748,9 +748,10 @@ def main():
     cfg = r.config_get("notify-keyspace-events").get("notify-keyspace-events", "")
     needed = set("Kgl$")
     if not needed.issubset(set(cfg)):
+        merged = "".join(sorted(set(cfg) | needed))
         log.warning("notify-keyspace-events=%r is missing required flags %r; "
-                    "setting Kgl$ (run CONFIG REWRITE to persist).", cfg, "".join(needed))
-        r.config_set("notify-keyspace-events", "Kgl$")
+                    "setting %r (run CONFIG REWRITE to persist).", cfg, "".join(needed), merged)
+        r.config_set("notify-keyspace-events", merged)
 
     readiness_checker = load_readiness_checker(args.readiness_checker)
     if readiness_checker:
