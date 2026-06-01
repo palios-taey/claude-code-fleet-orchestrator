@@ -1472,6 +1472,9 @@ def create_question(question_id: str, text: str, context: str = "",
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         result = session.run("""
+            OPTIONAL MATCH (t:OrchTask {id: $task_id})
+            WITH t
+            WHERE $task_id = '' OR t IS NOT NULL
             MERGE (q:OrchQuestion {id: $id})
             SET q.text = $text,
                 q.context = $context,
@@ -1479,23 +1482,19 @@ def create_question(question_id: str, text: str, context: str = "",
                 q.asked_by = $asked_by,
                 q.status = 'open',
                 q.created_at = datetime()
-            WITH q
-            OPTIONAL MATCH (t:OrchTask {id: $task_id})
-            FOREACH (_ IN CASE WHEN $task_id <> '' AND t IS NOT NULL THEN [1] ELSE [] END |
+            FOREACH (_ IN CASE WHEN $task_id <> '' THEN [1] ELSE [] END |
                 MERGE (q)-[:CONCERNS_TASK]->(t)
             )
-            RETURN q.id AS id,
-                   CASE
-                       WHEN $task_id = '' THEN true
-                       ELSE t IS NOT NULL
-                   END AS task_exists
+            RETURN q.id AS id
         """, id=question_id, text=text, context=context,
             task_id=task_id, asked_by=asked_by)
         record = result.single()
         if not record:
+            if task_id:
+                raise TaskWriteError(f"Task {task_id} not found for question {question_id}")
             raise TaskWriteError(f"Unable to create question {question_id}")
-        if task_id and not record["task_exists"]:
-            raise TaskWriteError(f"Task {task_id} not found for question {question_id}")
+        if not record["id"]:
+            raise TaskWriteError(f"Unable to create question {question_id}")
         return record["id"]
 def answer_question(question_id: str, answer: str, answered_by: str,
                     config: Optional[OrchConfig] = None) -> bool:

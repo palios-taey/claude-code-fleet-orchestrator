@@ -46,6 +46,7 @@ peer_idle body.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -53,6 +54,7 @@ import time
 from typing import Optional
 
 from .config import OrchConfig, get_configured_product_owner_map, get_neo4j_session
+from .orch_schema import update_task_status
 
 
 class BugLockActive(Exception):
@@ -347,25 +349,15 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
         except Exception:
             current_task = None
 
-    reverted_task_id = None
     if current_task and outcome in {"error", "interrupted"}:
         task_id = current_task.get("task_id")
         if task_id:
-            cfg = OrchConfig()
-            with get_neo4j_session(cfg) as session:
-                record = session.run(
-                    """
-                    MATCH (t:OrchTask {id: $task_id})
-                    WHERE coalesce(t.status, 'pending') = 'in_progress'
-                    SET t.status = $status,
-                        t.updated_at = datetime()
-                    RETURN t.id AS id
-                    """,
-                    task_id=task_id,
-                    status="failed" if outcome == "error" else "interrupted",
-                ).single()
-            if record is not None:
-                reverted_task_id = task_id
+            update_task_status(
+                task_id,
+                "failed" if outcome == "error" else "interrupted",
+                owner=worker,
+                config=OrchConfig(),
+            )
 
     payload = {"outcome": outcome}
     if details:
@@ -373,18 +365,7 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
     try:
         r.set(_state_key(worker, "last_outcome"), json.dumps(payload))
     except Exception:
-        if reverted_task_id is not None:
-            cfg = OrchConfig()
-            with get_neo4j_session(cfg) as session:
-                session.run(
-                    """
-                    MATCH (t:OrchTask {id: $task_id})
-                    SET t.status = 'in_progress',
-                        t.updated_at = datetime()
-                    """,
-                    task_id=reverted_task_id,
-                )
-        raise
+        logging.exception("record_outcome failed to write Redis last_outcome for %s", worker)
 
 
 def check_previous_task(worker: str) -> Optional[dict]:
