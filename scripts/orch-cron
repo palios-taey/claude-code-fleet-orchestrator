@@ -76,6 +76,10 @@ try:
 except ImportError:  # py<3.9
     from backports.zoneinfo import ZoneInfo  # type: ignore
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 from lib.config import OrchConfig
 
 logging.basicConfig(
