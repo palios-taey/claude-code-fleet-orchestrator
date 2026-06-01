@@ -39,7 +39,7 @@ def _epoch_priority(created_at: Any) -> int:
         created_at = dt.datetime.fromisoformat(created_at.replace("Z", "+00:00"))
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=dt.timezone.utc)
-    return -int(created_at.timestamp())
+    return max(0, int(created_at.timestamp()))
 
 
 def _normalize_conditions(raw: Any) -> str:

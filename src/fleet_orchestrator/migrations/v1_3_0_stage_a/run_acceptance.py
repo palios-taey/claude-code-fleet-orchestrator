@@ -23,6 +23,7 @@ from neo4j import GraphDatabase
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver
 from fleet_orchestrator.dispatch import _claim_ready_orch_task
+from fleet_orchestrator.migrations.v1_3_0_stage_a.v1_3_0_stage_a_migrate import apply_migration
 from fleet_orchestrator.plan_loader import load_plan_from_text
 from fleet_orchestrator.orch_schema import (
     _ZERO_DEP_READY_CYPHER,
@@ -173,6 +174,31 @@ def main() -> int:
             """
         ).single()["count"]
     record(f"PASS legacy_migration_exempt_probe count={exempt_count}")
+
+    # 8b migration writes non-negative project priorities that the API accepts
+    migration_project, _ = _make_project("migration-priority")
+    with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+        session.run(
+            """
+            MATCH (p:OrchProject {id: $project_id})
+            SET p.priority = NULL,
+                p.priority_history = NULL,
+                p.migration_exempt = NULL
+            """,
+            project_id=migration_project,
+        )
+    apply_migration(CFG.neo4j_uri)
+    migrated = CLIENT.get(f"/api/projects/{migration_project}").json()["project"]
+    migrated_priority = migrated.get("priority")
+    patch_resp = CLIENT.patch(
+        f"/api/projects/{migration_project}",
+        json={"priority": migrated_priority + 1, "set_by": "tester", "source_surface": "api", "reason": "migration acceptance"},
+    )
+    record(
+        f"PASS migration_priority_non_negative priority={migrated_priority} patch_status={patch_resp.status_code}"
+        if isinstance(migrated_priority, int) and migrated_priority >= 0 and patch_resp.status_code == 200
+        else f"FAIL migration_priority_non_negative priority={migrated_priority} patch_status={patch_resp.status_code}"
+    )
 
     # 9 POST /api/projects without supervisor returns 400
     no_supervisor = CLIENT.post("/api/projects", json={"id": f"{prefix}missing-supervisor", "name": "bad"})
