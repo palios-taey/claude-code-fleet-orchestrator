@@ -19,3 +19,17 @@ Under the real threat model:
 DECISION: do NOT build multi-tenant auth (out of scope for a local single-user product). FIX: (1) config fail-loud, (2) ws3-localbind default, (3) honest SECURITY.md threat-model statement ("single trust domain, localhost; not hardened for mutually-untrusted tenants on a shared network; expose across a network = your responsibility to add auth/proxy"). Jesse has veto to instead request real multi-tenant security (large build).
 
 ws1 stays OPEN pending: config-fail-loud fix + SECURITY.md threat-model doc. Multi-tenant-isolation findings RECLASSIFIED non-blocking-by-design (documented, not hidden). Re-confirm with Family that the threat-model framing resolves their BLOCKERs (some may legitimately persist — e.g. config fail-loud).
+
+---
+
+## CORRECTION 2026-06-01 (Jesse): multi-tenant framing STRUCK, not reclassified.
+There is NO multi-tenant. The product is a LOCAL single-user single-machine tool. The :5002 API is local glue between the user's own CLIs (taey-task/taey-plan) + own web dashboard and the user's own Neo4j (verified: ORCH_DASHBOARD_URL=localhost:5002, app.js fetch('/api/...')). One tenant = the user. No external callers. Adopters each run their own copy on their own hardware.
+
+Therefore Cosmos/Horizon/Clarity BLOCKERs (tenant isolation, task theft, unauth mutation) are NOT real findings — they audited a public-multi-tenant-service that this is not. The cause was my packet omitting the product shape; reviewers pattern-matched "HTTP API" → "hosted service." Struck.
+
+REAL residue, total:
+- config FAIL-LOUD on malformed config (genuine even for one local user — a local misconfig shouldn't silently mis-gate). → small fix.
+- ws3-localbind: default 127.0.0.1 so it isn't needlessly on the LAN. Network HYGIENE, not a threat model. No auth.
+- SECURITY.md: state plainly "local single-user tool; runs on your machine; internal services are local + unauthenticated by design; not a hosted/multi-user service."
+
+ws1 effectively PASSES on the 2 genuine ENDORSEs (Gaia+Logos) once those 2 small items land. NO multi-tenant work. Future packets carry the product-shape header (memory: product_is_local_single_user_not_a_service) so this phantom never recurs.
