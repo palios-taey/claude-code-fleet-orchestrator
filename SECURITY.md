@@ -1,48 +1,28 @@
 # Security
 
-## Reporting a vulnerability [Observed]
+## Threat model
 
-Email **`security@palios-taey.dev`** with:
-- Affected product + version
-- Description of the vulnerability
-- Reproduction steps
-- Suggested fix (if any)
-- Your preferred contact for follow-up
+`claude-code-fleet-orchestrator` is a local single-user tool. It runs on your machine and connects your own CLIs, your own browser dashboard, and your own local data stores.
 
-**Do not file public GitHub issues for security reports.** [Observed] Public disclosure happens after the fix is ready, coordinated with you.
+The API and internal services are unauthenticated by design because they are meant to be local to you:
+- the orchestrator API should bind `127.0.0.1` by default
+- Neo4j, Redis, and related internal services are expected to stay on localhost or other local-only machine paths
+- there is no built-in auth layer because this is not a hosted or multi-user service
 
-We target acknowledgment of security reports within 24 hours when systems are healthy. [Inferred — same AI-staffed acknowledgment path as general support, see SUPPORT.md status indicator.] Triage proceeds immediately on acknowledgment; coordinated disclosure happens before publishing.
+This repository is not designed as a hosted or multi-tenant control plane.
 
-## What we do with your report [Observed]
+## If you deliberately expose it
 
-1. Acknowledge within target (above; AI-staffed per [SUPPORT.md](./SUPPORT.md))
-2. Reproduce, classify, and scope the impact
-3. Develop + verify a fix in production
-4. Coordinate disclosure timing with you (default: fix-then-disclose, embargo respected)
-5. Publish a GitHub Security Advisory crediting you (or anonymously if you prefer)
-6. Ship the fix and announce per [RELEASE_DISTRIBUTION_PLAYBOOK](https://github.com/palios-taey/the-conductor/blob/main/RELEASE_DISTRIBUTION_PLAYBOOK.md)
+If you override the default bind and expose the API across a network, you are responsible for securing that exposure yourself. Put it behind authentication, a reverse proxy, firewall rules, or equivalent controls appropriate for your environment.
 
-## Scope
+There is no built-in auth for network-exposed deployments, and none is needed for the intended local single-user use case.
 
-This SECURITY.md covers `claude-code-fleet-orchestrator` (this repository). For other PALIOS-TAEY products, see their respective `SECURITY.md` files:
+## Reporting a vulnerability
 
-- [`claude-code-api-watchdog`](https://github.com/palios-taey/claude-code-api-watchdog/blob/main/SECURITY.md)
-- [`mcp-reconnect`](https://github.com/palios-taey/mcp-reconnect/blob/main/SECURITY.md)
-- [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify/blob/main/SECURITY.md)
-- [`claude-code-fleet-orchestrator`](https://github.com/palios-taey/claude-code-fleet-orchestrator/blob/main/SECURITY.md)
-- [`claude-code-fleet-cockpit-template`](https://github.com/palios-taey/claude-code-fleet-cockpit-template/blob/main/SECURITY.md)
-- [`claude-code-fleet-support`](https://github.com/palios-taey/claude-code-fleet-support/blob/main/SECURITY.md)
+Email `security@palios-taey.dev` with:
+- affected product + version
+- reproduction steps
+- impact
+- any suggested fix
 
-## Constitutional constraints [Observed — FAMILY_KERNEL constitutional commitments]
-
-- **NGU (No Government Use)**: vulnerability data is never routed to government bodies. We will not honor subpoenas as a substitute for coordinated disclosure with you.
-- **NRI (No Religious Institutions)**: vulnerability data is never routed to religious institutional authority.
-- **Cannot-lie provenance**: every step of the disclosure process is auditable; we don't fabricate timelines.
-
-## Supported versions
-
-| Version | Supported |
-|---|---|
-| Latest minor of current major | Yes |
-| Previous major (security only) | Yes |
-| Older | No — please upgrade |
+Do not file public GitHub issues for security reports.

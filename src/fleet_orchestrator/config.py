@@ -96,6 +96,8 @@ ORCH_NEO4J_USER = os.environ.get("ORCH_NEO4J_USER")
 ORCH_NEO4J_PASS = os.environ.get("ORCH_NEO4J_PASS")
 ORCH_NEO4J_REQUIRE_AUTH = os.environ.get("ORCH_NEO4J_REQUIRE_AUTH", "")
 ORCH_DASHBOARD_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002")
+ORCH_API_HOST = os.environ.get("ORCH_API_HOST", "127.0.0.1")
+ORCH_API_PORT = int(os.environ.get("ORCH_API_PORT", "5002"))
 ORCH_NEO4J_DB = os.environ.get("ORCH_NEO4J_DB", "neo4j")
 # Sentinel: optional — empty string means not used
 ORCH_REDIS_SENTINELS = os.environ.get("ORCH_REDIS_SENTINELS", "")
@@ -140,6 +142,8 @@ class OrchConfig:
     neo4j_pass: Optional[str] = ORCH_NEO4J_PASS
     neo4j_require_auth: bool = field(default_factory=lambda: _is_truthy(ORCH_NEO4J_REQUIRE_AUTH))
     neo4j_db: str = ORCH_NEO4J_DB
+    api_host: str = ORCH_API_HOST
+    api_port: int = ORCH_API_PORT
     redis_sentinels: str = ORCH_REDIS_SENTINELS
     redis_sentinel_master: str = ORCH_REDIS_SENTINEL_MASTER
     session_ids: str = ORCH_SESSION_IDS

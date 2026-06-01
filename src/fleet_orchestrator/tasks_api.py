@@ -12,7 +12,8 @@ Endpoints:
   PATCH /api/task/{task_id}        — update status/owner
 
 Run:
-  python3 -m uvicorn conductor.tasks_api:app --host 127.0.0.1 --port 5002
+  python3 -m fleet_orchestrator.tasks_api
+  ORCH_API_HOST=<explicit-nonlocal-bind> python3 -m fleet_orchestrator.tasks_api
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -644,3 +646,16 @@ def root_redirect() -> RedirectResponse:
 
 app.mount("/ui/static", StaticFiles(directory=_UI_ROOT / "static"), name="ui-static")
 app.mount("/ui", StaticFiles(directory=_UI_ROOT, html=True), name="ui")
+
+
+def main() -> None:
+    cfg = _cfg()
+    uvicorn.run(
+        "fleet_orchestrator.tasks_api:app",
+        host=cfg.api_host,
+        port=cfg.api_port,
+    )
+
+
+if __name__ == "__main__":
+    main()
