@@ -60,6 +60,7 @@ def _reset_driver() -> None:
         except Exception:
             pass
     config_module._neo4j_driver = None
+    config_module._neo4j_driver_config = None
 
 
 def _cleanup(prefix: str) -> None:

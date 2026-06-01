@@ -63,6 +63,7 @@ from fleet_orchestrator.orch_schema import (
     set_project_stop_reason,
     set_session_pause,
     set_project_user_stop_conditions,
+    init_schema,
     update_project_priority,
     update_task_status,
     validate_task_transition,
@@ -78,6 +79,13 @@ ALLOWED_NOTIFY_TYPES = {
     "command": "command",
     "response_ready": "response_ready",
 }
+
+
+@app.on_event("startup")
+def _init_schema_on_startup() -> None:
+    results = init_schema(config=_cfg())
+    if results.get("errors"):
+        raise RuntimeError(f"init_schema failed: {results['errors']}")
 
 
 def _cfg() -> OrchConfig:

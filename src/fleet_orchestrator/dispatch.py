@@ -339,10 +339,52 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
             f"outcome must be one of {_VALID_OUTCOMES!r}, got {outcome!r}"
         )
     r = _redis_connect()
+    raw_task = r.get(_state_key(worker, "current_task"))
+    current_task = None
+    if raw_task:
+        try:
+            current_task = json.loads(raw_task)
+        except Exception:
+            current_task = None
+
+    reverted_task_id = None
+    if current_task and outcome in {"error", "interrupted"}:
+        task_id = current_task.get("task_id")
+        if task_id:
+            cfg = OrchConfig()
+            with get_neo4j_session(cfg) as session:
+                record = session.run(
+                    """
+                    MATCH (t:OrchTask {id: $task_id})
+                    WHERE coalesce(t.status, 'pending') = 'in_progress'
+                    SET t.status = $status,
+                        t.updated_at = datetime()
+                    RETURN t.id AS id
+                    """,
+                    task_id=task_id,
+                    status="failed" if outcome == "error" else "interrupted",
+                ).single()
+            if record is not None:
+                reverted_task_id = task_id
+
     payload = {"outcome": outcome}
     if details:
         payload["details"] = details[:500]
-    r.set(_state_key(worker, "last_outcome"), json.dumps(payload))
+    try:
+        r.set(_state_key(worker, "last_outcome"), json.dumps(payload))
+    except Exception:
+        if reverted_task_id is not None:
+            cfg = OrchConfig()
+            with get_neo4j_session(cfg) as session:
+                session.run(
+                    """
+                    MATCH (t:OrchTask {id: $task_id})
+                    SET t.status = 'in_progress',
+                        t.updated_at = datetime()
+                    """,
+                    task_id=reverted_task_id,
+                )
+        raise
 
 
 def check_previous_task(worker: str) -> Optional[dict]:

@@ -796,7 +796,13 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                     END,
                     p.status = CASE
                         WHEN $status = 'in_progress' THEN 'in_progress'
-                        WHEN $status IN ['completed', 'failed', 'interrupted'] AND p.status = 'in_progress' THEN 'active'
+                        WHEN $status IN ['completed', 'failed', 'interrupted']
+                             AND p.status = 'in_progress'
+                             AND NOT EXISTS {
+                                 MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(other:OrchTask)
+                                 WHERE other.id <> $task_id
+                                   AND coalesce(other.status, 'pending') = 'in_progress'
+                             } THEN 'active'
                         ELSE p.status
                     END,
                     p.updated_at = datetime()

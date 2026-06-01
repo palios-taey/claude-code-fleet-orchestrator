@@ -303,14 +303,21 @@ def get_redis_async(config: Optional[OrchConfig] = None) -> aioredis.Redis:
 
 
 _neo4j_driver = None
+_neo4j_driver_config = None
 
 
 def get_neo4j_driver(config: Optional[OrchConfig] = None):
     """Get Neo4j driver for the orchestration database (singleton)."""
-    global _neo4j_driver
+    global _neo4j_driver, _neo4j_driver_config
+    cfg = config or OrchConfig()
+    requested = (
+        cfg.neo4j_uri,
+        cfg.neo4j_user or "",
+        cfg.neo4j_pass or "",
+        bool(cfg.neo4j_require_auth),
+    )
     if _neo4j_driver is None:
         from neo4j import GraphDatabase
-        cfg = config or OrchConfig()
         if not cfg.neo4j_uri:
             raise OrchConfigError("ORCH_NEO4J_URI must be set")
         if cfg.neo4j_user and cfg.neo4j_pass:
@@ -324,6 +331,12 @@ def get_neo4j_driver(config: Optional[OrchConfig] = None):
             )
         else:
             _neo4j_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=None)
+        _neo4j_driver_config = requested
+    elif _neo4j_driver_config != requested:
+        raise OrchConfigError(
+            "get_neo4j_driver already initialized with different Neo4j config; "
+            f"existing={_neo4j_driver_config!r} requested={requested!r}"
+        )
     return _neo4j_driver
 
 
