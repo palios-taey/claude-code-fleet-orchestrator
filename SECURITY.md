@@ -1,25 +1,42 @@
 # Security
 
-## Threat model
+## Security model
 
-`claude-code-fleet-orchestrator` is a local single-user tool. It runs on your machine and connects your own CLIs, your own browser dashboard, and your own local data stores.
+`claude-code-fleet-orchestrator` is built for a local-trust deployment:
 
-The API and internal services are unauthenticated by design because they are meant to be local to you:
-- the orchestrator API should bind `127.0.0.1` by default
-- Neo4j, Redis, and related internal services are expected to stay on localhost or other local-only machine paths
-- there is no built-in auth layer because this is not a hosted or multi-user service
+- one operator
+- one machine
+- local Redis
+- local Neo4j
+- loopback API by default
 
-This repository is not designed as a hosted or multi-tenant control plane.
+The product assumes the caller is already trusted because the intended boundary is the machine itself, not an application-layer login.
 
-## If you deliberately expose it
+## What the current code does
 
-If you override the default bind and expose the API across a network, you are responsible for securing that exposure yourself. Put it behind authentication, a reverse proxy, firewall rules, or equivalent controls appropriate for your environment.
+- `tasks_api` binds to `127.0.0.1` by default
+- CLI tooling talks to that local API
+- Redis and Neo4j credentials are environment-driven
+- Neo4j may be no-auth or auth-required depending on your local setup
+- there is no built-in user/session authentication layer for the HTTP API
 
-There is no built-in auth for network-exposed deployments, and none is needed for the intended local single-user use case.
+That is intentional for the local single-user case. This repository is not a hosted control plane.
+
+## If you expose it anyway
+
+If you bind the API to a routable interface or expose the backing services over a network, you are changing the trust model yourself. At that point you need to provide your own controls, such as:
+
+- reverse-proxy authentication
+- firewall rules
+- VPN-only access
+- host-level service isolation
+
+The repository does not currently ship a first-party auth or tenancy layer for that mode.
 
 ## Reporting a vulnerability
 
 Email `security@palios-taey.dev` with:
+
 - affected product + version
 - reproduction steps
 - impact

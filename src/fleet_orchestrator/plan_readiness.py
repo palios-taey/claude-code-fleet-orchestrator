@@ -157,7 +157,7 @@ def check_readiness(supervisor: str, completed_task: dict) -> Optional[str]:
     - Zero-dep tasks (no DEPENDS_ON edges at all): never reach this
       function (they have no completion event to trigger the check) —
       they need a separate "wake-at-creation" path. Tracked in
-      docs/STATUS.md as a v0.4.1 follow-up.
+      docs/internal/STATUS.md as a v0.4.1 follow-up.
     - Already-completed deps at edge-creation time: tracked as a
       v0.4.1 follow-up; resolve at write time in
       ``orch_schema.add_dependency`` rather than here.

@@ -75,11 +75,11 @@ Currently running on the Mira fleet via `peer-respawn.sh` DAEMONS list (without 
 
 ## Phase C — Recurring task type (✅ shipped in v0.3.0)
 
-`src/fleet_orchestrator/scripts/orch_cron.py` + [`docs/SCHEMA.md`](SCHEMA.md) — first-class recurring tasks with file-tracked state and tamper-evident hash provenance.
+`src/fleet_orchestrator/scripts/orch_cron.py` + [`SCHEMA.md`](../SCHEMA.md) — first-class recurring tasks with file-tracked state and tamper-evident hash provenance.
 
 **What ships**:
 - `src/fleet_orchestrator/scripts/orch_cron.py` — drop-in replacement for static `recurring_triggers.json`-style runners. Backward-compatible with existing JSON registry format; adds optional `state_file` per trigger that becomes an append-only JSONL audit log of fires.
-- `docs/SCHEMA.md` — formal task model. One `OrchTask` label, kind-aware status enum (`one_shot` → `{pending,in_progress,completed,failed,blocked}`; `recurring` → `{active,paused,retired}` NEVER `completed`). Reserves `(:OrchTask)-[:FIRED]->(:OrchRecurringFire)` for v0.4+ per-fire visibility.
+- [`SCHEMA.md`](../SCHEMA.md) — formal task model. One `OrchTask` label, kind-aware status enum (`one_shot` → `{pending,in_progress,completed,failed,blocked}`; `recurring` → `{active,paused,retired}` NEVER `completed`). Reserves `(:OrchTask)-[:FIRED]->(:OrchRecurringFire)` for v0.4+ per-fire visibility.
 - Hash-on-fire sidecar — every fire that writes the state file also writes `<state_file>.meta.json` with `last_fire_log_hash` (SHA-256 of the full appended file), `last_fire_ts`, `last_fire_id`, `last_fire_size_bytes`. Tamper-evident integrity without graph bloat.
 
 **Family Phase C consultation 2026-05-26 (both amendments load-bearing)**:
