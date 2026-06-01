@@ -38,7 +38,8 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install .
+          python3 -c "import fleet_orchestrator; print(fleet_orchestrator.__version__)"
           for cli in orch-cron orch-watch taey-plan taey-task; do
-            command -v "$cli" >/dev/null || { echo "MISSING entry point: $cli"; exit 1; }
+            command -v "$cli" >/dev/null || { echo \"MISSING entry point: $cli\"; exit 1; }
+            "$cli" --help >/dev/null
           done
-          python3 -c "import fleet_orchestrator; print('import OK')"
