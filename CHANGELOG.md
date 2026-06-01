@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.0 - in progress on `release/v1.4.0-production-grade`
+
+- Hardened the package/install surface around the real `src/` layout, console entry points, and clean-install verification, then added CI enforcement so both the integrity gate and a fresh `pip install .` plus CLI-help check run on every push.
+- Fixed multiple commit-then-fail state divergence bugs by enforcing the same invariant at each layer: validate before the durable write, and do not rewrite authoritative Neo4j state to compensate for a failed secondary signal write.
+- Routed `dispatch.record_outcome()` through the canonical task transition path, removed the Redis-failure compensation branch, prevented orphan `OrchQuestion` nodes on missing-task question creation, and made `update_task_status()` atomic so task and parent-project recompute succeed or roll back together.
+
 ## v1.2.1 - 2026-05-30
 
 - Fixed the v1.2.0 session-card selection bug by making the active state session-based instead of project-based, so idle sessions sharing a default project no longer co-highlight.

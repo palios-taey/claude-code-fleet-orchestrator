@@ -1,10 +1,12 @@
-"""
-Orchestration Configuration
+"""Configuration helpers for the local fleet orchestrator runtime.
 
-Orch-specific Redis/Neo4j connections with strict namespace isolation.
-All Redis keys are prefixed with 'orch:'. Neo4j uses 'orchestration' database.
+This module owns the orchestrator's Redis/Neo4j connection settings and the
+`orch:` key namespace used by orchestrator-managed Redis data. It does not own
+the separate `taey:` session-state keys written by the fleet-notify transport.
 
-ISOLATION: Zero shared state with memory infrastructure (ISMA, HMM, Weaviate).
+Deployment model: one trusted operator on one machine. The default API bind is
+loopback, Redis defaults to localhost, and Neo4j may be either local no-auth or
+local auth depending on the operator's environment.
 """
 
 import json
@@ -79,16 +81,9 @@ def _load_env_defaults() -> None:
 
 _load_env_defaults()
 
-# Environment overrides with sensible localhost defaults so module-level
-# imports don't KeyError if the .env loader missed a path (race condition
-# observed by x-claude 2026-05-26: first import of orch-watch failed with
-# KeyError ORCH_REDIS_HOST; subsequent loads succeeded). Defaults match
-# the typical single-machine fleet layout. Production deployments should
-# override via .env or environment; the default-presence is a safety
-# net that lets imports succeed even if config is missing, so the failure
-# manifests at OrchConfig() use time (with a clear connection error)
-# rather than at import time (with a cryptic KeyError that masks the
-# actual call site).
+# Local defaults keep imports deterministic on a single-machine install even if
+# the environment loader misses a `.env` path. Required settings still fail
+# loud when OrchConfig or a connection helper is actually used.
 ORCH_REDIS_HOST = os.environ.get("ORCH_REDIS_HOST", "127.0.0.1")
 ORCH_REDIS_PORT = int(os.environ.get("ORCH_REDIS_PORT", "6379"))
 ORCH_NEO4J_URI = os.environ.get("ORCH_NEO4J_URI")
@@ -134,7 +129,7 @@ def _parse_sentinels(raw: str):
 
 @dataclass
 class OrchConfig:
-    """Orchestration layer configuration."""
+    """Runtime configuration for the local orchestrator process set."""
     redis_host: str = ORCH_REDIS_HOST
     redis_port: int = ORCH_REDIS_PORT
     neo4j_uri: Optional[str] = ORCH_NEO4J_URI
@@ -177,7 +172,7 @@ class OrchConfig:
 
 
 def key(suffix: str) -> str:
-    """Generate a namespaced Redis key. All orch keys go through here."""
+    """Return an `orch:`-prefixed Redis key for orchestrator-owned state."""
     return f"{KEY_PREFIX}{suffix}"
 
 
@@ -255,7 +250,7 @@ _sentinel_sync = None
 
 
 def get_redis_sync(config: Optional[OrchConfig] = None) -> redis.Redis:
-    """Get synchronous Redis client. Uses Sentinel if configured, direct otherwise."""
+    """Return a synchronous Redis client for orchestrator-owned state."""
     global _sync_pool, _sentinel_sync
     cfg = config or OrchConfig()
     sentinels = _parse_sentinels(cfg.redis_sentinels)
