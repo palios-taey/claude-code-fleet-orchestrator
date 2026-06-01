@@ -38,3 +38,12 @@ ws1 effectively PASSES on the 2 genuine ENDORSEs (Gaia+Logos) once those 2 small
 ## config-fail-loud FIXED @ 0ea4f5d (Gaia's lone ENDORSE gate) — 2026-06-01
 _parse_product_owner_map (config.py:210): blank→{} (intentional); valid json/kv→dict; MALFORMED nonempty→raise OrchConfigError. Behaviorally verified (UNSET={}, KV={'a':'b'}, JSON={'a':'b'}, MALFORMED→RAISED). codex also handles json-parses-but-not-dict (edge beyond Gaia's repro). Gate CLEAN, origin==local.
 ws1 correctness COMPLETE. Remaining ws1 = ws3-localbind (default 127.0.0.1) + SECURITY.md (local-single-user threat model) — then ws1 closes. NO multi-tenant.
+
+---
+## ws3-localbind + SECURITY.md DONE @ 7b55adb — ws1 functionally COMPLETE (2026-06-01)
+- Default API bind = 127.0.0.1 (tasks_api.py); ORCH_API_HOST=<explicit> opt-in override for deliberate network exposure. ZERO 0.0.0.0 in shipped python.
+- SECURITY.md states real threat model: local single-user, internal services no-auth by design, not hosted/multi-user, network-exposure = user's responsibility.
+- PROD validated (codex): fresh start → LISTEN 127.0.0.1:5002 only; curl 127.0.0.1 ok; curl 127.0.0.1 connection-refused. Gate CLEAN, origin==local.
+- DRIFT (logged, NOT a shipped-product blocker): /path/to/repo still has --host 0.0.0.0 — that's the FLEET-LOCAL launcher (why the live Mira process binds 0.0.0.0), outside the orchestrator repo. Fix at deploy time so live matches shipped default; not in the release artifact.
+
+ws1 items ALL complete: de-umbilical (F4), multitenant→config (F25/F26), config-fail-loud, localbind, SECURITY.md. Remaining: Family re-confirm under correct (local-single-user) threat model → ws1 CLOSES → ws2.
