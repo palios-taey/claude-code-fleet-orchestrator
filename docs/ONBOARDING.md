@@ -35,6 +35,7 @@ parallel work, or (c) a declared stop condition (e.g. needs-human).
 ## 1. Install
 
 ```bash
+python -m venv .venv && source .venv/bin/activate   # isolate from system Python
 pip install .
 ```
 
@@ -72,6 +73,20 @@ more than one):
 
 > `ORCH_API_HOST` defaults to `127.0.0.1` deliberately. Binding a routable
 > interface exposes the no-auth API to your network — only do it knowingly.
+
+A minimal local `.env` (everything except `ORCH_NEO4J_URI` can be omitted to
+take the localhost defaults):
+
+```bash
+# .env  (loaded automatically; or point ORCH_DOTENV at it)
+export ORCH_NEO4J_URI=bolt://127.0.0.1:7687
+# export ORCH_NEO4J_USER=neo4j        # only if your Neo4j requires auth
+# export ORCH_NEO4J_PASS=...          # only if your Neo4j requires auth
+```
+
+```bash
+source .env
+```
 
 ## 3. Start the tasks API
 
@@ -117,25 +132,30 @@ taey-plan stop-conditions your-project-id set blocked-on-worker blocker-found-ne
    ```
 
 2. **The session works the task.** When it finishes, it records evidence —
-   a task cannot transition to `completed` without a commit SHA and/or a
+   a task cannot transition to `completed` without **both** a commit SHA and a
    production observation (self-reported "done" with no evidence is rejected;
    that is the feature that makes the fleet trustworthy unattended):
 
    ```bash
-   taey-task update <task-id> completed
+   taey-task update <task-id> completed \
+     --commit-sha <sha> \
+     --production-observation "what you observed in production"
    ```
 
 3. **It cannot silently idle.** If the session tries to stop while it still
    owns ready work, the Stop hook blocks the stop and hands it the next task.
-   If it is legitimately waiting on another worker, it declares that instead:
+   If it is legitimately waiting on another worker, it records that on the
+   task it is holding so the wait is intentional rather than a silent stall:
 
    ```bash
-   taey-stop-reason set your-project-id --condition blocked-on-worker \
-     --detail "waiting on <worker> to finish <task>; no parallel work"
+   taey-task update <task-id> in_progress \
+     --blocked-on "waiting on <worker> to finish <task>; no parallel work"
    ```
 
    A worker reporting back (via the fleet-notify inbox) wakes the session and
-   the loop continues — no human in the loop.
+   the loop continues — no human in the loop. (At the project level you can
+   also declare allowed supervisor stop conditions with
+   `taey-plan stop-conditions <project-id> set ...`, per step 4.)
 
 ## 6. The integrity gate (the differentiator)
 
