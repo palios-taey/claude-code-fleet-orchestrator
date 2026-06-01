@@ -33,3 +33,8 @@ REAL residue, total:
 - SECURITY.md: state plainly "local single-user tool; runs on your machine; internal services are local + unauthenticated by design; not a hosted/multi-user service."
 
 ws1 effectively PASSES on the 2 genuine ENDORSEs (Gaia+Logos) once those 2 small items land. NO multi-tenant work. Future packets carry the product-shape header (memory: product_is_local_single_user_not_a_service) so this phantom never recurs.
+
+---
+## config-fail-loud FIXED @ 0ea4f5d (Gaia's lone ENDORSE gate) — 2026-06-01
+_parse_product_owner_map (config.py:210): blank→{} (intentional); valid json/kv→dict; MALFORMED nonempty→raise OrchConfigError. Behaviorally verified (UNSET={}, KV={'a':'b'}, JSON={'a':'b'}, MALFORMED→RAISED). codex also handles json-parses-but-not-dict (edge beyond Gaia's repro). Gate CLEAN, origin==local.
+ws1 correctness COMPLETE. Remaining ws1 = ws3-localbind (default 127.0.0.1) + SECURITY.md (local-single-user threat model) — then ws1 closes. NO multi-tenant.
