@@ -1,129 +1,152 @@
 # claude-code-fleet-orchestrator
 
-> Turn scattered AI terminals into a supervised tmux fleet: dispatch work to Claude Code / Codex / Gemini / Grok / any **hookable** REPL CLI, get `done`/`error`/`interrupted` outcomes back inline so the supervisor can update the plan instead of babysitting panes.
+`claude-code-fleet-orchestrator` is a local stop-discipline orchestrator for one operator running their own Claude Code fleet on one machine.
 
-Current version: **v1.2.1** (the `/ui/` browser surface is now session-first and includes a bottom-bar notify form that shells through `taey-notify`, while task/plan mutations still stay in the CLI/API surfaces — see [`docs/STATUS.md`](docs/STATUS.md)).
+It keeps sessions on-task without requiring a human to re-dispatch work after every stop:
 
-Built on top of [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (≥ v1.0.0), which provides the message transport (Redis inbox, daemon, tmux-send, per-CLI Stop hooks). This repo adds the supervisor-worker coordination layer.
+- the task graph lives in Neo4j
+- session inbox/idle state lives in Redis
+- `orch-watch` reacts to stop/idle transitions
+- the task/plan CLIs and API expose the shared work graph
+- the integrity gate blocks silent-fallback patterns mechanically
 
-**Scope**: terminal-native hookable REPL CLIs only — IDE-embedded agents (Cursor, etc.) and many-to-many distributed topologies are NOT in scope; see [fleet-notify's scope section](https://github.com/palios-taey/claude-code-fleet-notify#scope-what-this-is-and-what-this-isnt).
+Package version in this branch: `1.4.0`.
+
+## What It Is
+
+This repository is for the local, single-user, single-machine case:
+
+- one operator
+- one trusted machine
+- one local Redis
+- one local Neo4j
+- multiple local CLI sessions coordinating through one task graph
+
+It is not a hosted service, not a multi-tenant control plane, and not an auth-first web app. The default trust boundary is localhost.
 
 ## Why
 
-You spawn a worker CLI in another tmux pane (codex, gemini, grok, a second Claude Code, anything driven by a REPL prompt). You dispatch a task. Then nothing — the supervisor session doesn't know if the worker received the task, doesn't know when it starts, doesn't know when it finishes, doesn't see the outcome inline. So you keep tabbing between panes, or you give up and write everything from one session.
+Without an orchestrator, a worker session stops and the operator has to notice, inspect state, decide whether there is more ready work, and manually wake the next step.
 
-This product closes that gap with one primitive: **the worker's Stop hook is the universal notifier**. Don't trust the worker to call `taey-notify` manually — make the Stop hook do it for every CLI, with the completed task's content embedded in the notify body (the hook implementation lives in `fleet-notify`; this package adds the dispatcher-side `current_task` write so the hook has something to report).
+This package closes that loop:
 
-Layered on top: an event-driven watchloop (Redis keyspace listener — fires only on state changes, no poll spam) and a recurring-task runner with file-tracked state + hash-on-fire provenance.
+- `dispatch.py` records active work for worker sessions
+- the companion `claude-code-fleet-notify` hooks report stop outcomes
+- `orch-watch` decides whether the session or supervisor should be woken
+- `taey-plan` / `taey-task` expose the current and next-ready work graph
 
-## What's shipped (v0.4.x)
-
-| Component | Purpose | Phase |
-|---|---|---|
-| `src/fleet_orchestrator/dispatch.py` | `dispatch()` / `record_outcome()` / `check_previous_task()` / `clear_current_task()`. Writes `taey:<worker>:current_task` atomically with stale-outcome + stuck-dedup clear, performs the spec §3.1 bug-lock pre-check before any worker-state mutation, and as of `v1.0.5` conditionally claims OrchTasks in Neo4j before the Redis write so blocked tasks cannot slip through on a stale readiness snapshot. | A — v0.1.0, updated in v1.0.5 |
-| `src/fleet_orchestrator/scripts/orch_watch.py` | Event-driven supervisor wake daemon. PSUBSCRIBE on `current_task` / `idle` / `last_activity` keyspace notifications + 30-min safety-net sweep. Fires high-priority `peer_idle` escalations on stuck workers (idle + unresolved `current_task` for > threshold) and optional `wake` messages on done-DEL when a configurable readiness-checker says the completion unblocked an OrchTask the supervisor owns. | B — v0.2.0 / v0.2.1 |
-| `src/fleet_orchestrator/scripts/orch_cron.py` | Recurring-task runner. Drop-in replacement for static `recurring_triggers.json`-style cron runners. Adds optional `state_file` per trigger (append-only JSONL audit log) + SHA-256 hash-on-fire sidecar (`<state_file>.meta.json`) so the file pointer is tamper-evident. | C — v0.3.0 |
-| `docs/SCHEMA.md` | Task model spec. One `OrchTask` label, kind-aware status enum (`one_shot` ∈ {pending,in_progress,completed,failed,blocked}; `recurring` ∈ {active,paused,retired} — NEVER completed); reserves `(:OrchTask)-[:FIRED]->(:OrchRecurringFire)` for v0.4+ per-fire visibility. | C — v0.3.0 |
-
-The Stop hook itself lives in [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) (`hooks/_shared.py:action_stop` + per-CLI hook variants for Claude Code / codex / gemini; Grok inherits Claude Code automatically). This package is the dispatcher-side counterpart that writes the keys the hook reads.
-
-## What shipped in v0.4.0 (Phase D — plan tracker + default readiness checker)
-
-| Component | Purpose |
-|---|---|
-| `src/fleet_orchestrator/orch_schema.py` | Neo4j schema implementation of [`docs/SCHEMA.md`](docs/SCHEMA.md): OrchProject ↔ OrchPhase ↔ OrchTask DAG with kind-aware status, dependency ready-task discovery, phase-completion cascade, session current/next-ready, and creation-time zero-dep wake for idle owners. |
-| `src/fleet_orchestrator/plan_loader.py` | Markdown plan ingest (idempotent, content-hash provenance). |
-| `src/fleet_orchestrator/tasks_api.py` | FastAPI app on `:5002` — `/api/tasks`, `/api/projects`, `/api/projects/{id}/user-stop-conditions`, `/api/projects/load-md`, `/api/sessions/{sid}/current\|next-ready`, `/api/sessions/{sid}/projects`, `/api/sessions/{sid}/notify`, plus `/ui/` and `/ui/static/*` for the browser surface. |
-| `src/fleet_orchestrator/config.py` | `OrchConfig` + Redis/Neo4j connection helpers; path-flexible `.env` loading. `ORCH_NEO4J_URI` is required. By default the driver uses `auth=None`; if a deployment requires auth, set both `ORCH_NEO4J_USER` and `ORCH_NEO4J_PASS` or opt into fail-loud enforcement with `ORCH_NEO4J_REQUIRE_AUTH=1`. |
-| `src/fleet_orchestrator/plan_readiness.py` | **Default readiness checker** for `orch-watch --readiness-checker`. LOOSE semantic (wake only on blocked→ready transition); self-loop exclusion; SETNX dedup for concurrent finals. |
-| `src/fleet_orchestrator/scripts/taey_plan.py` | CLI: project list / show / current / next-ready / ingest-md / assign / stop-conditions get\|set. |
-| `src/fleet_orchestrator/scripts/taey_task.py` | CLI: task create / update / list / delegate. |
-| `ui/` | Static HTML/CSS/JS session-first plan UI mounted under `/ui/`. Polls every 5s with a pause toggle and includes a bottom-bar session notify form. |
-
-### Default readiness checker
-
-`orch-watch` v0.2.1+ accepts `--readiness-checker module_path_or_file:function`. Wiring it to the v0.4.0 default:
-
-```bash
-orch-watch \
-    --readiness-checker fleet_orchestrator.plan_readiness:check_readiness
-```
-
-Now when a worker finishes cleanly (Stop hook CAS-clears `current_task` on outcome=done), `orch-watch` queries Neo4j: does any OrchTask owned by the supervisor have a `DEPENDS_ON` edge to the completed task AND all OTHER deps already complete? If yes AND supervisor is idle, page them. LOOSE semantics, so a task with N deps completing in sequence wakes the supervisor exactly once (on the Nth completion, not all N).
-
-> **v1.0.5 note**: the zero-dep wake gap from the original v0.4.1 follow-up plan is now closed. The remaining queued edge from that note is the already-completed-deps-at-edge-creation wake in `add_dependency`; the May 28 dispatch instead prioritized a stricter dispatch-time ready-claim guard so blocked tasks cannot be assigned from a stale view.
+The differentiator is the integrity gate: “works or fails loud” is enforced by code review automation and CI, not by operator discipline alone.
 
 ## Install
 
-```bash
-# 1. Install the transport dependency first (covers Claude Code / codex / gemini / grok hooks)
-git clone https://github.com/palios-taey/claude-code-fleet-notify.git
-cd claude-code-fleet-notify
-sudo make install
-bash scripts/install-hooks.sh --all --apply
-bash scripts/start_notify_daemons.sh start
+Prerequisites:
 
-# 2. Install this orchestrator
-cd ..
-git clone https://github.com/palios-taey/claude-code-fleet-orchestrator.git
-cd claude-code-fleet-orchestrator
+- Python `3.10+`
+- Redis reachable from this machine
+- Neo4j reachable from this machine
+- the companion transport package [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify) installed for the stop-hook and inbox runtime
 
-# 3. Enable Redis keyspace notifications for orch-watch
-redis-cli CONFIG SET notify-keyspace-events 'Kgl$'
-redis-cli CONFIG REWRITE   # persist
-
-# 4. Start orch-watch (one per machine)
-orch-watch --redis-host 127.0.0.1 &
-```
-
-## Usage
-
-```python
-from fleet_orchestrator.dispatch import dispatch, record_outcome, check_previous_task, clear_current_task
-
-# Supervisor side
-prev = check_previous_task('treasurer-codex')
-if prev:
-    # Previous dispatch did not complete cleanly (outcome != done left
-    # current_task in place). Decide: retry, investigate, or cancel.
-    ...
-
-dispatch(
-    worker='treasurer-codex',
-    task_id='scout-cycle-22',
-    description='Scout r/MachineLearning for acute-pain replies',
-    supervisor='treasurer',     # written to taey:treasurer-codex:parent
-)
-
-# Worker side, just before stopping
-record_outcome('treasurer-codex', 'done', 'found 3 qualifying targets, posted 2 replies')
-
-# When the worker stops, its Stop hook (in fleet-notify) reads current_task
-# + last_outcome and pushes a single peer_idle message to the supervisor's
-# inbox with outcome inline. Zero context-switch.
-```
+Install from the repo root:
 
 ```bash
-# Recurring tasks via JSON registry (orch-cron)
-cat > /etc/orch/recurring.json <<EOF
-{
-  "triggers": [{
-    "id": "x-claude-cycle",
-    "session": "x-claude",
-    "tz": "America/New_York",
-    "minute": 9,
-    "hours": [8, 10, 12, 14, 16, 18, 20, 22],
-    "prompt_file": "/path/to/repo",
-    "state_file": "/var/log/orch/x-claude.jsonl",
-    "enabled": true,
-    "status": "active"
-  }]
-}
-EOF
-
-# Run from system cron (every minute) — exact-minute match
-* * * * * /usr/local/bin/orch-cron --registry /etc/orch/recurring.json
+python3 -m venv .venv
+source .venv/bin/activate
+pip install .
 ```
+
+The install provides four console entry points:
+
+- `orch-cron`
+- `orch-watch`
+- `taey-plan`
+- `taey-task`
+
+The tasks API is started as a module:
+
+```bash
+python -m fleet_orchestrator.tasks_api
+```
+
+## Five-Minute Quickstart
+
+1. Install the package.
+
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install .
+   ```
+
+2. Start the local API on loopback.
+
+   ```bash
+   python -m fleet_orchestrator.tasks_api
+   ```
+
+3. In another shell, verify the API is up.
+
+   ```bash
+   curl http://127.0.0.1:5002/health
+   ```
+
+4. Verify the installed entry points.
+
+   ```bash
+   orch-cron --help
+   orch-watch --help
+   taey-plan --help
+   taey-task --help
+   ```
+
+5. Inspect work once your graph is configured.
+
+   ```bash
+   taey-plan current
+   taey-plan next
+   ```
+
+## Runtime Pieces
+
+| Component | Path | Purpose |
+| --- | --- | --- |
+| Tasks API | `src/fleet_orchestrator/tasks_api.py` | FastAPI service on `127.0.0.1:5002` by default, plus the `/ui/` browser surface |
+| Graph model | `src/fleet_orchestrator/orch_schema.py` | Neo4j schema and state transitions for projects, phases, tasks, and questions |
+| Plan ingest | `src/fleet_orchestrator/plan_loader.py` | Markdown plan ingest into the graph |
+| Dispatch/state | `src/fleet_orchestrator/dispatch.py` | Redis dispatch wire plus worker outcome recording |
+| Readiness | `src/fleet_orchestrator/plan_readiness.py` | Readiness checker used by `orch-watch` |
+| Daemons | `src/fleet_orchestrator/scripts/orch_watch.py`, `src/fleet_orchestrator/scripts/orch_cron.py` | Event-driven watch loop and recurring wake runner |
+
+## Configuration
+
+`src/fleet_orchestrator/config.py` loads environment defaults from `.env` candidates and then reads the live process environment.
+
+Load-bearing settings:
+
+- `ORCH_NEO4J_URI`
+- `ORCH_NEO4J_USER` / `ORCH_NEO4J_PASS` when your Neo4j requires auth
+- `ORCH_NEO4J_REQUIRE_AUTH=1` if you want missing auth to fail loud
+- `ORCH_REDIS_HOST` / `ORCH_REDIS_PORT`
+- `ORCH_API_HOST` / `ORCH_API_PORT`
+
+The default API bind is `127.0.0.1:5002`.
+
+## Documentation
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — runtime shape and data flow
+- [SCHEMA.md](SCHEMA.md) — actual Neo4j node/relationship model and priority convention
+- [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md) — markdown plan ingest format
+- [CHANGELOG.md](CHANGELOG.md) — branch and release history
+- [SECURITY.md](SECURITY.md) — local-trust security model
+
+## Integrity Gate
+
+Run the repository gate locally with:
+
+```bash
+python3 tools/lint_no_silent_fallbacks.py --all
+```
+
+CI runs the same gate and also verifies that a clean `pip install .` exposes all four CLI entry points.
 
 ## License
 
