@@ -252,6 +252,11 @@ def _state_key(node_id: str, suffix: str) -> str:
     return f"{prefix}:{node_id}:{suffix}"
 
 
+_STOP_BLOCK_CONVERGENCE_LIMIT = 3
+_STOP_BLOCK_TTL_SECS = 3600
+WAKE_ALLOW_STOP = "ALLOW_STOP"
+
+
 def _send_wake(owner: str, body: str) -> None:
     cli = OrchConfig().notify_cli_path
     result = subprocess.run(
@@ -288,6 +293,218 @@ def _wake_owner_for_zero_dep_task(task_id: str, cfg: OrchConfig) -> None:
         f"and is ready now. Pick it up with `taey-plan next` or dispatch a worker."
     )
     _send_wake(owner, body)
+
+
+def _stop_block_marker_key(node_id: str) -> str:
+    return _state_key(node_id, "stop_blocked_task")
+
+
+def _stop_block_count_key(node_id: str) -> str:
+    return _state_key(node_id, "stop_block_count")
+
+
+def _session_pause_active(session_id: str, config: Optional[OrchConfig] = None) -> bool:
+    from .config import get_redis_sync
+
+    cfg = config or OrchConfig()
+    r = get_redis_sync(cfg)
+    return bool(r.exists(_state_key(session_id, "pause")))
+
+
+def _resolve_supervisor_session(session_id: str, config: Optional[OrchConfig] = None) -> str:
+    from .config import get_redis_sync
+
+    cfg = config or OrchConfig()
+    r = get_redis_sync(cfg)
+    try:
+        explicit = r.get(_state_key(session_id, "parent"))
+    except Exception:
+        explicit = None
+    if explicit:
+        return str(explicit)
+    for suffix in ("-codex", "-gemini", "-grok", "-claude"):
+        if session_id.endswith(suffix):
+            base = session_id[: -len(suffix)]
+            if base:
+                return base
+    return session_id
+
+
+def _observed_stop_task_id(session_id: str, config: Optional[OrchConfig] = None) -> Optional[str]:
+    from .config import get_redis_sync
+
+    cfg = config or OrchConfig()
+    r = get_redis_sync(cfg)
+    raw = r.get(_state_key(session_id, "current_task"))
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    task_id = payload.get("task_id")
+    return str(task_id) if task_id else None
+
+
+def _task_blocked_on(task_id: Optional[str], config: Optional[OrchConfig] = None) -> Optional[str]:
+    if not task_id:
+        return None
+    task = get_task(task_id, config=config)
+    if not task:
+        return None
+    blocked_on = task.get("blocked_on")
+    if blocked_on in (None, "", "null"):
+        return None
+    return str(blocked_on)
+
+
+def _queue_block_reason(task_id: Optional[str], description: Optional[str]) -> str:
+    task_id_value = task_id or "unknown-task"
+    task_title = (description or "untitled task")[:80]
+    return (
+        "You have ready work and must continue, not stop. "
+        f"Next task: {task_id_value} — {task_title}. "
+        "Pick it up via taey-queue next / taey-plan next and do it. "
+        "Do NOT stop until all supervised projects are completed or have a valid "
+        "stop_reason matching a user_stop_condition. Setting blocked-on / "
+        "waiting-on-worker is NOT a stop reason if parallel ready work exists."
+    )
+
+
+def _reason_required_block_reason(active_conditions: list[dict[str, Any]]) -> str:
+    labels = [str(cond.get("label")) for cond in active_conditions if cond.get("label")]
+    labels_text = ", ".join(labels) if labels else "no active user_stop_conditions"
+    return (
+        "You are trying to stop with no ready work and no valid stop_reason. "
+        "Either there IS work (re-check taey-plan next) or you must set a stop_reason "
+        f"matching one of: {labels_text}. You cannot stop otherwise."
+    )
+
+
+def _raw_stop_decision(session_id: str,
+                       config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    cfg = config or OrchConfig()
+    supervisor = _resolve_supervisor_session(session_id, config=cfg)
+    ready_owner = session_id
+    if _session_pause_active(supervisor, config=cfg):
+        return {"block": False, "reason": None, "wake_type": WAKE_ALLOW_STOP, "task_id": None}
+
+    projects = sorted(
+        get_session_supervised_projects(supervisor, config=cfg),
+        key=lambda project: project.get("priority") if project.get("priority") is not None else 999999999,
+    )
+
+    for project in projects:
+        status = str(project.get("status") or "active")
+        if status == "completed":
+            continue
+        next_ready = get_session_next_ready(ready_owner, project_id=str(project.get("id")), config=cfg)
+        if next_ready:
+            task_id = next_ready.get("task_id") or next_ready.get("id")
+            return {
+                "block": True,
+                "reason": _queue_block_reason(task_id, next_ready.get("description")),
+                "wake_type": "WAKE_WITH_QUEUE",
+                "task_id": task_id,
+                "project_id": project.get("id"),
+                "phase_id": next_ready.get("phase_id"),
+                "task_priority": next_ready.get("priority"),
+                "task_title_short": (str(next_ready.get("description") or "")[:80] or None),
+            }
+
+    blocked_on = _task_blocked_on(_observed_stop_task_id(session_id, config=cfg), config=cfg)
+    if blocked_on:
+        return {
+            "block": False,
+            "reason": None,
+            "wake_type": WAKE_ALLOW_STOP,
+            "task_id": None,
+            "blocked_on": blocked_on,
+        }
+
+    reason_required: Optional[Dict[str, Any]] = None
+    for project in projects:
+        status = str(project.get("status") or "active")
+        if status == "completed":
+            continue
+        active_conditions = _active_conditions(list(project.get("user_stop_conditions") or []))
+        stop_state = _project_stop_reason_state(project)
+        if not active_conditions and project.get("user_stop_conditions"):
+            continue
+        if status == "stopped" and stop_state["valid"]:
+            continue
+        if stop_state["valid"]:
+            continue
+        if not active_conditions:
+            continue
+        if reason_required is None:
+            reason_required = {
+                "block": True,
+                "reason": _reason_required_block_reason(active_conditions),
+                "wake_type": "WAKE_REASON_REQUIRED",
+                "task_id": None,
+                "project_id": project.get("id"),
+                "available_conditions": [
+                    {
+                        "condition_id": cond.get("id"),
+                        "version": cond.get("version"),
+                        "label": cond.get("label"),
+                    }
+                    for cond in active_conditions
+                ],
+            }
+
+    if reason_required is not None:
+        return reason_required
+    return {"block": False, "reason": None, "wake_type": WAKE_ALLOW_STOP, "task_id": None}
+
+
+def get_session_stop_decision(session_id: str,
+                              stop_hook_active: bool = False,
+                              config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    from .config import get_redis_sync
+
+    cfg = config or OrchConfig()
+    decision = _raw_stop_decision(session_id, config=cfg)
+    if not stop_hook_active:
+        return decision
+
+    r = get_redis_sync(cfg)
+    marker_key = _stop_block_marker_key(session_id)
+    count_key = _stop_block_count_key(session_id)
+
+    if not decision.get("block"):
+        r.delete(marker_key, count_key)
+        return decision
+
+    marker_value = str(
+        decision.get("task_id")
+        or decision.get("project_id")
+        or decision.get("wake_type")
+        or "unknown"
+    )
+    previous_marker = r.get(marker_key)
+    if previous_marker is not None:
+        previous_marker = str(previous_marker)
+    if previous_marker == marker_value:
+        try:
+            block_count = int(r.get(count_key) or 0) + 1
+        except (TypeError, ValueError):
+            block_count = 1
+    else:
+        block_count = 1
+
+    r.set(marker_key, marker_value, ex=_STOP_BLOCK_TTL_SECS)
+    r.set(count_key, str(block_count), ex=_STOP_BLOCK_TTL_SECS)
+    decision["convergence_count"] = block_count
+    if block_count >= _STOP_BLOCK_CONVERGENCE_LIMIT:
+        decision["block"] = False
+        decision["reason"] = None
+        decision["wake_type"] = WAKE_ALLOW_STOP
+        decision["task_id"] = None
+        decision["converged_allow"] = True
+        r.delete(marker_key, count_key)
+    return decision
 
 
 def init_schema(config: Optional[OrchConfig] = None) -> Dict[str, Any]:

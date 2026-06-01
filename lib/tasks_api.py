@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -54,6 +54,7 @@ from lib.orch_schema import (
     get_ready_tasks,
     get_session_current_work,
     get_task as load_task_record,
+    get_session_stop_decision,
     get_task_phase,
     set_project_stop_reason,
     set_session_pause,
@@ -441,6 +442,12 @@ def session_projects(session_id: str) -> Dict[str, Any]:
 @app.get("/api/sessions/{session_id}/stop-status")
 def session_stop_status(session_id: str) -> Dict[str, Any]:
     result = get_session_stop_status(session_id, config=_cfg())
+    return {"session": session_id, **result}
+
+
+@app.get("/api/sessions/{session_id}/stop-decision")
+def session_stop_decision(session_id: str, stop_hook_active: bool = Query(default=False)) -> Dict[str, Any]:
+    result = get_session_stop_decision(session_id, stop_hook_active=stop_hook_active, config=_cfg())
     return {"session": session_id, **result}
 
 
