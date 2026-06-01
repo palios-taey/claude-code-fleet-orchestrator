@@ -659,7 +659,8 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     production_observation_value = "__KEEP__" if production_observation is None else production_observation.strip()
     evidence_note_value = "__KEEP__" if evidence_note is None else evidence_note.strip()
     with driver.session(database=cfg.neo4j_db) as session:
-        current_record = session.run(
+        def _tx_update(tx):
+            current_record = tx.run(
                 """
                 MATCH (t:OrchTask {id: $task_id})
                 RETURN coalesce(t.status, 'pending') AS status,
@@ -668,24 +669,24 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                 """,
                 task_id=task_id,
             ).single()
-        if current_record is None:
-            return False
+            if current_record is None:
+                return False
 
-        validate_task_transition(
-            str(current_record["status"] or "pending"),
-            status,
-            commit_sha=_effective_closeout_value(
-                current_record.get("closeout_commit_sha"),
-                commit_sha_value,
-            ) or "",
-            production_observation=_effective_closeout_value(
-                current_record.get("closeout_production_observation"),
-                production_observation_value,
-            ) or "",
-        )
+            validate_task_transition(
+                str(current_record["status"] or "pending"),
+                status,
+                commit_sha=_effective_closeout_value(
+                    current_record.get("closeout_commit_sha"),
+                    commit_sha_value,
+                ) or "",
+                production_observation=_effective_closeout_value(
+                    current_record.get("closeout_production_observation"),
+                    production_observation_value,
+                ) or "",
+            )
 
-        if result is None:
-            rec = session.run("""
+            if result is None:
+                rec = tx.run("""
                     MATCH (t:OrchTask {id: $task_id})
                     SET t.status = $status, t.owner = $owner,
                         t.blocked_on = CASE
@@ -732,9 +733,9 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                     commit_sha=commit_sha_value,
                     production_observation=production_observation_value,
                     evidence_note=evidence_note_value,
-            )
-        else:
-            rec = session.run("""
+                )
+            else:
+                rec = tx.run("""
                     MATCH (t:OrchTask {id: $task_id})
                     SET t.status = $status, t.owner = $owner,
                         t.result = $result,
@@ -783,11 +784,11 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                     commit_sha=commit_sha_value,
                     production_observation=production_observation_value,
                     evidence_note=evidence_note_value,
-            )
-        rec_record = rec.single()
-        if rec_record is None:
-            return False
-        session.run("""
+                )
+            rec_record = rec.single()
+            if rec_record is None:
+                return False
+            tx.run("""
                 MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
                 SET p.in_progress_heartbeat_at = CASE
                         WHEN $status = 'in_progress' THEN datetime()
@@ -806,8 +807,10 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                         ELSE p.status
                     END,
                     p.updated_at = datetime()
-        """, task_id=task_id, status=status)
-        return True
+            """, task_id=task_id, status=status)
+            return True
+
+        return session.execute_write(_tx_update)
 
 
 def get_task(task_id: str,
