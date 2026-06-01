@@ -64,7 +64,7 @@ The install provides four console entry points:
 The tasks API is started as a module:
 
 ```bash
-python -m fleet_orchestrator.tasks_api
+python -m uvicorn fleet_orchestrator.tasks_api:app --host 127.0.0.1 --port 5002
 ```
 
 ## Five-Minute Quickstart
@@ -77,19 +77,25 @@ python -m fleet_orchestrator.tasks_api
    pip install .
    ```
 
-2. Start the local API on loopback.
+2. Configure the minimum required graph endpoint.
 
    ```bash
-   python -m fleet_orchestrator.tasks_api
+   export ORCH_NEO4J_URI=bolt://127.0.0.1:7687
    ```
 
-3. In another shell, verify the API is up.
+3. Start the local API on loopback.
 
    ```bash
-   curl http://127.0.0.1:5002/health
+   python -m uvicorn fleet_orchestrator.tasks_api:app --host 127.0.0.1 --port 5002
    ```
 
-4. Verify the installed entry points.
+4. In another shell, verify the task API is up.
+
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5002/api/projects
+   ```
+
+5. Verify the installed entry points.
 
    ```bash
    orch-cron --help
@@ -98,7 +104,27 @@ python -m fleet_orchestrator.tasks_api
    taey-task --help
    ```
 
-5. Inspect work once your graph is configured.
+6. Ingest a plan so the fleet has work to reason about.
+
+   ```bash
+   cat > /tmp/orch-quickstart.md <<'EOF'
+   # Project: orch-quickstart — Quickstart Probe
+   > Minimal local probe plan.
+   
+   ## Phase: phase-1 — Start  [order: 1]
+   
+   ### Task: task-1 — Verify the local fleet  [priority: 50] [owner: conductor]
+   EOF
+   taey-plan ingest /tmp/orch-quickstart.md
+   ```
+
+7. Start the readiness daemon so newly-ready work can wake sessions.
+
+   ```bash
+   orch-watch --redis-host 127.0.0.1
+   ```
+
+8. Inspect work once your graph is configured.
 
    ```bash
    taey-plan current
@@ -134,6 +160,7 @@ The default API bind is `127.0.0.1:5002`.
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — runtime shape and data flow
 - [SCHEMA.md](SCHEMA.md) — actual Neo4j node/relationship model and priority convention
+- [docs/ONBOARDING.md](docs/ONBOARDING.md) — full ordered first-run setup from install through active fleet
 - [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md) — markdown plan ingest format
 - [CHANGELOG.md](CHANGELOG.md) — branch and release history
 - [SECURITY.md](SECURITY.md) — local-trust security model
