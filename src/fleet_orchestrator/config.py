@@ -231,7 +231,9 @@ def _parse_product_owner_map(raw: str) -> dict[str, str]:
         product_id = value.strip()
         if session_id and product_id:
             mapping[session_id] = product_id
-    return mapping
+    if mapping:
+        return mapping
+    raise OrchConfigError(f"ORCH_PRODUCT_OWNER_MAP set but unparseable: {raw!r}")
 
 
 def get_configured_product_owner_map(config: Optional[OrchConfig] = None) -> dict[str, str]:
