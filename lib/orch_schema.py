@@ -1035,6 +1035,7 @@ def create_task(
     file_blast_radius: Optional[List[str]] = None,
     estimated_tokens: int = 50_000,
     heartbeat_exempt_secs: Optional[int] = None,
+    initial_status: str = "pending",
     wake_owner_if_ready: bool = True,
     config: Optional[OrchConfig] = None,
 ) -> str:
@@ -1047,7 +1048,7 @@ def create_task(
                 MATCH (ph:OrchPhase {id: $phase_id})
                 MERGE (t:OrchTask {id: $task_id})
                 ON CREATE SET t.created_at = datetime(),
-                              t.status = 'pending',
+                              t.status = $initial_status,
                               t.owner = $owner,
                               t.forced_continuation_count = 0
                 SET t.description = $description,
@@ -1089,6 +1090,7 @@ def create_task(
                 file_blast_radius=file_blast_radius or [],
                 estimated_tokens=estimated_tokens,
                 heartbeat_exempt_secs=heartbeat_exempt_secs,
+                initial_status=initial_status,
             )
             created_id = result.single()["id"]
         if wake_owner_if_ready:
@@ -1105,12 +1107,17 @@ def add_dependency(task_id: str, depends_on_id: str,
     driver = get_neo4j_driver(cfg)
     try:
         with driver.session(database=cfg.neo4j_db) as session:
-            session.run("""
-                MATCH (t:OrchTask {id: $task_id})
-                MATCH (dep:OrchTask {id: $depends_on_id})
-                MERGE (t)-[:DEPENDS_ON]->(dep)
+            result = session.run("""
+                OPTIONAL MATCH (t:OrchTask {id: $task_id})
+                OPTIONAL MATCH (dep:OrchTask {id: $depends_on_id})
+                FOREACH (_ IN CASE WHEN t IS NOT NULL AND dep IS NOT NULL THEN [1] ELSE [] END |
+                    MERGE (t)-[:DEPENDS_ON]->(dep)
+                )
+                RETURN (t IS NOT NULL) AS t_exists,
+                       (dep IS NOT NULL) AS dep_exists
             """, task_id=task_id, depends_on_id=depends_on_id)
-            return True
+            record = result.single()
+            return bool(record and record["t_exists"] and record["dep_exists"])
     finally:
         pass  # Driver is singleton; do not close
 

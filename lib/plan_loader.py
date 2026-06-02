@@ -167,6 +167,19 @@ def _set_task_metadata(task: Dict[str, Any], cfg: OrchConfig) -> None:
         )
 
 
+def _release_ingest_holds(task_ids: Set[str], cfg: OrchConfig) -> None:
+    if not task_ids:
+        return
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        session.run("""
+            MATCH (t:OrchTask)
+            WHERE t.id IN $task_ids AND t.status = 'ingesting'
+            SET t.status = 'pending',
+                t.updated_at = datetime()
+        """, task_ids=sorted(task_ids))
+
+
 def _collect_ref_warnings(parsed: Dict[str, Any], source_path: str) -> List[str]:
     warnings: List[str] = []
     buckets: List[tuple[str, str, List[Dict[str, Any]]]] = []
@@ -409,6 +422,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
     tasks_created = 0
     tasks_updated = 0
     dependency_pairs: List[tuple[str, str]] = []
+    held_task_ids: Set[str] = set()
 
     for phase in parsed["phases"]:
         create_phase(
@@ -425,6 +439,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
 
         for task in phase["tasks"]:
             parsed_task_ids.add(task["id"])
+            is_existing_task = task["id"] in existing_task_phase
             create_task(
                 phase_id=phase["id"],
                 task_id=task["id"],
@@ -436,21 +451,30 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
                 capability_tags=task.get("tags", []),
                 file_blast_radius=[],
                 estimated_tokens=50_000,
+                initial_status="pending" if is_existing_task else "ingesting",
+                wake_owner_if_ready=False,
                 config=cfg,
             )
             assign_task_to_phase(task["id"], phase["id"], config=cfg)
             _set_task_metadata(task, cfg)
 
-            if task["id"] in existing_task_phase:
+            if is_existing_task:
                 tasks_updated += 1
             else:
                 tasks_created += 1
+                held_task_ids.add(task["id"])
 
             for depends_on in task.get("depends", []):
                 dependency_pairs.append((task["id"], depends_on))
 
     for task_id, depends_on in dependency_pairs:
-        add_dependency(task_id, depends_on, config=cfg)
+        if not add_dependency(task_id, depends_on, config=cfg):
+            held_task_ids.discard(task_id)
+            errors.append(
+                f"task '{task_id}' depends on missing task '{depends_on}' -- dependency NOT created (would be ungated)"
+            )
+
+    _release_ingest_holds(held_task_ids, cfg)
 
     stale_tasks = sorted(task_id for task_id in existing_task_phase if task_id not in parsed_task_ids)
 
