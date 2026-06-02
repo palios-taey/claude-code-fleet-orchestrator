@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from .config import OrchConfig, get_neo4j_driver
@@ -13,6 +12,7 @@ from .orch_schema import (
     create_phase,
     create_project,
     create_task,
+    resolve_ref_path,
 )
 
 
@@ -113,16 +113,6 @@ def _set_task_metadata(task: Dict[str, Any], cfg: OrchConfig) -> None:
         )
 
 
-def _resolve_ref_path(ref_path: str, source_path: str) -> Path:
-    candidate = Path(ref_path).expanduser()
-    if candidate.is_absolute():
-        return candidate
-    repo_relative = (Path.cwd() / candidate).resolve()
-    if repo_relative.exists():
-        return repo_relative
-    return (Path(source_path).expanduser().resolve().parent / candidate).resolve()
-
-
 def _collect_ref_warnings(parsed: Dict[str, Any], source_path: str) -> List[str]:
     warnings: List[str] = []
     buckets: List[tuple[str, str, List[Dict[str, Any]]]] = []
@@ -134,8 +124,11 @@ def _collect_ref_warnings(parsed: Dict[str, Any], source_path: str) -> List[str]
             buckets.append(("task", str(task.get("id") or "?"), task.get("refs", [])))
     for kind, node_id, refs in buckets:
         for ref in refs:
-            resolved = _resolve_ref_path(str(ref.get("path") or ""), source_path)
-            if not resolved.exists():
+            resolved, resolve_warning = resolve_ref_path(str(ref.get("path") or ""), source_path)
+            if resolve_warning:
+                warnings.append(resolve_warning)
+                continue
+            if resolved is None or not resolved.exists():
                 warnings.append(f"{kind} {node_id}: ref unreadable {ref.get('path')}:{ref.get('l_start')}-{ref.get('l_end')}")
     return warnings
 

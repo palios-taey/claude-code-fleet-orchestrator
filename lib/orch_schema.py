@@ -10,6 +10,7 @@ Label convention: OrchProject, OrchPhase, OrchTask, OrchFileOwnership
 
 import copy
 import datetime as dt
+import itertools
 import json
 import logging
 import os
@@ -64,6 +65,7 @@ class PauseValidationError(ValueError):
 
 
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
+_REF_READ_BYTE_CAP = 1024 * 1024
 
 
 def _utc_now_iso() -> str:
@@ -188,17 +190,29 @@ def _encode_refs_or_none(refs: Optional[List[Dict[str, Any]]]) -> Optional[str]:
     return _json_encode(_normalize_refs(refs))
 
 
-def _resolve_ref_path(ref_path: str, source_path: Optional[str]) -> Path:
-    candidate = Path(ref_path).expanduser()
-    if candidate.is_absolute():
-        return candidate
-    repo_relative = (Path.cwd() / candidate).resolve()
-    if repo_relative.exists():
-        return repo_relative
+def _ref_allowed_root(source_path: Optional[str]) -> Path:
     if source_path:
-        source_relative = (Path(source_path).expanduser().resolve().parent / candidate).resolve()
-        return source_relative
-    return repo_relative
+        return Path(source_path).resolve(strict=False).parent
+    return Path.cwd().resolve()
+
+
+def resolve_ref_path(ref_path: str, source_path: Optional[str]) -> tuple[Optional[Path], Optional[str]]:
+    raw_path = str(ref_path or "").strip()
+    if not raw_path:
+        return None, "ref unreadable: empty path"
+    if raw_path.startswith("~"):
+        return None, f"ref outside allowed root: {raw_path}"
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        return None, f"ref outside allowed root: {raw_path}"
+
+    root = _ref_allowed_root(source_path)
+    resolved = (root / candidate).resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None, f"ref outside allowed root: {raw_path}"
+    return resolved, None
 
 
 def _read_ref_context(refs: List[Dict[str, Any]], source_path: Optional[str],
@@ -218,23 +232,39 @@ def _read_ref_context(refs: List[Dict[str, Any]], source_path: Optional[str],
             ref_entry["warning"] = "ref truncated by aggregate line cap"
             resolved.append(ref_entry)
             continue
-        resolved_path = _resolve_ref_path(path, source_path)
+        resolved_path, resolve_warning = resolve_ref_path(path, source_path)
+        if resolve_warning:
+            ref_entry["warning"] = resolve_warning
+            warnings.append(resolve_warning)
+            resolved.append(ref_entry)
+            continue
+        assert resolved_path is not None
         ref_entry["resolved_path"] = str(resolved_path)
         try:
-            lines = resolved_path.read_text(encoding="utf-8").splitlines()
+            stat_result = resolved_path.stat()
+            if stat_result.st_size > _REF_READ_BYTE_CAP:
+                warning = f"ref unreadable: {path}:{l_start}-{l_end} (file exceeds byte cap {_REF_READ_BYTE_CAP})"
+                ref_entry["warning"] = warning
+                warnings.append(warning)
+                resolved.append(ref_entry)
+                continue
+            slice_lines: List[str] = []
+            with resolved_path.open("r", encoding="utf-8") as handle:
+                for line_no, line in enumerate(itertools.islice(handle, l_end), start=1):
+                    if line_no >= l_start:
+                        slice_lines.append(line.rstrip("\n"))
         except Exception as exc:
             warning = f"ref unreadable: {path}:{l_start}-{l_end} ({exc.__class__.__name__})"
             ref_entry["warning"] = warning
             warnings.append(warning)
             resolved.append(ref_entry)
             continue
-        if l_start > len(lines):
+        if not slice_lines and l_start > 0:
             warning = f"ref unreadable: {path}:{l_start}-{l_end} (start beyond file)"
             ref_entry["warning"] = warning
             warnings.append(warning)
             resolved.append(ref_entry)
             continue
-        slice_lines = lines[l_start - 1:l_end]
         if not slice_lines:
             warning = f"ref unreadable: {path}:{l_start}-{l_end} (empty slice)"
             ref_entry["warning"] = warning
