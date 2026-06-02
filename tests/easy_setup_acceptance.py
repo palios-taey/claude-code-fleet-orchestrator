@@ -43,6 +43,7 @@ from lib.easy_setup import (  # noqa: E402
 from lib.tasks_api import app  # noqa: E402
 
 FAILURES: list[str] = []
+EXPECTED_RELEASE = "1.5.0"
 
 
 def _assert(label: str, condition: bool, detail: object) -> None:
@@ -310,11 +311,13 @@ def main() -> int:
             client = TestClient(app)
             health = client.get("/health")
             payload = health.json()
+        _assert("release-version-identity", package_version() == EXPECTED_RELEASE, package_version())
         _assert(
             "health-version-identity",
             health.status_code == 200 and payload.get("version") == package_version(),
             payload,
         )
+        _assert("health-version-release", payload.get("version") == EXPECTED_RELEASE, payload)
 
         scope = compose_scope()
         _assert(
