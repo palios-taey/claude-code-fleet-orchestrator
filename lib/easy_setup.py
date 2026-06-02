@@ -86,6 +86,7 @@ def atomic_write_text(path: Path, text: str) -> None:
     mode = _existing_mode(path)
     handle = tempfile.NamedTemporaryFile("w", delete=False, dir=str(path.parent), prefix=f".{path.name}.", encoding="utf-8")
     temp_path = Path(handle.name)
+    dir_fd = None
     try:
         handle.write(text)
         handle.flush()
@@ -93,10 +94,14 @@ def atomic_write_text(path: Path, text: str) -> None:
         handle.close()
         os.chmod(temp_path, mode)
         os.replace(temp_path, path)
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        os.fsync(dir_fd)
         verify = path.read_text(encoding="utf-8")
         if verify != text:
             raise RuntimeError(f"atomic write verification failed for {path}")
     finally:
+        if dir_fd is not None:
+            os.close(dir_fd)
         try:
             handle.close()
         except Exception:
@@ -224,7 +229,7 @@ def _extract_command_path(command: str) -> Optional[Path]:
 def _hook_matches_expected(command_path: Optional[Path], expected_path: Path) -> bool:
     if command_path is None:
         return False
-    return command_path.name == expected_path.name
+    return command_path == expected_path
 
 
 def snapshot_expected_hook_commands(settings: Dict[str, Any], notify_root: Optional[Path] = None) -> Dict[str, List[str]]:
@@ -255,11 +260,11 @@ def snapshot_expected_hook_commands(settings: Dict[str, Any], notify_root: Optio
 def _command_delta(before: Dict[str, List[str]], after: Dict[str, List[str]]) -> Dict[str, List[str]]:
     delta: Dict[str, List[str]] = {}
     for event, commands in after.items():
-        before_paths = {(_extract_command_path(command).name if _extract_command_path(command) is not None else command) for command in before.get(event, [])}
+        before_paths = {str(_extract_command_path(command)) for command in before.get(event, []) if _extract_command_path(command) is not None}
         added = []
         for command in commands:
             parsed = _extract_command_path(command)
-            path_key = parsed.name if parsed is not None else command
+            path_key = str(parsed) if parsed is not None else command
             if path_key not in before_paths:
                 added.append(command)
         if added:
@@ -387,9 +392,20 @@ def _remove_recorded_hook_commands(settings: Dict[str, Any], recorded: Dict[str,
 
 
 def _cleanup_empty_settings_containers(settings: Dict[str, Any]) -> None:
+    permissions = settings.get("permissions")
+    if isinstance(permissions, dict) and not permissions:
+        settings.pop("permissions", None)
     hooks = settings.get("hooks")
     if isinstance(hooks, dict) and not hooks:
         settings.pop("hooks", None)
+
+
+def _managed_owner(settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    managed = settings.get("_managedBy")
+    if not isinstance(managed, dict):
+        return None
+    owner = managed.get(MANAGED_BY)
+    return owner if isinstance(owner, dict) else None
 
 
 def snapshot_claude_settings(path: Path = CLAUDE_SETTINGS_PATH, *, original_text: Optional[str] = None) -> Path:
@@ -400,10 +416,13 @@ def snapshot_claude_settings(path: Path = CLAUDE_SETTINGS_PATH, *, original_text
 
     def _mutate(state: Dict[str, Any]) -> None:
         existing_path = state.get("claude_settings_backup")
+        existing_target = state.get("claude_settings_path")
         existing_fingerprint = state.get("claude_settings_backup_fingerprint")
-        state["claude_settings_path"] = str(path)
         if existing_path and existing_fingerprint:
+            if not existing_target:
+                state["claude_settings_path"] = str(path)
             return
+        state["claude_settings_path"] = str(path)
         backup = STATE_DIR / f"{path.name}.pre-orch-install.{_timestamp()}.{uuid.uuid4().hex[:8]}.bak"
         atomic_write_text(backup, original_text)
         state["claude_settings_backup"] = str(backup)
@@ -424,7 +443,7 @@ def apply_claude_permission_guard(
     _dedupe_expected_hook_commands(settings)
     permissions = settings["permissions"]
     deny = permissions["deny"]
-    existing_owner = settings.get("_managedBy", {}).get(MANAGED_BY) if isinstance(settings.get("_managedBy"), dict) else None
+    existing_owner = _managed_owner(settings)
     existing_added = existing_owner.get("permissions.deny_added") if isinstance(existing_owner, dict) else None
     recorded_added = [str(item) for item in existing_added] if isinstance(existing_added, list) else []
 
@@ -463,8 +482,17 @@ def apply_claude_permission_guard(
 
 
 def remove_claude_permission_guard(path: Path = CLAUDE_SETTINGS_PATH, *, apply: bool) -> Dict[str, Any]:
-    settings, original = load_claude_settings(path)
-    marker = _managed_marker(settings)
+    if not path.exists():
+        return {"changed": False, "diff": "", "updated": "{\n}\n"}
+    original = path.read_text(encoding="utf-8")
+    parsed = json.loads(original)
+    if not isinstance(parsed, dict):
+        raise ValueError("settings JSON root must be an object")
+    marker = _managed_owner(parsed)
+    if marker is None:
+        return {"changed": False, "diff": "", "updated": original}
+
+    settings = _normalize_settings(parsed)
     permissions = settings.get("permissions", {})
     deny = permissions.get("deny", [])
     changed = False
@@ -504,17 +532,26 @@ def remove_claude_permission_guard(path: Path = CLAUDE_SETTINGS_PATH, *, apply: 
     return {"changed": changed, "diff": diff, "updated": updated}
 
 
-def restore_claude_settings_backup() -> Optional[Path]:
+def restore_claude_settings_backup(*, allow_path_drift: bool = False) -> Optional[Path]:
     state = load_setup_state()
     backup_raw = state.get("claude_settings_backup")
     path_raw = state.get("claude_settings_path")
     if not backup_raw or not path_raw:
         return None
     backup = Path(str(backup_raw))
-    target = Path(str(path_raw))
+    target = CLAUDE_SETTINGS_PATH
     if not backup.exists():
         return None
-    atomic_write_text(target, backup.read_text(encoding="utf-8"))
+    recorded_target = Path(str(path_raw))
+    if target != recorded_target and not allow_path_drift:
+        raise RuntimeError(
+            f"refusing restore: current settings path {target} differs from recorded pristine path {recorded_target}"
+        )
+    expected_fingerprint = state.get("claude_settings_backup_fingerprint")
+    backup_text = backup.read_text(encoding="utf-8")
+    if expected_fingerprint and fingerprint_text(backup_text) != str(expected_fingerprint):
+        raise RuntimeError("refusing restore: pristine backup fingerprint mismatch")
+    atomic_write_text(target, backup_text)
     return backup
 
 
@@ -779,23 +816,72 @@ def compose_managed() -> bool:
     return bool(load_setup_state().get("compose_managed", False))
 
 
+def _pending_hook_journal(before_hooks: Dict[str, List[str]]) -> Dict[str, Any]:
+    return {
+        "notify_root": str(resolve_notify_root()),
+        "before_hooks": before_hooks,
+        "created_at": time.time(),
+    }
+
+
+def _write_pending_hook_transaction(before_hooks: Dict[str, List[str]]) -> None:
+    def _mutate(state: Dict[str, Any]) -> None:
+        state["pending_hook_transaction"] = _pending_hook_journal(before_hooks)
+
+    update_setup_state(_mutate)
+
+
+def _clear_pending_hook_transaction() -> None:
+    def _mutate(state: Dict[str, Any]) -> None:
+        state.pop("pending_hook_transaction", None)
+
+    update_setup_state(_mutate)
+
+
+def reconcile_pending_hook_transaction(path: Path = CLAUDE_SETTINGS_PATH) -> Dict[str, Any]:
+    state = load_setup_state()
+    pending = state.get("pending_hook_transaction")
+    if not isinstance(pending, dict):
+        return {"reconciled": False}
+    settings, original = load_claude_settings(path)
+    notify_root = Path(str(pending.get("notify_root", resolve_notify_root()))).resolve()
+    before_hooks = pending.get("before_hooks", {})
+    before_hooks = before_hooks if isinstance(before_hooks, dict) else {}
+    after_hooks = snapshot_expected_hook_commands(settings, notify_root=notify_root)
+    added = _command_delta(before_hooks, after_hooks)
+    changed = False
+    if added:
+        marker = _managed_marker(settings)
+        _merge_recorded_hook_commands(marker, added)
+        changed = render_settings(settings) != original
+    if changed:
+        atomic_write_text(path, render_settings(settings))
+    _clear_pending_hook_transaction()
+    return {"reconciled": True, "hook_commands_added": added, "changed": changed}
+
+
 def ensure_claude_integration(*, dry_run: bool = False) -> Dict[str, Any]:
     settings, original = load_claude_settings(CLAUDE_SETTINGS_PATH)
+    reconciled = reconcile_pending_hook_transaction(CLAUDE_SETTINGS_PATH)
+    if reconciled.get("reconciled"):
+        settings, original = load_claude_settings(CLAUDE_SETTINGS_PATH)
     backup_path = snapshot_claude_settings(CLAUDE_SETTINGS_PATH, original_text=original)
     pre_hooks = snapshot_expected_hook_commands(settings)
     hook_commands_added: Dict[str, List[str]] = {}
 
     if dry_run:
         guard = apply_claude_permission_guard(CLAUDE_SETTINGS_PATH, apply=False)
-        return {"backup": backup_path, "guard": guard, "hook_commands_added": hook_commands_added}
+        return {"backup": backup_path, "guard": guard, "hook_commands_added": hook_commands_added, "reconciled": reconciled}
 
     try:
+        _write_pending_hook_transaction(pre_hooks)
         subprocess.run([str(notify_script("install-hooks.sh")), "--apply"], check=True, cwd=str(resolve_notify_root()))
         after_notify, _ = load_claude_settings(CLAUDE_SETTINGS_PATH)
         _dedupe_expected_hook_commands(after_notify)
         hook_commands_added = _command_delta(pre_hooks, snapshot_expected_hook_commands(after_notify))
         guard = apply_claude_permission_guard(CLAUDE_SETTINGS_PATH, apply=True, hook_commands_added=hook_commands_added)
-        return {"backup": backup_path, "guard": guard, "hook_commands_added": hook_commands_added}
+        _clear_pending_hook_transaction()
+        return {"backup": backup_path, "guard": guard, "hook_commands_added": hook_commands_added, "reconciled": reconciled}
     except Exception:
         atomic_restore_settings_text(CLAUDE_SETTINGS_PATH, original)
         raise

@@ -18,6 +18,7 @@ from lib.easy_setup import (  # noqa: E402
     notify_script,
     preflight_restore_diff,
     print_doctor_results,
+    reconcile_pending_hook_transaction,
     remove_claude_permission_guard,
     restore_claude_settings_backup,
     run_doctor,
@@ -42,6 +43,7 @@ def cmd_disable(_: argparse.Namespace) -> int:
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
+    reconcile_pending_hook_transaction()
     for line in disable_services():
         print(line)
     try:
@@ -62,7 +64,11 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         diff = preflight_restore_diff()
         if diff:
             print(diff, end="")
-        restored = restore_claude_settings_backup()
+        try:
+            restored = restore_claude_settings_backup(allow_path_drift=args.allow_path_drift_restore)
+        except Exception as exc:
+            print(f"claude-settings: {exc}")
+            return 1
         if restored is not None:
             print(f"claude-settings: restored pristine backup {restored}")
         else:
@@ -92,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     uninstall = sub.add_parser("uninstall")
     uninstall.add_argument("--restore-original-settings", action="store_true")
+    uninstall.add_argument("--allow-path-drift-restore", action="store_true")
     uninstall.set_defaults(func=cmd_uninstall)
     return parser
 

@@ -34,7 +34,9 @@ from lib.easy_setup import (  # noqa: E402
     atomic_write_text,
     compose_scope,
     package_version,
+    reconcile_pending_hook_transaction,
     remove_claude_permission_guard,
+    restore_claude_settings_backup,
     snapshot_claude_settings,
 )
 from lib.tasks_api import app  # noqa: E402
@@ -121,6 +123,82 @@ def main() -> int:
             "double-install-uninstall-baseline-clean",
             backup1 == backup2 and final_text == baseline and removed["changed"],
             {"backup1": str(backup1), "backup2": str(backup2), "final_text": final_text},
+        )
+
+        hooks_path = _temp_settings(tmp / "hooks", [])
+        hooks_doc = {
+            "hooks": {
+                "Stop": [
+                    {"hooks": [{"type": "command", "command": "python3 /user/alt/stop_idle.py", "timeout": 5000}]},
+                    {"hooks": [{"type": "command", "command": "python3 /notify/hooks/stop_idle.py", "timeout": 5000}]},
+                ]
+            },
+            "permissions": {"deny": []},
+        }
+        hooks_path.write_text(json.dumps(hooks_doc, indent=2) + "\n", encoding="utf-8")
+        with mock.patch("lib.easy_setup.resolve_notify_root", return_value=Path("/notify")):
+            hook_guard = apply_claude_permission_guard(hooks_path, apply=True, hook_commands_added={"Stop": ["python3 /notify/hooks/stop_idle.py"]})
+        hook_doc = json.loads(hooks_path.read_text(encoding="utf-8"))
+        stop_commands = []
+        for group in hook_doc["hooks"]["Stop"]:
+            for hook in group["hooks"]:
+                stop_commands.append(hook["command"])
+        _assert(
+            "basename-collision-user-hook-preserved",
+            "python3 /user/alt/stop_idle.py" in stop_commands and "python3 /notify/hooks/stop_idle.py" in stop_commands and len(stop_commands) == 2 and hook_guard["recorded_hook_commands"]["Stop"] == ["python3 /notify/hooks/stop_idle.py"],
+            stop_commands,
+        )
+
+        with mock.patch.object(easy_setup, "STATE_DIR", tmp / "drift-state"), \
+             mock.patch.object(easy_setup, "SETUP_STATE_PATH", tmp / "drift-state" / "easy_setup_state.json"), \
+             mock.patch.object(easy_setup, "CLAUDE_SETTINGS_PATH", tmp / "drift-b" / "settings.json"):
+            drift_original = _temp_settings(tmp / "drift-a", ["Original"]).read_text(encoding="utf-8")
+            recorded_path = tmp / "drift-a" / "settings.json"
+            snapshot_claude_settings(recorded_path, original_text=drift_original)
+            refused = False
+            try:
+                restore_claude_settings_backup()
+            except RuntimeError:
+                refused = True
+            restored = restore_claude_settings_backup(allow_path_drift=True)
+        _assert("path-drift-restore-refuse", refused and restored is not None, {"refused": refused, "restored": str(restored) if restored else None})
+
+        pending_path = _temp_settings(tmp / "pending", [])
+        pending_doc = {
+            "permissions": {"deny": []},
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "python3 /notify/hooks/stop_idle.py", "timeout": 5000}]}]
+            },
+        }
+        pending_path.write_text(json.dumps(pending_doc, indent=2) + "\n", encoding="utf-8")
+        with mock.patch.object(easy_setup, "STATE_DIR", tmp / "pending-state"), \
+             mock.patch.object(easy_setup, "SETUP_STATE_PATH", tmp / "pending-state" / "easy_setup_state.json"), \
+             mock.patch("lib.easy_setup.resolve_notify_root", return_value=Path("/notify")):
+            easy_setup.save_setup_state(
+                {
+                    "pending_hook_transaction": {
+                        "notify_root": "/notify",
+                        "before_hooks": {"Stop": []},
+                        "created_at": 1.0,
+                    }
+                }
+            )
+            pending_result = reconcile_pending_hook_transaction(pending_path)
+            pending_settings = json.loads(pending_path.read_text(encoding="utf-8"))
+        _assert(
+            "pending-txn-crash-reconcile",
+            pending_result["reconciled"] and pending_result["hook_commands_added"]["Stop"] == ["python3 /notify/hooks/stop_idle.py"] and pending_settings["_managedBy"]["claude-code-fleet-orchestrator"]["hooks"]["commands_added"]["Stop"] == ["python3 /notify/hooks/stop_idle.py"],
+            pending_settings,
+        )
+
+        unmanaged_path = _temp_settings(tmp / "unmanaged", ["UserOnly"])
+        unmanaged_before = unmanaged_path.read_text(encoding="utf-8")
+        unmanaged_result = remove_claude_permission_guard(unmanaged_path, apply=True)
+        unmanaged_after = unmanaged_path.read_text(encoding="utf-8")
+        _assert(
+            "unmanaged-uninstall-noop",
+            not unmanaged_result["changed"] and unmanaged_before == unmanaged_after and "_managedBy" not in unmanaged_after,
+            unmanaged_after,
         )
 
         with mock.patch("lib.easy_setup.detect_local_infra_ports", return_value={"redis": True, "neo4j": False}), \
