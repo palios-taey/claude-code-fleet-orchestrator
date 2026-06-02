@@ -43,7 +43,7 @@ from lib.easy_setup import (  # noqa: E402
 from lib.tasks_api import app  # noqa: E402
 
 FAILURES: list[str] = []
-EXPECTED_RELEASE = "1.5.0"
+EXPECTED_RELEASE = "1.5.1"
 
 
 def _assert(label: str, condition: bool, detail: object) -> None:

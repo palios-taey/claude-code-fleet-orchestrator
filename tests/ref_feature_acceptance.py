@@ -278,6 +278,47 @@ def main() -> int:
             project_ref = project_summary["project"]["ref_context"]["refs"][0] if project_summary else {}
             _assert("project-ref-context-works", project_ref.get("content") == "line1\nupdated2", project_ref)
 
+            summary_project_id = f"{PREFIX}-summary-phase-ref"
+            summary_phase_id = f"{PREFIX}-summary-phase-ref-phase"
+            summary_task_id = f"{PREFIX}-summary-phase-ref-task"
+            create_project(
+                summary_project_id,
+                "summary phase ref",
+                supervisor="conductor",
+                priority=1,
+                source_path=str(plan_path),
+                config=CFG,
+            )
+            create_phase(
+                summary_project_id,
+                summary_phase_id,
+                "phase with fallback ref",
+                refs=[{"path": "src/module.py", "l_start": 1, "l_end": 2}],
+                config=CFG,
+            )
+            create_task(
+                summary_phase_id,
+                summary_task_id,
+                "task under phase",
+                owner="worker-a",
+                priority=5,
+                wake_owner_if_ready=False,
+                config=CFG,
+            )
+            summary_with_phase = get_project_summary(summary_project_id, config=CFG)
+            summary_phase = summary_with_phase["phases"][0]["phase"] if summary_with_phase and summary_with_phase["phases"] else {}
+            summary_phase_ref = summary_phase.get("ref_context", {}).get("refs", [{}])[0]
+            summary_tasks = summary_with_phase["phases"][0]["tasks"] if summary_with_phase and summary_with_phase["phases"] else []
+            _assert(
+                "project-summary-phase-fallback",
+                bool(summary_with_phase)
+                and len(summary_with_phase["phases"]) == 1
+                and summary_phase_ref.get("content") == "line1\nupdated2"
+                and len(summary_tasks) == 1
+                and summary_tasks[0].get("id") == summary_task_id,
+                summary_with_phase,
+            )
+
             force_cases = [
                 ("force-false-bool", {"force": False}, 409),
                 ("force-false-string", {"force": "false"}, 422),
