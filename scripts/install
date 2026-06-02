@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from lib.easy_setup import (  # noqa: E402
+    apply_claude_permission_guard,
+    docker_compose_up,
+    docker_running,
+    enable_services,
+    notify_script,
+    package_version,
+    port_open,
+    print_doctor_results,
+    require_command,
+    resolve_notify_root,
+    run_doctor,
+    snapshot_claude_settings,
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-compose", action="store_true")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+
+    require_command("python3")
+    require_command("pip")
+    require_command("docker")
+    resolve_notify_root()
+
+    use_external_infra = args.skip_compose or port_open("127.0.0.1", 6379) or port_open("127.0.0.1", 7687)
+    if not docker_running() and not use_external_infra:
+        raise SystemExit("Docker daemon is not running")
+
+    if use_external_infra:
+        print("compose: skipped (external/BYO infra detected)")
+    elif args.dry_run:
+        print("compose: would run docker compose up -d")
+    else:
+        docker_compose_up()
+        print("compose: up")
+
+    if args.dry_run:
+        print("venv: skipped write")
+    else:
+        venv_path = ROOT / ".venv"
+        if not venv_path.exists():
+            subprocess.run([sys.executable, "-m", "venv", str(venv_path)], check=True, cwd=str(ROOT))
+        pip = venv_path / "bin" / "pip"
+        subprocess.run([str(pip), "install", "--upgrade", "pip"], check=True, cwd=str(ROOT))
+        subprocess.run([str(pip), "install", "."], check=True, cwd=str(ROOT))
+        print(f"python: installed version {package_version()} into {venv_path}")
+
+    if args.dry_run:
+        print(f"hooks: would run {notify_script('install-hooks.sh')} --apply")
+        diff = apply_claude_permission_guard(apply=False)["diff"]
+        if diff:
+            print(diff, end="")
+    else:
+        snapshot_claude_settings()
+        subprocess.run([str(notify_script("install-hooks.sh")), "--apply"], check=True, cwd=str(resolve_notify_root()))
+        guard = apply_claude_permission_guard(apply=True)
+        if guard["diff"]:
+            print(guard["diff"], end="")
+        subprocess.run([str(notify_script("start_notify_daemons.sh")), "start"], check=True, cwd=str(resolve_notify_root()))
+        for line in enable_services():
+            print(line)
+        return print_doctor_results(run_doctor(), explain_scope=False)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

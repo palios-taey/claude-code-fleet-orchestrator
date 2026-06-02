@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from lib.easy_setup import (  # noqa: E402
+    disable_services,
+    docker_compose_down,
+    enable_services,
+    notify_script,
+    print_doctor_results,
+    remove_claude_permission_guard,
+    restore_claude_settings_backup,
+    run_doctor,
+)
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    return print_doctor_results(run_doctor(), explain_scope=args.explain_scope)
+
+
+def cmd_enable(_: argparse.Namespace) -> int:
+    for line in enable_services():
+        print(line)
+    return 0
+
+
+def cmd_disable(_: argparse.Namespace) -> int:
+    for line in disable_services():
+        print(line)
+    return 0
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    for line in disable_services():
+        print(line)
+    try:
+        subprocess.run([str(notify_script("start_notify_daemons.sh")), "stop"], check=False)
+    except Exception as exc:
+        print(f"notify-daemon-stop: {exc}")
+    try:
+        docker_compose_down()
+        print("compose: down")
+    except Exception as exc:
+        print(f"compose: {exc}")
+    if args.restore_settings:
+        result = remove_claude_permission_guard(apply=True)
+        if result["changed"]:
+            print("claude-settings: removed managed deny entries")
+        restored = restore_claude_settings_backup()
+        if restored is not None:
+            print(f"claude-settings: restored backup {restored}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="orch")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    doctor = sub.add_parser("doctor")
+    doctor.add_argument("--explain-scope", action="store_true")
+    doctor.set_defaults(func=cmd_doctor)
+
+    enable = sub.add_parser("enable")
+    enable.set_defaults(func=cmd_enable)
+
+    disable = sub.add_parser("disable")
+    disable.set_defaults(func=cmd_disable)
+
+    uninstall = sub.add_parser("uninstall")
+    uninstall.add_argument("--restore-settings", action="store_true")
+    uninstall.set_defaults(func=cmd_uninstall)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

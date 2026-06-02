@@ -41,16 +41,14 @@ Optional variables:
 ## Install
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install --upgrade pip
-pip install .
+scripts/install
 ```
 
 ## Smoke test
 
 ```bash
 python3 -c "import fleet_orchestrator; print(fleet_orchestrator.__version__)"
+orch doctor --explain-scope
 orch-cron --help
 orch-watch --help
 taey-plan --help

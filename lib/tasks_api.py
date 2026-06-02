@@ -13,6 +13,7 @@ Run:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import subprocess
 import time
@@ -27,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lib.config import OrchConfig
+from lib.easy_setup import package_version
 from lib.dispatch import bind_current_task, record_outcome
 from lib.orch_schema import (
     ConditionValidationError,
@@ -67,7 +69,7 @@ from lib.orch_schema import (
 )
 from lib.plan_loader import load_plan_from_text, plan_declares_refs
 
-app = FastAPI(title="Fleet Orchestrator API", version="2.0")
+app = FastAPI(title="Fleet Orchestrator API", version=package_version())
 _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
 ALLOWED_NOTIFY_TYPES = {
     "standard": "message",
@@ -653,7 +655,13 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
 def health() -> Dict[str, Any]:
     try:
         _ = get_ready_tasks(_cfg())
-        return {"ok": True, "service": "fleet-orchestrator-api", "ts": time.time()}
+        return {
+            "ok": True,
+            "service": "fleet-orchestrator-api",
+            "version": package_version(),
+            "api_base": os.environ.get("ORCH_API_BASE", "http://127.0.0.1:5002"),
+            "ts": time.time(),
+        }
     except Exception as e:
         return JSONResponse(status_code=503, content={"ok": False, "error": str(e)})
 
