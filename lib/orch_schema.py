@@ -14,6 +14,7 @@ import itertools
 import json
 import logging
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -169,6 +170,8 @@ def _normalize_refs(raw_refs: Any) -> List[Dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         path = str(item.get("path") or "").strip()
+        if _has_control_chars(path):
+            continue
         try:
             l_start = int(item.get("l_start"))
             l_end = int(item.get("l_end"))
@@ -190,16 +193,75 @@ def _encode_refs_or_none(refs: Optional[List[Dict[str, Any]]]) -> Optional[str]:
     return _json_encode(_normalize_refs(refs))
 
 
+def _has_control_chars(value: str) -> bool:
+    return any(ord(ch) < 32 for ch in value)
+
+
+def _allowed_ref_roots() -> List[Path]:
+    raw = str(os.environ.get("ORCH_REF_ALLOWED_ROOT") or "").strip()
+    if not raw:
+        return []
+    candidates: List[str]
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = []
+        candidates = [str(item).strip() for item in parsed if str(item).strip()]
+    else:
+        normalized = raw.replace(os.pathsep, ",")
+        candidates = [item.strip() for item in normalized.split(",") if item.strip()]
+    return [Path(item).expanduser().resolve(strict=False) for item in candidates]
+
+
+def _path_within_any_root(path: Path, roots: List[Path]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 def _ref_allowed_root(source_path: Optional[str]) -> Optional[Path]:
     if not source_path:
         return None
-    return Path(source_path).resolve(strict=False).parent
+    try:
+        return Path(source_path).resolve(strict=False).parent
+    except Exception:
+        return None
+
+
+def validate_source_path_for_refs(source_path: Optional[str], refs_present: bool) -> tuple[Optional[str], Optional[str]]:
+    raw_path = str(source_path or "").strip()
+    if not refs_present:
+        if not raw_path:
+            return None, None
+        try:
+            return str(Path(raw_path).resolve(strict=False)), None
+        except Exception as exc:
+            return None, f"invalid source_path ({exc.__class__.__name__})"
+    if not raw_path:
+        return None, "refs require source_path"
+    allowed_roots = _allowed_ref_roots()
+    if not allowed_roots:
+        return None, "refs require ORCH_REF_ALLOWED_ROOT"
+    try:
+        resolved_source = Path(raw_path).resolve(strict=False)
+    except Exception as exc:
+        return None, f"invalid source_path ({exc.__class__.__name__})"
+    if not _path_within_any_root(resolved_source, allowed_roots):
+        return None, f"source_path outside ORCH_REF_ALLOWED_ROOT: {raw_path}"
+    return str(resolved_source), None
 
 
 def resolve_ref_path(ref_path: str, source_path: Optional[str]) -> tuple[Optional[Path], Optional[str]]:
     raw_path = str(ref_path or "").strip()
     if not raw_path:
         return None, "ref unreadable: empty path"
+    if _has_control_chars(raw_path):
+        return None, "ref unreadable: control characters in path"
     if raw_path.startswith("~"):
         return None, f"ref outside allowed root: {raw_path}"
     candidate = Path(raw_path)
@@ -209,12 +271,20 @@ def resolve_ref_path(ref_path: str, source_path: Optional[str]) -> tuple[Optiona
     root = _ref_allowed_root(source_path)
     if root is None:
         return None, "ref has no plan-source root (sandbox undefined)"
-    resolved = (root / candidate).resolve(strict=False)
+    allowed_roots = _allowed_ref_roots()
+    if not allowed_roots:
+        return None, "ref disabled: ORCH_REF_ALLOWED_ROOT is unset"
     try:
-        resolved.relative_to(root)
-    except ValueError:
-        return None, f"ref outside allowed root: {raw_path}"
-    return resolved, None
+        if not _path_within_any_root(root, allowed_roots):
+            return None, f"ref outside allowed root: {raw_path}"
+        resolved = (root / candidate).resolve(strict=False)
+        if not _path_within_any_root(resolved, [root]):
+            return None, f"ref outside allowed root: {raw_path}"
+        if not _path_within_any_root(resolved, allowed_roots):
+            return None, f"ref outside allowed root: {raw_path}"
+        return resolved, None
+    except Exception as exc:
+        return None, f"ref unreadable: {raw_path} ({exc.__class__.__name__})"
 
 
 def _read_ref_context(refs: List[Dict[str, Any]], source_path: Optional[str],
@@ -241,9 +311,14 @@ def _read_ref_context(refs: List[Dict[str, Any]], source_path: Optional[str],
             resolved.append(ref_entry)
             continue
         assert resolved_path is not None
-        ref_entry["resolved_path"] = str(resolved_path)
         try:
             stat_result = resolved_path.stat()
+            if not stat.S_ISREG(stat_result.st_mode):
+                warning = f"ref unreadable: {path}:{l_start}-{l_end} (not a regular file)"
+                ref_entry["warning"] = warning
+                warnings.append(warning)
+                resolved.append(ref_entry)
+                continue
             if stat_result.st_size > _REF_READ_BYTE_CAP:
                 warning = f"ref unreadable: {path}:{l_start}-{l_end} (file exceeds byte cap {_REF_READ_BYTE_CAP})"
                 ref_entry["warning"] = warning
@@ -1726,72 +1801,27 @@ def clear_project_stop_reason(project_id: str, cleared_by: str,
         pass
 
 
-def _project_participant_sessions(project_id: str, config: Optional[OrchConfig] = None) -> List[str]:
-    cfg = config or OrchConfig()
-    driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            rows = session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
-                RETURN p.supervisor AS supervisor, collect(DISTINCT t.owner) AS owners
-            """, project_id=project_id).single()
-            if not rows:
-                return []
-            sessions: List[str] = []
-            supervisor = str(rows.get("supervisor") or "").strip()
-            if supervisor:
-                sessions.append(supervisor)
-            for owner in rows.get("owners") or []:
-                owner_value = str(owner or "").strip()
-                if owner_value and owner_value not in sessions:
-                    sessions.append(owner_value)
-            return sessions
-    finally:
-        pass
-
-
-def _clear_project_convergence_keys(project_id: str, config: Optional[OrchConfig] = None) -> None:
-    from .config import get_redis_sync
-
-    cfg = config or OrchConfig()
-    sessions = _project_participant_sessions(project_id, config=cfg)
-    if not sessions:
-        return
-    redis_client = get_redis_sync(cfg)
-    keys: List[str] = []
-    for session_id in sessions:
-        keys.append(_stop_block_marker_key(session_id))
-        keys.append(_stop_block_count_key(session_id))
-    if keys:
-        redis_client.delete(*keys)
-
-
 def complete_project(project_id: str, *, force: bool = False,
                      completed_by: str = "unknown",
                      config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     cfg = config or OrchConfig()
-    summary = get_project_summary(project_id, config=cfg)
-    if not summary:
-        raise ProjectNotFoundError(f"Project {project_id} not found")
-    phases = summary.get("phases", [])
-    incomplete = [
-        task["id"]
-        for phase in phases
-        for task in phase.get("tasks", [])
-        if task.get("status") != "completed"
-    ]
-    if incomplete and not force:
-        raise ReadyWorkConflictError(f"project {project_id} has incomplete tasks: {', '.join(incomplete[:10])}")
     driver = get_neo4j_driver(cfg)
     try:
         with driver.session(database=cfg.neo4j_db) as session:
-            session.run("""
+            record = session.run("""
                 MATCH (p:OrchProject {id: $project_id})
+                WHERE $force OR NOT EXISTS {
+                    MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+                    WHERE coalesce(t.status, 'pending') <> 'completed'
+                }
                 SET p.status = 'completed',
                     p.completed_at = datetime(),
                     p.updated_at = datetime()
-            """, project_id=project_id)
+                RETURN p.id AS id
+            """, project_id=project_id, force=bool(force)).single()
+            if not record:
+                _project_record(project_id, cfg)
+                raise ReadyWorkConflictError(f"project {project_id} has incomplete tasks")
         return {"ok": True, "project_id": project_id, "status": "completed", "force": bool(force), "completed_by": completed_by}
     finally:
         pass
@@ -1801,7 +1831,6 @@ def reset_project(project_id: str, *, reset_by: str = "unknown",
                   config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     cfg = config or OrchConfig()
     project = _project_record(project_id, cfg)
-    cleared_sessions = _project_participant_sessions(project_id, config=cfg)
     driver = get_neo4j_driver(cfg)
     try:
         with driver.session(database=cfg.neo4j_db) as session:
@@ -1830,13 +1859,12 @@ def reset_project(project_id: str, *, reset_by: str = "unknown",
                     t.forced_continuation_count = 0,
                     t.updated_at = datetime()
             """, project_id=project_id)
-        _clear_project_convergence_keys(project_id, config=cfg)
         return {
             "ok": True,
             "project_id": project_id,
             "status": "active",
             "reset_by": reset_by,
-            "cleared_sessions": cleared_sessions,
+            "cleared_sessions": [],
             "previous_stop_reason": project.get("stop_reason_current"),
         }
     finally:

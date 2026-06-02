@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from .config import OrchConfig, get_neo4j_driver
 from .orch_schema import (
+    _has_control_chars,
     add_dependency,
     assign_task_to_phase,
     create_phase,
@@ -15,11 +16,8 @@ from .orch_schema import (
     resolve_ref_path,
 )
 
-
-PROJECT_RE = re.compile(r"^# Project:\s*(?P<id>.+?)\s+[—-]\s+(?P<name>.+?)\s*(?P<meta>(?:\[[^\]]+\]\s*)*)$")
-PHASE_RE = re.compile(r"^## Phase:\s*(?P<id>.+?)\s+[—-]\s+(?P<name>.+?)\s*(?P<meta>(?:\[[^\]]+\]\s*)*)$")
-TASK_RE = re.compile(r"^### Task:\s*(?P<id>.+?)\s+[—-]\s+(?P<desc>.+?)\s*(?P<meta>(?:\[[^\]]+\]\s*)*)$")
 META_RE = re.compile(r"\[([^\]]+)\]")
+HEADER_SEPARATOR_RE = re.compile(r"\s+[—-]\s+")
 
 
 def _parse_ref(raw_value: str) -> Optional[Dict[str, Any]]:
@@ -33,12 +31,47 @@ def _parse_ref(raw_value: str) -> Optional[Dict[str, Any]]:
         l_end = int(end_raw.strip())
     except Exception:
         return None
-    if not path_part.strip() or l_start <= 0 or l_end < l_start:
+    path = path_part.strip()
+    if not path or _has_control_chars(path) or l_start <= 0 or l_end < l_start:
         return None
     return {
-        "path": path_part.strip(),
+        "path": path,
         "l_start": l_start,
         "l_end": l_end,
+    }
+
+
+def _split_header_meta(text: str) -> tuple[str, str]:
+    matches = list(META_RE.finditer(text))
+    if not matches:
+        return text.rstrip(), ""
+    trailing_start: Optional[int] = None
+    cursor = len(text)
+    for match in reversed(matches):
+        between = text[match.end():cursor]
+        if between.strip():
+            break
+        trailing_start = match.start()
+        cursor = match.start()
+    if trailing_start is None:
+        return text.rstrip(), ""
+    return text[:trailing_start].rstrip(), text[trailing_start:].strip()
+
+
+def _parse_header(line: str, prefix: str) -> Optional[Dict[str, str]]:
+    if not line.startswith(prefix):
+        return None
+    remainder = line[len(prefix):].strip()
+    if not remainder:
+        return None
+    body, meta_blob = _split_header_meta(remainder)
+    parts = HEADER_SEPARATOR_RE.split(body, maxsplit=1)
+    if len(parts) != 2:
+        return None
+    return {
+        "id": parts[0].strip(),
+        "name": parts[1].strip(),
+        "meta": meta_blob,
     }
 
 
@@ -155,7 +188,7 @@ def _parse_plan(md: str) -> Dict[str, Any]:
         if in_code_block:
             continue
 
-        project_match = PROJECT_RE.match(line)
+        project_match = _parse_header(line, "# Project:")
         if project_match:
             in_user_stop_conditions = False
             if project is not None:
@@ -163,26 +196,26 @@ def _parse_plan(md: str) -> Dict[str, Any]:
                 current_phase = None
                 current_task = None
                 continue
-            meta = _parse_meta(project_match.group("meta"))
+            meta = _parse_meta(project_match["meta"])
             project = {
-                "id": project_match.group("id").strip(),
-                "name": project_match.group("name").strip(),
+                "id": project_match["id"],
+                "name": project_match["name"],
                 "refs": meta.get("refs", []),
             }
             for bad_ref in meta.get("_ref_errors", []):
                 errors.append(f"line {line_no}: invalid ref '{bad_ref}'")
             continue
 
-        phase_match = PHASE_RE.match(line)
+        phase_match = _parse_header(line, "## Phase:")
         if phase_match:
             in_user_stop_conditions = False
             if project is None:
                 errors.append(f"line {line_no}: phase declared before project")
                 continue
-            meta = _parse_meta(phase_match.group("meta"))
+            meta = _parse_meta(phase_match["meta"])
             current_phase = {
-                "id": phase_match.group("id").strip(),
-                "name": phase_match.group("name").strip(),
+                "id": phase_match["id"],
+                "name": phase_match["name"],
                 "order": meta.get("order", 0),
                 "refs": meta.get("refs", []),
                 "tasks": [],
@@ -193,16 +226,16 @@ def _parse_plan(md: str) -> Dict[str, Any]:
             current_task = None
             continue
 
-        task_match = TASK_RE.match(line)
+        task_match = _parse_header(line, "### Task:")
         if task_match:
             in_user_stop_conditions = False
             if current_phase is None:
                 errors.append(f"line {line_no}: task declared before phase")
                 continue
-            meta = _parse_meta(task_match.group("meta"))
+            meta = _parse_meta(task_match["meta"])
             current_task = {
-                "id": task_match.group("id").strip(),
-                "description": task_match.group("desc").strip(),
+                "id": task_match["id"],
+                "description": task_match["name"],
                 "priority": int(meta.get("priority", 50)),
                 "owner": meta.get("owner", ""),
                 "tags": meta.get("tags", []),
@@ -258,6 +291,20 @@ def _parse_plan(md: str) -> Dict[str, Any]:
             del task["body"]
 
     return {"project": project, "phases": phases, "errors": errors}
+
+
+def plan_declares_refs(md: str) -> bool:
+    parsed = _parse_plan(md)
+    project = parsed.get("project") or {}
+    if project.get("refs"):
+        return True
+    for phase in parsed.get("phases", []):
+        if phase.get("refs"):
+            return True
+        for task in phase.get("tasks", []):
+            if task.get("refs"):
+                return True
+    return False
 
 
 def load_plan_from_text(md: str, source_path: str, source_kind: str,

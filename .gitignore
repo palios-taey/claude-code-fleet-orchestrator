@@ -6,3 +6,4 @@ __pycache__/
 .env
 .env.local
 .env.*.local
+audit_logs/

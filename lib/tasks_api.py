@@ -63,8 +63,9 @@ from lib.orch_schema import (
     set_project_user_stop_conditions,
     update_project_priority,
     update_task_status,
+    validate_source_path_for_refs,
 )
-from lib.plan_loader import load_plan_from_text
+from lib.plan_loader import load_plan_from_text, plan_declares_refs
 
 app = FastAPI(title="Fleet Orchestrator API", version="2.0")
 _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
@@ -122,6 +123,22 @@ def _project_row(project: Dict[str, Any]) -> Dict[str, Any]:
         "stop_reason_orphaned": bool(project.get("stop_reason_orphaned")),
         **counts,
     }
+
+
+def _strict_force_flag(data: Dict[str, Any]) -> bool:
+    if "force" not in data:
+        return False
+    value = data["force"]
+    if isinstance(value, bool):
+        return value
+    raise HTTPException(status_code=422, detail="force must be a JSON boolean")
+
+
+def _validated_source_path(source_path: Optional[str], refs_present: bool) -> Optional[str]:
+    normalized, error = validate_source_path_for_refs(source_path, refs_present=refs_present)
+    if error:
+        raise HTTPException(status_code=422, detail=error)
+    return normalized
 
 
 @app.get("/api/tasks")
@@ -330,15 +347,17 @@ async def create_project_endpoint(req: Request) -> Dict[str, Any]:
             status_code=400,
             detail=f"priority must be >= 0 (got {project_priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
         )
+    refs = data.get("refs") if isinstance(data.get("refs"), list) else None
+    source_path = _validated_source_path(data.get("source_path"), refs_present=bool(refs))
     pid = create_project(
         project_id=project_id,
         name=name,
         description=data.get("description", ""),
-        refs=data.get("refs"),
+        refs=refs,
         user_stop_conditions=data.get("user_stop_conditions"),
         supervisor=supervisor,
         priority=project_priority,
-        source_path=data.get("source_path"),
+        source_path=source_path,
         source_sha256=data.get("source_sha256"),
         source_kind=data.get("source_kind"),
         ingested_by=data.get("ingested_by"),
@@ -379,13 +398,15 @@ async def create_phase_endpoint(project_id: str, req: Request) -> Dict[str, Any]
     name = data.get("name", phase_id)
     if not phase_id:
         raise HTTPException(status_code=400, detail="id required")
+    refs = data.get("refs") if isinstance(data.get("refs"), list) else None
+    source_path = _validated_source_path(data.get("source_path"), refs_present=bool(refs))
     pid = create_phase(
         project_id=project_id,
         phase_id=phase_id,
         name=name,
         order=int(data.get("order", 0)),
-        refs=data.get("refs"),
-        source_path=data.get("source_path"),
+        refs=refs,
+        source_path=source_path,
         config=_cfg(),
     )
     return {"ok": True, "phase_id": pid}
@@ -408,9 +429,11 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
             status_code=400,
             detail=f"priority must be >= 0 (got {ingest_priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
         )
+    refs_present = plan_declares_refs(md_text)
+    source_path = _validated_source_path(data.get("source_path", ""), refs_present=refs_present)
     return load_plan_from_text(
         md=md_text,
-        source_path=data.get("source_path", ""),
+        source_path=source_path or "",
         source_kind=data.get("source_kind", "markdown"),
         ingested_by=data.get("ingested_by", "unknown"),
         supervisor=supervisor,
@@ -425,7 +448,7 @@ async def complete_project_endpoint(project_id: str, req: Request) -> Dict[str, 
     try:
         return complete_project(
             project_id,
-            force=bool(data.get("force", False)),
+            force=_strict_force_flag(data),
             completed_by=data.get("completed_by") or data.get("from") or "unknown",
             config=_cfg(),
         )
