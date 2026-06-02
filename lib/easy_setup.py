@@ -863,16 +863,16 @@ def reconcile_pending_hook_transaction(path: Path = CLAUDE_SETTINGS_PATH) -> Dic
 
 def ensure_claude_integration(*, dry_run: bool = False) -> Dict[str, Any]:
     settings, original = load_claude_settings(CLAUDE_SETTINGS_PATH)
+    if dry_run:
+        guard = apply_claude_permission_guard(CLAUDE_SETTINGS_PATH, apply=False)
+        return {"backup": None, "guard": guard, "hook_commands_added": {}, "reconciled": {"reconciled": False}}
+
     reconciled = reconcile_pending_hook_transaction(CLAUDE_SETTINGS_PATH)
     if reconciled.get("reconciled"):
         settings, original = load_claude_settings(CLAUDE_SETTINGS_PATH)
     backup_path = snapshot_claude_settings(CLAUDE_SETTINGS_PATH, original_text=original)
     pre_hooks = snapshot_expected_hook_commands(settings)
     hook_commands_added: Dict[str, List[str]] = {}
-
-    if dry_run:
-        guard = apply_claude_permission_guard(CLAUDE_SETTINGS_PATH, apply=False)
-        return {"backup": backup_path, "guard": guard, "hook_commands_added": hook_commands_added, "reconciled": reconciled}
 
     try:
         _write_pending_hook_transaction(pre_hooks)

@@ -5,6 +5,7 @@ import json
 import os
 import importlib.util
 import importlib.machinery
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -250,7 +251,38 @@ def main() -> int:
             with mock.patch.object(sys, "argv", ["install", "--dry-run"]):
                 rc = install_main()
         called_commands = [" ".join(call.args[0]) for call in subrun.call_args_list if call.args]
-        _assert("byo-no-docker", rc == 0 and set_compose_managed.call_args_list and not any(command.startswith("/usr/bin/docker") or command.startswith("docker ") for command in called_commands), called_commands)
+        _assert("byo-no-docker", rc == 0 and not set_compose_managed.call_args_list and not any(command.startswith("/usr/bin/docker") or command.startswith("docker ") for command in called_commands), called_commands)
+
+        dry_run_settings = tmp / "dry-run" / "settings.json"
+        dry_run_state = tmp / "dry-run-state"
+        dry_run_notify_root = easy_setup.resolve_notify_root()
+        dry_run_env = os.environ.copy()
+        dry_run_env.update(
+            {
+                "CLAUDE_SETTINGS_PATH": str(dry_run_settings),
+                "ORCH_STATE_DIR": str(dry_run_state),
+                "ORCH_NOTIFY_LIB_ROOT": str(dry_run_notify_root),
+            }
+        )
+        dry_run = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "install"), "--dry-run", "--skip-compose"],
+            cwd=str(ROOT),
+            env=dry_run_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        _assert(
+            "dry-run-writes-nothing",
+            dry_run.returncode == 0 and not dry_run_settings.exists() and not dry_run_state.exists(),
+            {
+                "returncode": dry_run.returncode,
+                "stdout": dry_run.stdout,
+                "stderr": dry_run.stderr,
+                "settings_exists": dry_run_settings.exists(),
+                "state_exists": dry_run_state.exists(),
+            },
+        )
 
         with mock.patch("lib.easy_setup.ensure_claude_integration", return_value={"guard": {"changed": False}}), \
              mock.patch("lib.easy_setup.managed_python", return_value="/tmp/fake-venv-python"), \

@@ -35,7 +35,8 @@ def _bootstrap(args: argparse.Namespace) -> int:
     if use_byo:
         status = ", ".join(f"{name}={'open' if open_ else 'closed'}" for name, open_ in ports.items())
         print(f"compose: skipped (BYO/existing infra; {status})")
-        set_compose_managed(False)
+        if not args.dry_run:
+            set_compose_managed(False)
     else:
         require_command("docker")
         if not docker_running():
