@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="orch-public")
+    parser.add_argument("--port", type=int, default=5005)
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.port <= 0:
+        raise SystemExit("port must be positive")
+    command = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "lib.public_readonly:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(args.port),
+    ]
+    return subprocess.call(command, cwd=str(ROOT))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
