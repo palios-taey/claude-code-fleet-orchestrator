@@ -18,6 +18,7 @@ from .orch_schema import (
 
 META_RE = re.compile(r"\[([^\]]+)\]")
 HEADER_SEPARATOR_RE = re.compile(r"\s+[—-]\s+")
+_PLAN_LINE_BYTE_CAP = 4096
 
 
 def _parse_ref(raw_value: str) -> Optional[Dict[str, Any]]:
@@ -42,6 +43,12 @@ def _parse_ref(raw_value: str) -> Optional[Dict[str, Any]]:
 
 
 def _split_header_meta(text: str) -> tuple[str, str]:
+    if "[" not in text:
+        return text.rstrip(), ""
+    last_open = text.rfind("[")
+    last_close = text.rfind("]")
+    if last_open > last_close:
+        return text.rstrip(), ""
     matches = list(META_RE.finditer(text))
     if not matches:
         return text.rstrip(), ""
@@ -172,12 +179,16 @@ def _parse_plan(md: str) -> Dict[str, Any]:
     current_task: Optional[Dict[str, Any]] = None
     phases: List[Dict[str, Any]] = []
     errors: List[str] = []
+    warnings: List[str] = []
     description_lines: List[str] = []
     user_stop_conditions: List[str] = []
     in_code_block = False
     in_user_stop_conditions = False
 
     for line_no, raw_line in enumerate(md.splitlines(), start=1):
+        if len(raw_line.encode("utf-8")) > _PLAN_LINE_BYTE_CAP:
+            warnings.append(f"line {line_no}: skipped overlong line (> {_PLAN_LINE_BYTE_CAP} bytes)")
+            continue
         line = raw_line.rstrip()
         stripped = line.strip()
 
@@ -290,7 +301,7 @@ def _parse_plan(md: str) -> Dict[str, Any]:
                 task["description"] = f"{task['description']} {' '.join(task['body'])}".strip()
             del task["body"]
 
-    return {"project": project, "phases": phases, "errors": errors}
+    return {"project": project, "phases": phases, "errors": errors, "warnings": warnings}
 
 
 def plan_declares_refs(md: str) -> bool:
@@ -316,7 +327,9 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
     parsed = _parse_plan(md)
     project = parsed["project"]
     errors = list(parsed["errors"])
-    warnings = _collect_ref_warnings(parsed, source_path) if source_path else []
+    warnings = list(parsed.get("warnings", []))
+    if source_path:
+        warnings.extend(_collect_ref_warnings(parsed, source_path))
     if project is None:
         return {
             "project_id": None,

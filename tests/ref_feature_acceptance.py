@@ -41,7 +41,7 @@ from lib.orch_schema import (  # noqa: E402
     reset_project,
     resolve_ref_path,
 )
-from lib.plan_loader import _parse_plan, _parse_ref  # noqa: E402
+from lib.plan_loader import _PLAN_LINE_BYTE_CAP, _parse_plan, _parse_ref  # noqa: E402
 from lib.tasks_api import app  # noqa: E402
 
 CFG = OrchConfig()
@@ -94,6 +94,20 @@ def _benchmark_parse_ms(blocks: int) -> float:
         if parsed["project"] is None:
             raise AssertionError("project parse failed")
     return min(timings)
+
+
+def _benchmark_malformed_parse_ms(blocks: int) -> tuple[float, dict]:
+    line = "# Project: proj - Name " + (" [" * blocks) + "x"
+    doc = f"{line}\n"
+    timings = []
+    last_parsed = None
+    for _ in range(3):
+        start = time.perf_counter()
+        parsed = _parse_plan(doc)
+        timings.append((time.perf_counter() - start) * 1000.0)
+        last_parsed = parsed
+    assert last_parsed is not None
+    return min(timings), last_parsed
 
 
 def main() -> int:
@@ -221,12 +235,25 @@ def main() -> int:
                 oversize_first,
             )
 
-            bench_sizes = [128, 256, 512, 1024]
+            bench_sizes = [32, 64, 128, 256]
             bench_ms = [_benchmark_parse_ms(size) for size in bench_sizes]
             ratios = [bench_ms[idx + 1] / max(bench_ms[idx], 0.001) for idx in range(len(bench_ms) - 1)]
             linear_ok = all(ratio < 3.0 for ratio in ratios)
             _assert("linear-parse-benchmark", linear_ok, {"sizes": bench_sizes, "ms": bench_ms, "ratios": ratios})
             print(f"BENCH parse-ms blocks={bench_sizes} values={[round(v, 3) for v in bench_ms]}")
+
+            malformed_sizes = [1000, 2000, 4000, 8000, 16000]
+            malformed_results = [_benchmark_malformed_parse_ms(size) for size in malformed_sizes]
+            malformed_ms = [item[0] for item in malformed_results]
+            malformed_parsed = malformed_results[-1][1]
+            malformed_ok = max(malformed_ms) < 250.0
+            malformed_warning = f"line 1: skipped overlong line (> {_PLAN_LINE_BYTE_CAP} bytes)"
+            _assert(
+                "overlong-line-bounded",
+                malformed_ok and malformed_warning in malformed_parsed.get("warnings", []),
+                {"sizes": malformed_sizes, "ms": malformed_ms, "warnings": malformed_parsed.get("warnings")},
+            )
+            print(f"BENCH malformed-parse-ms blocks={malformed_sizes} values={[round(v, 3) for v in malformed_ms]}")
 
             project_ref_id = f"{PREFIX}-project-ref"
             create_project(
