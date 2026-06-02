@@ -96,6 +96,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from lib.config import OrchConfig
+from lib.handoff_validation import process_expired_handoffs
 
 import redis as redis_lib
 
@@ -210,6 +211,43 @@ def _send_wake(r, target: str, body: str, priority: str, msg_id: str) -> bool:
         log.error("taey-notify failed for %s: %s", target, result.stderr.strip())
         return False
     return True
+
+
+def _process_handoff_timeouts(r) -> None:
+    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+    seen: set[str] = set()
+    for key in r.scan_iter(match=f"{prefix}:handoff:*"):
+        parts = str(key).split(":")
+        if len(parts) < 4:
+            continue
+        dispatcher = parts[2]
+        if dispatcher in seen:
+            continue
+        seen.add(dispatcher)
+
+        def _load_task(task_id: str):
+            return _load_task_state(task_id) if task_id else None
+
+        def _send(event: dict[str, object]) -> None:
+            body = json.dumps(event, separators=(",", ":"))
+            _send_wake(
+                r,
+                dispatcher,
+                body,
+                priority="high",
+                msg_id=f"handoff-wake-{dispatcher}-{event.get('dispatcher_task_id')}",
+            )
+
+        try:
+            process_expired_handoffs(
+                r,
+                session_id=dispatcher,
+                load_task=_load_task,
+                send_wake=_send,
+                prefix=prefix,
+            )
+        except Exception as exc:
+            log.error("handoff timeout processing failed for %s: %s", dispatcher, exc)
 
 
 def _stop_gate_dedup(r, node_id: str, current_task_id: str, decision_key: str,
@@ -739,6 +777,7 @@ def main():
             last_sweep = now
             sweep_count = 0
             try:
+                _process_handoff_timeouts(r)
                 for k in r.scan_iter(match="taey:*:current_task"):
                     parts = k.split(":", 2)
                     if len(parts) == 3:
@@ -753,6 +792,10 @@ def main():
                 log.error("Sweep failed: %s", exc)
 
         if not message or message.get("type") not in ("pmessage", "message"):
+            try:
+                _process_handoff_timeouts(r)
+            except Exception as exc:
+                log.error("handoff timeout background pass failed: %s", exc)
             continue
 
         channel = message.get("channel", "")

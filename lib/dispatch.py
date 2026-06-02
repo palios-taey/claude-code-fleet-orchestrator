@@ -53,6 +53,7 @@ import time
 from typing import Optional
 
 from .config import OrchConfig, ensure_notify_importable, get_neo4j_session
+from .handoff_validation import mark_superseded_for_task
 
 
 class BugLockActive(Exception):
@@ -220,6 +221,7 @@ def dispatch(
             raise BugLockActive(f"BUG_LOCK_ACTIVE for {product_id}: {reason}")
 
     _claim_ready_orch_task(task_id=task_id, worker=worker)
+    mark_superseded_for_task(_redis_connect(), from_session := (supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")), task_id)
 
     bind_current_task(
         worker=worker,
@@ -259,9 +261,23 @@ def dispatch(
         )
 
     cli = OrchConfig().notify_cli_path
-    from_session = supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")
     result = subprocess.run(
-        [cli, worker, prompt_body, "--from", from_session, "--type", "command", "--priority", priority],
+        [
+            cli,
+            worker,
+            prompt_body,
+            "--from",
+            from_session,
+            "--type",
+            "command",
+            "--priority",
+            priority,
+            "--handoff",
+            "--dispatcher-task-id",
+            task_id,
+            "--actionable-inputs",
+            "{}",
+        ],
         capture_output=True,
         text=True,
         check=False,

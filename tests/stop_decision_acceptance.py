@@ -1,87 +1,39 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import os
 import socket
 import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 import uuid
 from pathlib import Path
+from unittest import mock
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-PREFIX = f"stopapi-{uuid.uuid4().hex[:8]}"
-if "ORCH_DOTENV" not in os.environ:
-    candidate = ROOT / ".env"
-    if candidate.is_file():
-        os.environ["ORCH_DOTENV"] = str(candidate)
+PREFIX = f"hvstop-{uuid.uuid4().hex[:8]}"
 os.environ["NOTIFY_KEY_PREFIX"] = PREFIX
+if "ORCH_DOTENV" not in os.environ:
+    for candidate in (
+        ROOT / ".env",
+        Path.home() / "claude-code-fleet-orchestrator/.env",
+    ):
+        if candidate.is_file():
+            os.environ["ORCH_DOTENV"] = str(candidate)
+            break
 os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
+os.environ.pop("CF_STOP_INPROGRESS", None)
+os.environ.pop("CF_STOP_INPROGRESS_SESSIONS", None)
 
 from lib.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
-from lib.orch_schema import create_phase, create_project, create_task, update_task_status  # noqa: E402
+from lib.orch_schema import create_phase, create_project, create_task, get_session_next_ready, get_session_stop_decision, update_task_status, _stop_inprogress_enabled  # noqa: E402
 
 CFG = OrchConfig()
-
-
-def _ensure_dotenv_for_server() -> str:
-    explicit = os.environ.get("ORCH_DOTENV")
-    if explicit:
-        return explicit
-    handle = tempfile.NamedTemporaryFile("w", delete=False, suffix=".env")
-    for key in (
-        "ORCH_REDIS_HOST",
-        "ORCH_REDIS_PORT",
-        "ORCH_NEO4J_URI",
-        "ORCH_NEO4J_USER",
-        "ORCH_NEO4J_PASS",
-        "ORCH_NEO4J_DB",
-        "ORCH_DASHBOARD_URL",
-        "ORCH_NOTIFY_LIB_ROOT",
-        "ORCH_NOTIFY_CLI",
-    ):
-        value = os.environ.get(key)
-        if value:
-            handle.write(f"{key}={value}\n")
-    handle.flush()
-    handle.close()
-    return handle.name
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _wait_for_http(url: str, timeout: float = 10.0) -> None:
-    deadline = time.time() + timeout
-    last_error = None
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(url, timeout=1):
-                return
-        except Exception as exc:
-            last_error = exc
-            time.sleep(0.1)
-    raise RuntimeError(f"server did not become ready: {last_error}")
-
-
-def _json_get(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=5) as resp:
-        return json.load(resp)
-
-
-def _stop_block_count(session_id: str) -> str | None:
-    r = get_redis_sync(CFG)
-    raw = r.get(f"{PREFIX}:{session_id}:stop_block_count")
-    return None if raw is None else str(raw)
 
 
 def _cleanup(prefix: str) -> None:
@@ -92,98 +44,177 @@ def _cleanup(prefix: str) -> None:
         session.run("MATCH (p:OrchProject) WHERE p.id STARTS WITH $prefix DETACH DELETE p", prefix=prefix)
     r = get_redis_sync(CFG)
     cursor = 0
-    pattern = f"{PREFIX}:*"
     while True:
-        cursor, keys = r.scan(cursor=cursor, match=pattern, count=100)
+        cursor, keys = r.scan(cursor=cursor, match=f"{prefix}:*", count=100)
         if keys:
             r.delete(*keys)
         if cursor == 0:
             break
 
 
-def _wire_dependency(task_id: str, dep_id: str) -> None:
-    driver = get_neo4j_driver(CFG)
-    with driver.session(database=CFG.neo4j_db) as session:
-        session.run(
-            """
-            MATCH (t:OrchTask {id: $task_id}), (dep:OrchTask {id: $dep_id})
-            MERGE (t)-[:DEPENDS_ON]->(dep)
-            """,
-            task_id=task_id,
-            dep_id=dep_id,
-        )
+def _write_flag_file(payload: str) -> str:
+    handle = tempfile.NamedTemporaryFile("w", delete=False, suffix=".json")
+    handle.write(payload)
+    handle.flush()
+    handle.close()
+    return handle.name
+
+
+def _make_priority_fixture() -> None:
+    project_id = f"{PREFIX}-project"
+    phase_id = f"{PREFIX}-phase"
+    create_project(project_id, "hv ordering", supervisor="conductor", priority=1, config=CFG)
+    create_phase(project_id, phase_id, "Main", config=CFG)
+    create_task(phase_id, f"{PREFIX}-task-10", "priority 10", owner="conductor-codex", priority=10, wake_owner_if_ready=False, config=CFG)
+    create_task(phase_id, f"{PREFIX}-task-2", "priority 2", owner="conductor-codex", priority=2, wake_owner_if_ready=False, config=CFG)
+
+
+def _make_in_progress_fixture(*, blocked_on: str | None = None) -> str:
+    project_id = f"{PREFIX}-ip-project-{uuid.uuid4().hex[:6]}"
+    phase_id = f"{PREFIX}-ip-phase-{uuid.uuid4().hex[:6]}"
+    task_id = f"{PREFIX}-ip-task-{uuid.uuid4().hex[:6]}"
+    create_project(project_id, "hv in-progress", supervisor="conductor", priority=1, config=CFG)
+    create_phase(project_id, phase_id, "Main", config=CFG)
+    create_task(phase_id, task_id, "owned in-progress task", owner="conductor-codex", priority=5, wake_owner_if_ready=False, config=CFG)
+    update_task_status(task_id, "in_progress", owner="conductor-codex", blocked_on=blocked_on, config=CFG)
+    return task_id
 
 
 def main() -> int:
-    project_id = f"{PREFIX}-project"
-    phase_id = f"{PREFIX}-phase"
-    task1 = f"{PREFIX}-task-1"
-    task2 = f"{PREFIX}-task-2"
-    port = _find_free_port()
-    server_env = os.environ.copy()
-    server_env["NOTIFY_KEY_PREFIX"] = PREFIX
-    server_env["ORCH_DOTENV"] = _ensure_dotenv_for_server()
-    server = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "lib.tasks_api:app", "--host", "127.0.0.1", "--port", str(port)],
-        cwd=str(ROOT),
-        env=server_env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    _cleanup(PREFIX)
     try:
+        flag_file = _write_flag_file('{"conductor-codex":{"enforce":true},"worker-codex":{"enforce":false}}')
+        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
+
+        off = get_session_stop_decision("worker-codex", config=CFG)
+        print("PASS conductor-only-enforce" if off.get("block") is False and off.get("wake_type") == "ALLOW_STOP" else f"FAIL conductor-only-enforce {off}")
+
+        with mock.patch("lib.orch_schema.flags_for_session", side_effect=RuntimeError("flag-boom")):
+            flag_fail_open = get_session_stop_decision("worker-codex", config=CFG)
+        print("PASS flags-for-session-fail-open" if flag_fail_open.get("wake_type") == off.get("wake_type") and flag_fail_open.get("block") == off.get("block") else f"FAIL flags-for-session-fail-open {flag_fail_open}")
+
+        with mock.patch("lib.orch_schema.validate_stop_handoff", side_effect=TimeoutError("boom")):
+            fail_open = get_session_stop_decision("conductor-codex", config=CFG)
+        print("PASS redis-down-fail-open" if fail_open.get("block") is False and fail_open.get("hv_fail_open") else f"FAIL redis-down-fail-open {fail_open}")
+
+        with mock.patch("lib.orch_schema._raw_stop_decision", side_effect=RuntimeError("neo4j-boom")):
+            raw_fail_open = get_session_stop_decision("conductor-codex", config=CFG)
+        print("PASS raw-stop-fail-open" if raw_fail_open.get("block") is False and raw_fail_open.get("keystone_fail_open") else f"FAIL raw-stop-fail-open {raw_fail_open}")
+
+        _make_priority_fixture()
+        next_ready = get_session_next_ready("conductor-codex", config=CFG)
+        print("PASS next-ready-priority-ascending" if next_ready and next_ready.get("task_id") == f"{PREFIX}-task-2" else f"FAIL next-ready-priority-ascending {next_ready}")
+
+        class HangingRedis:
+            def sismember(self, *_args, **_kwargs):
+                time.sleep(0.5)
+                return True
+
+        with mock.patch("lib.config.get_redis_sync", return_value=HangingRedis()):
+            timeout_flag = _stop_inprogress_enabled("conductor-codex", config=CFG)
+        print("PASS stop-inprogress-redis-timeout-fail-open" if timeout_flag is False else f"FAIL stop-inprogress-redis-timeout-fail-open {timeout_flag}")
+
         _cleanup(PREFIX)
-        create_project(project_id, "Stop Decision API", supervisor="conductor", config=CFG)
-        create_phase(project_id, phase_id, "Main", config=CFG)
-        create_task(phase_id, task1, "First ready task", owner="conductor-codex", wake_owner_if_ready=False, config=CFG)
-        create_task(phase_id, task2, "Second ready task", owner="conductor-codex", wake_owner_if_ready=False, config=CFG)
-        _wire_dependency(task2, task1)
-
-        _wait_for_http(f"http://127.0.0.1:{port}/health")
-
-        first = _json_get(f"http://127.0.0.1:{port}/api/sessions/conductor-codex/stop-decision")
+        flag_file = _write_flag_file('{"conductor-codex":{"enforce":true}}')
+        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
+        os.environ.pop("CF_STOP_INPROGRESS", None)
+        os.environ.pop("CF_STOP_INPROGRESS_SESSIONS", None)
+        task_id = _make_in_progress_fixture(blocked_on=None)
+        in_progress_keystone = get_session_stop_decision("conductor-codex", config=CFG)
         print(
-            "PASS live_cycle_step1"
-            if first.get("block") and first.get("task_id") == task1 and first.get("wake_type") == "WAKE_WITH_QUEUE"
-            else f"FAIL live_cycle_step1 {first}"
-        )
-        passive_before = _stop_block_count("conductor-codex")
-        passive = _json_get(f"http://127.0.0.1:{port}/api/sessions/conductor-codex/stop-decision")
-        passive_after = _stop_block_count("conductor-codex")
-        print(
-            "PASS passive_get_no_mutation"
-            if passive.get("block") is True and passive_before == passive_after
-            else f"FAIL passive_get_no_mutation before={passive_before} after={passive_after} payload={passive}"
-        )
-        active = _json_get(f"http://127.0.0.1:{port}/api/sessions/conductor-codex/stop-decision?stop_hook_active=true")
-        active_after = _stop_block_count("conductor-codex")
-        print(
-            "PASS active_get_mutates"
-            if active.get("block") is True and active_after == "1"
-            else f"FAIL active_get_mutates count={active_after} payload={active}"
+            "PASS in-progress-not-allowlisted-keystone-allows"
+            if in_progress_keystone.get("block") is False and in_progress_keystone.get("wake_type") == "ALLOW_STOP"
+            else f"FAIL in-progress-not-allowlisted-keystone-allows {in_progress_keystone}"
         )
 
-        update_task_status(task1, "completed", owner="conductor-codex", config=CFG)
-        second = _json_get(f"http://127.0.0.1:{port}/api/sessions/conductor-codex/stop-decision")
+        _cleanup(PREFIX)
+        flag_file = _write_flag_file('{}')
+        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
+        os.environ["CF_STOP_INPROGRESS"] = "1"
+        os.environ["CF_STOP_INPROGRESS_SESSIONS"] = "conductor-codex"
+        task_id = _make_in_progress_fixture(blocked_on=None)
+        in_progress_block_no_enforce = get_session_stop_decision("conductor-codex", config=CFG)
         print(
-            "PASS live_cycle_step2"
-            if second.get("block") and second.get("task_id") == task2 and second.get("wake_type") == "WAKE_WITH_QUEUE"
-            else f"FAIL live_cycle_step2 {second}"
+            "PASS in-progress-blocks-with-enforce-off"
+            if in_progress_block_no_enforce.get("block") is True and in_progress_block_no_enforce.get("task_id") == task_id and in_progress_block_no_enforce.get("wake_type") == "WAKE_WITH_QUEUE"
+            else f"FAIL in-progress-blocks-with-enforce-off {in_progress_block_no_enforce}"
         )
 
-        update_task_status(task2, "completed", owner="conductor-codex", config=CFG)
-        third = _json_get(f"http://127.0.0.1:{port}/api/sessions/conductor-codex/stop-decision")
+        _cleanup(PREFIX)
+        flag_file = _write_flag_file('{"conductor-codex":{"enforce":true}}')
+        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
+        os.environ["CF_STOP_INPROGRESS"] = "1"
+        os.environ["CF_STOP_INPROGRESS_SESSIONS"] = "conductor-codex"
+        task_id = _make_in_progress_fixture(blocked_on=None)
+        in_progress_block = get_session_stop_decision("conductor-codex", config=CFG)
         print(
-            "PASS live_cycle_step3"
-            if third.get("block") is False and third.get("wake_type") == "ALLOW_STOP"
-            else f"FAIL live_cycle_step3 {third}"
+            "PASS in-progress-allowlisted-blocks"
+            if in_progress_block.get("block") is True and in_progress_block.get("task_id") == task_id and in_progress_block.get("wake_type") == "WAKE_WITH_QUEUE"
+            else f"FAIL in-progress-allowlisted-blocks {in_progress_block}"
+        )
+
+        _cleanup(PREFIX)
+        flag_file = _write_flag_file('{"conductor-codex":{"enforce":true}}')
+        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
+        os.environ["CF_STOP_INPROGRESS"] = "1"
+        os.environ["CF_STOP_INPROGRESS_SESSIONS"] = "conductor-codex"
+        _make_in_progress_fixture(blocked_on="worker-codex")
+        blocked_on_allow = get_session_stop_decision("conductor-codex", config=CFG)
+        print(
+            "PASS in-progress-blocked-on-allows"
+            if blocked_on_allow.get("block") is False and blocked_on_allow.get("wake_type") == "ALLOW_STOP"
+            else f"FAIL in-progress-blocked-on-allows {blocked_on_allow}"
+        )
+
+        with mock.patch("lib.orch_schema._raw_stop_decision", return_value={"block": True, "wake_type": "WAKE_WITH_QUEUE", "task_id": "base-task", "reason": "base"}):
+            with mock.patch("lib.orch_schema.validate_stop_handoff", return_value={"state": "dead", "record": {"dispatcher_task_id": "hv-task"}}):
+                base_block_wins = get_session_stop_decision("conductor-codex", config=CFG)
+        print(
+            "PASS handoff-dead-does-not-override-base-block"
+            if base_block_wins.get("block") is True and base_block_wins.get("task_id") == "base-task"
+            else f"FAIL handoff-dead-does-not-override-base-block {base_block_wins}"
+        )
+
+        _cleanup(PREFIX)
+        flag_file = _write_flag_file('{"conductor-codex":{"enforce":true}}')
+        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
+        os.environ["CF_STOP_INPROGRESS"] = "1"
+        os.environ["CF_STOP_INPROGRESS_SESSIONS"] = "conductor-codex"
+        _make_in_progress_fixture(blocked_on=None)
+        convergence_results = [
+            get_session_stop_decision("conductor-codex", stop_hook_active=True, config=CFG)
+            for _ in range(3)
+        ]
+        converged = convergence_results[-1]
+        print(
+            "PASS convergence-limit-force-allows"
+            if converged.get("block") is False and converged.get("converged_allow") is True and converged.get("wake_type") == "ALLOW_STOP"
+            else f"FAIL convergence-limit-force-allows {convergence_results}"
+        )
+
+        class HangingMarkerRedis:
+            def delete(self, *_args, **_kwargs):
+                time.sleep(0.5)
+                return 0
+
+            def get(self, *_args, **_kwargs):
+                time.sleep(0.5)
+                return None
+
+            def set(self, *_args, **_kwargs):
+                time.sleep(0.5)
+                return True
+
+        with mock.patch("lib.config.get_redis_sync", return_value=HangingMarkerRedis()):
+            with mock.patch("lib.orch_schema._raw_stop_decision", return_value={"block": True, "wake_type": "WAKE_WITH_QUEUE", "task_id": "task-marker", "reason": "marker"}):
+                marker_fail_open = get_session_stop_decision("conductor-codex", stop_hook_active=True, config=CFG)
+        print(
+            "PASS convergence-marker-fail-open"
+            if marker_fail_open.get("block") is True and marker_fail_open.get("convergence_marker_fail_open")
+            else f"FAIL convergence-marker-fail-open {marker_fail_open}"
         )
         return 0
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            server.kill()
         _cleanup(PREFIX)
 
 

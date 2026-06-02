@@ -11,14 +11,17 @@ Label convention: OrchProject, OrchPhase, OrchTask, OrchFileOwnership
 import copy
 import datetime as dt
 import json
+import logging
 import os
 import subprocess
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, ensure_notify_importable, get_neo4j_driver
+from .handoff_validation import flags_for_session, validate_stop_handoff
 
 
 SCHEMA_CONSTRAINTS = [
@@ -253,8 +256,16 @@ def _state_key(node_id: str, suffix: str) -> str:
 
 
 _STOP_BLOCK_CONVERGENCE_LIMIT = 3
+# This TTL deliberately survives short-lived process restarts so a stop cycle
+# can still converge after a crash/restart. The tradeoff is a stale marker/count
+# may survive until expiry if a process dies mid-cycle.
 _STOP_BLOCK_TTL_SECS = 3600
 WAKE_ALLOW_STOP = "ALLOW_STOP"
+_STOP_INPROGRESS_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+_STOP_INPROGRESS_REDIS_TIMEOUT_S = 0.2
+_STOP_MARKER_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+_STOP_MARKER_REDIS_TIMEOUT_S = 0.2
+_LOG = logging.getLogger(__name__)
 
 
 def _send_wake(owner: str, body: str) -> None:
@@ -371,6 +382,44 @@ def _queue_block_reason(task_id: Optional[str], description: Optional[str]) -> s
     )
 
 
+def _in_progress_block_reason(task_id: Optional[str], description: Optional[str]) -> str:
+    task_id_value = task_id or "unknown-task"
+    task_title = (description or "untitled task")[:80]
+    return f"Finish in-progress task {task_id_value}: {task_title}."
+
+
+def _stop_inprogress_enabled(session_id: str, config: Optional[OrchConfig] = None) -> bool:
+    from .config import get_redis_sync
+
+    cfg = config or OrchConfig()
+    if str(os.environ.get("CF_STOP_INPROGRESS") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        allowed = {
+            item.strip()
+            for item in str(os.environ.get("CF_STOP_INPROGRESS_SESSIONS") or "").replace(";", ",").split(",")
+            if item.strip()
+        }
+        if session_id in allowed:
+            return True
+    try:
+        prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+        redis_client = get_redis_sync(cfg)
+        future = _STOP_INPROGRESS_EXECUTOR.submit(
+            redis_client.sismember,
+            f"{prefix}:stop_inprogress_enabled",
+            session_id,
+        )
+        return bool(future.result(timeout=_STOP_INPROGRESS_REDIS_TIMEOUT_S))
+    except FuturesTimeoutError:
+        return False
+    except Exception:
+        return False
+
+
+def _redis_marker_call(fn, *args):
+    future = _STOP_MARKER_EXECUTOR.submit(fn, *args)
+    return future.result(timeout=_STOP_MARKER_REDIS_TIMEOUT_S)
+
+
 def _reason_required_block_reason(active_conditions: list[dict[str, Any]]) -> str:
     labels = [str(cond.get("label")) for cond in active_conditions if cond.get("label")]
     labels_text = ", ".join(labels) if labels else "no active user_stop_conditions"
@@ -410,6 +459,33 @@ def _raw_stop_decision(session_id: str,
                 "phase_id": next_ready.get("phase_id"),
                 "task_priority": next_ready.get("priority"),
                 "task_title_short": (str(next_ready.get("description") or "")[:80] or None),
+            }
+
+    if _stop_inprogress_enabled(session_id, config=cfg):
+        current_work = get_session_current_work(session_id, config=cfg)
+        current_task_id = current_work.get("top_task_id") if current_work else None
+        blocked_on = _task_blocked_on(current_task_id, config=cfg)
+        if current_task_id and not blocked_on:
+            # This block is intentionally bounded by the wrapper-level
+            # convergence release valve: after the same stop block is observed
+            # three times in stop-hook context, get_session_stop_decision()
+            # force-allows so sessions cannot wedge permanently.
+            return {
+                "block": True,
+                "reason": _in_progress_block_reason(current_task_id, current_work.get("top_task_desc") if current_work else None),
+                "wake_type": "WAKE_WITH_QUEUE",
+                "task_id": current_task_id,
+                "project_id": current_work.get("project_id") if current_work else None,
+                "phase_id": current_work.get("phase_id") if current_work else None,
+                "task_title_short": (str(current_work.get("top_task_desc") or "")[:80] or None) if current_work else None,
+            }
+        if current_task_id and blocked_on:
+            return {
+                "block": False,
+                "reason": None,
+                "wake_type": WAKE_ALLOW_STOP,
+                "task_id": None,
+                "blocked_on": blocked_on,
             }
 
     blocked_on = _task_blocked_on(_observed_stop_task_id(session_id, config=cfg), config=cfg)
@@ -465,45 +541,125 @@ def get_session_stop_decision(session_id: str,
     from .config import get_redis_sync
 
     cfg = config or OrchConfig()
-    decision = _raw_stop_decision(session_id, config=cfg)
+    try:
+        enforce_handoff = flags_for_session(session_id)["enforce"]
+    except Exception:
+        enforce_handoff = False
+
+    try:
+        decision = _raw_stop_decision(session_id, config=cfg)
+    except Exception as exc:
+        decision = {
+            "block": False,
+            "reason": "keystone stop decision unavailable; fail-open allow used.",
+            "wake_type": WAKE_ALLOW_STOP,
+            "task_id": None,
+            "keystone_fail_open": {
+                "session": session_id,
+                "operation": "_raw_stop_decision",
+                "exception_class": exc.__class__.__name__,
+            },
+        }
+
+    if enforce_handoff and not decision.get("block"):
+        observed_task_id = _observed_stop_task_id(session_id, config=cfg)
+        try:
+            validate_timeout_s = float(os.environ.get("CF_HANDOFF_VALIDATE_TIMEOUT_S", "0.2") or 0.2)
+        except Exception:
+            validate_timeout_s = 0.2
+        try:
+            hv_result = validate_stop_handoff(
+                get_redis_sync(cfg),
+                session_id,
+                observed_task_id,
+                prefix=os.environ.get("NOTIFY_KEY_PREFIX", "taey"),
+                timeout_s=validate_timeout_s,
+            )
+        except Exception as exc:
+            decision = dict(decision)
+            decision["hv_fail_open"] = {
+                "session": session_id,
+                "operation": "validate_stop_handoff",
+                "exception_class": exc.__class__.__name__,
+                "handoff_id": observed_task_id,
+            }
+            _LOG.warning(
+                "handoff validation fail-open for %s (%s): %s",
+                session_id,
+                observed_task_id,
+                exc.__class__.__name__,
+            )
+        else:
+            hv_state = hv_result.get("state")
+            # Handoff-specific blocks bypass the convergence valve below. They
+            # rely on the daemon/handoff retry machinery for bounded release.
+            if hv_state in {"pending_unacked", "delivery_failed", "redispatch_requested"}:
+                record = hv_result.get("record") or {}
+                return {
+                    "block": True,
+                    "reason": "Explicit handoff has not produced a scoped receipt yet; stop is blocked until receipt_acked or bounded wake gives up.",
+                    "wake_type": "WAKE_REASON_REQUIRED",
+                    "task_id": observed_task_id,
+                    "handoff_state": hv_state,
+                    "target_session_id": record.get("target_session_id"),
+                    "dispatcher_task_id": record.get("dispatcher_task_id"),
+                    "delivery_failure_reason": record.get("delivery_failure_reason"),
+                    "last_delivery_signal": record.get("last_delivery_signal"),
+                    "delivery_signal_source": record.get("delivery_signal_source"),
+                }
+            if hv_state == "dead":
+                return {
+                    "block": False,
+                    "reason": "handoff delivery failed after bounded retries; manual handling required.",
+                    "wake_type": WAKE_ALLOW_STOP,
+                    "task_id": None,
+                    "handoff_state": "dead",
+                }
+
     if not stop_hook_active:
         return decision
 
-    r = get_redis_sync(cfg)
     marker_key = _stop_block_marker_key(session_id)
     count_key = _stop_block_count_key(session_id)
+    try:
+        r = get_redis_sync(cfg)
+        if not decision.get("block"):
+            _redis_marker_call(r.delete, marker_key, count_key)
+            return decision
 
-    if not decision.get("block"):
-        r.delete(marker_key, count_key)
-        return decision
-
-    marker_value = str(
-        decision.get("task_id")
-        or decision.get("project_id")
-        or decision.get("wake_type")
-        or "unknown"
-    )
-    previous_marker = r.get(marker_key)
-    if previous_marker is not None:
-        previous_marker = str(previous_marker)
-    if previous_marker == marker_value:
-        try:
-            block_count = int(r.get(count_key) or 0) + 1
-        except (TypeError, ValueError):
+        marker_value = str(
+            decision.get("task_id")
+            or decision.get("project_id")
+            or decision.get("wake_type")
+            or "unknown"
+        )
+        previous_marker = _redis_marker_call(r.get, marker_key)
+        if previous_marker is not None:
+            previous_marker = str(previous_marker)
+        if previous_marker == marker_value:
+            try:
+                block_count = int(_redis_marker_call(r.get, count_key) or 0) + 1
+            except (TypeError, ValueError):
+                block_count = 1
+        else:
             block_count = 1
-    else:
-        block_count = 1
 
-    r.set(marker_key, marker_value, ex=_STOP_BLOCK_TTL_SECS)
-    r.set(count_key, str(block_count), ex=_STOP_BLOCK_TTL_SECS)
-    decision["convergence_count"] = block_count
-    if block_count >= _STOP_BLOCK_CONVERGENCE_LIMIT:
-        decision["block"] = False
-        decision["reason"] = None
-        decision["wake_type"] = WAKE_ALLOW_STOP
-        decision["task_id"] = None
-        decision["converged_allow"] = True
-        r.delete(marker_key, count_key)
+        _redis_marker_call(r.set, marker_key, marker_value, _STOP_BLOCK_TTL_SECS)
+        _redis_marker_call(r.set, count_key, str(block_count), _STOP_BLOCK_TTL_SECS)
+        decision["convergence_count"] = block_count
+        if block_count >= _STOP_BLOCK_CONVERGENCE_LIMIT:
+            decision["block"] = False
+            decision["reason"] = None
+            decision["wake_type"] = WAKE_ALLOW_STOP
+            decision["task_id"] = None
+            decision["converged_allow"] = True
+            _redis_marker_call(r.delete, marker_key, count_key)
+    except Exception as exc:
+        decision = dict(decision)
+        decision["convergence_marker_fail_open"] = {
+            "session": session_id,
+            "exception_class": exc.__class__.__name__,
+        }
     return decision
 
 
@@ -1058,8 +1214,8 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                        t.blocked_on AS blocked_on,
                        ph.id AS phase_id, ph.name AS phase_name,
                        proj.id AS project_id, proj.name AS project_name
-                ORDER BY coalesce(proj.priority, 999999999) ASC,
-                         coalesce(t.priority, 999999999) ASC,
+                ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,
+                         toInteger(coalesce(t.priority, 999999999)) ASC,
                          t.created_at ASC
                 LIMIT 1
             """, sess=session_id, exclude_task_id=exclude_task_id, project_id=project_id).single()
