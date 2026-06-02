@@ -1384,6 +1384,7 @@ def get_project_summary(project_id: str,
             if not record:
                 return None
 
+            project = _decode_project_node(dict(record["p"]))
             phases = []
             for item in record["phases"]:
                 if item is None:
@@ -1405,7 +1406,6 @@ def get_project_summary(project_id: str,
                     "tasks": tasks,
                 })
 
-            project = _decode_project_node(dict(record["p"]))
             project = _attach_ref_runtime(project, source_path=project.get("source_path"))
             return {
                 "project": project,
