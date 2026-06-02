@@ -227,6 +227,10 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print("errors:")
         for item in result["errors"]:
             print(f"  - {item}")
+    if result.get("warnings"):
+        print("warnings:")
+        for item in result["warnings"]:
+            print(f"  - {item}")
     if result.get("stale_tasks"):
         print("stale_tasks:")
         for item in result["stale_tasks"]:

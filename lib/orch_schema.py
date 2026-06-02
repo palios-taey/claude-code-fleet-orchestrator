@@ -18,6 +18,7 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, ensure_notify_importable, get_neo4j_driver
@@ -148,12 +149,106 @@ def _decode_project_node(node: Dict[str, Any]) -> Dict[str, Any]:
         _decode_json_field(project.get("user_stop_conditions"), []),
         created_by="decoded",
     )
+    project["refs"] = _decode_json_field(project.get("refs"), [])
     project["stop_reason_current"] = _decode_json_field(project.get("stop_reason_current"), None)
     project["stop_reason_history"] = _decode_json_field(project.get("stop_reason_history"), [])
     project["priority_history"] = _decode_json_field(project.get("priority_history"), [])
     stop_state = _project_stop_reason_state(project)
     project["stop_reason_orphaned"] = stop_state["orphaned"]
     return project
+
+
+def _normalize_refs(raw_refs: Any) -> List[Dict[str, Any]]:
+    refs = _decode_json_field(raw_refs, [])
+    if not isinstance(refs, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for item in refs:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        try:
+            l_start = int(item.get("l_start"))
+            l_end = int(item.get("l_end"))
+        except Exception:
+            continue
+        if not path or l_start <= 0 or l_end < l_start:
+            continue
+        entry = {"path": path, "l_start": l_start, "l_end": l_end}
+        label = str(item.get("label") or "").strip()
+        if label:
+            entry["label"] = label
+        normalized.append(entry)
+    return normalized
+
+
+def _encode_refs_or_none(refs: Optional[List[Dict[str, Any]]]) -> Optional[str]:
+    if refs is None:
+        return None
+    return _json_encode(_normalize_refs(refs))
+
+
+def _resolve_ref_path(ref_path: str, source_path: Optional[str]) -> Path:
+    candidate = Path(ref_path).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    repo_relative = (Path.cwd() / candidate).resolve()
+    if repo_relative.exists():
+        return repo_relative
+    if source_path:
+        source_relative = (Path(source_path).expanduser().resolve().parent / candidate).resolve()
+        return source_relative
+    return repo_relative
+
+
+def _read_ref_context(refs: List[Dict[str, Any]], source_path: Optional[str],
+                      line_cap: int = 200) -> Dict[str, Any]:
+    resolved: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    remaining_lines = line_cap
+    for ref in refs:
+        path = str(ref.get("path") or "")
+        l_start = int(ref.get("l_start") or 0)
+        l_end = int(ref.get("l_end") or 0)
+        ref_entry = {"path": path, "l_start": l_start, "l_end": l_end}
+        label = ref.get("label")
+        if label:
+            ref_entry["label"] = label
+        if remaining_lines <= 0:
+            ref_entry["warning"] = "ref truncated by aggregate line cap"
+            resolved.append(ref_entry)
+            continue
+        resolved_path = _resolve_ref_path(path, source_path)
+        ref_entry["resolved_path"] = str(resolved_path)
+        try:
+            lines = resolved_path.read_text(encoding="utf-8").splitlines()
+        except Exception as exc:
+            warning = f"ref unreadable: {path}:{l_start}-{l_end} ({exc.__class__.__name__})"
+            ref_entry["warning"] = warning
+            warnings.append(warning)
+            resolved.append(ref_entry)
+            continue
+        if l_start > len(lines):
+            warning = f"ref unreadable: {path}:{l_start}-{l_end} (start beyond file)"
+            ref_entry["warning"] = warning
+            warnings.append(warning)
+            resolved.append(ref_entry)
+            continue
+        slice_lines = lines[l_start - 1:l_end]
+        if not slice_lines:
+            warning = f"ref unreadable: {path}:{l_start}-{l_end} (empty slice)"
+            ref_entry["warning"] = warning
+            warnings.append(warning)
+            resolved.append(ref_entry)
+            continue
+        allowed = min(len(slice_lines), remaining_lines)
+        ref_entry["content"] = "\n".join(slice_lines[:allowed])
+        ref_entry["truncated"] = allowed < len(slice_lines)
+        if ref_entry["truncated"]:
+            ref_entry["warning"] = "ref truncated by aggregate line cap"
+        remaining_lines -= allowed
+        resolved.append(ref_entry)
+    return {"refs": resolved, "warnings": warnings, "line_cap": line_cap}
 
 
 def _condition_lookup(conditions: List[Dict[str, Any]], condition_id: str,
@@ -696,6 +791,7 @@ def create_project(project_id: str, name: str, description: str = "",
                    source_kind: Optional[str] = None,
                    ingested_at: Optional[str] = None,
                    ingested_by: Optional[str] = None,
+                   refs: Optional[List[Dict[str, Any]]] = None,
                    user_stop_conditions: Optional[List[Any]] = None,
                    supervisor: Optional[str] = None,
                    priority: Optional[int] = None,
@@ -730,6 +826,10 @@ def create_project(project_id: str, name: str, description: str = "",
                     p.user_stop_conditions = CASE
                         WHEN $user_stop_conditions IS NULL THEN coalesce(p.user_stop_conditions, '[]')
                         ELSE $user_stop_conditions
+                    END,
+                    p.refs = CASE
+                        WHEN $refs IS NULL THEN coalesce(p.refs, '[]')
+                        ELSE $refs
                     END,
                     p.stop_reason_current = coalesce(p.stop_reason_current, ''),
                     p.stop_reason_history = coalesce(p.stop_reason_history, '[]'),
@@ -771,6 +871,7 @@ def create_project(project_id: str, name: str, description: str = "",
                 source_kind=source_kind,
                 ingested_at=ingested_at,
                 ingested_by=ingested_by,
+                refs=_encode_refs_or_none(refs),
                 user_stop_conditions=_json_encode(conditions_value),
                 priority_history=_json_encode(priority_history),
                 migration_exempt=bool(migration_exempt),
@@ -781,7 +882,10 @@ def create_project(project_id: str, name: str, description: str = "",
 
 
 def create_phase(project_id: str, phase_id: str, name: str,
-                 order: int = 0, config: Optional[OrchConfig] = None) -> str:
+                 order: int = 0,
+                 refs: Optional[List[Dict[str, Any]]] = None,
+                 source_path: Optional[str] = None,
+                 config: Optional[OrchConfig] = None) -> str:
     """Create an OrchPhase linked to a project."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
@@ -791,10 +895,20 @@ def create_phase(project_id: str, phase_id: str, name: str,
                 MATCH (p:OrchProject {id: $project_id})
                 MERGE (ph:OrchPhase {id: $phase_id})
                 ON CREATE SET ph.created_at = datetime(), ph.status = 'pending'
-                SET ph.name = $name, ph.order = $order
+                SET ph.name = $name,
+                    ph.order = $order,
+                    ph.refs = CASE
+                        WHEN $refs IS NULL THEN coalesce(ph.refs, '[]')
+                        ELSE $refs
+                    END,
+                    ph.source_path = CASE
+                        WHEN $source_path IS NULL OR $source_path = '' THEN ph.source_path
+                        ELSE $source_path
+                    END
                 MERGE (p)-[:HAS_PHASE]->(ph)
                 RETURN ph.id AS id
-            """, project_id=project_id, phase_id=phase_id, name=name, order=order)
+            """, project_id=project_id, phase_id=phase_id, name=name, order=order,
+                 refs=_encode_refs_or_none(refs), source_path=source_path)
             return result.single()["id"]
     finally:
         pass  # Driver is singleton; do not close
@@ -808,6 +922,8 @@ def create_task(
     owner: str = "",
     created_by: str = "",
     task_type: str = "standard",
+    refs: Optional[List[Dict[str, Any]]] = None,
+    source_path: Optional[str] = None,
     capability_tags: Optional[List[str]] = None,
     file_blast_radius: Optional[List[str]] = None,
     estimated_tokens: int = 50_000,
@@ -838,6 +954,14 @@ def create_task(
                         WHEN $task_type = '' THEN t.task_type
                         ELSE $task_type
                     END,
+                    t.refs = CASE
+                        WHEN $refs IS NULL THEN coalesce(t.refs, '[]')
+                        ELSE $refs
+                    END,
+                    t.source_path = CASE
+                        WHEN $source_path IS NULL OR $source_path = '' THEN t.source_path
+                        ELSE $source_path
+                    END,
                     t.capability_tags = $capability_tags,
                     t.file_blast_radius = $file_blast_radius,
                     t.estimated_tokens = $estimated_tokens,
@@ -852,6 +976,8 @@ def create_task(
                 owner=owner,
                 created_by=created_by,
                 task_type=task_type,
+                refs=_encode_refs_or_none(refs),
+                source_path=source_path,
                 capability_tags=capability_tags or [],
                 file_blast_radius=file_blast_radius or [],
                 estimated_tokens=estimated_tokens,
@@ -1006,7 +1132,7 @@ def get_task(task_id: str,
                 return None
             task = _normalize_map(dict(result["t"]))
             task["forced_continuation_count"] = int(task.get("forced_continuation_count", 0) or 0)
-            return task
+            return _attach_ref_runtime(task, source_path=task.get("source_path"))
     finally:
         pass  # Driver is singleton; do not close
 
@@ -1085,6 +1211,16 @@ def _normalize_map(values: Dict[str, Any]) -> Dict[str, Any]:
     return {key: _normalize_value(value) for key, value in values.items()}
 
 
+def _attach_ref_runtime(record: Dict[str, Any], *, source_path: Optional[str]) -> Dict[str, Any]:
+    refs = _normalize_refs(record.get("refs"))
+    record["refs"] = refs
+    if not refs:
+        record["ref_context"] = {"refs": [], "warnings": [], "line_cap": 200}
+        return record
+    record["ref_context"] = _read_ref_context(refs, source_path=source_path, line_cap=200)
+    return record
+
+
 def get_project_summary(project_id: str,
                         config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
     """Return a project with its phases, tasks, and per-phase task status counts."""
@@ -1113,7 +1249,9 @@ def get_project_summary(project_id: str,
                                  status: t.status,
                                  owner: t.owner,
                                  priority: t.priority,
-                                 blocked_on: t.blocked_on
+                                 blocked_on: t.blocked_on,
+                                 refs: t.refs,
+                                 source_path: t.source_path
                              }
                          END
                      ) AS tasks
@@ -1144,19 +1282,23 @@ def get_project_summary(project_id: str,
                 if item is None:
                     continue
                 phase = _normalize_map(dict(item["phase"]))
+                phase = _attach_ref_runtime(phase, source_path=phase.get("source_path"))
                 tasks = []
                 for task in item["tasks"]:
                     if task is None:
                         continue
-                    tasks.append(_normalize_map(dict(task)))
+                    task_row = _normalize_map(dict(task))
+                    tasks.append(_attach_ref_runtime(task_row, source_path=task_row.get("source_path") or phase.get("source_path")))
                 phases.append({
-                "phase": phase,
+                    "phase": phase,
                     "task_counts": dict(item["task_counts"]),
                     "tasks": tasks,
                 })
 
+            project = _decode_project_node(dict(record["p"]))
+            project = _attach_ref_runtime(project, source_path=project.get("source_path"))
             return {
-                "project": _decode_project_node(dict(record["p"])),
+                "project": project,
                 "phases": phases,
             }
     finally:
@@ -1175,15 +1317,42 @@ def get_session_current_work(session_id: str,
                 WHERE t.owner = $session_id AND t.status = 'in_progress'
                 RETURN p.id AS project_id,
                        p.name AS project_name,
+                       p.source_path AS project_source_path,
+                       p.refs AS project_refs,
                        ph.id AS phase_id,
                        ph.name AS phase_name,
+                       ph.source_path AS phase_source_path,
+                       ph.refs AS phase_refs,
                        t.id AS top_task_id,
-                       t.description AS top_task_desc
+                       t.description AS top_task_desc,
+                       t.source_path AS task_source_path,
+                       t.refs AS task_refs
                 ORDER BY coalesce(p.priority, 999999999) ASC, coalesce(t.priority, 999999999) ASC, ph.order ASC, t.created_at ASC
                 LIMIT 1
             """, session_id=session_id)
             record = result.single()
-            return dict(record) if record else None
+            if not record:
+                return None
+            result = dict(record)
+            result["project_ref_context"] = _read_ref_context(
+                _normalize_refs(result.get("project_refs")),
+                source_path=result.get("project_source_path"),
+                line_cap=200,
+            )
+            result["phase_ref_context"] = _read_ref_context(
+                _normalize_refs(result.get("phase_refs")),
+                source_path=result.get("phase_source_path") or result.get("project_source_path"),
+                line_cap=200,
+            )
+            result["task_ref_context"] = _read_ref_context(
+                _normalize_refs(result.get("task_refs")),
+                source_path=result.get("task_source_path") or result.get("phase_source_path") or result.get("project_source_path"),
+                line_cap=200,
+            )
+            result["project_refs"] = _normalize_refs(result.get("project_refs"))
+            result["phase_refs"] = _normalize_refs(result.get("phase_refs"))
+            result["task_refs"] = _normalize_refs(result.get("task_refs"))
+            return result
     finally:
         pass  # Driver is singleton; do not close
 
@@ -1212,14 +1381,39 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                 RETURN t.id AS task_id, t.description AS description,
                        t.priority AS priority, t.owner AS owner,
                        t.blocked_on AS blocked_on,
+                       t.refs AS task_refs,
+                       t.source_path AS task_source_path,
                        ph.id AS phase_id, ph.name AS phase_name,
-                       proj.id AS project_id, proj.name AS project_name
+                       ph.refs AS phase_refs, ph.source_path AS phase_source_path,
+                       proj.id AS project_id, proj.name AS project_name,
+                       proj.refs AS project_refs, proj.source_path AS project_source_path
                 ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,
                          toInteger(coalesce(t.priority, 999999999)) ASC,
                          t.created_at ASC
                 LIMIT 1
             """, sess=session_id, exclude_task_id=exclude_task_id, project_id=project_id).single()
-            return dict(result) if result else None
+            if not result:
+                return None
+            row = dict(result)
+            row["project_ref_context"] = _read_ref_context(
+                _normalize_refs(row.get("project_refs")),
+                source_path=row.get("project_source_path"),
+                line_cap=200,
+            )
+            row["phase_ref_context"] = _read_ref_context(
+                _normalize_refs(row.get("phase_refs")),
+                source_path=row.get("phase_source_path") or row.get("project_source_path"),
+                line_cap=200,
+            )
+            row["task_ref_context"] = _read_ref_context(
+                _normalize_refs(row.get("task_refs")),
+                source_path=row.get("task_source_path") or row.get("phase_source_path") or row.get("project_source_path"),
+                line_cap=200,
+            )
+            row["project_refs"] = _normalize_refs(row.get("project_refs"))
+            row["phase_refs"] = _normalize_refs(row.get("phase_refs"))
+            row["task_refs"] = _normalize_refs(row.get("task_refs"))
+            return row
     finally:
         pass  # Driver is singleton; do not close
 
@@ -1496,6 +1690,123 @@ def clear_project_stop_reason(project_id: str, cleared_by: str,
                 stop_reason_history=_append_history(list(project.get("stop_reason_history") or []), history_entry),
             ).single()
             return record is not None
+    finally:
+        pass
+
+
+def _project_participant_sessions(project_id: str, config: Optional[OrchConfig] = None) -> List[str]:
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    try:
+        with driver.session(database=cfg.neo4j_db) as session:
+            rows = session.run("""
+                MATCH (p:OrchProject {id: $project_id})
+                OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+                RETURN p.supervisor AS supervisor, collect(DISTINCT t.owner) AS owners
+            """, project_id=project_id).single()
+            if not rows:
+                return []
+            sessions: List[str] = []
+            supervisor = str(rows.get("supervisor") or "").strip()
+            if supervisor:
+                sessions.append(supervisor)
+            for owner in rows.get("owners") or []:
+                owner_value = str(owner or "").strip()
+                if owner_value and owner_value not in sessions:
+                    sessions.append(owner_value)
+            return sessions
+    finally:
+        pass
+
+
+def _clear_project_convergence_keys(project_id: str, config: Optional[OrchConfig] = None) -> None:
+    from .config import get_redis_sync
+
+    cfg = config or OrchConfig()
+    sessions = _project_participant_sessions(project_id, config=cfg)
+    if not sessions:
+        return
+    redis_client = get_redis_sync(cfg)
+    keys: List[str] = []
+    for session_id in sessions:
+        keys.append(_stop_block_marker_key(session_id))
+        keys.append(_stop_block_count_key(session_id))
+    if keys:
+        redis_client.delete(*keys)
+
+
+def complete_project(project_id: str, *, force: bool = False,
+                     completed_by: str = "unknown",
+                     config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    cfg = config or OrchConfig()
+    summary = get_project_summary(project_id, config=cfg)
+    if not summary:
+        raise ProjectNotFoundError(f"Project {project_id} not found")
+    phases = summary.get("phases", [])
+    incomplete = [
+        task["id"]
+        for phase in phases
+        for task in phase.get("tasks", [])
+        if task.get("status") != "completed"
+    ]
+    if incomplete and not force:
+        raise ReadyWorkConflictError(f"project {project_id} has incomplete tasks: {', '.join(incomplete[:10])}")
+    driver = get_neo4j_driver(cfg)
+    try:
+        with driver.session(database=cfg.neo4j_db) as session:
+            session.run("""
+                MATCH (p:OrchProject {id: $project_id})
+                SET p.status = 'completed',
+                    p.completed_at = datetime(),
+                    p.updated_at = datetime()
+            """, project_id=project_id)
+        return {"ok": True, "project_id": project_id, "status": "completed", "force": bool(force), "completed_by": completed_by}
+    finally:
+        pass
+
+
+def reset_project(project_id: str, *, reset_by: str = "unknown",
+                  config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    cfg = config or OrchConfig()
+    project = _project_record(project_id, cfg)
+    cleared_sessions = _project_participant_sessions(project_id, config=cfg)
+    driver = get_neo4j_driver(cfg)
+    try:
+        with driver.session(database=cfg.neo4j_db) as session:
+            session.run("""
+                MATCH (p:OrchProject {id: $project_id})
+                SET p.status = 'active',
+                    p.completed_at = NULL,
+                    p.in_progress_heartbeat_at = '',
+                    p.stop_reason_current = '',
+                    p.stop_reason_history = '[]',
+                    p.updated_at = datetime()
+            """, project_id=project_id)
+            session.run("""
+                MATCH (p:OrchProject {id: $project_id})
+                OPTIONAL MATCH (p)-[:HAS_PHASE]->(ph:OrchPhase)
+                SET ph.status = 'pending',
+                    ph.completed_at = NULL,
+                    ph.updated_at = datetime()
+            """, project_id=project_id)
+            session.run("""
+                MATCH (p:OrchProject {id: $project_id})
+                OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+                SET t.status = 'pending',
+                    t.blocked_on = NULL,
+                    t.result = NULL,
+                    t.forced_continuation_count = 0,
+                    t.updated_at = datetime()
+            """, project_id=project_id)
+        _clear_project_convergence_keys(project_id, config=cfg)
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "status": "active",
+            "reset_by": reset_by,
+            "cleared_sessions": cleared_sessions,
+            "previous_stop_reason": project.get("stop_reason_current"),
+        }
     finally:
         pass
 

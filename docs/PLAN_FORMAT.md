@@ -10,7 +10,7 @@ The execution tracker indexes markdown plans into `OrchProject`, `OrchPhase`, an
 
 ## Phase: phase-id - Phase Name [order: 1]
 
-### Task: task-id - Task description [priority: 60] [owner: worker-a] [depends: other-task-id]
+### Task: task-id - Task description [priority: 60] [owner: worker-a] [depends: other-task-id] [ref: docs/STRUCTURE.md:10-40]
 - Optional bullet content becomes part of the task description.
 
 ## User Stop Conditions
@@ -23,6 +23,7 @@ The execution tracker indexes markdown plans into `OrchProject`, `OrchPhase`, an
 - Zero or one `## User Stop Conditions` section at project scope.
 - `order` and `priority` are integers.
 - `owner`, `tags`, and `depends` are optional.
+- `ref` is repeatable and uses `[ref: <path>:<Lstart>-<Lend>]`.
 - Content inside fenced code blocks is ignored by the loader.
 
 ## CLI surface

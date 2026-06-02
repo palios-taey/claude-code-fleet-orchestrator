@@ -39,6 +39,7 @@ from lib.orch_schema import (
     check_phase_complete,
     clear_project_stop_reason,
     clear_session_pause,
+    complete_project,
     create_phase,
     create_project,
     create_task,
@@ -56,6 +57,7 @@ from lib.orch_schema import (
     get_task as load_task_record,
     get_session_stop_decision,
     get_task_phase,
+    reset_project,
     set_project_stop_reason,
     set_session_pause,
     set_project_user_stop_conditions,
@@ -332,6 +334,7 @@ async def create_project_endpoint(req: Request) -> Dict[str, Any]:
         project_id=project_id,
         name=name,
         description=data.get("description", ""),
+        refs=data.get("refs"),
         user_stop_conditions=data.get("user_stop_conditions"),
         supervisor=supervisor,
         priority=project_priority,
@@ -381,6 +384,8 @@ async def create_phase_endpoint(project_id: str, req: Request) -> Dict[str, Any]
         phase_id=phase_id,
         name=name,
         order=int(data.get("order", 0)),
+        refs=data.get("refs"),
+        source_path=data.get("source_path"),
         config=_cfg(),
     )
     return {"ok": True, "phase_id": pid}
@@ -412,6 +417,35 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
         priority=ingest_priority,
         migration_exempt=bool(data.get("migration_exempt", False)),
     )
+
+
+@app.post("/api/projects/{project_id}/complete")
+async def complete_project_endpoint(project_id: str, req: Request) -> Dict[str, Any]:
+    data = await req.json() if req.headers.get("content-type", "").startswith("application/json") else {}
+    try:
+        return complete_project(
+            project_id,
+            force=bool(data.get("force", False)),
+            completed_by=data.get("completed_by") or data.get("from") or "unknown",
+            config=_cfg(),
+        )
+    except ReadyWorkConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/api/projects/{project_id}/reset")
+async def reset_project_endpoint(project_id: str, req: Request) -> Dict[str, Any]:
+    data = await req.json() if req.headers.get("content-type", "").startswith("application/json") else {}
+    try:
+        return reset_project(
+            project_id,
+            reset_by=data.get("reset_by") or data.get("from") or "unknown",
+            config=_cfg(),
+        )
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.get("/api/sessions/{session_id}/current")

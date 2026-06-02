@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from .config import OrchConfig, get_neo4j_driver
@@ -15,10 +16,30 @@ from .orch_schema import (
 )
 
 
-PROJECT_RE = re.compile(r"^# Project:\s*(?P<id>.+?)\s+[—-]\s+(?P<name>.+?)\s*$")
+PROJECT_RE = re.compile(r"^# Project:\s*(?P<id>.+?)\s+[—-]\s+(?P<name>.+?)\s*(?P<meta>(?:\[[^\]]+\]\s*)*)$")
 PHASE_RE = re.compile(r"^## Phase:\s*(?P<id>.+?)\s+[—-]\s+(?P<name>.+?)\s*(?P<meta>(?:\[[^\]]+\]\s*)*)$")
 TASK_RE = re.compile(r"^### Task:\s*(?P<id>.+?)\s+[—-]\s+(?P<desc>.+?)\s*(?P<meta>(?:\[[^\]]+\]\s*)*)$")
 META_RE = re.compile(r"\[([^\]]+)\]")
+
+
+def _parse_ref(raw_value: str) -> Optional[Dict[str, Any]]:
+    value = (raw_value or "").strip()
+    if not value:
+        return None
+    try:
+        path_part, line_part = value.rsplit(":", 1)
+        start_raw, end_raw = line_part.split("-", 1)
+        l_start = int(start_raw.strip())
+        l_end = int(end_raw.strip())
+    except Exception:
+        return None
+    if not path_part.strip() or l_start <= 0 or l_end < l_start:
+        return None
+    return {
+        "path": path_part.strip(),
+        "l_start": l_start,
+        "l_end": l_end,
+    }
 
 
 def _parse_meta(meta_blob: str) -> Dict[str, Any]:
@@ -34,6 +55,12 @@ def _parse_meta(meta_blob: str) -> Dict[str, Any]:
                 meta[key] = int(value)
             except ValueError:
                 meta[key] = value
+        elif key == "ref":
+            ref = _parse_ref(value)
+            if ref is None:
+                meta.setdefault("_ref_errors", []).append(value)
+                continue
+            meta.setdefault("refs", []).append(ref)
         elif key in {"tags", "depends"}:
             meta[key] = [part.strip() for part in value.split(",") if part.strip()]
         else:
@@ -86,6 +113,33 @@ def _set_task_metadata(task: Dict[str, Any], cfg: OrchConfig) -> None:
         )
 
 
+def _resolve_ref_path(ref_path: str, source_path: str) -> Path:
+    candidate = Path(ref_path).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    repo_relative = (Path.cwd() / candidate).resolve()
+    if repo_relative.exists():
+        return repo_relative
+    return (Path(source_path).expanduser().resolve().parent / candidate).resolve()
+
+
+def _collect_ref_warnings(parsed: Dict[str, Any], source_path: str) -> List[str]:
+    warnings: List[str] = []
+    buckets: List[tuple[str, str, List[Dict[str, Any]]]] = []
+    project = parsed.get("project") or {}
+    buckets.append(("project", str(project.get("id") or "?"), project.get("refs", [])))
+    for phase in parsed.get("phases", []):
+        buckets.append(("phase", str(phase.get("id") or "?"), phase.get("refs", [])))
+        for task in phase.get("tasks", []):
+            buckets.append(("task", str(task.get("id") or "?"), task.get("refs", [])))
+    for kind, node_id, refs in buckets:
+        for ref in refs:
+            resolved = _resolve_ref_path(str(ref.get("path") or ""), source_path)
+            if not resolved.exists():
+                warnings.append(f"{kind} {node_id}: ref unreadable {ref.get('path')}:{ref.get('l_start')}-{ref.get('l_end')}")
+    return warnings
+
+
 def _parse_plan(md: str) -> Dict[str, Any]:
     project: Optional[Dict[str, Any]] = None
     current_phase: Optional[Dict[str, Any]] = None
@@ -116,10 +170,14 @@ def _parse_plan(md: str) -> Dict[str, Any]:
                 current_phase = None
                 current_task = None
                 continue
+            meta = _parse_meta(project_match.group("meta"))
             project = {
                 "id": project_match.group("id").strip(),
                 "name": project_match.group("name").strip(),
+                "refs": meta.get("refs", []),
             }
+            for bad_ref in meta.get("_ref_errors", []):
+                errors.append(f"line {line_no}: invalid ref '{bad_ref}'")
             continue
 
         phase_match = PHASE_RE.match(line)
@@ -128,12 +186,16 @@ def _parse_plan(md: str) -> Dict[str, Any]:
             if project is None:
                 errors.append(f"line {line_no}: phase declared before project")
                 continue
+            meta = _parse_meta(phase_match.group("meta"))
             current_phase = {
                 "id": phase_match.group("id").strip(),
                 "name": phase_match.group("name").strip(),
-                "order": _parse_meta(phase_match.group("meta")).get("order", 0),
+                "order": meta.get("order", 0),
+                "refs": meta.get("refs", []),
                 "tasks": [],
             }
+            for bad_ref in meta.get("_ref_errors", []):
+                errors.append(f"line {line_no}: invalid ref '{bad_ref}'")
             phases.append(current_phase)
             current_task = None
             continue
@@ -152,8 +214,11 @@ def _parse_plan(md: str) -> Dict[str, Any]:
                 "owner": meta.get("owner", ""),
                 "tags": meta.get("tags", []),
                 "depends": meta.get("depends", []),
+                "refs": meta.get("refs", []),
                 "body": [],
             }
+            for bad_ref in meta.get("_ref_errors", []):
+                errors.append(f"line {line_no}: invalid ref '{bad_ref}'")
             current_phase["tasks"].append(current_task)
             continue
 
@@ -211,6 +276,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
     parsed = _parse_plan(md)
     project = parsed["project"]
     errors = list(parsed["errors"])
+    warnings = _collect_ref_warnings(parsed, source_path) if source_path else []
     if project is None:
         return {
             "project_id": None,
@@ -218,6 +284,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
             "tasks_created": 0,
             "tasks_updated": 0,
             "errors": errors,
+            "warnings": warnings,
             "stale_tasks": [],
         }
 
@@ -234,6 +301,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
         project_id=project["id"],
         name=project["name"],
         description=project.get("description", ""),
+        refs=project.get("refs", []),
         user_stop_conditions=project.get("user_stop_conditions", []),
         supervisor=supervisor,
         priority=priority,
@@ -257,6 +325,8 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
             phase_id=phase["id"],
             name=phase["name"],
             order=phase.get("order", 0),
+            refs=phase.get("refs", []),
+            source_path=source_path,
             config=cfg,
         )
         if phase["id"] not in existing_phase_ids:
@@ -270,6 +340,8 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
                 description=task["description"],
                 priority=task.get("priority", 50),
                 owner=task.get("owner", ""),
+                refs=task.get("refs", []),
+                source_path=source_path,
                 capability_tags=task.get("tags", []),
                 file_blast_radius=[],
                 estimated_tokens=50_000,
@@ -297,5 +369,6 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
         "tasks_created": tasks_created,
         "tasks_updated": tasks_updated,
         "errors": errors,
+        "warnings": warnings,
         "stale_tasks": stale_tasks,
     }
