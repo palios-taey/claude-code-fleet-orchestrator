@@ -143,10 +143,10 @@ def _existing_project_state(project_id: str, cfg: OrchConfig) -> Dict[str, Any]:
             """, project_id=project_id)
         }
         tasks = {
-            row["task_id"]: row["phase_id"]
+            row["task_id"]: {"phase_id": row["phase_id"], "status": row["status"]}
             for row in session.run("""
                 MATCH (:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
-                RETURN t.id AS task_id, ph.id AS phase_id
+                RETURN t.id AS task_id, ph.id AS phase_id, t.status AS status
             """, project_id=project_id)
         }
     return {"phase_ids": phases, "task_phase": tasks}
@@ -395,7 +395,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
     cfg = config or OrchConfig()
     existing = _existing_project_state(project["id"], cfg)
     existing_phase_ids: Set[str] = set(existing["phase_ids"])
-    existing_task_phase: Dict[str, str] = dict(existing["task_phase"])
+    existing_tasks: Dict[str, Dict[str, Any]] = dict(existing["task_phase"])
     parsed_task_ids: Set[str] = set()
 
     ingested_at = datetime.now(timezone.utc).isoformat()
@@ -439,7 +439,8 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
 
         for task in phase["tasks"]:
             parsed_task_ids.add(task["id"])
-            is_existing_task = task["id"] in existing_task_phase
+            existing_task = existing_tasks.get(task["id"])
+            is_existing_task = existing_task is not None
             create_task(
                 phase_id=phase["id"],
                 task_id=task["id"],
@@ -460,6 +461,8 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
 
             if is_existing_task:
                 tasks_updated += 1
+                if existing_task.get("status") == "ingesting":
+                    held_task_ids.add(task["id"])
             else:
                 tasks_created += 1
                 held_task_ids.add(task["id"])
@@ -476,7 +479,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
 
     _release_ingest_holds(held_task_ids, cfg)
 
-    stale_tasks = sorted(task_id for task_id in existing_task_phase if task_id not in parsed_task_ids)
+    stale_tasks = sorted(task_id for task_id in existing_tasks if task_id not in parsed_task_ids)
 
     return {
         "project_id": project["id"],
