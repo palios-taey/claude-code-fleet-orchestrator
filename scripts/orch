@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,14 +11,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.easy_setup import (  # noqa: E402
+    compose_managed,
     disable_services,
     docker_compose_down,
     enable_services,
     notify_script,
+    preflight_restore_diff,
     print_doctor_results,
     remove_claude_permission_guard,
     restore_claude_settings_backup,
     run_doctor,
+    set_compose_managed,
 )
 
 
@@ -46,18 +48,31 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         subprocess.run([str(notify_script("start_notify_daemons.sh")), "stop"], check=False)
     except Exception as exc:
         print(f"notify-daemon-stop: {exc}")
-    try:
-        docker_compose_down()
-        print("compose: down")
-    except Exception as exc:
-        print(f"compose: {exc}")
-    if args.restore_settings:
-        result = remove_claude_permission_guard(apply=True)
-        if result["changed"]:
-            print("claude-settings: removed managed deny entries")
+    if compose_managed():
+        try:
+            docker_compose_down()
+            set_compose_managed(False)
+            print("compose: down")
+        except Exception as exc:
+            print(f"compose: {exc}")
+    else:
+        print("compose: skipped (BYO mode)")
+
+    if args.restore_original_settings:
+        diff = preflight_restore_diff()
+        if diff:
+            print(diff, end="")
         restored = restore_claude_settings_backup()
         if restored is not None:
-            print(f"claude-settings: restored backup {restored}")
+            print(f"claude-settings: restored pristine backup {restored}")
+        else:
+            print("claude-settings: no pristine backup recorded")
+        return 0
+
+    result = remove_claude_permission_guard(apply=True)
+    if result["diff"]:
+        print(result["diff"], end="")
+    print("claude-settings: removed managed deny and hook deltas")
     return 0
 
 
@@ -76,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     disable.set_defaults(func=cmd_disable)
 
     uninstall = sub.add_parser("uninstall")
-    uninstall.add_argument("--restore-settings", action="store_true")
+    uninstall.add_argument("--restore-original-settings", action="store_true")
     uninstall.set_defaults(func=cmd_uninstall)
     return parser
 

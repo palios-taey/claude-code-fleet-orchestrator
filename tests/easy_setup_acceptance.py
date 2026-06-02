@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+import importlib.util
+import importlib.machinery
 import sys
 import tempfile
-from unittest import mock
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -22,15 +24,20 @@ os.environ.setdefault("ORCH_NEO4J_URI", "bolt://127.0.0.1:7687")
 os.environ.setdefault("ORCH_NEO4J_DB", "neo4j")
 os.environ.setdefault("ORCH_DASHBOARD_URL", "http://127.0.0.1:5002")
 
+from fastapi.testclient import TestClient  # noqa: E402
+
+from lib import easy_setup  # noqa: E402
 from lib.easy_setup import (  # noqa: E402
     MANAGED_DENIES,
     apply_claude_permission_guard,
+    atomic_write_json,
+    atomic_write_text,
     compose_scope,
     package_version,
     remove_claude_permission_guard,
+    snapshot_claude_settings,
 )
 from lib.tasks_api import app  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -43,29 +50,118 @@ def _assert(label: str, condition: bool, detail: object) -> None:
         print(f"FAIL {label} {detail}")
 
 
+def _temp_settings(tmp: Path, deny: list[str] | None = None) -> Path:
+    tmp.mkdir(parents=True, exist_ok=True)
+    settings_path = tmp / "settings.json"
+    settings_path.write_text(json.dumps({"permissions": {"deny": deny or []}}, indent=2) + "\n", encoding="utf-8")
+    return settings_path
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as td:
-        settings_path = Path(td) / "settings.json"
-        settings_path.write_text(json.dumps({"permissions": {"deny": ["ExistingDeny"]}}, indent=2) + "\n", encoding="utf-8")
+        tmp = Path(td)
 
+        settings_path = _temp_settings(tmp, ["ExistingDeny"])
         first = apply_claude_permission_guard(settings_path, apply=True)
         second = apply_claude_permission_guard(settings_path, apply=True)
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
         deny = settings["permissions"]["deny"]
-        marker = settings["_managedBy"]["claude-code-fleet-orchestrator"]["permissions.deny"]
+        marker = settings["_managedBy"]["claude-code-fleet-orchestrator"]["permissions.deny_added"]
         _assert(
             "deny-exactly-once",
-            all(deny.count(entry) == 1 for entry in MANAGED_DENIES) and marker == MANAGED_DENIES and first["changed"] and not second["changed"],
-            deny,
+            all(deny.count(entry) == 1 for entry in MANAGED_DENIES) and first["changed"] and not second["changed"] and set(marker) == set(MANAGED_DENIES),
+            settings,
         )
 
-        removed = remove_claude_permission_guard(settings_path, apply=True)
-        settings_removed = json.loads(settings_path.read_text(encoding="utf-8"))
-        deny_removed = settings_removed["permissions"]["deny"]
+        preowned_path = _temp_settings(tmp / "preowned", ["AskUserQuestion", "ExistingDeny"])
+        preowned_path.parent.mkdir(parents=True, exist_ok=True)
+        preowned_path.write_text(json.dumps({"permissions": {"deny": ["AskUserQuestion", "ExistingDeny"]}}, indent=2) + "\n", encoding="utf-8")
+        apply_claude_permission_guard(preowned_path, apply=True)
+        remove_claude_permission_guard(preowned_path, apply=True)
+        preowned = json.loads(preowned_path.read_text(encoding="utf-8"))
         _assert(
-            "deny-removal-reversible",
-            removed["changed"] and all(entry not in deny_removed for entry in MANAGED_DENIES) and "ExistingDeny" in deny_removed,
-            deny_removed,
+            "ownership-roundtrip-preexisting-deny",
+            "AskUserQuestion" in preowned["permissions"]["deny"] and "AskUserQuestion(*)" not in preowned["permissions"]["deny"],
+            preowned,
+        )
+
+        before_text = settings_path.read_text(encoding="utf-8")
+        with mock.patch("lib.easy_setup.os.replace", side_effect=RuntimeError("replace failed")):
+            try:
+                atomic_write_text(settings_path, "mutated\n")
+            except RuntimeError:
+                pass
+        after_text = settings_path.read_text(encoding="utf-8")
+        _assert("crash-mid-write-recovery", before_text == after_text, {"before": before_text, "after": after_text})
+
+        state_path = tmp / "state.json"
+        atomic_write_json(state_path, {"a": 1})
+        original_state = state_path.read_text(encoding="utf-8")
+        with mock.patch("lib.easy_setup.os.replace", side_effect=RuntimeError("replace failed")):
+            try:
+                atomic_write_json(state_path, {"a": 2})
+            except RuntimeError:
+                pass
+        _assert("state-atomic-write-recovery", state_path.read_text(encoding="utf-8") == original_state, state_path.read_text(encoding="utf-8"))
+
+        double_path = _temp_settings(tmp / "double", ["UserOwned"])
+        double_path.parent.mkdir(parents=True, exist_ok=True)
+        double_path.write_text(json.dumps({"permissions": {"deny": ["UserOwned"]}}, indent=2) + "\n", encoding="utf-8")
+        baseline = double_path.read_text(encoding="utf-8")
+        with mock.patch.object(easy_setup, "STATE_DIR", tmp / "state-dir"), \
+             mock.patch.object(easy_setup, "SETUP_STATE_PATH", tmp / "state-dir" / "easy_setup_state.json"):
+            backup1 = snapshot_claude_settings(double_path, original_text=baseline)
+            backup2 = snapshot_claude_settings(double_path, original_text=double_path.read_text(encoding="utf-8"))
+            hook_added = {"Stop": ["python3 /tmp/notify/hooks/stop_idle.py"]}
+            apply_claude_permission_guard(double_path, apply=True, hook_commands_added=hook_added)
+            apply_claude_permission_guard(double_path, apply=True, hook_commands_added={})
+            removed = remove_claude_permission_guard(double_path, apply=True)
+            final_text = double_path.read_text(encoding="utf-8")
+        _assert(
+            "double-install-uninstall-baseline-clean",
+            backup1 == backup2 and final_text == baseline and removed["changed"],
+            {"backup1": str(backup1), "backup2": str(backup2), "final_text": final_text},
+        )
+
+        with mock.patch("lib.easy_setup.detect_local_infra_ports", return_value={"redis": True, "neo4j": False}), \
+             mock.patch("lib.easy_setup.set_compose_managed") as set_compose_managed, \
+             mock.patch("lib.easy_setup.require_command") as require_command, \
+             mock.patch("lib.easy_setup.resolve_notify_root") as resolve_notify_root, \
+             mock.patch("subprocess.run") as subrun:
+            require_command.side_effect = lambda name: f"/usr/bin/{name}"
+            resolve_notify_root.return_value = Path("/tmp/notify-root")
+            subrun.return_value.returncode = 0
+            loader = importlib.machinery.SourceFileLoader("orch_install_test", str(ROOT / "scripts" / "install"))
+            spec = importlib.util.spec_from_loader("orch_install_test", loader)
+            assert spec is not None
+            module = importlib.util.module_from_spec(spec)
+            loader.exec_module(module)
+            install_main = module.main
+            with mock.patch.object(sys, "argv", ["install", "--dry-run"]):
+                rc = install_main()
+        called_commands = [" ".join(call.args[0]) for call in subrun.call_args_list if call.args]
+        _assert("byo-no-docker", rc == 0 and set_compose_managed.call_args_list and not any(command.startswith("/usr/bin/docker") or command.startswith("docker ") for command in called_commands), called_commands)
+
+        with mock.patch("lib.easy_setup.ensure_claude_integration", return_value={"guard": {"changed": False}}), \
+             mock.patch("lib.easy_setup.managed_python", return_value="/tmp/fake-venv-python"), \
+             mock.patch("lib.easy_setup._spawn_background", side_effect=[1234, 5678]), \
+             mock.patch("lib.easy_setup.write_pid_record"), \
+             mock.patch("lib.easy_setup.port_open", return_value=False), \
+             mock.patch("lib.easy_setup.read_pid_record", return_value=None):
+            messages = easy_setup.enable_services()
+        _assert("venv-interpreter", any("started pid=1234" in line for line in messages) and any("started pid=5678" in line for line in messages), messages)
+
+        fake_cfg = mock.Mock(redis_host="10.1.2.3", redis_port=6399, neo4j_uri="bolt://10.9.9.9:7777", neo4j_db="neo4j")
+        with mock.patch("lib.easy_setup._load_config_module") as loader, \
+             mock.patch("lib.easy_setup._redis_ping") as redis_ping, \
+             mock.patch("lib.easy_setup._neo4j_probe") as neo4j_probe:
+            OrchConfig = mock.Mock(return_value=fake_cfg)
+            loader.return_value = (OrchConfig, mock.Mock(), mock.Mock())
+            result = easy_setup._doctor_infra()
+        _assert(
+            "doctor-real-probe-configured-endpoints",
+            result.ok and redis_ping.call_args.args[0] is fake_cfg and neo4j_probe.call_args.args[0] is fake_cfg,
+            result,
         )
 
         with mock.patch("lib.tasks_api.get_ready_tasks", return_value=[]):

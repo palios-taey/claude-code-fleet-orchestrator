@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
+import shlex
 import shutil
 import socket
 import stat
@@ -12,14 +14,11 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
-
-from lib.config import OrchConfig, get_neo4j_driver
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANAGED_BY = "claude-code-fleet-orchestrator"
@@ -36,6 +35,8 @@ WATCH_PID_PATH = RUNTIME_DIR / "watch.pid"
 API_LOG_PATH = LOG_DIR / "api.log"
 WATCH_LOG_PATH = LOG_DIR / "watch.log"
 DOCKER_COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
+PIDENTITY_KEYS = ("pid", "starttime", "cwd", "cmdline")
+DEFAULT_FILE_MODE = 0o600
 
 
 @dataclass
@@ -49,6 +50,12 @@ class CheckResult:
 def ensure_runtime_dirs() -> None:
     for path in (STATE_DIR, RUNTIME_DIR, LOG_DIR):
         path.mkdir(parents=True, exist_ok=True)
+
+
+def _load_config_module():
+    from lib.config import OrchConfig, get_neo4j_driver, get_redis_sync
+
+    return OrchConfig, get_neo4j_driver, get_redis_sync
 
 
 def package_version() -> str:
@@ -68,9 +75,38 @@ def read_json_file(path: Path, default: Any) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def write_json_file(path: Path, value: Any) -> None:
+def _existing_mode(path: Path) -> int:
+    if path.exists():
+        return stat.S_IMODE(path.stat().st_mode)
+    return DEFAULT_FILE_MODE
+
+
+def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    mode = _existing_mode(path)
+    handle = tempfile.NamedTemporaryFile("w", delete=False, dir=str(path.parent), prefix=f".{path.name}.", encoding="utf-8")
+    temp_path = Path(handle.name)
+    try:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+        handle.close()
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+        verify = path.read_text(encoding="utf-8")
+        if verify != text:
+            raise RuntimeError(f"atomic write verification failed for {path}")
+    finally:
+        try:
+            handle.close()
+        except Exception:
+            pass
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    atomic_write_text(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
 def load_setup_state() -> Dict[str, Any]:
@@ -79,84 +115,22 @@ def load_setup_state() -> Dict[str, Any]:
 
 
 def save_setup_state(state: Dict[str, Any]) -> None:
-    write_json_file(SETUP_STATE_PATH, state)
+    atomic_write_json(SETUP_STATE_PATH, state)
+
+
+def update_setup_state(mutator: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+    state = load_setup_state()
+    mutator(state)
+    save_setup_state(state)
+    return state
 
 
 def _timestamp() -> str:
     return time.strftime("%Y%m%d-%H%M%S")
 
 
-def _managed_marker(settings: Dict[str, Any]) -> Dict[str, Any]:
-    managed = settings.setdefault("_managedBy", {})
-    if not isinstance(managed, dict):
-        settings["_managedBy"] = {}
-        managed = settings["_managedBy"]
-    orchestrator = managed.setdefault(MANAGED_BY, {})
-    if not isinstance(orchestrator, dict):
-        managed[MANAGED_BY] = {}
-        orchestrator = managed[MANAGED_BY]
-    return orchestrator
-
-
-def _normalize_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(settings, dict):
-        raise ValueError("settings JSON root must be an object")
-    permissions = settings.setdefault("permissions", {})
-    if not isinstance(permissions, dict):
-        raise ValueError("permissions must be an object")
-    deny = permissions.setdefault("deny", [])
-    if not isinstance(deny, list):
-        raise ValueError("permissions.deny must be a list")
-    return settings
-
-
-def load_claude_settings(path: Path = CLAUDE_SETTINGS_PATH) -> tuple[Dict[str, Any], str]:
-    if path.exists():
-        original = path.read_text(encoding="utf-8")
-        parsed = json.loads(original)
-    else:
-        original = "{\n}\n"
-        parsed = {}
-    return _normalize_settings(parsed), original
-
-
-def _ensure_deny_entries(settings: Dict[str, Any]) -> bool:
-    permissions = settings["permissions"]
-    deny = permissions["deny"]
-    changed = False
-    for entry in MANAGED_DENIES:
-        if entry not in deny:
-            deny.append(entry)
-            changed = True
-    marker = _managed_marker(settings)
-    existing = marker.get("permissions.deny")
-    if existing != MANAGED_DENIES:
-        marker["permissions.deny"] = list(MANAGED_DENIES)
-        changed = True
-    return changed
-
-
-def _remove_deny_entries(settings: Dict[str, Any]) -> bool:
-    changed = False
-    permissions = settings.get("permissions")
-    if isinstance(permissions, dict):
-        deny = permissions.get("deny")
-        if isinstance(deny, list):
-            kept = [item for item in deny if item not in MANAGED_DENIES]
-            if kept != deny:
-                permissions["deny"] = kept
-                changed = True
-    managed = settings.get("_managedBy")
-    if isinstance(managed, dict):
-        marker = managed.get(MANAGED_BY)
-        if isinstance(marker, dict) and "permissions.deny" in marker:
-            del marker["permissions.deny"]
-            changed = True
-        if isinstance(marker, dict) and not marker:
-            del managed[MANAGED_BY]
-        if not managed:
-            settings.pop("_managedBy", None)
-    return changed
+def fingerprint_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def render_settings(settings: Dict[str, Any]) -> str:
@@ -174,39 +148,359 @@ def unified_diff(original: str, updated: str, label: str) -> str:
     )
 
 
-def snapshot_claude_settings(path: Path = CLAUDE_SETTINGS_PATH) -> Path:
-    ensure_runtime_dirs()
-    backup = STATE_DIR / f"{path.name}.pre-orch-install.{_timestamp()}.bak"
+def _normalize_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(settings, dict):
+        raise ValueError("settings JSON root must be an object")
+    permissions = settings.setdefault("permissions", {})
+    if not isinstance(permissions, dict):
+        raise ValueError("permissions must be an object")
+    deny = permissions.setdefault("deny", [])
+    if not isinstance(deny, list):
+        raise ValueError("permissions.deny must be a list")
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError("hooks must be an object")
+    return settings
+
+
+def load_claude_settings(path: Path = CLAUDE_SETTINGS_PATH) -> tuple[Dict[str, Any], str]:
     if path.exists():
-        shutil.copy2(path, backup)
+        original = path.read_text(encoding="utf-8")
+        parsed = json.loads(original)
     else:
-        backup.write_text("{\n}\n", encoding="utf-8")
-    state = load_setup_state()
-    state["claude_settings_backup"] = str(backup)
-    state["claude_settings_path"] = str(path)
-    save_setup_state(state)
-    return backup
+        original = "{\n}\n"
+        parsed = {}
+    return _normalize_settings(parsed), original
 
 
-def apply_claude_permission_guard(path: Path = CLAUDE_SETTINGS_PATH, *, apply: bool) -> Dict[str, Any]:
+def atomic_restore_settings_text(path: Path, text: str) -> None:
+    atomic_write_text(path, text)
+
+
+def _managed_marker(settings: Dict[str, Any]) -> Dict[str, Any]:
+    managed = settings.setdefault("_managedBy", {})
+    if not isinstance(managed, dict):
+        settings["_managedBy"] = {}
+        managed = settings["_managedBy"]
+    owner = managed.setdefault(MANAGED_BY, {})
+    if not isinstance(owner, dict):
+        managed[MANAGED_BY] = {}
+        owner = managed[MANAGED_BY]
+    return owner
+
+
+def _cleanup_managed_marker(settings: Dict[str, Any]) -> None:
+    managed = settings.get("_managedBy")
+    if not isinstance(managed, dict):
+        return
+    owner = managed.get(MANAGED_BY)
+    if isinstance(owner, dict) and not owner:
+        del managed[MANAGED_BY]
+    if not managed:
+        settings.pop("_managedBy", None)
+
+
+def _expected_hook_scripts(notify_root: Path) -> Dict[str, Path]:
+    hooks_root = notify_root / "hooks"
+    return {
+        "PreToolUse": (hooks_root / "pre_tool_activity.py").resolve(),
+        "PostToolUse": (hooks_root / "check_notifications.py").resolve(),
+        "Stop": (hooks_root / "stop_idle.py").resolve(),
+        "UserPromptSubmit": (hooks_root / "prompt_activity.py").resolve(),
+    }
+
+
+def _extract_command_path(command: str) -> Optional[Path]:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+    for part in reversed(parts):
+        if part.endswith(".py") or part.startswith("/") or part.startswith("."):
+            return Path(part).expanduser().resolve()
+    return None
+
+
+def _hook_matches_expected(command_path: Optional[Path], expected_path: Path) -> bool:
+    if command_path is None:
+        return False
+    return command_path.name == expected_path.name
+
+
+def snapshot_expected_hook_commands(settings: Dict[str, Any], notify_root: Optional[Path] = None) -> Dict[str, List[str]]:
+    root = notify_root or resolve_notify_root()
+    expected = _expected_hook_scripts(root)
+    hooks = settings.get("hooks", {})
+    snapshot: Dict[str, List[str]] = {}
+    for event, expected_path in expected.items():
+        event_entries = hooks.get(event, [])
+        commands: List[str] = []
+        if not isinstance(event_entries, list):
+            snapshot[event] = commands
+            continue
+        for group in event_entries:
+            if not isinstance(group, dict):
+                continue
+            for hook in group.get("hooks", []):
+                if not isinstance(hook, dict):
+                    continue
+                command = str(hook.get("command", ""))
+                command_path = _extract_command_path(command)
+                if _hook_matches_expected(command_path, expected_path):
+                    commands.append(command)
+        snapshot[event] = commands
+    return snapshot
+
+
+def _command_delta(before: Dict[str, List[str]], after: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    delta: Dict[str, List[str]] = {}
+    for event, commands in after.items():
+        before_paths = {(_extract_command_path(command).name if _extract_command_path(command) is not None else command) for command in before.get(event, [])}
+        added = []
+        for command in commands:
+            parsed = _extract_command_path(command)
+            path_key = parsed.name if parsed is not None else command
+            if path_key not in before_paths:
+                added.append(command)
+        if added:
+            delta[event] = added
+    return delta
+
+
+def _dedupe_expected_hook_commands(settings: Dict[str, Any], notify_root: Optional[Path] = None) -> bool:
+    root = notify_root or resolve_notify_root()
+    expected = _expected_hook_scripts(root)
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return False
+    changed = False
+    for event, expected_path in expected.items():
+        event_entries = hooks.get(event)
+        if not isinstance(event_entries, list):
+            continue
+        seen_expected = False
+        new_groups = []
+        for group in event_entries:
+            if not isinstance(group, dict):
+                new_groups.append(group)
+                continue
+            hook_rows = group.get("hooks", [])
+            if not isinstance(hook_rows, list):
+                new_groups.append(group)
+                continue
+            kept = []
+            for hook in hook_rows:
+                if not isinstance(hook, dict):
+                    kept.append(hook)
+                    continue
+                command_path = _extract_command_path(str(hook.get("command", "")))
+                if _hook_matches_expected(command_path, expected_path):
+                    if seen_expected:
+                        changed = True
+                        continue
+                    seen_expected = True
+                kept.append(hook)
+            if kept:
+                new_group = dict(group)
+                new_group["hooks"] = kept
+                new_groups.append(new_group)
+            else:
+                changed = True
+        hooks[event] = new_groups
+    _cleanup_empty_settings_containers(settings)
+    return changed
+
+
+def _recorded_hook_commands(marker: Dict[str, Any]) -> Dict[str, List[str]]:
+    raw = marker.get("hooks")
+    if not isinstance(raw, dict):
+        return {}
+    commands = raw.get("commands_added")
+    if not isinstance(commands, dict):
+        return {}
+    normalized: Dict[str, List[str]] = {}
+    for event, entries in commands.items():
+        if isinstance(entries, list):
+            normalized[event] = [str(entry) for entry in entries]
+    return normalized
+
+
+def _merge_recorded_hook_commands(marker: Dict[str, Any], hook_commands_added: Dict[str, List[str]]) -> None:
+    if not hook_commands_added:
+        return
+    hooks = marker.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        marker["hooks"] = {}
+        hooks = marker["hooks"]
+    existing = hooks.setdefault("commands_added", {})
+    if not isinstance(existing, dict):
+        hooks["commands_added"] = {}
+        existing = hooks["commands_added"]
+    for event, commands in hook_commands_added.items():
+        current = [str(item) for item in existing.get(event, [])] if isinstance(existing.get(event), list) else []
+        for command in commands:
+            if command not in current:
+                current.append(command)
+        if current:
+            existing[event] = current
+
+
+def _remove_recorded_hook_commands(settings: Dict[str, Any], recorded: Dict[str, List[str]]) -> bool:
+    if not recorded:
+        return False
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return False
+    changed = False
+    for event, commands_to_remove in recorded.items():
+        event_entries = hooks.get(event)
+        if not isinstance(event_entries, list):
+            continue
+        new_event_entries = []
+        for group in event_entries:
+            if not isinstance(group, dict):
+                new_event_entries.append(group)
+                continue
+            hook_rows = group.get("hooks", [])
+            if not isinstance(hook_rows, list):
+                new_event_entries.append(group)
+                continue
+            kept_hooks = []
+            for hook in hook_rows:
+                if not isinstance(hook, dict):
+                    kept_hooks.append(hook)
+                    continue
+                command = str(hook.get("command", ""))
+                if command in commands_to_remove:
+                    changed = True
+                    continue
+                kept_hooks.append(hook)
+            if kept_hooks:
+                new_group = dict(group)
+                new_group["hooks"] = kept_hooks
+                new_event_entries.append(new_group)
+        if new_event_entries:
+            hooks[event] = new_event_entries
+        else:
+            hooks.pop(event, None)
+    return changed
+
+
+def _cleanup_empty_settings_containers(settings: Dict[str, Any]) -> None:
+    hooks = settings.get("hooks")
+    if isinstance(hooks, dict) and not hooks:
+        settings.pop("hooks", None)
+
+
+def snapshot_claude_settings(path: Path = CLAUDE_SETTINGS_PATH, *, original_text: Optional[str] = None) -> Path:
+    ensure_runtime_dirs()
+    if original_text is None:
+        _, original_text = load_claude_settings(path)
+    original_fingerprint = fingerprint_text(original_text)
+
+    def _mutate(state: Dict[str, Any]) -> None:
+        existing_path = state.get("claude_settings_backup")
+        existing_fingerprint = state.get("claude_settings_backup_fingerprint")
+        state["claude_settings_path"] = str(path)
+        if existing_path and existing_fingerprint:
+            return
+        backup = STATE_DIR / f"{path.name}.pre-orch-install.{_timestamp()}.{uuid.uuid4().hex[:8]}.bak"
+        atomic_write_text(backup, original_text)
+        state["claude_settings_backup"] = str(backup)
+        state["claude_settings_backup_fingerprint"] = original_fingerprint
+
+    state = update_setup_state(_mutate)
+    backup_path = Path(str(state["claude_settings_backup"]))
+    return backup_path
+
+
+def apply_claude_permission_guard(
+    path: Path = CLAUDE_SETTINGS_PATH,
+    *,
+    apply: bool,
+    hook_commands_added: Optional[Dict[str, List[str]]] = None,
+) -> Dict[str, Any]:
     settings, original = load_claude_settings(path)
-    changed = _ensure_deny_entries(settings)
+    _dedupe_expected_hook_commands(settings)
+    permissions = settings["permissions"]
+    deny = permissions["deny"]
+    existing_owner = settings.get("_managedBy", {}).get(MANAGED_BY) if isinstance(settings.get("_managedBy"), dict) else None
+    existing_added = existing_owner.get("permissions.deny_added") if isinstance(existing_owner, dict) else None
+    recorded_added = [str(item) for item in existing_added] if isinstance(existing_added, list) else []
+
+    newly_added: List[str] = []
+    for entry in MANAGED_DENIES:
+        if entry not in deny:
+            deny.append(entry)
+            newly_added.append(entry)
+    for entry in newly_added:
+        if entry not in recorded_added:
+            recorded_added.append(entry)
+
+    marker = existing_owner if isinstance(existing_owner, dict) else None
+    hook_commands_added = hook_commands_added or {}
+    if recorded_added or hook_commands_added or marker:
+        marker = _managed_marker(settings)
+        if recorded_added:
+            marker["permissions.deny_added"] = recorded_added
+        _merge_recorded_hook_commands(marker, hook_commands_added)
+        if "permissions.deny_added" not in marker and not _recorded_hook_commands(marker):
+            _cleanup_managed_marker(settings)
+
     updated = render_settings(settings)
     diff = unified_diff(original, updated, str(path))
+    changed = updated != original
     if apply and changed:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(updated, encoding="utf-8")
-    return {"changed": changed, "diff": diff, "updated": updated}
+        atomic_write_text(path, updated)
+    return {
+        "changed": changed,
+        "diff": diff,
+        "updated": updated,
+        "deny_added": newly_added,
+        "recorded_deny_added": recorded_added,
+        "recorded_hook_commands": _recorded_hook_commands(marker or {}),
+    }
 
 
 def remove_claude_permission_guard(path: Path = CLAUDE_SETTINGS_PATH, *, apply: bool) -> Dict[str, Any]:
     settings, original = load_claude_settings(path)
-    changed = _remove_deny_entries(settings)
+    marker = _managed_marker(settings)
+    permissions = settings.get("permissions", {})
+    deny = permissions.get("deny", [])
+    changed = False
+
+    deny_added = marker.get("permissions.deny_added")
+    recorded_denies = [str(item) for item in deny_added] if isinstance(deny_added, list) else []
+    if isinstance(deny, list) and recorded_denies:
+        new_deny = []
+        removed_budget = {entry: recorded_denies.count(entry) for entry in set(recorded_denies)}
+        for item in deny:
+            budget = removed_budget.get(item, 0)
+            if budget > 0:
+                removed_budget[item] = budget - 1
+                changed = True
+                continue
+            new_deny.append(item)
+        permissions["deny"] = new_deny
+
+    recorded_hooks = _recorded_hook_commands(marker)
+    if _remove_recorded_hook_commands(settings, recorded_hooks):
+        changed = True
+
+    marker.pop("permissions.deny_added", None)
+    hooks_marker = marker.get("hooks")
+    if isinstance(hooks_marker, dict):
+        hooks_marker.pop("commands_added", None)
+        if not hooks_marker:
+            marker.pop("hooks", None)
+    _cleanup_empty_settings_containers(settings)
+    _cleanup_managed_marker(settings)
+
     updated = render_settings(settings)
     diff = unified_diff(original, updated, str(path))
+    changed = changed or updated != original
     if apply and changed:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(updated, encoding="utf-8")
+        atomic_write_text(path, updated)
     return {"changed": changed, "diff": diff, "updated": updated}
 
 
@@ -220,9 +514,21 @@ def restore_claude_settings_backup() -> Optional[Path]:
     target = Path(str(path_raw))
     if not backup.exists():
         return None
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(backup, target)
+    atomic_write_text(target, backup.read_text(encoding="utf-8"))
     return backup
+
+
+def preflight_restore_diff(path: Path = CLAUDE_SETTINGS_PATH) -> str:
+    state = load_setup_state()
+    backup_raw = state.get("claude_settings_backup")
+    if not backup_raw:
+        return ""
+    backup = Path(str(backup_raw))
+    if not backup.exists():
+        return ""
+    current = path.read_text(encoding="utf-8") if path.exists() else "{\n}\n"
+    original = backup.read_text(encoding="utf-8")
+    return unified_diff(current, original, str(path))
 
 
 def resolve_notify_root() -> Path:
@@ -235,6 +541,7 @@ def resolve_notify_root() -> Path:
     for candidate in (
         REPO_ROOT.parent / "claude-code-fleet-notify",
         REPO_ROOT.parent.parent / "claude-code-fleet-notify",
+        Path.home() / "claude-code-fleet-notify",
     ):
         if candidate.is_dir():
             return candidate.resolve()
@@ -298,26 +605,75 @@ def docker_running() -> bool:
     return result.returncode == 0
 
 
+def _compose_health_ready() -> bool:
+    result = subprocess.run(
+        docker_compose_cmd() + ["-f", str(DOCKER_COMPOSE_FILE), "ps", "--format", "json"],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    text = result.stdout.strip()
+    if not text:
+        return False
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        lines = [json.loads(line) for line in text.splitlines() if line.strip()]
+        payload = lines
+    rows = payload if isinstance(payload, list) else [payload]
+    if len(rows) < 2:
+        return False
+    all_ready = True
+    for row in rows:
+        status_text = str(row.get("Health", "") or row.get("Status", ""))
+        if "healthy" not in status_text.lower():
+            all_ready = False
+    return all_ready
+
+
 def docker_compose_up() -> None:
     subprocess.run(docker_compose_cmd() + ["-f", str(DOCKER_COMPOSE_FILE), "up", "-d"], check=True, cwd=str(REPO_ROOT))
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        if _compose_health_ready():
+            return
+        time.sleep(1)
+    raise RuntimeError("docker compose services did not become healthy within 60s")
 
 
 def docker_compose_down() -> None:
     subprocess.run(docker_compose_cmd() + ["-f", str(DOCKER_COMPOSE_FILE), "down"], check=False, cwd=str(REPO_ROOT))
 
 
-def write_pid(pid_path: Path, pid: int) -> None:
-    ensure_runtime_dirs()
-    pid_path.write_text(str(pid), encoding="utf-8")
-
-
-def read_pid(pid_path: Path) -> Optional[int]:
-    if not pid_path.exists():
+def _proc_identity(pid: int) -> Optional[Dict[str, Any]]:
+    proc_dir = Path("/proc") / str(pid)
+    if not proc_dir.exists():
         return None
     try:
-        return int(pid_path.read_text(encoding="utf-8").strip())
+        cmdline_raw = (proc_dir / "cmdline").read_bytes()
+        cmdline = [part.decode("utf-8") for part in cmdline_raw.split(b"\x00") if part]
+        cwd = os.readlink(proc_dir / "cwd")
+        stat_fields = (proc_dir / "stat").read_text(encoding="utf-8").split()
+        starttime = stat_fields[21]
     except Exception:
         return None
+    return {"pid": pid, "cmdline": cmdline, "cwd": cwd, "starttime": str(starttime)}
+
+
+def write_pid_record(pid_path: Path, pid: int) -> None:
+    ensure_runtime_dirs()
+    identity = _proc_identity(pid)
+    if identity is None:
+        raise RuntimeError(f"unable to capture process identity for pid {pid}")
+    atomic_write_json(pid_path, identity)
+
+
+def read_pid_record(pid_path: Path) -> Optional[Dict[str, Any]]:
+    data = read_json_file(pid_path, None)
+    return data if isinstance(data, dict) else None
 
 
 def pid_alive(pid: Optional[int]) -> bool:
@@ -330,19 +686,43 @@ def pid_alive(pid: Optional[int]) -> bool:
         return False
 
 
-def stop_pidfile(pid_path: Path) -> bool:
-    pid = read_pid(pid_path)
-    if not pid_alive(pid):
+def _identity_matches(expected: Dict[str, Any], actual: Optional[Dict[str, Any]], *, suffix: Optional[str] = None) -> bool:
+    if not isinstance(actual, dict):
+        return False
+    for key in PIDENTITY_KEYS:
+        if key not in expected or key not in actual:
+            return False
+    if str(expected["pid"]) != str(actual["pid"]):
+        return False
+    if str(expected["starttime"]) != str(actual["starttime"]):
+        return False
+    if str(expected["cwd"]) != str(actual["cwd"]):
+        return False
+    if suffix is not None and not any(str(item).endswith(suffix) for item in actual.get("cmdline", [])):
+        return False
+    return True
+
+
+def stop_pidfile(pid_path: Path, *, suffix: Optional[str] = None) -> bool:
+    record = read_pid_record(pid_path)
+    if not isinstance(record, dict):
+        pid_path.unlink(missing_ok=True)
+        return False
+    pid = int(record.get("pid", 0))
+    actual = _proc_identity(pid)
+    if not _identity_matches(record, actual, suffix=suffix):
         pid_path.unlink(missing_ok=True)
         return False
     os.kill(pid, 15)
     deadline = time.time() + 5
     while time.time() < deadline:
-        if not pid_alive(pid):
+        if _proc_identity(pid) is None:
             pid_path.unlink(missing_ok=True)
             return True
         time.sleep(0.1)
-    os.kill(pid, 9)
+    actual = _proc_identity(pid)
+    if _identity_matches(record, actual, suffix=suffix):
+        os.kill(pid, 9)
     pid_path.unlink(missing_ok=True)
     return True
 
@@ -361,6 +741,19 @@ def _spawn_background(args: List[str], log_path: Path, env: Optional[Dict[str, s
     return int(proc.pid)
 
 
+def venv_python_path() -> Path:
+    return REPO_ROOT / ".venv" / "bin" / "python"
+
+
+def managed_python(required: bool = True) -> str:
+    venv_python = venv_python_path()
+    if venv_python.is_file():
+        return str(venv_python)
+    if required:
+        raise RuntimeError("managed venv is missing; run scripts/install first")
+    return sys.executable
+
+
 def _default_env() -> Dict[str, str]:
     env = os.environ.copy()
     env.setdefault("PYTHONPATH", str(REPO_ROOT))
@@ -368,51 +761,95 @@ def _default_env() -> Dict[str, str]:
     return env
 
 
+def detect_local_infra_ports() -> Dict[str, bool]:
+    return {
+        "redis": port_open("127.0.0.1", 6379),
+        "neo4j": port_open("127.0.0.1", 7687),
+    }
+
+
+def set_compose_managed(value: bool) -> None:
+    def _mutate(state: Dict[str, Any]) -> None:
+        state["compose_managed"] = bool(value)
+
+    update_setup_state(_mutate)
+
+
+def compose_managed() -> bool:
+    return bool(load_setup_state().get("compose_managed", False))
+
+
+def ensure_claude_integration(*, dry_run: bool = False) -> Dict[str, Any]:
+    settings, original = load_claude_settings(CLAUDE_SETTINGS_PATH)
+    backup_path = snapshot_claude_settings(CLAUDE_SETTINGS_PATH, original_text=original)
+    pre_hooks = snapshot_expected_hook_commands(settings)
+    hook_commands_added: Dict[str, List[str]] = {}
+
+    if dry_run:
+        guard = apply_claude_permission_guard(CLAUDE_SETTINGS_PATH, apply=False)
+        return {"backup": backup_path, "guard": guard, "hook_commands_added": hook_commands_added}
+
+    try:
+        subprocess.run([str(notify_script("install-hooks.sh")), "--apply"], check=True, cwd=str(resolve_notify_root()))
+        after_notify, _ = load_claude_settings(CLAUDE_SETTINGS_PATH)
+        _dedupe_expected_hook_commands(after_notify)
+        hook_commands_added = _command_delta(pre_hooks, snapshot_expected_hook_commands(after_notify))
+        guard = apply_claude_permission_guard(CLAUDE_SETTINGS_PATH, apply=True, hook_commands_added=hook_commands_added)
+        return {"backup": backup_path, "guard": guard, "hook_commands_added": hook_commands_added}
+    except Exception:
+        atomic_restore_settings_text(CLAUDE_SETTINGS_PATH, original)
+        raise
+
+
 def enable_services() -> List[str]:
     messages: List[str] = []
+    integration = ensure_claude_integration(dry_run=False)
+    if integration["guard"]["changed"]:
+        messages.append("claude-settings: reconciled managed delta")
     env = _default_env()
-    if pid_alive(read_pid(API_PID_PATH)):
+    python_exec = managed_python(required=True)
+
+    api_record = read_pid_record(API_PID_PATH)
+    if isinstance(api_record, dict) and _identity_matches(api_record, _proc_identity(int(api_record["pid"])), suffix="uvicorn"):
         messages.append("api: already managed")
     elif port_open("127.0.0.1", 5002):
         messages.append("api: external listener detected on 127.0.0.1:5002")
     else:
         pid = _spawn_background(
-            [sys.executable, "-m", "uvicorn", "lib.tasks_api:app", "--host", "127.0.0.1", "--port", "5002"],
+            [python_exec, "-m", "uvicorn", "lib.tasks_api:app", "--host", "127.0.0.1", "--port", "5002"],
             API_LOG_PATH,
             env=env,
         )
-        write_pid(API_PID_PATH, pid)
+        write_pid_record(API_PID_PATH, pid)
         messages.append(f"api: started pid={pid}")
-    if pid_alive(read_pid(WATCH_PID_PATH)):
+
+    watch_record = read_pid_record(WATCH_PID_PATH)
+    if isinstance(watch_record, dict) and _identity_matches(watch_record, _proc_identity(int(watch_record["pid"])), suffix="scripts/orch-watch"):
         messages.append("watch: already managed")
     else:
-        existing = subprocess.run(["pgrep", "-f", "scripts/orch-watch"], capture_output=True, text=True)
-        if existing.returncode == 0 and existing.stdout.strip():
-            messages.append("watch: external orch-watch detected")
-        else:
-            pid = _spawn_background(
-                [
-                    sys.executable,
-                    str(REPO_ROOT / "scripts" / "orch-watch"),
-                    "--redis-host",
-                    os.environ.get("ORCH_REDIS_HOST", "127.0.0.1"),
-                    "--redis-port",
-                    os.environ.get("ORCH_REDIS_PORT", "6379"),
-                    "--readiness-checker",
-                    "lib.plan_readiness:check_readiness",
-                ],
-                WATCH_LOG_PATH,
-                env=env,
-            )
-            write_pid(WATCH_PID_PATH, pid)
-            messages.append(f"watch: started pid={pid}")
+        pid = _spawn_background(
+            [
+                python_exec,
+                str(REPO_ROOT / "scripts" / "orch-watch"),
+                "--redis-host",
+                os.environ.get("ORCH_REDIS_HOST", "127.0.0.1"),
+                "--redis-port",
+                os.environ.get("ORCH_REDIS_PORT", "6379"),
+                "--readiness-checker",
+                "lib.plan_readiness:check_readiness",
+            ],
+            WATCH_LOG_PATH,
+            env=env,
+        )
+        write_pid_record(WATCH_PID_PATH, pid)
+        messages.append(f"watch: started pid={pid}")
     return messages
 
 
 def disable_services() -> List[str]:
     messages = [
-        f"api: {'stopped' if stop_pidfile(API_PID_PATH) else 'not-managed'}",
-        f"watch: {'stopped' if stop_pidfile(WATCH_PID_PATH) else 'not-managed'}",
+        f"api: {'stopped' if stop_pidfile(API_PID_PATH, suffix='uvicorn') else 'not-managed'}",
+        f"watch: {'stopped' if stop_pidfile(WATCH_PID_PATH, suffix='scripts/orch-watch') else 'not-managed'}",
     ]
     return messages
 
@@ -427,6 +864,7 @@ def compose_scope() -> Dict[str, Any]:
 
 
 def _doctor_env_validation() -> CheckResult:
+    OrchConfig, _, _ = _load_config_module()
     try:
         cfg = OrchConfig()
     except Exception as exc:
@@ -434,7 +872,7 @@ def _doctor_env_validation() -> CheckResult:
     problems = []
     if not cfg.neo4j_uri.startswith("bolt://"):
         problems.append("ORCH_NEO4J_URI must start with bolt://")
-    if not cfg.dashboard_url.startswith("http://") and not cfg.dashboard_url.startswith("https://"):
+    if not cfg.dashboard_url.startswith(("http://", "https://")):
         problems.append("ORCH_DASHBOARD_URL must be http(s)")
     if cfg.redis_port <= 0:
         problems.append("ORCH_REDIS_PORT must be positive")
@@ -443,27 +881,41 @@ def _doctor_env_validation() -> CheckResult:
     return CheckResult("env", True, "config values parse")
 
 
+def _redis_ping(cfg: Any) -> None:
+    _, _, get_redis_sync = _load_config_module()
+    client = get_redis_sync(cfg)
+    if not client.ping():
+        raise RuntimeError("Redis PING returned false")
+
+
+def _neo4j_probe(cfg: Any) -> None:
+    _, get_neo4j_driver, _ = _load_config_module()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        session.run("RETURN 1 AS ok").single()
+
+
 def _doctor_docker() -> CheckResult:
+    if not compose_managed():
+        return CheckResult("docker", True, "skipped: BYO infra mode")
     try:
         require_command("docker")
     except Exception as exc:
         return CheckResult("docker", False, str(exc), "install Docker with compose support")
     if not docker_running():
-        return CheckResult("docker", False, "docker daemon is not running", "start Docker or use external Redis/Neo4j")
+        return CheckResult("docker", False, "docker daemon is not running", "start Docker")
     return CheckResult("docker", True, "docker present and daemon reachable")
 
 
 def _doctor_infra() -> CheckResult:
-    redis_ok = port_open("127.0.0.1", 6379)
-    bolt_ok = port_open("127.0.0.1", 7687)
-    if redis_ok and bolt_ok:
-        return CheckResult("infra", True, "redis:6379 and neo4j:7687 reachable")
-    missing = []
-    if not redis_ok:
-        missing.append("redis:6379")
-    if not bolt_ok:
-        missing.append("neo4j:7687")
-    return CheckResult("infra", False, "missing " + ", ".join(missing), "run docker compose up or point .env at external infra")
+    OrchConfig, _, _ = _load_config_module()
+    try:
+        cfg = OrchConfig()
+        _redis_ping(cfg)
+        _neo4j_probe(cfg)
+        return CheckResult("infra", True, f"redis={cfg.redis_host}:{cfg.redis_port} neo4j={cfg.neo4j_uri}")
+    except Exception as exc:
+        return CheckResult("infra", False, str(exc), "ensure configured Redis and Neo4j endpoints are reachable")
 
 
 def _doctor_health() -> CheckResult:
@@ -489,68 +941,70 @@ def _doctor_claude_settings() -> CheckResult:
     deny = settings.get("permissions", {}).get("deny", [])
     counts = {entry: deny.count(entry) for entry in MANAGED_DENIES}
     if any(count != 1 for count in counts.values()):
-        return CheckResult("claude-settings", False, f"deny entries not exactly-once: {counts}", "rerun scripts/install or `orch enable` guard step")
+        return CheckResult("claude-settings", False, f"deny entries not exactly-once: {counts}", "run `orch enable` to reconcile managed settings")
     return CheckResult("claude-settings", True, f"deny entries present exactly-once: {counts}")
 
 
 def _doctor_claude_hooks() -> CheckResult:
     try:
         settings, _ = load_claude_settings(CLAUDE_SETTINGS_PATH)
+        notify_root = resolve_notify_root()
     except Exception as exc:
-        return CheckResult("claude-hooks", False, f"settings unreadable: {exc}", "repair ~/.claude/settings.json")
-    expected = {
-        "PreToolUse": "pre_tool_activity.py",
-        "PostToolUse": "check_notifications.py",
-        "Stop": "stop_idle.py",
-        "UserPromptSubmit": "prompt_activity.py",
-    }
+        return CheckResult("claude-hooks", False, f"settings unreadable: {exc}", "repair ~/.claude/settings.json or ORCH_NOTIFY_LIB_ROOT")
+    expected = _expected_hook_scripts(notify_root)
     hooks = settings.get("hooks", {})
     failures = []
-    for event, script_name in expected.items():
+    for event, expected_path in expected.items():
         groups = hooks.get(event, [])
-        commands = []
+        count = 0
         for group in groups if isinstance(groups, list) else []:
-            if isinstance(group, dict):
-                for hook in group.get("hooks", []):
-                    if isinstance(hook, dict):
-                        commands.append(str(hook.get("command", "")))
-        count = sum(1 for command in commands if command.endswith(script_name))
+            if not isinstance(group, dict):
+                continue
+            for hook in group.get("hooks", []):
+                if not isinstance(hook, dict):
+                    continue
+                command_path = _extract_command_path(str(hook.get("command", "")))
+                if command_path == expected_path:
+                    count += 1
         if count != 1:
             failures.append(f"{event}={count}")
     if failures:
-        return CheckResult("claude-hooks", False, ", ".join(failures), "rerun notify install-hooks.sh --apply")
-    return CheckResult("claude-hooks", True, "hook commands present exactly-once")
+        return CheckResult("claude-hooks", False, ", ".join(failures), "run `orch enable` to reconcile managed hooks")
+    return CheckResult("claude-hooks", True, "hook commands present exactly-once at expected paths")
 
 
-def _doctor_hook_fail_open() -> CheckResult:
-    try:
-        hook = resolve_notify_root() / "hooks" / "codex_stop.py"
-    except Exception as exc:
-        return CheckResult("hook-fail-open", False, str(exc), "set ORCH_NOTIFY_LIB_ROOT to the notify checkout")
-    dead_port = 65530
+def _run_fail_open_hook(hook_name: str) -> tuple[int, str, str]:
     payload = json.dumps({"stop_hook_active": True})
     env = os.environ.copy()
-    env["ORCH_API_BASE"] = f"http://127.0.0.1:{dead_port}"
+    env["ORCH_API_BASE"] = "http://127.0.0.1:65530"
     env.setdefault("TAEY_NODE_ID", "doctor-codex")
     proc = subprocess.run(
-        [sys.executable, str(hook)],
+        [sys.executable, str(resolve_notify_root() / "hooks" / hook_name)],
         input=payload,
         text=True,
         capture_output=True,
         cwd=str(resolve_notify_root()),
         env=env,
     )
-    if proc.returncode == 0 and proc.stdout.strip() == "{}" and proc.stderr.strip() == "":
-        return CheckResult("hook-fail-open", True, "stop hook returns {} and exit 0 when API is down")
-    return CheckResult(
-        "hook-fail-open",
-        False,
-        f"rc={proc.returncode} stdout={proc.stdout.strip()} stderr={proc.stderr.strip()}",
-        "fix notify hook fail-open behavior or ORCH_API_BASE wiring",
-    )
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def _doctor_notify_hook_fail_open() -> CheckResult:
+    rc, out, err = _run_fail_open_hook("codex_stop.py")
+    if rc == 0 and out == "{}" and err == "":
+        return CheckResult("notify-hook-fail-open", True, "codex_stop.py returns {} and exit 0 when API is down")
+    return CheckResult("notify-hook-fail-open", False, f"rc={rc} stdout={out} stderr={err}", "fix notify codex stop hook fail-open behavior")
+
+
+def _doctor_orch_hook_fail_open() -> CheckResult:
+    rc, out, err = _run_fail_open_hook("stop_idle.py")
+    if rc == 0 and out == "{}" and err == "":
+        return CheckResult("orch-hook-fail-open", True, "stop_idle.py returns {} and exit 0 when API is down")
+    return CheckResult("orch-hook-fail-open", False, f"rc={rc} stdout={out} stderr={err}", "fix notify claude stop hook fail-open behavior")
 
 
 def _doctor_stop_round_trip() -> CheckResult:
+    OrchConfig, get_neo4j_driver, _ = _load_config_module()
     cfg = OrchConfig()
     project_id = f"doctor-{uuid.uuid4().hex[:8]}"
     phase_id = f"{project_id}-phase"
@@ -605,17 +1059,10 @@ def _doctor_notify_daemon() -> CheckResult:
 
 
 def _doctor_orch_watch() -> CheckResult:
-    managed_pid = read_pid(WATCH_PID_PATH)
-    process = subprocess.run(["pgrep", "-f", "scripts/orch-watch"], capture_output=True, text=True)
-    pids = [line.strip() for line in process.stdout.splitlines() if line.strip()]
-    if len(pids) == 1:
-        detail = f"pid={pids[0]}"
-        if pid_alive(managed_pid):
-            detail += " managed"
-        return CheckResult("orch-watch", True, detail)
-    if len(pids) == 0:
-        return CheckResult("orch-watch", False, "orch-watch not running", "run `orch enable`")
-    return CheckResult("orch-watch", False, f"multiple orch-watch processes: {', '.join(pids)}", "stop duplicates and keep one orch-watch instance")
+    record = read_pid_record(WATCH_PID_PATH)
+    if isinstance(record, dict) and _identity_matches(record, _proc_identity(int(record["pid"])), suffix="scripts/orch-watch"):
+        return CheckResult("orch-watch", True, f"pid={record['pid']} managed")
+    return CheckResult("orch-watch", False, "orch-watch not running under managed pidfile", "run `orch enable`")
 
 
 def run_doctor() -> List[CheckResult]:
@@ -629,7 +1076,8 @@ def run_doctor() -> List[CheckResult]:
         ("stop-round-trip", _doctor_stop_round_trip),
         ("notify-daemon", _doctor_notify_daemon),
         ("orch-watch", _doctor_orch_watch),
-        ("hook-fail-open", _doctor_hook_fail_open),
+        ("notify-hook-fail-open", _doctor_notify_hook_fail_open),
+        ("orch-hook-fail-open", _doctor_orch_hook_fail_open),
     ]
     results: List[CheckResult] = []
     for label, fn in checks:
@@ -653,30 +1101,3 @@ def print_doctor_results(results: Iterable[CheckResult], *, explain_scope: bool)
             if result.remediation:
                 print(f"   remediation: {result.remediation}")
     return 1 if failures else 0
-
-
-def create_temp_dotenv() -> Path:
-    cfg = {}
-    for key in (
-        "ORCH_REDIS_HOST",
-        "ORCH_REDIS_PORT",
-        "ORCH_NEO4J_URI",
-        "ORCH_NEO4J_USER",
-        "ORCH_NEO4J_PASS",
-        "ORCH_NEO4J_DB",
-        "ORCH_DASHBOARD_URL",
-        "ORCH_NOTIFY_LIB_ROOT",
-        "ORCH_NOTIFY_CLI",
-        "ORCH_API_BASE",
-    ):
-        value = os.environ.get(key)
-        if value:
-            cfg[key] = value
-    handle = tempfile.NamedTemporaryFile("w", delete=False, suffix=".env")
-    try:
-        for key, value in cfg.items():
-            handle.write(f"{key}={value}\n")
-    finally:
-        handle.flush()
-        handle.close()
-    return Path(handle.name)
