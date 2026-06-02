@@ -102,10 +102,11 @@ The orchestrator is the core. A few small, separately released products compose 
 ### Optional
 
 - **[restart-safe-agents](https://github.com/palios-taey/restart-safe-agents)** — patterns for agents that survive restart without losing in-flight work.
+- **[claude-code-fleet-cockpit-template](https://github.com/palios-taey/claude-code-fleet-cockpit-template)** — the start-here template for the shared fleet operating spine: routing, recaps, action logs, prompting standards, 6SIGMA workflow, per-CLI orientation, and cron registry for teams running the released claude-code-fleet products.
 
 ### Planned, not yet released
 
-- A local fleet dashboard template (`cockpit-template`) and a one-command suite installer are planned but not yet published.
+- A one-command suite installer is planned but not yet published.
 
 ## Documentation
 
