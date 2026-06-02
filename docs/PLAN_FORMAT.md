@@ -26,6 +26,20 @@ The execution tracker indexes markdown plans into `OrchProject`, `OrchPhase`, an
 - `ref` is repeatable and uses `[ref: <path>:<Lstart>-<Lend>]`.
 - Content inside fenced code blocks is ignored by the loader.
 
+## Ref semantics
+
+Observed in `lib/orch_schema.py`:
+
+- refs are stored as structured metadata and resolved later into `ref_context`
+- the orchestrator reads ref file slices fresh at API/runtime read time rather than copying file contents into Neo4j
+- refs require a `source_path` for the ingested plan when refs are present
+- refs are disabled unless `ORCH_REF_ALLOWED_ROOT` is set
+- `ORCH_REF_ALLOWED_ROOT` can be a single path, a comma-separated list, or a JSON list of paths
+- ref paths must be relative
+- absolute paths, `~`, control characters, `..` escapes, and symlink escapes are rejected
+- the resolved ref path must stay under both the plan file directory and one of the configured allowed roots
+- unreadable or oversized refs degrade to warnings in `ref_context`
+
 ## CLI surface
 
 ```bash
@@ -38,6 +52,21 @@ taey-plan assign <task-id> <session>
 taey-plan stop-conditions <project-id> get
 taey-plan stop-conditions <project-id> set <condition> [<condition> ...]
 ```
+
+## `taey-task` vs `taey-plan`
+
+`taey-plan` is the markdown-backed project tracker CLI.
+
+Observed in `scripts/taey-task`, `taey-task` is the direct task-management CLI and exposes:
+
+```bash
+taey-task create "<description>"
+taey-task list
+taey-task status <task-id>
+taey-task update <task-id> <status>
+```
+
+Use `taey-plan` for project / phase / task structures sourced from markdown. Use `taey-task` for direct task creation, ranking, inspection, and status updates through the API.
 
 ## API surface
 
