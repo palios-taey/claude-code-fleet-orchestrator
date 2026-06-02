@@ -163,3 +163,10 @@ cat audit_logs/p2_ref_feature_grok.md
 *This is the last gate before public merge+tag for the p2 ref + lifecycle feature.*
 
 **Recommendation:** Do not merge/tag until the path traversal / sandbox issues are fixed. The current implementation allows the orchestrator (running as the fleet user) to be tricked into reading any readable file on the host via a crafted plan.
+
+---
+
+## Follow-up note after sandbox fix
+
+- Residual TOCTOU concerns around local filesystem mutation between `stat()`, `resolve()`, and open/read remain inherent to the single-user local-filesystem threat model for this feature.
+- Those residuals are accepted and are **not** being papered over with more fallback branches or wider sandbox defaults.

@@ -190,10 +190,10 @@ def _encode_refs_or_none(refs: Optional[List[Dict[str, Any]]]) -> Optional[str]:
     return _json_encode(_normalize_refs(refs))
 
 
-def _ref_allowed_root(source_path: Optional[str]) -> Path:
-    if source_path:
-        return Path(source_path).resolve(strict=False).parent
-    return Path.cwd().resolve()
+def _ref_allowed_root(source_path: Optional[str]) -> Optional[Path]:
+    if not source_path:
+        return None
+    return Path(source_path).resolve(strict=False).parent
 
 
 def resolve_ref_path(ref_path: str, source_path: Optional[str]) -> tuple[Optional[Path], Optional[str]]:
@@ -207,6 +207,8 @@ def resolve_ref_path(ref_path: str, source_path: Optional[str]) -> tuple[Optiona
         return None, f"ref outside allowed root: {raw_path}"
 
     root = _ref_allowed_root(source_path)
+    if root is None:
+        return None, "ref has no plan-source root (sandbox undefined)"
     resolved = (root / candidate).resolve(strict=False)
     try:
         resolved.relative_to(root)

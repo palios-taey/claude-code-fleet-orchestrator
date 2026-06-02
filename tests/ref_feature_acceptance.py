@@ -33,6 +33,18 @@ def main() -> int:
         resolved, warning = resolve_ref_path("/etc/passwd", str(plan_path))
         _assert("absolute-path-rejected", resolved is None and warning == "ref outside allowed root: /etc/passwd", (resolved, warning))
 
+        no_root = _read_ref_context(
+            [{"path": "src/module.py", "l_start": 1, "l_end": 2}],
+            source_path=None,
+            line_cap=200,
+        )
+        no_root_first = no_root["refs"][0]
+        _assert(
+            "no-source-root-rejected",
+            no_root_first.get("warning") == "ref has no plan-source root (sandbox undefined)" and "content" not in no_root_first,
+            no_root_first,
+        )
+
         resolved, warning = resolve_ref_path("../secrets.txt", str(plan_path))
         _assert("dotdot-escape-rejected", resolved is None and warning == "ref outside allowed root: ../secrets.txt", (resolved, warning))
 
