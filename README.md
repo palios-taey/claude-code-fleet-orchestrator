@@ -72,6 +72,10 @@ ${ORCH_DASHBOARD_URL}/ui/
 
 With the default `.env.example`, that is `http://127.0.0.1:5002/ui/`.
 
+### Public read-only dashboard (v1.6.0+)
+
+A separate, **read-only-by-construction** app (`lib/public_readonly.py`, launched via `scripts/orch-public`, default `127.0.0.1:5005`) serves the same session-first view safely for public exposure behind a single tunnel route. It defines **only GET routes** — no create/update/notify endpoint exists in the app, so a write request is a 404/405 because the route is absent, not guarded. It applies a **fail-closed session allowlist** (`ORCH_PUBLIC_SHOW_SESSIONS`, default approved sessions only; everything unassigned/denied is hidden), an **outbound field allowlist** that scrubs operator filesystem paths and hosts from free-text and drops source paths / internal-ops fields, serves **ref pointers only** (never file contents), sanitizes `/health`, and disables the interactive API docs. Never point a tunnel at the live mutable `:5002` API — use `:5005`.
+
 Observed in [`ui/static/app.js`](ui/static/app.js) and [`ui/index.html`](ui/index.html):
 
 - The UI is session-first and auto-refreshes every `5000` ms.

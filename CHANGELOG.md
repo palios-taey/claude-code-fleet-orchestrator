@@ -4,6 +4,11 @@
 
 - No unreleased changes recorded.
 
+## v1.6.0 - 2026-06-02
+
+- Added a public read-only dashboard surface (`lib/public_readonly.py`, `scripts/orch-public`, `ui/public_index.html`, `ui/static/public-app.js`): GET-only by construction (no write/mutate/notify route exists in the app), fail-closed session allowlist (`ORCH_PUBLIC_SHOW_SESSIONS`, default approved sessions only), outbound field allowlist with operator-path/host scrubbing, by-id backstop (`ORCH_PUBLIC_HIDE_PROJECT_IDS`), pointer-only refs (file contents never served), `127.0.0.1` bind, sanitized `/health` (no infra detail), and disabled interactive API docs (`/docs`, `/redoc`, `/openapi.json`). Intended for a single read-only tunnel route; never the live mutable API.
+- Fixed ingest dependency gating: ingested `[depends:]` edges now gate task readiness — tasks are created in a held `ingesting` status until their dependencies are wired, then released, and `add_dependency` fails loud (surfacing an ingest error) on a missing target instead of silently leaving the task ungated.
+
 ## v1.5.1 - 2026-06-02
 
 - Fixed `get_project_summary()` for projects with phases after a production `UnboundLocalError` surfaced on the real fleet dataset.
