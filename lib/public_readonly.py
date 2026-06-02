@@ -24,6 +24,7 @@ _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
 _PUBLIC_INDEX = _UI_ROOT / "public_index.html"
 _PUBLIC_CSS = _UI_ROOT / "static" / "app.css"
 _PUBLIC_JS = _UI_ROOT / "static" / "public-app.js"
+_DEFAULT_SHOW_SESSIONS = ("conductor", "weaver", "tutor", "infra", "hunter", "taey-ed")
 _DEFAULT_HIDE_SESSIONS = ("taeys-hands", "x-claude", "treasurer")
 _UI_SESSIONS = (
     "conductor",
@@ -53,13 +54,31 @@ def _hidden_sessions() -> set[str]:
     return {item for item in values if item}
 
 
+def _shown_sessions() -> set[str]:
+    raw = os.environ.get("ORCH_PUBLIC_SHOW_SESSIONS")
+    if raw is None:
+        values = list(_DEFAULT_SHOW_SESSIONS)
+    else:
+        values = [item.strip() for item in raw.replace(";", ",").split(",")]
+    return {item for item in values if item} - _hidden_sessions()
+
+
+def _hidden_project_ids() -> set[str]:
+    raw = os.environ.get("ORCH_PUBLIC_HIDE_PROJECT_IDS")
+    if raw is None:
+        values: List[str] = []
+    else:
+        values = [item.strip() for item in raw.replace(";", ",").split(",")]
+    return {item for item in values if item}
+
+
 def _public_sessions() -> List[str]:
-    hidden = _hidden_sessions()
-    return [session_id for session_id in _UI_SESSIONS if session_id not in hidden]
+    shown = _shown_sessions()
+    return [session_id for session_id in _UI_SESSIONS if session_id in shown]
 
 
 def _require_visible_session(session_id: str) -> None:
-    if session_id in _hidden_sessions():
+    if session_id not in _shown_sessions():
         raise HTTPException(status_code=404, detail="session not found")
 
 
@@ -125,7 +144,8 @@ def _project_row(project: Dict[str, Any]) -> Dict[str, Any]:
 def _all_project_rows() -> List[Dict[str, Any]]:
     cfg = _cfg()
     driver = get_neo4j_driver(cfg)
-    hidden = _hidden_sessions()
+    shown = _shown_sessions()
+    hidden_project_ids = _hidden_project_ids()
     with driver.session(database=cfg.neo4j_db) as session:
         result = session.run("MATCH (p:OrchProject) RETURN p ORDER BY p.id")
         projects = []
@@ -136,7 +156,9 @@ def _all_project_rows() -> List[Dict[str, Any]]:
             project["stop_reason_history"] = _decode_json(project.get("stop_reason_history"), [])
             project["priority_history"] = _decode_json(project.get("priority_history"), [])
             project["stop_reason_orphaned"] = False
-            if str(project.get("supervisor") or "") in hidden:
+            if str(project.get("id") or "") in hidden_project_ids:
+                continue
+            if str(project.get("supervisor") or "") not in shown:
                 continue
             projects.append(_project_row(project))
     return projects
@@ -199,7 +221,12 @@ def _next_visible(session_id: str) -> Dict[str, Any]:
 
 def _session_projects_visible(session_id: str) -> Dict[str, Any]:
     _require_visible_session(session_id)
-    projects = [_project_row(project) for project in get_session_supervised_projects(session_id, config=_cfg())]
+    visible_project_ids = {str(project.get("id") or "") for project in _all_project_rows()}
+    projects = [
+        _project_row(project)
+        for project in get_session_supervised_projects(session_id, config=_cfg())
+        if str(project.get("id") or "") in visible_project_ids
+    ]
     return {"session": session_id, "projects": [_strip_ref_content(project) for project in projects]}
 
 
