@@ -1,6 +1,6 @@
 # Schema — Task model + reservation notes
 
-> Status: schema lives in operator-controlled storage today (JSON registry for orch-cron, Redis keys for the dispatch primitive). A Neo4j-backed plan tracker ships in v0.4.0 (Phase D extraction from conductor) — when it lands, the rules below become enforced constraints. **The rules apply now regardless** — they guide the JSON registry format and the eventual Neo4j schema both.
+> Status: the Neo4j-backed plan tracker is live in the current release. Redis keys still back the dispatch primitive, and `orch-cron` still uses operator-controlled JSON state for recurring fires. The rules below describe the current task model plus reserved future-expansion names.
 
 ## OrchTask
 
@@ -61,13 +61,13 @@ Implementations MUST reject writes that put a recurring task into a one-shot sta
      "last_fire_size_bytes": 42137
    }
    ```
-4. (When plan tracker lands v0.4) the same fields persist on the OrchTask node.
+4. The same field names are reserved for graph-side mirrors if recurring fire state is later copied onto OrchTask nodes.
 
 Cost: <1ms per fire, even at 8 fires/day per loop. No cardinality explosion. No node-size bloat. The sidecar is plain JSON so any auditor (graph query, monitoring script, human grep) can verify the state file hasn't drifted since the last fire.
 
 `orch-cron` writes the sidecar automatically when `state_file` is configured. Migration of existing recurring_triggers.json entries: backfill happens on the next fire — no batch migration needed.
 
-## Reserved schema (v0.4+)
+## Reserved schema (future expansion)
 
 The Phase C consultation noted that per-fire visibility is the next natural growth (Gaia: "a recurring task's *fires* are the things that complete"). Reserved now so v0.4+ can add per-fire nodes without a label migration:
 
@@ -77,7 +77,7 @@ The Phase C consultation noted that per-fire visibility is the next natural grow
    (:OrchRecurringFire {fire_id, ts, prompt_hash, result, hostname})
 ```
 
-For v0.3.x we DO NOT create per-fire nodes — the cardinality (8/day per loop) is fine in a JSONL log + sidecar hash. We reserve the relationship + node names so v0.4+ adds them without breaking existing queries.
+Current behavior does not create per-fire nodes — the cardinality (8/day per loop) stays in JSONL + sidecar hash. The relationship and node names remain reserved so a future graph expansion can add them without breaking existing queries.
 
 ## Dispatch tracking (Phase A primitive, v0.1.0+)
 
@@ -90,4 +90,4 @@ For one-shot tasks dispatched to workers via `lib/dispatch.py:dispatch()`, the R
 | `taey:<worker>:parent` | string | Optional explicit supervisor override (else suffix-strip). |
 | `taey:<worker>:idle` | "1" | Set by Stop hook, cleared by UserPromptSubmit hook. |
 
-These keys also pair with OrchTask records when the plan tracker is wired (v0.4+) — `dispatch()` will write the task to Neo4j AND set `current_task`. For v0.1–v0.3 they live only in Redis.
+These keys coexist with the live Neo4j task tracker. When a dispatched task already exists as an OrchTask, `dispatch()` claims it in Neo4j and also sets `current_task` in Redis. Redis remains the direct source of truth for stop-hook / idle-state coordination.
