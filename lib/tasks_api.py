@@ -445,6 +445,8 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
 @app.post("/api/projects/{project_id}/complete")
 async def complete_project_endpoint(project_id: str, req: Request) -> Dict[str, Any]:
     data = await req.json() if req.headers.get("content-type", "").startswith("application/json") else {}
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=422, detail="request body must be a JSON object")
     try:
         return complete_project(
             project_id,

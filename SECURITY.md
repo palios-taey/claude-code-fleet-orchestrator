@@ -31,7 +31,10 @@ This policy covers this repository only.
 - Plan/source refs are enabled only when `ORCH_REF_ALLOWED_ROOT` is configured.
 - Incoming `source_path` values are accepted for ref use only when they resolve inside `ORCH_REF_ALLOWED_ROOT`.
 - Ref reads are sandboxed to both the persisted plan-source directory and `ORCH_REF_ALLOWED_ROOT`.
+- Path sanitization rejects code points with `ord(ch) < 32`; `DEL` (`0x7f`), `NEL`, and `U+2028/U+2029` are not pre-filtered but still degrade gracefully during resolution/open.
 - Non-regular files are refused, oversized files are refused, and unresolved refs fail loudly with warnings instead of silent fallback.
+- The `META_RE` parser remains intrinsically quadratic in isolation; mitigation is the 4096-byte per-line cap plus the 512-byte meta-blob cap before regex meta scanning.
+- There is no total-plan-size cap; operator self-DoS via very large overall plan uploads remains accepted in this local single-user model.
 - `reset_project` intentionally does not clear session-global convergence keys; those keys are not project-qualified and are treated as broader session state.
 - Residual `stat()/resolve()/open()` TOCTOU races on the local filesystem are accepted in this single-user model and are not treated as a supported remote attack surface.
 

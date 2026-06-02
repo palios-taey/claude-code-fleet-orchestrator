@@ -19,6 +19,7 @@ from .orch_schema import (
 META_RE = re.compile(r"\[([^\]]+)\]")
 HEADER_SEPARATOR_RE = re.compile(r"\s+[—-]\s+")
 _PLAN_LINE_BYTE_CAP = 4096
+_META_BLOB_BYTE_CAP = 512
 
 
 def _parse_ref(raw_value: str) -> Optional[Dict[str, Any]]:
@@ -42,16 +43,20 @@ def _parse_ref(raw_value: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _split_header_meta(text: str) -> tuple[str, str]:
+def _split_header_meta(text: str) -> tuple[str, str, Optional[str]]:
     if "[" not in text:
-        return text.rstrip(), ""
+        return text.rstrip(), "", None
     last_open = text.rfind("[")
     last_close = text.rfind("]")
     if last_open > last_close:
-        return text.rstrip(), ""
+        return text.rstrip(), "", None
+    first_open = text.find("[")
+    trailing = text[first_open:]
+    if len(trailing.encode("utf-8")) > _META_BLOB_BYTE_CAP:
+        return text[:first_open].rstrip(), "", f"meta blob exceeds {_META_BLOB_BYTE_CAP} bytes"
     matches = list(META_RE.finditer(text))
     if not matches:
-        return text.rstrip(), ""
+        return text.rstrip(), "", None
     trailing_start: Optional[int] = None
     cursor = len(text)
     for match in reversed(matches):
@@ -61,8 +66,11 @@ def _split_header_meta(text: str) -> tuple[str, str]:
         trailing_start = match.start()
         cursor = match.start()
     if trailing_start is None:
-        return text.rstrip(), ""
-    return text[:trailing_start].rstrip(), text[trailing_start:].strip()
+        return text.rstrip(), "", None
+    meta_blob = text[trailing_start:].strip()
+    if len(meta_blob.encode("utf-8")) > _META_BLOB_BYTE_CAP:
+        return text[:trailing_start].rstrip(), "", f"meta blob exceeds {_META_BLOB_BYTE_CAP} bytes"
+    return text[:trailing_start].rstrip(), meta_blob, None
 
 
 def _parse_header(line: str, prefix: str) -> Optional[Dict[str, str]]:
@@ -71,19 +79,25 @@ def _parse_header(line: str, prefix: str) -> Optional[Dict[str, str]]:
     remainder = line[len(prefix):].strip()
     if not remainder:
         return None
-    body, meta_blob = _split_header_meta(remainder)
+    body, meta_blob, meta_error = _split_header_meta(remainder)
     parts = HEADER_SEPARATOR_RE.split(body, maxsplit=1)
     if len(parts) != 2:
         return None
-    return {
+    result = {
         "id": parts[0].strip(),
         "name": parts[1].strip(),
         "meta": meta_blob,
     }
+    if meta_error:
+        result["meta_error"] = meta_error
+    return result
 
 
 def _parse_meta(meta_blob: str) -> Dict[str, Any]:
     meta: Dict[str, Any] = {}
+    if len((meta_blob or "").encode("utf-8")) > _META_BLOB_BYTE_CAP:
+        meta["_meta_error"] = f"meta blob exceeds {_META_BLOB_BYTE_CAP} bytes"
+        return meta
     for raw in META_RE.findall(meta_blob or ""):
         if ":" not in raw:
             continue
@@ -207,7 +221,17 @@ def _parse_plan(md: str) -> Dict[str, Any]:
                 current_phase = None
                 current_task = None
                 continue
+            if project_match.get("meta_error"):
+                warnings.append(f"line {line_no}: {project_match['meta_error']}")
+                current_phase = None
+                current_task = None
+                continue
             meta = _parse_meta(project_match["meta"])
+            if meta.get("_meta_error"):
+                warnings.append(f"line {line_no}: {meta['_meta_error']}")
+                current_phase = None
+                current_task = None
+                continue
             project = {
                 "id": project_match["id"],
                 "name": project_match["name"],
@@ -223,7 +247,15 @@ def _parse_plan(md: str) -> Dict[str, Any]:
             if project is None:
                 errors.append(f"line {line_no}: phase declared before project")
                 continue
+            if phase_match.get("meta_error"):
+                warnings.append(f"line {line_no}: {phase_match['meta_error']}")
+                current_task = None
+                continue
             meta = _parse_meta(phase_match["meta"])
+            if meta.get("_meta_error"):
+                warnings.append(f"line {line_no}: {meta['_meta_error']}")
+                current_task = None
+                continue
             current_phase = {
                 "id": phase_match["id"],
                 "name": phase_match["name"],
@@ -243,7 +275,13 @@ def _parse_plan(md: str) -> Dict[str, Any]:
             if current_phase is None:
                 errors.append(f"line {line_no}: task declared before phase")
                 continue
+            if task_match.get("meta_error"):
+                warnings.append(f"line {line_no}: {task_match['meta_error']}")
+                continue
             meta = _parse_meta(task_match["meta"])
+            if meta.get("_meta_error"):
+                warnings.append(f"line {line_no}: {meta['_meta_error']}")
+                continue
             current_task = {
                 "id": task_match["id"],
                 "description": task_match["name"],

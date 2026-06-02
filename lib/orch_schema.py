@@ -1389,13 +1389,16 @@ def get_project_summary(project_id: str,
                 if item is None:
                     continue
                 phase = _normalize_map(dict(item["phase"]))
-                phase = _attach_ref_runtime(phase, source_path=phase.get("source_path"))
+                phase = _attach_ref_runtime(phase, source_path=phase.get("source_path") or project.get("source_path"))
                 tasks = []
                 for task in item["tasks"]:
                     if task is None:
                         continue
                     task_row = _normalize_map(dict(task))
-                    tasks.append(_attach_ref_runtime(task_row, source_path=task_row.get("source_path") or phase.get("source_path")))
+                    tasks.append(_attach_ref_runtime(
+                        task_row,
+                        source_path=task_row.get("source_path") or phase.get("source_path") or project.get("source_path"),
+                    ))
                 phases.append({
                     "phase": phase,
                     "task_counts": dict(item["task_counts"]),

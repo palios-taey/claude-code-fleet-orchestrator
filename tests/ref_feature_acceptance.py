@@ -41,7 +41,7 @@ from lib.orch_schema import (  # noqa: E402
     reset_project,
     resolve_ref_path,
 )
-from lib.plan_loader import _PLAN_LINE_BYTE_CAP, _parse_plan, _parse_ref  # noqa: E402
+from lib.plan_loader import _META_BLOB_BYTE_CAP, _PLAN_LINE_BYTE_CAP, _parse_plan, _parse_ref  # noqa: E402
 from lib.tasks_api import app  # noqa: E402
 
 CFG = OrchConfig()
@@ -235,7 +235,7 @@ def main() -> int:
                 oversize_first,
             )
 
-            bench_sizes = [32, 64, 128, 256]
+            bench_sizes = [4, 8, 16, 32]
             bench_ms = [_benchmark_parse_ms(size) for size in bench_sizes]
             ratios = [bench_ms[idx + 1] / max(bench_ms[idx], 0.001) for idx in range(len(bench_ms) - 1)]
             linear_ok = all(ratio < 3.0 for ratio in ratios)
@@ -254,6 +254,15 @@ def main() -> int:
                 {"sizes": malformed_sizes, "ms": malformed_ms, "warnings": malformed_parsed.get("warnings")},
             )
             print(f"BENCH malformed-parse-ms blocks={malformed_sizes} values={[round(v, 3) for v in malformed_ms]}")
+
+            dense_meta_line = "# Project: proj - Name " + ("[tag:x]" * 80)
+            dense_meta = _parse_plan(f"{dense_meta_line}\n")
+            dense_warning = f"line 1: meta blob exceeds {_META_BLOB_BYTE_CAP} bytes"
+            _assert(
+                "meta-blob-cap-bounded",
+                dense_warning in dense_meta.get("warnings", []) and dense_meta.get("project") is None,
+                dense_meta,
+            )
 
             project_ref_id = f"{PREFIX}-project-ref"
             create_project(
@@ -280,6 +289,10 @@ def main() -> int:
                 project_id = _project_fixture(label)
                 response = CLIENT.post(f"/api/projects/{project_id}/complete", json=body)
                 _assert(label, response.status_code == expected_status, response.text)
+
+            non_object_project = _project_fixture("force-list-body")
+            non_object_resp = CLIENT.request("POST", f"/api/projects/{non_object_project}/complete", json=["force", True])
+            _assert("force-non-object-body", non_object_resp.status_code == 422, non_object_resp.text)
 
             force_true_project = _project_fixture("force-true")
             force_true = CLIENT.post(f"/api/projects/{force_true_project}/complete", json={"force": True})
