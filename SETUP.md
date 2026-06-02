@@ -6,6 +6,7 @@ Observed:
 - the installer and lifecycle commands live in `scripts/install` and `scripts/orch`
 - the setup transaction logic lives in `lib/easy_setup.py`
 - the product is designed for a local, single-user workstation with loopback-only trust boundaries and no built-in auth layer
+- this guide is for the release line that includes the easy-setup entrypoints `scripts/install` and `orch`; `SETUP.md` and those entrypoints ship together
 
 ## Threat Model
 
@@ -24,7 +25,8 @@ If you need network auth, shared-user isolation, or remote secret management, th
 ## Prerequisites
 
 Required:
-- `python3`
+- Python 3.10+
+- a `python3` install with the stdlib `venv` module available
 - a local checkout of `claude-code-fleet-orchestrator`
 - a sibling checkout of `claude-code-fleet-notify`
 - Claude Code installed and using `~/.claude/settings.json`
@@ -33,12 +35,28 @@ Optional:
 - Docker, if you want the bundled Redis + Neo4j path
 
 Observed:
+- `README.md` sets the project Python floor at 3.10+
+- `scripts/install` runs `python3 -m venv`, so the host Python must include `venv`
 - `scripts/install` can skip Docker entirely when `--skip-compose` is passed or when local infra is already reachable on the expected ports
 - notify hook installation is delegated to the notify repo's `scripts/install-hooks.sh`
 
+Operator note:
+- on Debian or Ubuntu, a missing `venv` module usually means you need the `python3-venv` system package
+- no exact Claude Code minimum version is encoded in this repo; you need a Claude Code build that supports the managed hooks and `permissions.deny` settings shape used here
+
 ## Install
 
-From the orchestrator repo:
+From the orchestrator repo, start with a no-write preview:
+
+```bash
+scripts/install --dry-run
+```
+
+Observed:
+- `--dry-run` previews the install flow and Claude settings diff
+- `--dry-run` writes nothing: no state file, no pristine backup, no settings mutation
+
+Then run the real install:
 
 ```bash
 scripts/install
@@ -63,6 +81,10 @@ Observed settings behavior:
 - hook ownership is tracked by normalized full path, not basename
 - a pending hook transaction journal is written before the external hook installer runs and reconciled later if a crash interrupts that window
 
+Layout note:
+- the default auto-discovery path expects `claude-code-fleet-orchestrator` and `claude-code-fleet-notify` as sibling checkouts
+- if notify is not in that sibling layout, set `ORCH_NOTIFY_LIB_ROOT` to the notify repo root
+
 ## Bring Your Own Infra
 
 If local Redis and Neo4j are already running on the expected ports, or if you do not want Docker-managed services:
@@ -72,10 +94,18 @@ scripts/install --skip-compose
 ```
 
 Observed:
+- the default local ports are Redis `127.0.0.1:6379` and Neo4j `127.0.0.1:7687`
 - BYO mode does not require Docker
 - setup state records whether compose is managed
 - later doctor runs skip Docker checks when the install was done in BYO mode
 - doctor probes the configured Redis and Neo4j endpoints with real connectivity checks
+
+BYO configuration:
+- `ORCH_REDIS_HOST`
+- `ORCH_REDIS_PORT`
+- `ORCH_NEO4J_URI`
+- `ORCH_NEO4J_DB`
+- `ORCH_NOTIFY_LIB_ROOT`
 
 ## Doctor
 
@@ -111,6 +141,10 @@ Enable services and re-apply managed integration idempotently:
 scripts/orch enable
 ```
 
+Observed:
+- re-running `scripts/install` or `scripts/orch enable` is intended to reconcile the managed delta rather than duplicate it
+- `orch doctor --explain-scope` is the documented post-install verification path
+
 Stop managed services without removing settings ownership:
 
 ```bash
@@ -132,6 +166,9 @@ scripts/orch uninstall --restore-original-settings
 Observed uninstall behavior:
 - default uninstall is surgical
 - unmanaged state is a no-op
+- the pristine pre-install backup is preserved
+- `--restore-original-settings` is destructive with respect to post-install edits in the Claude settings file
+- `scripts/orch uninstall --restore-original-settings` prints a preflight diff before restoring
 - full restore refuses path drift or fingerprint mismatch unless explicitly overridden
 
 Override only if you intentionally want to restore despite path drift:
@@ -167,8 +204,8 @@ Observed:
 ## OS Notes
 
 Observed:
-- Claude settings are resolved through the current user's home directory at `~/.claude/settings.json`
+- Claude settings are resolved through the current user's `.claude` directory under the current user's home directory
 - the managed local environment expects a Unix-like shell and process model
 
 Unknown:
-- a fully supported Windows-native path has not been encoded or tested in this repo
+- a fully supported Windows-native path and workflow have not been encoded or tested in this repo
