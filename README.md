@@ -86,6 +86,27 @@ orch-watch \
   --readiness-checker lib/plan_readiness.py:check_readiness
 ```
 
+## Companion products
+
+The orchestrator is the core. A few small, separately released products compose with it. Start minimal: orchestrator + notify + `orch doctor` green. Add the others only when you hit the specific problem they solve.
+
+### Required
+
+- **[claude-code-fleet-notify](https://github.com/palios-taey/claude-code-fleet-notify)** — the hook, daemon, Redis inbox, and CLI layer the orchestrator depends on. `scripts/install` wires its hooks for you.
+
+### Recommended (manual install)
+
+- **[claude-code-api-watchdog](https://github.com/palios-taey/claude-code-api-watchdog)** — surfaces Claude Code API stalls and failures instead of leaving a wedged session silent.
+- **[mcp-reconnect](https://github.com/palios-taey/mcp-reconnect)** — keeps MCP connections alive across disconnects.
+
+### Optional
+
+- **[restart-safe-agents](https://github.com/palios-taey/restart-safe-agents)** — patterns for agents that survive restart without losing in-flight work.
+
+### Planned, not yet released
+
+- A local fleet dashboard template (`cockpit-template`) and a one-command suite installer are planned but not yet published.
+
 ## Documentation
 
 - [docs/SCHEMA.md](docs/SCHEMA.md)
