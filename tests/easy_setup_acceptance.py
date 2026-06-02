@@ -191,6 +191,38 @@ def main() -> int:
             pending_settings,
         )
 
+        pending_lazy_path = _temp_settings(tmp / "pending-lazy", [])
+        pending_lazy_doc = {
+            "permissions": {"deny": []},
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "python3 /notify/hooks/stop_idle.py", "timeout": 5000}]}]
+            },
+        }
+        pending_lazy_path.write_text(json.dumps(pending_lazy_doc, indent=2) + "\n", encoding="utf-8")
+        with mock.patch.object(easy_setup, "STATE_DIR", tmp / "pending-lazy-state"), \
+             mock.patch.object(easy_setup, "SETUP_STATE_PATH", tmp / "pending-lazy-state" / "easy_setup_state.json"), \
+             mock.patch("lib.easy_setup.resolve_notify_root", side_effect=RuntimeError("should not resolve notify root")):
+            easy_setup.save_setup_state(
+                {
+                    "pending_hook_transaction": {
+                        "notify_root": "/notify",
+                        "before_hooks": {"Stop": []},
+                        "created_at": 2.0,
+                    }
+                }
+            )
+            pending_lazy_result = reconcile_pending_hook_transaction(pending_lazy_path)
+            pending_lazy_state = easy_setup.load_setup_state()
+            pending_lazy_settings = json.loads(pending_lazy_path.read_text(encoding="utf-8"))
+        _assert(
+            "pending-txn-recorded-root-adopts-without-resolve",
+            pending_lazy_result["reconciled"]
+            and pending_lazy_result["hook_commands_added"]["Stop"] == ["python3 /notify/hooks/stop_idle.py"]
+            and "pending_hook_transaction" not in pending_lazy_state
+            and pending_lazy_settings["_managedBy"]["claude-code-fleet-orchestrator"]["hooks"]["commands_added"]["Stop"] == ["python3 /notify/hooks/stop_idle.py"],
+            pending_lazy_settings,
+        )
+
         unmanaged_path = _temp_settings(tmp / "unmanaged", ["UserOnly"])
         unmanaged_before = unmanaged_path.read_text(encoding="utf-8")
         unmanaged_result = remove_claude_permission_guard(unmanaged_path, apply=True)

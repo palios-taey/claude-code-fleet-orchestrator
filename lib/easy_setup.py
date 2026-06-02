@@ -844,7 +844,8 @@ def reconcile_pending_hook_transaction(path: Path = CLAUDE_SETTINGS_PATH) -> Dic
     if not isinstance(pending, dict):
         return {"reconciled": False}
     settings, original = load_claude_settings(path)
-    notify_root = Path(str(pending.get("notify_root", resolve_notify_root()))).resolve()
+    root_raw = pending.get("notify_root")
+    notify_root = Path(str(root_raw if root_raw else resolve_notify_root())).resolve()
     before_hooks = pending.get("before_hooks", {})
     before_hooks = before_hooks if isinstance(before_hooks, dict) else {}
     after_hooks = snapshot_expected_hook_commands(settings, notify_root=notify_root)
