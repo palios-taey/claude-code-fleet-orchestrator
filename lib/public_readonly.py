@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -47,7 +46,13 @@ _SECRET_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
-app = FastAPI(title="Fleet Orchestrator Public Readonly", version=package_version())
+app = FastAPI(
+    title="Fleet Orchestrator Public Readonly",
+    version=package_version(),
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 
 def _cfg() -> OrchConfig:
@@ -300,10 +305,10 @@ def _project_visible(project_id: str) -> bool:
 
 
 def _public_summary_or_404(project_id: str) -> Dict[str, Any]:
+    if not _project_visible(project_id):
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
     summary = get_project_summary(project_id, config=_cfg())
     if not summary:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
-    if not _project_visible(project_id):
         raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
     return _public_summary(summary)
 
@@ -349,14 +354,9 @@ def _public_index_html() -> str:
 def health() -> Dict[str, Any]:
     try:
         _ = get_ready_tasks(_cfg())
-        return {
-            "ok": True,
-            "service": "fleet-orchestrator-public-readonly",
-            "version": package_version(),
-            "ts": time.time(),
-        }
-    except Exception as exc:
-        return JSONResponse(status_code=503, content={"ok": False, "error": str(exc)})
+        return {"ok": True}
+    except Exception:
+        return JSONResponse(status_code=503, content={"ok": False})
 
 
 @app.get("/api/projects")
