@@ -17,6 +17,11 @@ NEEDS_YOU_KEY_PREFIX = "taey:needs_you:"
 MEMORY_BASE = Path.home() / ".claude" / "projects"
 MAX_LINEAGE_LEN = 160
 MAX_MESSAGE_LEN = 20000
+# B4 fix (Gaia Gate-2): roles a CLIENT may set via the HTTP endpoint. Internal
+# callers (escalate -> role="system") are trusted and bypass this; the allowlist
+# is enforced at the chat_post boundary so a request can't inject role="system"
+# (which would render into the agent transcript as a privileged instruction).
+CLIENT_ROLES = {"user", "assistant"}
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -250,10 +255,13 @@ async def chat_history(lineage: str) -> Dict[str, Any]:
 async def chat_post(lineage: str, req: Request) -> Dict[str, Any]:
     data = await req.json()
     try:
+        role = str(data.get("role") or "user").strip().lower() or "user"
+        if role not in CLIENT_ROLES:
+            raise ValueError(f"role must be one of {sorted(CLIENT_ROLES)}")
         message = await append_message(
             lineage,
             sender=data.get("sender") or "jesse",
-            role=data.get("role") or "user",
+            role=role,
             text=data.get("text") or data.get("message") or "",
             metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else None,
         )

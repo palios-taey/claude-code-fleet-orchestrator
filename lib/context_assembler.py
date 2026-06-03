@@ -17,17 +17,38 @@ CORE_BUDGET_BYTES = 15 * 1024
 DEFAULT_MAX_MEMORY = 4
 DEFAULT_MAX_REFS_PER_TIER = 5
 MEMORY_BASE = Path.home() / ".claude" / "projects"
-SESSION_ROOTS = {
-    "conductor": "/home/mira/the-conductor",
-    "weaver": "/home/mira/isma",
-    "infra": "/home/mira/infra-soul",
-    "taeys-hands": "/home/mira/taeys-hands",
-    "treasurer": "/home/mira/treasurer",
-    "taey-ed": "/home/mira/taey-ed",
-    "tutor": "/home/mira/tutor",
-    "hunter": "/home/mira/hunter",
-    "x-claude": "/home/mira/x-claude",
-}
+
+
+def _load_session_roots() -> Dict[str, str]:
+    """Session -> repo-root map, loaded from config (no hardcoded operator paths).
+
+    De-umbilical fix: this used to ship a hardcoded map of the reference
+    operator's fleet (/home/mira/...), which a downloader could not use. Each
+    operator sets ORCH_SESSION_ROOTS in their environment as JSON or
+    comma-separated key=value pairs, e.g.
+        ORCH_SESSION_ROOTS={"conductor":"/home/me/repo","worker":"/home/me/w"}
+        ORCH_SESSION_ROOTS=conductor=/home/me/repo,worker=/home/me/w
+    Unset -> empty map (callers fall back to MEMORY_BASE-only context).
+    """
+    raw = os.environ.get("ORCH_SESSION_ROOTS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return {str(k): str(v) for k, v in parsed.items() if str(k) and str(v)}
+    except (ValueError, TypeError):
+        pass
+    roots: Dict[str, str] = {}
+    for pair in raw.split(","):
+        if "=" in pair:
+            key, _, value = pair.partition("=")
+            if key.strip() and value.strip():
+                roots[key.strip()] = value.strip()
+    return roots
+
+
+SESSION_ROOTS = _load_session_roots()
 VALID_CLIS = {"claude", "codex", "gemini", "grok"}
 
 
