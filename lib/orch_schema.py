@@ -10,6 +10,7 @@ Label convention: OrchProject, OrchPhase, OrchTask, OrchFileOwnership
 
 import copy
 import datetime as dt
+import hashlib
 import itertools
 import json
 import logging
@@ -32,6 +33,8 @@ SCHEMA_CONSTRAINTS = [
     "CREATE CONSTRAINT orch_project_id IF NOT EXISTS FOR (p:OrchProject) REQUIRE p.id IS UNIQUE",
     "CREATE CONSTRAINT orch_phase_id IF NOT EXISTS FOR (ph:OrchPhase) REQUIRE ph.id IS UNIQUE",
     "CREATE CONSTRAINT orch_question_id IF NOT EXISTS FOR (q:OrchQuestion) REQUIRE q.id IS UNIQUE",
+    "CREATE CONSTRAINT orch_global_context_key IF NOT EXISTS FOR (g:OrchGlobalContext) REQUIRE g.key IS UNIQUE",
+    "CREATE CONSTRAINT orch_supervisor_session IF NOT EXISTS FOR (s:OrchSupervisor) REQUIRE s.session IS UNIQUE",
 ]
 
 SCHEMA_INDEXES = [
@@ -172,17 +175,34 @@ def _normalize_refs(raw_refs: Any) -> List[Dict[str, Any]]:
         path = str(item.get("path") or "").strip()
         if _has_control_chars(path):
             continue
-        try:
-            l_start = int(item.get("l_start"))
-            l_end = int(item.get("l_end"))
-        except Exception:
+        raw_sections = item.get("sections")
+        sections: List[Dict[str, int]] = []
+        section_items = raw_sections if isinstance(raw_sections, list) else [item]
+        for section in section_items:
+            if not isinstance(section, dict):
+                continue
+            try:
+                l_start = int(section.get("l_start"))
+                l_end = int(section.get("l_end"))
+            except Exception:
+                continue
+            if l_start > 0 and l_end >= l_start:
+                sections.append({"l_start": l_start, "l_end": l_end})
+        if not path or not sections:
             continue
-        if not path or l_start <= 0 or l_end < l_start:
-            continue
-        entry = {"path": path, "l_start": l_start, "l_end": l_end}
+        first_section = sections[0]
+        entry = {
+            "path": path,
+            "sections": sections,
+            "l_start": first_section["l_start"],
+            "l_end": first_section["l_end"],
+        }
         label = str(item.get("label") or "").strip()
         if label:
             entry["label"] = label
+        level = str(item.get("level") or "").strip()
+        if level in {"overall", "supervisor", "project", "phase", "task"}:
+            entry["level"] = level
         normalized.append(entry)
     return normalized
 
@@ -267,24 +287,46 @@ def resolve_ref_path(ref_path: str, source_path: Optional[str]) -> tuple[Optiona
     candidate = Path(raw_path)
     if candidate.is_absolute():
         return None, f"ref outside allowed root: {raw_path}"
-
-    root = _ref_allowed_root(source_path)
-    if root is None:
-        return None, "ref has no plan-source root (sandbox undefined)"
+    if any(part == ".." for part in candidate.parts):
+        return None, f"ref outside allowed root: {raw_path}"
     allowed_roots = _allowed_ref_roots()
     if not allowed_roots:
         return None, "ref disabled: ORCH_REF_ALLOWED_ROOT is unset"
+    first_resolved: Optional[Path] = None
     try:
-        if not _path_within_any_root(root, allowed_roots):
-            return None, f"ref outside allowed root: {raw_path}"
-        resolved = (root / candidate).resolve(strict=False)
-        if not _path_within_any_root(resolved, [root]):
-            return None, f"ref outside allowed root: {raw_path}"
-        if not _path_within_any_root(resolved, allowed_roots):
-            return None, f"ref outside allowed root: {raw_path}"
-        return resolved, None
+        for root in allowed_roots:
+            resolved = (root / candidate).resolve(strict=False)
+            if not _path_within_any_root(resolved, [root]):
+                continue
+            if first_resolved is None:
+                first_resolved = resolved
+            if resolved.exists():
+                return resolved, None
+        if first_resolved is not None:
+            return first_resolved, None
+        return None, f"ref outside allowed root: {raw_path}"
     except Exception as exc:
         return None, f"ref unreadable: {raw_path} ({exc.__class__.__name__})"
+
+
+def _git_head_for_path(path: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path.parent), "rev-parse", "HEAD"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return "nogit"
+    head = result.stdout.strip()
+    return head if result.returncode == 0 and head else "nogit"
+
+
+def _ref_section_pointer(section: Dict[str, int]) -> str:
+    return f"{int(section.get('l_start') or 0)}-{int(section.get('l_end') or 0)}"
 
 
 def _read_ref_context(refs: List[Dict[str, Any]], source_path: Optional[str],
@@ -292,20 +334,40 @@ def _read_ref_context(refs: List[Dict[str, Any]], source_path: Optional[str],
     resolved: List[Dict[str, Any]] = []
     warnings: List[str] = []
     remaining_lines = line_cap
-    for ref in refs:
+    for ref in _normalize_refs(refs):
         path = str(ref.get("path") or "")
-        l_start = int(ref.get("l_start") or 0)
-        l_end = int(ref.get("l_end") or 0)
-        ref_entry = {"path": path, "l_start": l_start, "l_end": l_end}
+        sections = list(ref.get("sections") or [])
+        first_section = sections[0] if sections else {"l_start": 0, "l_end": 0}
+        ref_entry = {
+            "path": path,
+            "sections": [],
+            "l_start": int(first_section.get("l_start") or 0),
+            "l_end": int(first_section.get("l_end") or 0),
+        }
         label = ref.get("label")
         if label:
             ref_entry["label"] = label
+        level = ref.get("level")
+        if level:
+            ref_entry["level"] = level
         if remaining_lines <= 0:
+            for section in sections:
+                ref_entry["sections"].append({
+                    "l_start": section["l_start"],
+                    "l_end": section["l_end"],
+                    "warning": "ref truncated by aggregate line cap",
+                })
             ref_entry["warning"] = "ref truncated by aggregate line cap"
             resolved.append(ref_entry)
             continue
         resolved_path, resolve_warning = resolve_ref_path(path, source_path)
         if resolve_warning:
+            for section in sections:
+                ref_entry["sections"].append({
+                    "l_start": section["l_start"],
+                    "l_end": section["l_end"],
+                    "warning": resolve_warning,
+                })
             ref_entry["warning"] = resolve_warning
             warnings.append(resolve_warning)
             resolved.append(ref_entry)
@@ -314,46 +376,76 @@ def _read_ref_context(refs: List[Dict[str, Any]], source_path: Optional[str],
         try:
             stat_result = resolved_path.stat()
             if not stat.S_ISREG(stat_result.st_mode):
-                warning = f"ref unreadable: {path}:{l_start}-{l_end} (not a regular file)"
-                ref_entry["warning"] = warning
-                warnings.append(warning)
+                for section in sections:
+                    section_warning = f"ref unreadable: {path}:{_ref_section_pointer(section)} (not a regular file)"
+                    ref_entry["sections"].append({
+                        "l_start": section["l_start"],
+                        "l_end": section["l_end"],
+                        "warning": section_warning,
+                    })
+                    warnings.append(section_warning)
+                    ref_entry.setdefault("warning", section_warning)
                 resolved.append(ref_entry)
                 continue
             if stat_result.st_size > _REF_READ_BYTE_CAP:
-                warning = f"ref unreadable: {path}:{l_start}-{l_end} (file exceeds byte cap {_REF_READ_BYTE_CAP})"
-                ref_entry["warning"] = warning
-                warnings.append(warning)
+                for section in sections:
+                    section_warning = f"ref unreadable: {path}:{_ref_section_pointer(section)} (file exceeds byte cap {_REF_READ_BYTE_CAP})"
+                    ref_entry["sections"].append({
+                        "l_start": section["l_start"],
+                        "l_end": section["l_end"],
+                        "warning": section_warning,
+                    })
+                    warnings.append(section_warning)
+                    ref_entry.setdefault("warning", section_warning)
                 resolved.append(ref_entry)
                 continue
-            slice_lines: List[str] = []
-            with resolved_path.open("r", encoding="utf-8") as handle:
-                for line_no, line in enumerate(itertools.islice(handle, l_end), start=1):
-                    if line_no >= l_start:
-                        slice_lines.append(line.rstrip("\n"))
+            file_bytes = resolved_path.read_bytes()
+            file_sha = hashlib.sha256(file_bytes).hexdigest()
+            provenance_material = f"{_git_head_for_path(resolved_path)}:{file_sha}"
+            ref_entry["provenance_hash"] = hashlib.sha256(provenance_material.encode("utf-8")).hexdigest()
+            file_lines = file_bytes.decode("utf-8").splitlines()
         except Exception as exc:
-            warning = f"ref unreadable: {path}:{l_start}-{l_end} ({exc.__class__.__name__})"
-            ref_entry["warning"] = warning
-            warnings.append(warning)
+            for section in sections:
+                section_warning = f"ref unreadable: {path}:{_ref_section_pointer(section)} ({exc.__class__.__name__})"
+                ref_entry["sections"].append({
+                    "l_start": section["l_start"],
+                    "l_end": section["l_end"],
+                    "warning": section_warning,
+                })
+                warnings.append(section_warning)
+                ref_entry.setdefault("warning", section_warning)
             resolved.append(ref_entry)
             continue
-        if not slice_lines and l_start > 0:
-            warning = f"ref unreadable: {path}:{l_start}-{l_end} (start beyond file)"
-            ref_entry["warning"] = warning
-            warnings.append(warning)
-            resolved.append(ref_entry)
-            continue
-        if not slice_lines:
-            warning = f"ref unreadable: {path}:{l_start}-{l_end} (empty slice)"
-            ref_entry["warning"] = warning
-            warnings.append(warning)
-            resolved.append(ref_entry)
-            continue
-        allowed = min(len(slice_lines), remaining_lines)
-        ref_entry["content"] = "\n".join(slice_lines[:allowed])
-        ref_entry["truncated"] = allowed < len(slice_lines)
-        if ref_entry["truncated"]:
-            ref_entry["warning"] = "ref truncated by aggregate line cap"
-        remaining_lines -= allowed
+        for section in sections:
+            l_start = int(section["l_start"])
+            l_end = int(section["l_end"])
+            section_entry: Dict[str, Any] = {"l_start": l_start, "l_end": l_end}
+            slice_lines = file_lines[l_start - 1:l_end]
+            if not slice_lines and l_start > 0:
+                warning = f"ref unreadable: {path}:{l_start}-{l_end} (start beyond file)"
+                section_entry["warning"] = warning
+                ref_entry.setdefault("warning", warning)
+                warnings.append(warning)
+                ref_entry["sections"].append(section_entry)
+                continue
+            if not slice_lines:
+                warning = f"ref unreadable: {path}:{l_start}-{l_end} (empty slice)"
+                section_entry["warning"] = warning
+                ref_entry.setdefault("warning", warning)
+                warnings.append(warning)
+                ref_entry["sections"].append(section_entry)
+                continue
+            allowed = min(len(slice_lines), remaining_lines)
+            section_entry["content"] = "\n".join(slice_lines[:allowed])
+            section_entry["truncated"] = allowed < len(slice_lines)
+            if section_entry["truncated"]:
+                section_entry["warning"] = "ref truncated by aggregate line cap"
+                ref_entry["warning"] = "ref truncated by aggregate line cap"
+            remaining_lines -= allowed
+            if "content" not in ref_entry:
+                ref_entry["content"] = section_entry["content"]
+                ref_entry["truncated"] = section_entry["truncated"]
+            ref_entry["sections"].append(section_entry)
         resolved.append(ref_entry)
     return {"refs": resolved, "warnings": warnings, "line_cap": line_cap}
 
@@ -1100,6 +1192,77 @@ def create_task(
         pass  # Driver is singleton; do not close
 
 
+def set_overall_refs(refs: List[Dict[str, Any]], config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            MERGE (g:OrchGlobalContext {key: 'overall'})
+            ON CREATE SET g.created_at = datetime()
+            SET g.refs = $refs,
+                g.updated_at = datetime()
+            RETURN g.key AS key, g.refs AS refs
+        """, refs=_encode_refs_or_none(refs) or "[]").single()
+    result = dict(row) if row else {"key": "overall", "refs": "[]"}
+    result["refs"] = _normalize_refs(result.get("refs"))
+    return result
+
+
+def set_supervisor_refs(session_id: str, refs: List[Dict[str, Any]],
+                        config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    session_value = _normalize_owner_session(session_id)
+    if not session_value:
+        raise ValueError("supervisor session must be non-empty")
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            MERGE (s:OrchSupervisor {session: $session})
+            ON CREATE SET s.created_at = datetime()
+            SET s.refs = $refs,
+                s.updated_at = datetime()
+            RETURN s.session AS session, s.refs AS refs
+        """, session=session_value, refs=_encode_refs_or_none(refs) or "[]").single()
+    result = dict(row) if row else {"session": session_value, "refs": "[]"}
+    result["refs"] = _normalize_refs(result.get("refs"))
+    return result
+
+
+def _context_record(level: str, refs: Any, *, line_cap: int = 200) -> Dict[str, Any]:
+    normalized = []
+    for ref in _normalize_refs(refs):
+        ref["level"] = level
+        normalized.append(ref)
+    return {
+        "level": level,
+        "refs": normalized,
+        "ref_context": _read_ref_context(normalized, source_path=None, line_cap=line_cap),
+    }
+
+
+def get_overall_refs(config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            OPTIONAL MATCH (g:OrchGlobalContext {key: 'overall'})
+            RETURN g.refs AS refs
+        """).single()
+    return _context_record("overall", row.get("refs") if row else [])
+
+
+def get_supervisor_refs(session_id: str, config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    session_value = _normalize_owner_session(session_id)
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            OPTIONAL MATCH (s:OrchSupervisor {session: $session})
+            RETURN s.refs AS refs
+        """, session=session_value).single()
+    return _context_record("supervisor", row.get("refs") if row else [])
+
+
 def add_dependency(task_id: str, depends_on_id: str,
                    config: Optional[OrchConfig] = None) -> bool:
     """Create DEPENDS_ON relationship between tasks."""
@@ -1344,11 +1507,14 @@ def get_project_summary(project_id: str,
         with driver.session(database=cfg.neo4j_db) as session:
             result = session.run("""
                 MATCH (p:OrchProject {id: $project_id})
+                OPTIONAL MATCH (g:OrchGlobalContext {key: 'overall'})
+                OPTIONAL MATCH (s:OrchSupervisor {session: coalesce(p.supervisor, '')})
+                WITH p, g, s
                 OPTIONAL MATCH (p)-[:HAS_PHASE]->(ph:OrchPhase)
                 OPTIONAL MATCH (ph)-[:HAS_TASK]->(t:OrchTask)
-                WITH p, ph, t
+                WITH p, g, s, ph, t
                 ORDER BY coalesce(t.priority, 999999999) ASC, t.created_at ASC
-                WITH p, ph,
+                WITH p, g, s, ph,
                      count(t) AS total_tasks,
                      sum(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END) AS pending,
                      sum(CASE WHEN t.status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
@@ -1370,7 +1536,7 @@ def get_project_summary(project_id: str,
                          END
                      ) AS tasks
                 ORDER BY ph.order ASC, ph.name ASC
-                RETURN p, collect(
+                RETURN p, g, s, collect(
                     CASE
                         WHEN ph IS NULL THEN NULL
                         ELSE {
@@ -1392,6 +1558,8 @@ def get_project_summary(project_id: str,
                 return None
 
             project = _decode_project_node(dict(record["p"]))
+            overall_tier = _context_record("overall", dict(record["g"]).get("refs") if record["g"] else [])
+            supervisor_tier = _context_record("supervisor", dict(record["s"]).get("refs") if record["s"] else [])
             phases = []
             for item in record["phases"]:
                 if item is None:
@@ -1417,6 +1585,36 @@ def get_project_summary(project_id: str,
             return {
                 "project": project,
                 "phases": phases,
+                "ref_tiers": {
+                    "overall": overall_tier,
+                    "supervisor": supervisor_tier,
+                    "project": {
+                        "level": "project",
+                        "refs": project.get("refs", []),
+                        "ref_context": project.get("ref_context", {"refs": [], "warnings": [], "line_cap": 200}),
+                    },
+                    "phases": [
+                        {
+                            "id": item["phase"].get("id"),
+                            "name": item["phase"].get("name"),
+                            "level": "phase",
+                            "refs": item["phase"].get("refs", []),
+                            "ref_context": item["phase"].get("ref_context", {"refs": [], "warnings": [], "line_cap": 200}),
+                        }
+                        for item in phases
+                    ],
+                    "tasks": [
+                        {
+                            "id": task.get("id"),
+                            "description": task.get("description"),
+                            "level": "task",
+                            "refs": task.get("refs", []),
+                            "ref_context": task.get("ref_context", {"refs": [], "warnings": [], "line_cap": 200}),
+                        }
+                        for item in phases
+                        for task in item.get("tasks", [])
+                    ],
+                },
             }
     finally:
         pass  # Driver is singleton; do not close
