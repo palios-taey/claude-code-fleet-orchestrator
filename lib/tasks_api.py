@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lib.config import OrchConfig
 from lib.chat_layer import router as chat_router
 from lib.easy_setup import package_version
+from lib.shippability import evaluate_shippability
 from lib.dispatch import bind_current_task, record_outcome
 from lib.orch_schema import (
     ConditionValidationError,
@@ -469,6 +470,22 @@ async def complete_project_endpoint(project_id: str, req: Request) -> Dict[str, 
         raise HTTPException(status_code=409, detail=str(exc))
     except ProjectNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/projects/{project_id}/shippability")
+async def project_shippability_endpoint(project_id: str) -> Dict[str, Any]:
+    """Ship-gate verdict: shippable only when every -prodtest/-audit gate is completed."""
+    return evaluate_shippability(project_id, config=_cfg())
+
+
+@app.post("/api/projects/{project_id}/ship")
+async def ship_project_endpoint(project_id: str) -> Dict[str, Any]:
+    """ENGINE SHIP GATE (rp0): refuse the ship transition unless all ship-gates are
+    completed with evidence. No human-approval override — the gates are the authority."""
+    verdict = evaluate_shippability(project_id, config=_cfg())
+    if not verdict.get("shippable"):
+        raise HTTPException(status_code=409, detail=verdict)
+    return {"ok": True, "shippable": True, "verdict": verdict}
 
 
 @app.post("/api/projects/{project_id}/reset")
