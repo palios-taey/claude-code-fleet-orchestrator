@@ -292,11 +292,26 @@ def resolve_ref_path(ref_path: str, source_path: Optional[str]) -> tuple[Optiona
     allowed_roots = _allowed_ref_roots()
     if not allowed_roots:
         return None, "ref disabled: ORCH_REF_ALLOWED_ROOT is unset"
+    # Resolution bases, in order of author intent:
+    #   1) the source plan's own directory — a bare filename means "the file
+    #      next to this plan" (source_path is validated within an allowed root
+    #      at ingest, so this base is itself inside the sandbox);
+    #   2) each allowed root — for repo-root-relative refs like "plans/x.md".
+    # SECURITY is enforced below regardless of base: the resolved real path
+    # MUST live within an allowed root (with ".." / absolute / "~" already
+    # rejected above), so source-relative resolution cannot escape the sandbox.
+    bases: List[Path] = []
+    if source_path:
+        try:
+            bases.append(Path(source_path).resolve(strict=False).parent)
+        except Exception:
+            pass
+    bases.extend(allowed_roots)
     first_resolved: Optional[Path] = None
     try:
-        for root in allowed_roots:
-            resolved = (root / candidate).resolve(strict=False)
-            if not _path_within_any_root(resolved, [root]):
+        for base in bases:
+            resolved = (base / candidate).resolve(strict=False)
+            if not _path_within_any_root(resolved, allowed_roots):
                 continue
             if first_resolved is None:
                 first_resolved = resolved
