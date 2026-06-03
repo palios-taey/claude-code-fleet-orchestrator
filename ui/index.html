@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Orchestrator Plan UI</title>
-  <link rel="stylesheet" href="/ui/static/app.css">
+  <link rel="stylesheet" href="/ui/static/app.css?v=3">
 </head>
 <body>
   <div class="shell">
@@ -49,16 +49,16 @@
       </section>
     </main>
 
-    <footer class="chat-bar panel" id="chat-bar">
+    <footer class="chat-bar panel expanded" id="chat-bar">
       <div class="chat-bar-header">
         <button type="button" id="chat-expand-toggle" class="chat-expand-toggle"
-                aria-expanded="false" aria-controls="chat-history-wrap">
+                aria-expanded="true" aria-controls="chat-history-wrap">
           <span class="chat-expand-arrow" aria-hidden="true">▸</span>
-          <span>Chat with <strong id="chat-target">conductor</strong></span>
+          <span>Chat with <strong id="chat-target">conductor</strong> — click to collapse</span>
         </button>
         <span id="chat-needs-you" class="status-badge blocked" hidden>needs you</span>
       </div>
-      <div id="chat-history-wrap" class="chat-history-wrap" hidden>
+      <div id="chat-history-wrap" class="chat-history-wrap">
         <div id="chat-open-questions" class="open-questions"></div>
         <div id="chat-history" class="chat-history" aria-live="polite"></div>
       </div>
@@ -97,6 +97,6 @@
     </form>
   </dialog>
 
-  <script src="/ui/static/app.js"></script>
+  <script src="/ui/static/app.js?v=3"></script>
 </body>
 </html>

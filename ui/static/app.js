@@ -562,14 +562,17 @@ elements.pauseToggle.addEventListener("change", (event) => {
 
 elements.chatInput.addEventListener("input", updateChatButtonState);
 
-elements.chatExpandToggle.addEventListener("click", () => {
-  const expanded = elements.chatHistoryWrap.hidden;
-  elements.chatHistoryWrap.hidden = !expanded;
-  elements.chatExpandToggle.setAttribute("aria-expanded", String(expanded));
-  elements.chatBar.classList.toggle("expanded", expanded);
-  if (expanded) {
+function setChatExpanded(open) {
+  elements.chatHistoryWrap.hidden = !open;
+  elements.chatExpandToggle.setAttribute("aria-expanded", String(open));
+  elements.chatBar.classList.toggle("expanded", open);
+  if (open) {
     elements.chatHistoryWrap.scrollTop = elements.chatHistoryWrap.scrollHeight;
   }
+}
+
+elements.chatExpandToggle.addEventListener("click", () => {
+  setChatExpanded(elements.chatHistoryWrap.hidden);
 });
 
 elements.projectDetail.addEventListener("click", (event) => {
@@ -620,7 +623,16 @@ elements.chatForm.addEventListener("submit", async (event) => {
   const target = selectedLineage();
 
   elements.chatSubmit.disabled = true;
-  setChatStatus("Sending...", "pending", 0);
+  // Optimistic echo: show the message in the thread immediately (like a normal
+  // AI chat), expand the panel if collapsed, then reconcile against the server.
+  const chat = state.chatByLineage.get(target) || { lineage: target, messages: [], open_questions: [] };
+  chat.messages = [...(chat.messages || []), { id: `local-${Date.now()}`, sender: "jesse", role: "user", text, ts: "sending…" }];
+  state.chatByLineage.set(target, chat);
+  elements.chatInput.value = "";
+  updateChatButtonState();
+  setChatExpanded(true);
+  renderChatPanel();
+  setChatStatus("Sending…", "pending", 0);
   try {
     // 1) persist to the two-way history stream, 2) deliver to the session inbox.
     // The chat endpoint only stores; delivery to the live session is the notify path.
@@ -632,19 +644,22 @@ elements.chatForm.addEventListener("submit", async (event) => {
       method: "POST",
       body: JSON.stringify({ type: elements.notifyType.value, message: text }),
     });
-    elements.chatInput.value = "";
-    updateChatButtonState();
     await loadChat();
     renderChatPanel();
     renderSessionCards();
     setChatStatus("Sent ✓", "success", 5000);
   } catch (error) {
+    // restore the message so it is not lost, drop the optimistic echo
+    elements.chatInput.value = text;
     updateChatButtonState();
+    await loadChat();
+    renderChatPanel();
     setChatStatus(error.message, "error", 8000);
   }
 });
 
 syncChatTarget();
+setChatExpanded(true);
 updateChatButtonState();
 refresh();
 window.setInterval(refresh, POLL_INTERVAL_MS);
