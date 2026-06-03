@@ -5,6 +5,7 @@ import ast
 import copy
 import datetime as dt
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -256,12 +257,23 @@ class ArtifactStore:
         cfg = self.config or OrchConfig()
         query = ref.get("query")
         params = ref.get("params") or {}
-        if not query:
+        if query:
+            # A presence check must be READ-ONLY. Reject mutating Cypher so a
+            # declared/injected query can't write through the orchestrator's DB
+            # credentials (Gaia Gate-2: _neo4j_present executed arbitrary Cypher).
+            if re.search(r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|CALL|LOAD\s+CSV)\b",
+                         str(query), re.IGNORECASE):
+                raise LoopDeclarationError("neo4j artifact query must be read-only (no write/CALL clauses)")
+        else:
             label = str(ref.get("label") or "").strip()
             prop = str(ref.get("property") or "id").strip()
             value = ref.get("value")
             if not label or value is None:
                 raise LoopDeclarationError("neo4j artifacts require query or label/property/value")
+            # Validate identifiers before interpolation — close the injection sink
+            # (only `value` was parameterized; label/property were interpolated raw).
+            if not re.fullmatch(r"[A-Za-z0-9_]+", label) or not re.fullmatch(r"[A-Za-z0-9_]+", prop):
+                raise LoopDeclarationError("neo4j label/property must be plain identifiers")
             query = f"MATCH (n:{label} {{{prop}: $value}}) RETURN count(n) AS c"
             params = {"value": value}
         driver = get_neo4j_driver(cfg)
