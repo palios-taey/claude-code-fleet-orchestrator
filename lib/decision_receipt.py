@@ -95,9 +95,10 @@ def _refs_used(ctx: Dict[str, Any]) -> list[Any]:
 
 
 def _state_hash(ctx: Dict[str, Any]) -> str:
-    raw_hash = ctx.get("observable_state_hash")
-    if raw_hash:
-        return str(raw_hash)
+    # CA-3-class fix (Gaia Gate-2): always compute over the actual state. Returning
+    # a caller-supplied observable_state_hash verbatim made the receipt's integrity
+    # field self-asserted / forgeable. Callers bind a specific state by passing
+    # observable_state (the data), not a pre-computed hash.
     state = ctx.get("observable_state")
     if state is None:
         state = {
