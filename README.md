@@ -55,22 +55,60 @@ taey-plan --help
 taey-task --help
 ```
 
-## Run the API
+## Run the API / Dashboard
+
+The simplest way to bring up the dashboard is:
 
 ```bash
-python3 -m uvicorn lib.tasks_api:app --host 127.0.0.1 --port 5002
+orch serve        # foreground, Ctrl-C to stop
+# or, for a persistent background service:
+orch enable
+```
+
+Both read `ORCH_HOST` / `ORCH_PORT` from your `.env`, so you configure once and
+launch with one command. To verify:
+
+```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5002/api/projects
 ```
 
-## Web UI / Dashboard
+(You can still run uvicorn directly — `python3 -m uvicorn lib.tasks_api:app --host "$ORCH_HOST" --port "$ORCH_PORT"` — but `orch serve` is the supported path.)
 
-The API root redirects to the browser UI, and the static dashboard is served at:
+### Serve the dashboard on your own network
 
-```text
-${ORCH_DASHBOARD_URL}/ui/
+By default the dashboard binds `127.0.0.1` — reachable only from the machine it
+runs on. To open it to other devices on your LAN (phone, laptop, another
+workstation), set the bind interface in `.env` and relaunch:
+
+```bash
+# .env
+ORCH_HOST=0.0.0.0          # all interfaces; or a specific LAN IP like 10.0.0.5
+ORCH_PORT=5002
+ORCH_DASHBOARD_URL=http://10.0.0.5:5002   # a reachable address, kept in sync
 ```
 
-With the default `.env.example`, that is `http://127.0.0.1:5002/ui/`.
+Then `orch serve` (or `orch enable`) and open `http://<your-lan-ip>:5002/ui/`
+from any device on the network. **There is no authentication** — this is a
+single-user, local product — so only expose it on a network you trust, with no
+inbound port-forward from the internet.
+
+### Two-way chat box
+
+The dashboard includes a floating chat bar to message a session and read the
+scrollable reply/escalation history. It is **off by default** because chat
+messages become context an AI session reads (an injection vector). Enable it
+only on a trusted/contained network:
+
+```bash
+# .env
+ORCH_CHAT_ENABLED=1
+```
+
+### Web UI / Dashboard URL
+
+The API root redirects to the browser UI, and the static dashboard is served at
+`${ORCH_DASHBOARD_URL}/ui/`. With the default `.env.example`, that is
+`http://127.0.0.1:5002/ui/`.
 
 ### Public read-only dashboard (v1.6.0+)
 

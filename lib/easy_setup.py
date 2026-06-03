@@ -69,6 +69,32 @@ def api_base() -> str:
     return os.environ.get("ORCH_API_BASE") or os.environ.get("ORCH_DASHBOARD_URL") or DEFAULT_API_BASE
 
 
+def _ensure_dotenv_loaded() -> None:
+    # Make .env values (ORCH_HOST/ORCH_PORT/ORCH_CHAT_ENABLED) visible to this
+    # process before we read them. Idempotent: the loader uses setdefault and
+    # never overrides an already-set variable.
+    from lib.config import _load_dotenv_candidates
+
+    _load_dotenv_candidates()
+
+
+def api_host() -> str:
+    """Interface the dashboard binds to. Default 127.0.0.1 (this machine only).
+    Set ORCH_HOST=0.0.0.0 to serve every device on the local network, or a
+    specific LAN IP to bind just that interface."""
+    _ensure_dotenv_loaded()
+    return (os.environ.get("ORCH_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+
+
+def api_port() -> int:
+    _ensure_dotenv_loaded()
+    raw = (os.environ.get("ORCH_PORT") or "5002").strip()
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"ORCH_PORT must be an integer, got {raw!r}") from exc
+
+
 def read_json_file(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -896,19 +922,24 @@ def enable_services() -> List[str]:
     env = _default_env()
     python_exec = managed_python(required=True)
 
+    host = api_host()
+    port = api_port()
+    chat_on = (os.environ.get("ORCH_CHAT_ENABLED", "").strip().lower() in ("1", "true", "yes"))
     api_record = read_pid_record(API_PID_PATH)
     if isinstance(api_record, dict) and _identity_matches(api_record, _proc_identity(int(api_record["pid"])), suffix="uvicorn"):
         messages.append("api: already managed")
-    elif port_open("127.0.0.1", 5002):
-        messages.append("api: external listener detected on 127.0.0.1:5002")
+    elif port_open("127.0.0.1", port):
+        messages.append(f"api: external listener detected on port {port}")
     else:
         pid = _spawn_background(
-            [python_exec, "-m", "uvicorn", "lib.tasks_api:app", "--host", "127.0.0.1", "--port", "5002"],
+            [python_exec, "-m", "uvicorn", "lib.tasks_api:app", "--host", host, "--port", str(port)],
             API_LOG_PATH,
             env=env,
         )
         write_pid_record(API_PID_PATH, pid)
-        messages.append(f"api: started pid={pid}")
+        reach = "this machine only" if host == "127.0.0.1" else f"reachable on your network via {host}"
+        messages.append(f"api: started pid={pid} on {host}:{port} ({reach})")
+        messages.append(f"api: chat box {'ENABLED' if chat_on else 'off (set ORCH_CHAT_ENABLED=1 on a trusted network)'}")
 
     watch_record = read_pid_record(WATCH_PID_PATH)
     if isinstance(watch_record, dict) and _identity_matches(watch_record, _proc_identity(int(watch_record["pid"])), suffix="scripts/orch-watch"):
