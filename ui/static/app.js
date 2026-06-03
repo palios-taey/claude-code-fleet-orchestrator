@@ -24,6 +24,7 @@ const state = {
   selectedProjectIdBySession: new Map(),
   sessionCards: new Map(),
   sessionProjects: new Map(),
+  refDrilldowns: new Map(),
   notifyStatusTimeoutId: null,
 };
 
@@ -39,6 +40,11 @@ const elements = {
   notifyInput: document.getElementById("notify-input"),
   notifySubmit: document.getElementById("notify-submit"),
   notifyStatus: document.getElementById("notify-status"),
+  refDialog: document.getElementById("ref-dialog"),
+  refDialogTitle: document.getElementById("ref-dialog-title"),
+  refDialogMeta: document.getElementById("ref-dialog-meta"),
+  refDialogContent: document.getElementById("ref-dialog-content"),
+  refDialogClose: document.getElementById("ref-dialog-close"),
 };
 
 function escapeHtml(value) {
@@ -82,6 +88,72 @@ async function fetchJson(url, options = {}) {
 function renderStatusBadge(status) {
   const safeStatus = status || "unknown";
   return `<span class="status-badge ${escapeHtml(safeStatus)}">${escapeHtml(safeStatus)}</span>`;
+}
+
+function basename(path) {
+  const parts = String(path || "").split(/[\\/]/);
+  return parts[parts.length - 1] || "ref";
+}
+
+function registerRefDrilldown(payload) {
+  const id = `ref-${state.refDrilldowns.size}`;
+  state.refDrilldowns.set(id, payload);
+  return id;
+}
+
+function renderRefSectionButton(ref, section) {
+  const start = section.l_start ?? ref.l_start ?? "?";
+  const end = section.l_end ?? ref.l_end ?? "?";
+  const pointer = `${basename(ref.path)}:L${start}-L${end}`;
+  const id = registerRefDrilldown({
+    title: pointer,
+    path: ref.path || "",
+    start,
+    end,
+    provenanceHash: ref.provenance_hash || "",
+    content: section.content || "",
+    warning: section.warning || ref.warning || "",
+  });
+  return `<button type="button" class="ref-pointer" data-ref-id="${escapeHtml(id)}">${escapeHtml(pointer)}</button>`;
+}
+
+function renderRefContext(refContext) {
+  const refs = refContext?.refs || [];
+  if (!refs.length) {
+    return '<span class="muted">(no refs)</span>';
+  }
+  return refs.map((ref) => {
+    const sections = ref.sections?.length ? ref.sections : [{ l_start: ref.l_start, l_end: ref.l_end, content: ref.content, warning: ref.warning }];
+    const label = ref.label ? `<strong>${escapeHtml(ref.label)}</strong> ` : "";
+    return `<div class="ref-row">${label}${sections.map((section) => renderRefSectionButton(ref, section)).join(" ")}</div>`;
+  }).join("");
+}
+
+function renderNamedRefTier(name, refContext) {
+  return `
+    <section class="ref-tier" data-ref-level="${escapeHtml(name)}">
+      <h3>${escapeHtml(name)} refs</h3>
+      ${renderRefContext(refContext)}
+    </section>
+  `;
+}
+
+function renderRefDialog(refId) {
+  const ref = state.refDrilldowns.get(refId);
+  if (!ref || !elements.refDialog) {
+    return;
+  }
+  elements.refDialogTitle.textContent = ref.title;
+  elements.refDialogMeta.textContent = [
+    ref.path,
+    ref.provenanceHash ? `provenance ${shortHash(ref.provenanceHash)}` : "",
+  ].filter(Boolean).join(" | ");
+  elements.refDialogContent.textContent = ref.warning || ref.content || "(empty)";
+  if (typeof elements.refDialog.showModal === "function") {
+    elements.refDialog.showModal();
+  } else {
+    window.alert(`${ref.title}\n${elements.refDialogMeta.textContent}\n\n${elements.refDialogContent.textContent}`);
+  }
 }
 
 function selectedSessionProjects() {
@@ -198,6 +270,7 @@ function renderPhaseCards(phases) {
             <th>Owner</th>
             <th>Priority</th>
             <th>Blocked On</th>
+            <th>Refs</th>
           </tr>
         </thead>
         <tbody>
@@ -213,6 +286,7 @@ function renderPhaseCards(phases) {
               <td data-label="Blocked On">
                 ${task.blocked_on ? `<span class="blocked-pill">${escapeHtml(task.blocked_on)}</span>` : '<span class="muted">(none)</span>'}
               </td>
+              <td data-label="Refs">${renderRefContext(task.ref_context)}</td>
             </tr>
           `).join("")}
         </tbody>
@@ -236,6 +310,7 @@ function renderPhaseCards(phases) {
             <span class="mini-bar failed">F ${escapeHtml(counts.failed ?? 0)}</span>
           </div>
         </div>
+        ${renderNamedRefTier("phase", phase.ref_context)}
         ${tasksMarkup}
       </article>
     `;
@@ -243,6 +318,7 @@ function renderPhaseCards(phases) {
 }
 
 function renderSessionSummary() {
+  state.refDrilldowns.clear();
   const session = state.sessionCards.get(state.selectedSessionId) || {};
   const current = session.current?.current;
   const nextReady = session.next?.next;
@@ -273,8 +349,10 @@ function renderSessionSummary() {
 }
 
 function renderProjectDetail(projectSummary, stopConditions) {
+  state.refDrilldowns.clear();
   const project = projectSummary.project || {};
   const phases = projectSummary.phases || [];
+  const tiers = projectSummary.ref_tiers || {};
   const conditions = stopConditions.conditions || [];
 
   elements.projectDetail.classList.remove("empty-state");
@@ -293,6 +371,12 @@ function renderProjectDetail(projectSummary, stopConditions) {
         <span>source: ${escapeHtml(project.source_path || "n/a")}</span>
         <span>sha: ${escapeHtml(shortHash(project.source_sha256))}</span>
       </div>
+    </section>
+
+    <section class="refs-panel">
+      ${renderNamedRefTier("overall", tiers.overall?.ref_context)}
+      ${renderNamedRefTier("supervisor", tiers.supervisor?.ref_context)}
+      ${renderNamedRefTier("project", project.ref_context)}
     </section>
 
     <section class="stop-conditions">
@@ -400,6 +484,20 @@ elements.pauseToggle.addEventListener("change", (event) => {
 });
 
 elements.notifyInput.addEventListener("input", updateNotifyButtonState);
+
+elements.projectDetail.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-ref-id]");
+  if (!target) {
+    return;
+  }
+  renderRefDialog(target.dataset.refId);
+});
+
+if (elements.refDialogClose) {
+  elements.refDialogClose.addEventListener("click", () => {
+    elements.refDialog.close();
+  });
+}
 
 elements.notifyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
