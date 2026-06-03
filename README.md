@@ -173,6 +173,43 @@ Observed in [`lib/orch_schema.py`](lib/orch_schema.py):
 - absolute paths, `~` paths, control characters, `..` escapes, and symlink escapes are rejected
 - oversized or unreadable files degrade to warnings instead of crashing the request path
 
+## Core loop — how a supervisor uses it
+
+The orchestrator runs one loop per supervisor session (a Claude Code / CLI instance):
+
+1. **Plan** — author a markdown plan (`# Project` / `## Phase` / `### Task` with
+   `[priority]`, `[owner]`, `[depends]`, `[ref]`) and `taey-plan ingest <file>`.
+   The markdown is the source of truth; re-ingest after edits (idempotent).
+2. **Pull ready work** — `taey-plan next [session]` returns the top ready task you
+   own. A task is *ready* only when its `[depends]` predecessors are `completed`
+   (engine-enforced via `DEPENDS_ON` edges) — a phase can't start until its
+   prerequisites close.
+3. **Dispatch** — hand work to a peer worker with `lib.dispatch.dispatch(...)`. It
+   claims the task (`in_progress`), writes the worker's `current_task`, and the
+   notify daemon injects the prompt when the worker is idle.
+4. **Wake** — when a worker stops, its Stop hook notifies the supervisor; the
+   daemon injects the message when the supervisor is idle. The supervisor wakes
+   with the result — no human relay.
+5. **Stop-discipline** — a session must not stop while ready work exists;
+   `blocked_on` is the only valid wait, and a stop cites a `user_stop_condition`.
+6. **Ship** — a project is shippable only when its ship-gate tasks pass (below).
+
+The dashboard (`orch serve` → `/ui/`) shows every session's current + next task,
+the project plans with clickable drill-down refs, and a two-way chat per session.
+
+## Dynamic context + automation features
+
+| Feature | What it does | Entry point |
+|---|---|---|
+| **Refs (5-level)** | `[ref: path:Lx-Ly]` at overall/supervisor/project/phase/task level; the dashboard renders clickable pointers that drill down to the live file lines + provenance. | plan `[ref:]` + `ORCH_REF_ALLOWED_ROOT` |
+| **Context assembler** | Per-task wake packet: selects relevant MEMORY + refs + rules, renders to a per-CLI token budget, stamps a content-bound provenance hash. | `orch-assemble <session> [task] --cli claude\|codex\|gemini\|grok` |
+| **Loop engine** | Loops that advance on *validated artifact presence* (never self-report); rejects unmeetable stop-conditions at declaration. | `orch-loop` / `lib.loop_engine` |
+| **Two-way chat** | Per-session dashboard chat: send delivers to the session inbox + stores history; expand/collapse; permanent-stop escalations surface as a "needs you" badge. OFF by default. | dashboard chat bar + `ORCH_CHAT_ENABLED` |
+| **Decision receipts** | Each stop/chat/wake/cycle/assembly can emit a content-hashed receipt (`why_this_context`, `refs_used`, `observable_state_hash`). | `lib.decision_receipt` |
+| **Rules tier** | Supervisor- + project-level standing rules auto-loaded by the assembler; promotable from chat. | `lib.rules_tier` |
+| **Project template** | Auto-injects the sub-role gate scaffold (scout → code → audit → verify → family) as `depends`-encoded gate tasks. | `lib.orch_template` |
+| **Shippability gate** | A project is shippable only when every `-prodtest`/`-audit` gate task is completed; `POST /api/projects/{id}/ship` returns 409 otherwise. No human-approval override. | `GET/POST /api/projects/{id}/shippability\|ship` · [docs/SHIPPABILITY.md](docs/SHIPPABILITY.md) |
+
 ## Run the watcher
 
 ```bash
@@ -226,8 +263,9 @@ The orchestrator is the core. A few small, separately released products compose 
 
 ## Documentation
 
-- [docs/SCHEMA.md](docs/SCHEMA.md)
-- [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md)
+- [docs/SCHEMA.md](docs/SCHEMA.md) — Neo4j/Redis data model
+- [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md) — markdown plan spec (project/phase/task/refs)
+- [docs/SHIPPABILITY.md](docs/SHIPPABILITY.md) — the ship-gate definition + enforcement
 - [SUPPORT.md](SUPPORT.md)
 - [SECURITY.md](SECURITY.md)
 
