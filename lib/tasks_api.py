@@ -71,10 +71,12 @@ from lib.orch_schema import (
 from lib.plan_loader import load_plan_from_text, plan_declares_refs
 
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
-# SECURITY (Gemini/Cosmos BLOCK 2026-06-03): chat is the injection vector and MUST NOT be
-# reachable on a LAN-bound surface. The live :5002 binds 0.0.0.0 (fleet access), so the chat
-# router stays OFF by default and only mounts when explicitly enabled on a loopback-only
-# deployment (the Jesse-gated cutover). Default off = chat absent from :5002 entirely.
+# SECURITY: chat is an injection vector (posts become content an AI session reads). It is the
+# same class as the session-notify endpoint, which already lives on this app. The router stays
+# OFF by default so a fresh install on an UNTRUSTED network never exposes it. Operators enable
+# it (ORCH_CHAT_ENABLED) only on a trusted/contained network or a loopback-only deployment,
+# where the network — not an app-route check — is the security boundary. (Operator decision,
+# 2026-06-03: the fleet's internal LAN is contained, no port-forward, so chat is enabled there.)
 if os.environ.get("ORCH_CHAT_ENABLED", "").strip().lower() in ("1", "true", "yes"):
     app.include_router(chat_router)
 _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"

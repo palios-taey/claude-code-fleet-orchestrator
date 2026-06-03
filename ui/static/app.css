@@ -41,7 +41,7 @@ code {
   padding: 24px;
   display: grid;
   gap: 18px;
-  padding-bottom: 220px;
+  padding-bottom: 140px;
 }
 
 .topbar,
@@ -370,23 +370,76 @@ code {
   color: var(--blocked);
 }
 
-.notify-bar {
+.chat-bar {
   position: fixed;
   left: 24px;
   right: 24px;
   bottom: 24px;
   z-index: 10;
   backdrop-filter: blur(14px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: calc(100vh - 48px);
 }
 
-.notify-form {
+.chat-bar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.chat-expand-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.chat-expand-arrow {
+  display: inline-block;
+  transition: transform 140ms ease;
+  color: var(--accent);
+  font-size: 0.9rem;
+}
+
+.chat-bar.expanded .chat-expand-arrow {
+  transform: rotate(90deg);
+}
+
+.chat-history-wrap {
+  border: 1px solid rgba(31, 26, 20, 0.1);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.5);
+  padding: 12px;
+  overflow-y: auto;
+  max-height: 46vh;
   display: grid;
-  grid-template-columns: minmax(160px, 220px) 160px minmax(0, 1fr) 150px;
+  gap: 10px;
+}
+
+.chat-history {
+  display: grid;
+  gap: 10px;
+}
+
+.chat-history .summary-card {
+  padding: 10px 12px;
+}
+
+.chat-form {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 120px;
   gap: 14px;
   align-items: stretch;
 }
 
-.notify-meta,
 .notify-type,
 .notify-actions {
   display: grid;
@@ -394,7 +447,6 @@ code {
   align-content: start;
 }
 
-.notify-target-label,
 .notify-type span {
   color: var(--muted);
   font-size: 0.85rem;
@@ -417,7 +469,7 @@ code {
 }
 
 .notify-input-wrap textarea {
-  min-height: 132px;
+  min-height: 48px;
   resize: vertical;
 }
 
@@ -491,13 +543,13 @@ code {
     flex-direction: column;
   }
 
-  .notify-bar {
+  .chat-bar {
     left: 14px;
     right: 14px;
     bottom: 14px;
   }
 
-  .notify-form {
+  .chat-form {
     grid-template-columns: 1fr;
   }
 

@@ -28,7 +28,6 @@ const state = {
   sessionProjects: new Map(),
   chatByLineage: new Map(),
   refDrilldowns: new Map(),
-  notifyStatusTimeoutId: null,
   chatStatusTimeoutId: null,
 };
 
@@ -38,12 +37,12 @@ const elements = {
   sessionsStrip: document.getElementById("sessions-strip"),
   lastUpdated: document.getElementById("last-updated"),
   pauseToggle: document.getElementById("pause-toggle"),
-  notifyForm: document.getElementById("notify-form"),
-  notifyTarget: document.getElementById("notify-target"),
   notifyType: document.getElementById("notify-type"),
-  notifyInput: document.getElementById("notify-input"),
-  notifySubmit: document.getElementById("notify-submit"),
-  notifyStatus: document.getElementById("notify-status"),
+  chatBar: document.getElementById("chat-bar"),
+  chatTarget: document.getElementById("chat-target"),
+  chatExpandToggle: document.getElementById("chat-expand-toggle"),
+  chatHistoryWrap: document.getElementById("chat-history-wrap"),
+  chatNeedsYou: document.getElementById("chat-needs-you"),
   chatOpenQuestions: document.getElementById("chat-open-questions"),
   chatHistory: document.getElementById("chat-history"),
   chatForm: document.getElementById("chat-form"),
@@ -260,7 +259,6 @@ function renderSessionCards() {
     `;
     card.addEventListener("click", () => {
       state.selectedSessionId = sessionId;
-      syncNotifyTarget();
       ensureSelectedProject();
       renderSessionCards();
       renderProjectList();
@@ -303,8 +301,14 @@ function renderChatMessages(messages) {
 
 function renderChatPanel() {
   const chat = state.chatByLineage.get(selectedLineage()) || {};
+  const needsYou = chat.needs_you || (chat.open_questions || []).length;
+  elements.chatNeedsYou.hidden = !needsYou;
   elements.chatOpenQuestions.innerHTML = renderOpenQuestions(chat.open_questions || []);
   elements.chatHistory.innerHTML = renderChatMessages(chat.messages || []);
+  // newest at the bottom — keep the latest exchange in view when expanded
+  if (!elements.chatHistoryWrap.hidden) {
+    elements.chatHistoryWrap.scrollTop = elements.chatHistoryWrap.scrollHeight;
+  }
 }
 
 function renderPhaseCards(phases) {
@@ -450,27 +454,9 @@ function renderProjectError(error) {
   elements.projectDetail.innerHTML = `<p class="empty-hint">Failed to load project: ${escapeHtml(error.message)}</p>`;
 }
 
-function syncNotifyTarget() {
-  elements.notifyTarget.textContent = state.selectedSessionId;
-  elements.notifyInput.placeholder = `Message to ${state.selectedSessionId}...`;
-}
-
 function syncChatTarget() {
-  elements.chatInput.placeholder = `Reply to ${selectedLineage()}...`;
-}
-
-function setNotifyStatus(message, kind, durationMs) {
-  elements.notifyStatus.textContent = message;
-  elements.notifyStatus.className = `notify-status ${kind}`.trim();
-  if (state.notifyStatusTimeoutId) {
-    window.clearTimeout(state.notifyStatusTimeoutId);
-  }
-  if (durationMs > 0) {
-    state.notifyStatusTimeoutId = window.setTimeout(() => {
-      elements.notifyStatus.textContent = "";
-      elements.notifyStatus.className = "notify-status";
-    }, durationMs);
-  }
+  elements.chatTarget.textContent = selectedLineage();
+  elements.chatInput.placeholder = `Message to ${selectedLineage()}...`;
 }
 
 function setChatStatus(message, kind, durationMs) {
@@ -485,10 +471,6 @@ function setChatStatus(message, kind, durationMs) {
       elements.chatStatus.className = "notify-status";
     }, durationMs);
   }
-}
-
-function updateNotifyButtonState() {
-  elements.notifySubmit.disabled = !elements.notifyInput.value.trim();
 }
 
 function updateChatButtonState() {
@@ -578,8 +560,17 @@ elements.pauseToggle.addEventListener("change", (event) => {
   state.paused = event.target.checked;
 });
 
-elements.notifyInput.addEventListener("input", updateNotifyButtonState);
 elements.chatInput.addEventListener("input", updateChatButtonState);
+
+elements.chatExpandToggle.addEventListener("click", () => {
+  const expanded = elements.chatHistoryWrap.hidden;
+  elements.chatHistoryWrap.hidden = !expanded;
+  elements.chatExpandToggle.setAttribute("aria-expanded", String(expanded));
+  elements.chatBar.classList.toggle("expanded", expanded);
+  if (expanded) {
+    elements.chatHistoryWrap.scrollTop = elements.chatHistoryWrap.scrollHeight;
+  }
+});
 
 elements.projectDetail.addEventListener("click", (event) => {
   const target = event.target.closest("[data-ref-id]");
@@ -594,32 +585,6 @@ if (elements.refDialogClose) {
     elements.refDialog.close();
   });
 }
-
-elements.notifyForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const message = elements.notifyInput.value.trim();
-  if (!message) {
-    return;
-  }
-
-  elements.notifySubmit.disabled = true;
-  setNotifyStatus("Sending...", "pending", 0);
-  try {
-    await fetchJson(SESSION_NOTIFY_ENDPOINT(state.selectedSessionId), {
-      method: "POST",
-      body: JSON.stringify({
-        type: elements.notifyType.value,
-        message,
-      }),
-    });
-    elements.notifyInput.value = "";
-    updateNotifyButtonState();
-    setNotifyStatus("Sent ✓", "success", 5000);
-  } catch (error) {
-    updateNotifyButtonState();
-    setNotifyStatus(error.message, "error", 8000);
-  }
-});
 
 elements.chatHistory.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-promote-reply]");
@@ -652,33 +617,34 @@ elements.chatForm.addEventListener("submit", async (event) => {
   if (!text) {
     return;
   }
+  const target = selectedLineage();
 
   elements.chatSubmit.disabled = true;
-  setChatStatus("Posting...", "pending", 0);
+  setChatStatus("Sending...", "pending", 0);
   try {
-    await fetchJson(CHAT_ENDPOINT(selectedLineage()), {
+    // 1) persist to the two-way history stream, 2) deliver to the session inbox.
+    // The chat endpoint only stores; delivery to the live session is the notify path.
+    await fetchJson(CHAT_ENDPOINT(target), {
       method: "POST",
-      body: JSON.stringify({
-        sender: "jesse",
-        role: "user",
-        text,
-      }),
+      body: JSON.stringify({ sender: "jesse", role: "user", text }),
+    });
+    await fetchJson(SESSION_NOTIFY_ENDPOINT(target), {
+      method: "POST",
+      body: JSON.stringify({ type: elements.notifyType.value, message: text }),
     });
     elements.chatInput.value = "";
     updateChatButtonState();
     await loadChat();
     renderChatPanel();
     renderSessionCards();
-    setChatStatus("Posted", "success", 5000);
+    setChatStatus("Sent ✓", "success", 5000);
   } catch (error) {
     updateChatButtonState();
     setChatStatus(error.message, "error", 8000);
   }
 });
 
-syncNotifyTarget();
 syncChatTarget();
-updateNotifyButtonState();
 updateChatButtonState();
 refresh();
 window.setInterval(refresh, POLL_INTERVAL_MS);
