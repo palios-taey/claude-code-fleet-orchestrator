@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lib.config import OrchConfig
+from lib.chat_layer import router as chat_router
 from lib.easy_setup import package_version
 from lib.dispatch import bind_current_task, record_outcome
 from lib.orch_schema import (
@@ -70,6 +71,7 @@ from lib.orch_schema import (
 from lib.plan_loader import load_plan_from_text, plan_declares_refs
 
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
+app.include_router(chat_router)
 _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
 ALLOWED_NOTIFY_TYPES = {
     "standard": "message",
