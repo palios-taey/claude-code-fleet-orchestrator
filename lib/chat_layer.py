@@ -31,8 +31,15 @@ def _normalize_lineage(lineage: str) -> str:
         raise ValueError("lineage must be non-empty")
     if len(value) > MAX_LINEAGE_LEN:
         raise ValueError(f"lineage must be <= {MAX_LINEAGE_LEN} characters")
-    if not re.fullmatch(r"[A-Za-z0-9._:@/+~-]+", value):
+    # CL-3 fix: lineage is a flat key used as a directory component in
+    # promote_reply_to_memory. The old charset allowed '/', '.', '~' enabling
+    # traversal ('../x'), absolute-reset ('/tmp/x') and home-ish paths. Strict
+    # allowlist only; reject '..' explicitly. (promote_reply_to_memory also
+    # asserts the resolved path stays under MEMORY_BASE — defense in depth.)
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", value):
         raise ValueError("lineage contains unsupported characters")
+    if ".." in value:
+        raise ValueError("lineage must not contain '..'")
     return value
 
 
@@ -195,6 +202,12 @@ async def promote_reply_to_memory(
     if not body:
         raise ValueError("reply must be non-empty")
     memory_dir = memory_root / lineage_value / "memory"
+    # CL-3 defense-in-depth: the resolved write path MUST stay under memory_root,
+    # regardless of the lineage value (belt + suspenders over the normalize allowlist).
+    base_resolved = Path(memory_root).resolve(strict=False)
+    target_resolved = memory_dir.resolve(strict=False)
+    if base_resolved != target_resolved and base_resolved not in target_resolved.parents:
+        raise ValueError("promote target escapes memory_root")
     memory_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = memory_dir / f"chat-feedback-{stamp}-{uuid.uuid4().hex[:8]}.md"
@@ -245,7 +258,11 @@ async def chat_post(lineage: str, req: Request) -> Dict[str, Any]:
             metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else None,
         )
         if message["role"] == "user":
-            await resolve_open_questions(lineage)
+            # CL-4 fix: a user reply clears the needs-you BADGE (human responded)
+            # but must NOT delete the open-question records — that silently wiped
+            # all pending escalations on any chat message. Resolve explicitly via
+            # the dedicated path, not as a side effect of every user message.
+            await clear_needs_you(lineage)
         return {"ok": True, "message": message}
     except ValueError as exc:
         raise _http_error(exc)

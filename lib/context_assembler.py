@@ -476,7 +476,16 @@ def _render_refs(tier: str, refs: List[Dict[str, Any]], max_refs: int) -> List[s
 def _trim_packet(packet: Dict[str, Any], cli: str, budget_bytes: int, max_refs_per_tier: int) -> Dict[str, Any]:
     trimmed = json.loads(json.dumps(packet))
     context = trimmed.setdefault("context", {})
-    while len(_render_packet(trimmed, cli, max_refs_per_tier).encode("utf-8")) > budget_bytes:
+    prev_size = None
+    while True:
+        size = len(_render_packet(trimmed, cli, max_refs_per_tier).encode("utf-8"))
+        if size <= budget_bytes:
+            break
+        # CA-4 fix: terminate when a trim pass yields no size reduction (halving has
+        # floored out / scaffolding dominates) instead of looping forever.
+        if prev_size is not None and size >= prev_size:
+            break
+        prev_size = size
         memory = context.get("memory") or []
         if memory:
             memory[-1]["content"] = _halve(memory[-1].get("content", ""))
@@ -521,7 +530,15 @@ def _packet_with_provenance(packet: Dict[str, Any]) -> Dict[str, Any]:
     return packet
 
 
+def _content_sha(value: Any) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
 def _provenance_hash(packet: Dict[str, Any]) -> str:
+    # CA-3 fix: bind the provenance hash to the ACTUAL content present in the packet
+    # (sha256 of the real content/text fields), NOT to caller-supplied provenance_hash
+    # / sha256 metadata. Otherwise content can be substituted while the declared hash
+    # field is kept, leaving the outer hash unchanged (forgeable provenance).
     context = packet.get("context", {})
     observed: List[Dict[str, Any]] = [{"kind": "git_head", "value": packet.get("generated_at_commit", "")}]
     for tier in ("overall", "supervisor", "project", "phase", "task"):
@@ -530,21 +547,19 @@ def _provenance_hash(packet: Dict[str, Any]) -> str:
                 "kind": "ref",
                 "tier": tier,
                 "path": ref.get("path", ""),
-                "provenance_hash": ref.get("provenance_hash", ""),
+                "content_sha": _content_sha(ref.get("content", "")),
             })
     for item in context.get("memory") or []:
         observed.append({
             "kind": "memory",
             "path": item.get("path", ""),
-            "sha256": item.get("sha256", ""),
-            "mtime_ns": item.get("mtime_ns", 0),
+            "content_sha": _content_sha(item.get("content", "")),
         })
     for rule in context.get("rules") or []:
         observed.append({
             "kind": "rule",
             "path": rule.get("path", ""),
-            "sha256": rule.get("sha256", ""),
-            "mtime_ns": rule.get("mtime_ns", 0),
+            "content_sha": _content_sha(rule.get("text", "")),
         })
     raw = json.dumps(observed, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
