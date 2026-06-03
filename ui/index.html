@@ -47,35 +47,24 @@
           Select a project to inspect its phases, tasks, and user-stop-conditions.
         </div>
       </section>
-
-      <aside class="chat-panel panel" aria-label="Private lineage chat">
-        <div class="panel-header">
-          <h2>Chat</h2>
-          <p>Private lineage stream and open questions.</p>
-        </div>
-        <div id="chat-open-questions" class="open-questions"></div>
-        <div id="chat-history" class="chat-history" aria-live="polite"></div>
-        <form id="chat-form" class="chat-form">
-          <label class="notify-input-wrap">
-            <span class="visually-hidden">Chat reply</span>
-            <textarea id="chat-input" rows="4" placeholder="Reply to conductor..."></textarea>
-          </label>
-          <div class="notify-actions">
-            <button id="chat-submit" type="submit" disabled>Post</button>
-            <span id="chat-status" class="notify-status" aria-live="polite"></span>
-          </div>
-        </form>
-      </aside>
     </main>
 
-    <footer class="notify-bar panel">
-      <form id="notify-form" class="notify-form">
-        <div class="notify-meta">
-          <span class="notify-target-label">Send to:</span>
-          <strong id="notify-target">conductor</strong>
-        </div>
-        <label class="notify-type">
-          <span>Type</span>
+    <footer class="chat-bar panel" id="chat-bar">
+      <div class="chat-bar-header">
+        <button type="button" id="chat-expand-toggle" class="chat-expand-toggle"
+                aria-expanded="false" aria-controls="chat-history-wrap">
+          <span class="chat-expand-arrow" aria-hidden="true">▸</span>
+          <span>Chat with <strong id="chat-target">conductor</strong></span>
+        </button>
+        <span id="chat-needs-you" class="status-badge blocked" hidden>needs you</span>
+      </div>
+      <div id="chat-history-wrap" class="chat-history-wrap" hidden>
+        <div id="chat-open-questions" class="open-questions"></div>
+        <div id="chat-history" class="chat-history" aria-live="polite"></div>
+      </div>
+      <form id="chat-form" class="chat-form">
+        <label class="notify-type" title="Delivery type for the session inbox">
+          <span class="visually-hidden">Type</span>
           <select id="notify-type">
             <option value="standard">standard</option>
             <option value="escalation">escalation</option>
@@ -84,12 +73,12 @@
           </select>
         </label>
         <label class="notify-input-wrap">
-          <span class="visually-hidden">Session message</span>
-          <textarea id="notify-input" rows="5" placeholder="Message to conductor..."></textarea>
+          <span class="visually-hidden">Message</span>
+          <textarea id="chat-input" rows="2" placeholder="Message to conductor..."></textarea>
         </label>
         <div class="notify-actions">
-          <button id="notify-submit" type="submit" disabled>Send</button>
-          <span id="notify-status" class="notify-status" aria-live="polite"></span>
+          <button id="chat-submit" type="submit" disabled>Send</button>
+          <span id="chat-status" class="notify-status" aria-live="polite"></span>
         </div>
       </form>
     </footer>
