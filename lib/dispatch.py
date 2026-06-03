@@ -120,6 +120,11 @@ def bind_current_task(
         pipe.set(_state_key(worker, "parent"), supervisor)
     pipe.execute()
 
+    # Oscillation fix (hunter 2026-06-03): binding a task means the worker is
+    # working it — flip it to in_progress so next-ready stops re-surfacing it.
+    # Best-effort: no-op for ad-hoc tasks / already-claimed / dep-blocked.
+    _mark_in_progress_best_effort(task_id, worker)
+
 
 def _orch_task_exists(task_id: str) -> bool:
     cfg = OrchConfig()
@@ -175,6 +180,38 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
         f"ORCH_TASK_NOT_READY task={task_id} status={detail['status']} "
         f"incomplete_deps={detail['incomplete_deps']}"
     )
+
+
+def _mark_in_progress_best_effort(task_id: str, worker: str) -> bool:
+    """Flip an OrchTask to in_progress if it is pending + dependency-ready.
+
+    Best-effort and NEVER raises (unlike _claim_ready_orch_task): returns False
+    for ad-hoc (non-Orch) tasks, already-claimed tasks, or dependency-blocked
+    tasks. Used by bind_current_task so a bound task stops re-surfacing in
+    next-ready (the oscillation), without making bind fail on a re-bind.
+    """
+    if not _orch_task_exists(task_id):
+        return False
+    cfg = OrchConfig()
+    with get_neo4j_session(cfg) as session:
+        record = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            WHERE coalesce(t.status, 'pending') = 'pending'
+              AND NOT EXISTS {
+                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+                  WHERE dep.status <> 'completed'
+              }
+            SET t.status = 'in_progress',
+                t.owner = $worker,
+                t.blocked_on = NULL,
+                t.updated_at = datetime()
+            RETURN t.id AS task_id
+            """,
+            task_id=task_id,
+            worker=worker,
+        ).single()
+    return record is not None
 
 
 def dispatch(
