@@ -86,18 +86,22 @@ def assemble(packet: Dict[str, Any], cli: str, budget_bytes: int = CORE_BUDGET_B
     if cli_key not in VALID_CLIS:
         raise ValueError(f"unsupported cli: {cli}")
 
-    normalized = _packet_with_provenance(packet)
+    normalized = packet
     context = normalized.setdefault("context", {})
     if max_memory is not None:
         context["memory"] = list(context.get("memory") or [])[:max_memory]
 
+    # Hash AFTER all content mutation (max_memory truncation), over exactly what
+    # _render_packet will emit — so the stored provenance_hash binds the final
+    # rendered packet, not a pre-truncation snapshot.
+    _packet_with_provenance(normalized, cli_key, max_refs_per_tier)
     rendered = _render_packet(normalized, cli_key, max_refs_per_tier=max_refs_per_tier)
     if len(rendered.encode("utf-8")) <= budget_bytes:
         context["budget_used"] = _estimate_tokens(rendered)
         return rendered
 
     trimmed = _trim_packet(normalized, cli_key, budget_bytes, max_refs_per_tier)
-    _packet_with_provenance(trimmed)
+    _packet_with_provenance(trimmed, cli_key, max_refs_per_tier)
     trimmed["context"]["budget_used"] = _estimate_tokens(
         _render_packet(trimmed, cli_key, max_refs_per_tier=max_refs_per_tier)
     )
@@ -131,7 +135,10 @@ def build_packet(session: str, context: Dict[str, Any]) -> Dict[str, Any]:
             "next_contract": None,
         },
     }
-    return _packet_with_provenance(packet)
+    # provenance_hash binds the RENDERED packet, which needs the cli + budget;
+    # assemble() computes it at render time. build_packet only constructs the
+    # structure, so it leaves the placeholder "" set above.
+    return packet
 
 
 def size_report(text: str, packet: Dict[str, Any], budget_bytes: int = CORE_BUDGET_BYTES) -> Dict[str, Any]:
@@ -555,62 +562,32 @@ def _halve(text: str) -> str:
     return text[: max(0, len(text) // 2)].rstrip() + "\n[truncated]"
 
 
-def _packet_with_provenance(packet: Dict[str, Any]) -> Dict[str, Any]:
+def _packet_with_provenance(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> Dict[str, Any]:
     if not packet.get("generated_at_commit"):
         packet["generated_at_commit"] = _git_head()
     if not packet.get("packet_id"):
         packet["packet_id"] = str(uuid.uuid4())
-    packet["provenance_hash"] = _provenance_hash(packet)
+    packet["provenance_hash"] = _provenance_hash(packet, cli, max_refs_per_tier)
     return packet
 
 
-def _content_sha(value: Any) -> str:
-    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
-
-
-def _provenance_hash(packet: Dict[str, Any]) -> str:
-    # CA-3 fix: bind the provenance hash to the ACTUAL content present in the packet
-    # (sha256 of the real content/text fields), NOT to caller-supplied provenance_hash
-    # / sha256 metadata. Otherwise content can be substituted while the declared hash
-    # field is kept, leaving the outer hash unchanged (forgeable provenance).
-    context = packet.get("context", {})
-    observed: List[Dict[str, Any]] = [{"kind": "git_head", "value": packet.get("generated_at_commit", "")}]
-    for tier in ("overall", "supervisor", "project", "phase", "task"):
-        for ref in context.get(f"{tier}_refs") or []:
-            observed.append({
-                "kind": "ref",
-                "tier": tier,
-                "path": ref.get("path", ""),
-                "content_sha": _content_sha(ref.get("content", "")),
-            })
-            # Horizon Gate-2 item 2: section bodies are ALSO rendered into the
-            # packet (_render_refs via _rendered_sections), so they must be folded
-            # in too — otherwise two packets with identical top-level content but
-            # different section bodies render different prompt text under the same
-            # hash. Same helper as the renderer => hash covers exactly what's shown.
-            for section in _rendered_sections(ref):
-                observed.append({
-                    "kind": "ref_section",
-                    "tier": tier,
-                    "path": ref.get("path", ""),
-                    "l_start": section.get("l_start"),
-                    "l_end": section.get("l_end"),
-                    "content_sha": _content_sha(section.get("content", "")),
-                })
-    for item in context.get("memory") or []:
-        observed.append({
-            "kind": "memory",
-            "path": item.get("path", ""),
-            "content_sha": _content_sha(item.get("content", "")),
-        })
-    for rule in context.get("rules") or []:
-        observed.append({
-            "kind": "rule",
-            "path": rule.get("path", ""),
-            "content_sha": _content_sha(rule.get("text", "")),
-        })
-    raw = json.dumps(observed, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+def _provenance_hash(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> str:
+    # Root-cause fix (Gate-2 round-2 v2 — Gemini/Horizon/Gaia BLOCK): bind the hash to
+    # the EXACT rendered output, not an enumerated subset of fields. The CA-3 and
+    # item-2 fixes hashed specific fields (ref content, then section bodies), and the
+    # forgery class kept recurring because every OTHER rendered field (ref label,
+    # ref warning, memory.description, the cycle/human/stop blocks) had to be
+    # remembered and folded in by hand — miss one and it renders-without-hashing.
+    # Instead, sha256 exactly what _render_packet emits — with provenance_hash itself
+    # blanked so it cannot hash itself — so the renderer and the hasher are the SAME
+    # code path and NO present-or-future rendered field can ever be left unhashed.
+    saved = packet.get("provenance_hash", "")
+    packet["provenance_hash"] = ""
+    try:
+        rendered = _render_packet(packet, cli, max_refs_per_tier)
+    finally:
+        packet["provenance_hash"] = saved
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
 
 def _git_head() -> str:
