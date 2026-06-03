@@ -47,6 +47,25 @@
           Select a project to inspect its phases, tasks, and user-stop-conditions.
         </div>
       </section>
+
+      <aside class="chat-panel panel" aria-label="Private lineage chat">
+        <div class="panel-header">
+          <h2>Chat</h2>
+          <p>Private lineage stream and open questions.</p>
+        </div>
+        <div id="chat-open-questions" class="open-questions"></div>
+        <div id="chat-history" class="chat-history" aria-live="polite"></div>
+        <form id="chat-form" class="chat-form">
+          <label class="notify-input-wrap">
+            <span class="visually-hidden">Chat reply</span>
+            <textarea id="chat-input" rows="4" placeholder="Reply to conductor..."></textarea>
+          </label>
+          <div class="notify-actions">
+            <button id="chat-submit" type="submit" disabled>Post</button>
+            <span id="chat-status" class="notify-status" aria-live="polite"></span>
+          </div>
+        </form>
+      </aside>
     </main>
 
     <footer class="notify-bar panel">

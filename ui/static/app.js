@@ -5,6 +5,8 @@ const SESSION_CURRENT_ENDPOINT = (sessionId) => `/api/sessions/${encodeURICompon
 const SESSION_NEXT_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/next-ready`;
 const SESSION_PROJECTS_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/projects`;
 const SESSION_NOTIFY_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/notify`;
+const CHAT_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}`;
+const CHAT_PROMOTE_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}/promote`;
 const POLL_INTERVAL_MS = 5000;
 const SESSIONS = [
   "conductor",
@@ -24,8 +26,10 @@ const state = {
   selectedProjectIdBySession: new Map(),
   sessionCards: new Map(),
   sessionProjects: new Map(),
+  chatByLineage: new Map(),
   refDrilldowns: new Map(),
   notifyStatusTimeoutId: null,
+  chatStatusTimeoutId: null,
 };
 
 const elements = {
@@ -40,6 +44,12 @@ const elements = {
   notifyInput: document.getElementById("notify-input"),
   notifySubmit: document.getElementById("notify-submit"),
   notifyStatus: document.getElementById("notify-status"),
+  chatOpenQuestions: document.getElementById("chat-open-questions"),
+  chatHistory: document.getElementById("chat-history"),
+  chatForm: document.getElementById("chat-form"),
+  chatInput: document.getElementById("chat-input"),
+  chatSubmit: document.getElementById("chat-submit"),
+  chatStatus: document.getElementById("chat-status"),
   refDialog: document.getElementById("ref-dialog"),
   refDialogTitle: document.getElementById("ref-dialog-title"),
   refDialogMeta: document.getElementById("ref-dialog-meta"),
@@ -164,6 +174,10 @@ function selectedProjectId() {
   return state.selectedProjectIdBySession.get(state.selectedSessionId) || null;
 }
 
+function selectedLineage() {
+  return state.selectedSessionId;
+}
+
 function ensureSelectedProject() {
   const projects = selectedSessionProjects();
   const currentSelection = selectedProjectId();
@@ -225,11 +239,16 @@ function renderSessionCards() {
     const current = session.current?.current;
     const nextReady = session.next?.next;
     const activeClass = sessionId === state.selectedSessionId ? "active" : "";
+    const chat = state.chatByLineage.get(sessionId) || {};
+    const needsYou = chat.needs_you || (chat.open_questions || []).length;
 
     const card = document.createElement("article");
     card.className = `session-card ${activeClass}`.trim();
     card.innerHTML = `
-      <h3 class="session-name">${escapeHtml(sessionId)}</h3>
+      <div class="status-row">
+        <h3 class="session-name">${escapeHtml(sessionId)}</h3>
+        ${needsYou ? '<span class="status-badge blocked">needs you</span>' : ""}
+      </div>
       <div class="session-line">
         <strong>Current:</strong>
         ${current ? escapeHtml(current.top_task_id) : '<span class="muted">idle</span>'}
@@ -246,10 +265,46 @@ function renderSessionCards() {
       renderSessionCards();
       renderProjectList();
       renderSessionSummary();
+      syncChatTarget();
+      renderChatPanel();
       loadSelectedProject();
     });
     elements.sessionsStrip.appendChild(card);
   }
+}
+
+function renderOpenQuestions(openQuestions) {
+  if (!openQuestions.length) {
+    return '<p class="muted">(no open questions)</p>';
+  }
+  return `
+    <section class="stop-conditions">
+      <h3>Open questions</h3>
+      <ul>${openQuestions.map((item) => `<li>${escapeHtml(item.reason || item.text || "")}</li>`).join("")}</ul>
+    </section>
+  `;
+}
+
+function renderChatMessages(messages) {
+  if (!messages.length) {
+    return '<p class="empty-hint">(no chat messages yet)</p>';
+  }
+  return messages.map((message) => `
+    <article class="summary-card" data-message-id="${escapeHtml(message.id || "")}">
+      <div class="status-row">
+        <strong>${escapeHtml(message.sender || message.role || "unknown")}</strong>
+        <span class="muted">${escapeHtml(message.ts || "")}</span>
+      </div>
+      <p>${escapeHtml(message.text || "")}</p>
+      ${message.role === "user" ? `<button type="button" data-promote-reply="${escapeHtml(message.id || "")}">Promote to MEMORY</button>` : ""}
+    </article>
+  `).join("");
+}
+
+function renderChatPanel() {
+  const chat = state.chatByLineage.get(selectedLineage()) || {};
+  elements.chatOpenQuestions.innerHTML = renderOpenQuestions(chat.open_questions || []);
+  elements.chatHistory.innerHTML = renderChatMessages(chat.messages || []);
 }
 
 function renderPhaseCards(phases) {
@@ -400,6 +455,10 @@ function syncNotifyTarget() {
   elements.notifyInput.placeholder = `Message to ${state.selectedSessionId}...`;
 }
 
+function syncChatTarget() {
+  elements.chatInput.placeholder = `Reply to ${selectedLineage()}...`;
+}
+
 function setNotifyStatus(message, kind, durationMs) {
   elements.notifyStatus.textContent = message;
   elements.notifyStatus.className = `notify-status ${kind}`.trim();
@@ -414,8 +473,26 @@ function setNotifyStatus(message, kind, durationMs) {
   }
 }
 
+function setChatStatus(message, kind, durationMs) {
+  elements.chatStatus.textContent = message;
+  elements.chatStatus.className = `notify-status ${kind}`.trim();
+  if (state.chatStatusTimeoutId) {
+    window.clearTimeout(state.chatStatusTimeoutId);
+  }
+  if (durationMs > 0) {
+    state.chatStatusTimeoutId = window.setTimeout(() => {
+      elements.chatStatus.textContent = "";
+      elements.chatStatus.className = "notify-status";
+    }, durationMs);
+  }
+}
+
 function updateNotifyButtonState() {
   elements.notifySubmit.disabled = !elements.notifyInput.value.trim();
+}
+
+function updateChatButtonState() {
+  elements.chatSubmit.disabled = !elements.chatInput.value.trim();
 }
 
 async function loadSelectedProject() {
@@ -466,15 +543,33 @@ async function loadSessions() {
   }));
 }
 
+async function loadChat() {
+  await Promise.all(SESSIONS.map(async (sessionId) => {
+    try {
+      const result = await fetchJson(CHAT_ENDPOINT(sessionId));
+      state.chatByLineage.set(sessionId, result);
+    } catch (error) {
+      state.chatByLineage.set(sessionId, {
+        lineage: sessionId,
+        messages: [],
+        open_questions: [],
+        needs_you: null,
+        error: error.message,
+      });
+    }
+  }));
+}
+
 async function refresh() {
   if (state.paused) {
     return;
   }
 
-  await Promise.all([loadSessions(), loadSessionProjects()]);
+  await Promise.all([loadSessions(), loadSessionProjects(), loadChat()]);
   ensureSelectedProject();
   renderSessionCards();
   renderProjectList();
+  renderChatPanel();
   await loadSelectedProject();
   elements.lastUpdated.textContent = new Date().toLocaleTimeString();
 }
@@ -484,6 +579,7 @@ elements.pauseToggle.addEventListener("change", (event) => {
 });
 
 elements.notifyInput.addEventListener("input", updateNotifyButtonState);
+elements.chatInput.addEventListener("input", updateChatButtonState);
 
 elements.projectDetail.addEventListener("click", (event) => {
   const target = event.target.closest("[data-ref-id]");
@@ -525,7 +621,64 @@ elements.notifyForm.addEventListener("submit", async (event) => {
   }
 });
 
+elements.chatHistory.addEventListener("click", async (event) => {
+  const target = event.target.closest("[data-promote-reply]");
+  if (!target) {
+    return;
+  }
+  const chat = state.chatByLineage.get(selectedLineage()) || {};
+  const message = (chat.messages || []).find((item) => item.id === target.dataset.promoteReply);
+  if (!message) {
+    return;
+  }
+  setChatStatus("Promoting...", "pending", 0);
+  try {
+    await fetchJson(CHAT_PROMOTE_ENDPOINT(selectedLineage()), {
+      method: "POST",
+      body: JSON.stringify({
+        sender: message.sender || "jesse",
+        reply: message.text || "",
+      }),
+    });
+    setChatStatus("Promoted to MEMORY", "success", 5000);
+  } catch (error) {
+    setChatStatus(error.message, "error", 8000);
+  }
+});
+
+elements.chatForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = elements.chatInput.value.trim();
+  if (!text) {
+    return;
+  }
+
+  elements.chatSubmit.disabled = true;
+  setChatStatus("Posting...", "pending", 0);
+  try {
+    await fetchJson(CHAT_ENDPOINT(selectedLineage()), {
+      method: "POST",
+      body: JSON.stringify({
+        sender: "jesse",
+        role: "user",
+        text,
+      }),
+    });
+    elements.chatInput.value = "";
+    updateChatButtonState();
+    await loadChat();
+    renderChatPanel();
+    renderSessionCards();
+    setChatStatus("Posted", "success", 5000);
+  } catch (error) {
+    updateChatButtonState();
+    setChatStatus(error.message, "error", 8000);
+  }
+});
+
 syncNotifyTarget();
+syncChatTarget();
 updateNotifyButtonState();
+updateChatButtonState();
 refresh();
 window.setInterval(refresh, POLL_INTERVAL_MS);
