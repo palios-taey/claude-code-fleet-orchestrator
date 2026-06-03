@@ -426,6 +426,12 @@ code {
   align-content: start;
 }
 
+/* The class sets display:grid, which would otherwise beat the [hidden]
+   attribute's display:none — so collapse must explicitly win here. */
+.chat-history-wrap[hidden] {
+  display: none;
+}
+
 .chat-history {
   display: grid;
   gap: 10px;
