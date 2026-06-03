@@ -419,9 +419,11 @@ code {
   background: rgba(255, 255, 255, 0.5);
   padding: 12px;
   overflow-y: auto;
+  min-height: 140px;
   max-height: 46vh;
   display: grid;
   gap: 10px;
+  align-content: start;
 }
 
 .chat-history {
