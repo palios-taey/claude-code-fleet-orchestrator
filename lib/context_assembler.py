@@ -470,6 +470,20 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
     return "\n".join(lines)
 
 
+def _rendered_sections(ref: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Sections that _render_refs actually emits into the packet — content present
+    and distinct from the top-level ref content. SINGLE SOURCE OF TRUTH so
+    _provenance_hash can cover exactly what is rendered and the two cannot drift
+    (Horizon Gate-2 item 2: section bodies were rendered but never hashed ->
+    forgeable provenance, same defect class as CA-3 one tier down)."""
+    content = ref.get("content")
+    return [
+        section
+        for section in ref.get("sections") or []
+        if section.get("content") and section.get("content") != content
+    ]
+
+
 def _render_refs(tier: str, refs: List[Dict[str, Any]], max_refs: int) -> List[str]:
     lines = [f"### {tier}"]
     if not refs:
@@ -485,12 +499,11 @@ def _render_refs(tier: str, refs: List[Dict[str, Any]], max_refs: int) -> List[s
             lines.append("```")
             lines.append(str(content).strip())
             lines.append("```")
-        for section in ref.get("sections") or []:
-            if section.get("content") and section.get("content") != content:
-                lines.append(f"  lines {section.get('l_start')}-{section.get('l_end')}:")
-                lines.append("```")
-                lines.append(str(section["content"]).strip())
-                lines.append("```")
+        for section in _rendered_sections(ref):
+            lines.append(f"  lines {section.get('l_start')}-{section.get('l_end')}:")
+            lines.append("```")
+            lines.append(str(section["content"]).strip())
+            lines.append("```")
     return lines
 
 
@@ -570,6 +583,20 @@ def _provenance_hash(packet: Dict[str, Any]) -> str:
                 "path": ref.get("path", ""),
                 "content_sha": _content_sha(ref.get("content", "")),
             })
+            # Horizon Gate-2 item 2: section bodies are ALSO rendered into the
+            # packet (_render_refs via _rendered_sections), so they must be folded
+            # in too — otherwise two packets with identical top-level content but
+            # different section bodies render different prompt text under the same
+            # hash. Same helper as the renderer => hash covers exactly what's shown.
+            for section in _rendered_sections(ref):
+                observed.append({
+                    "kind": "ref_section",
+                    "tier": tier,
+                    "path": ref.get("path", ""),
+                    "l_start": section.get("l_start"),
+                    "l_end": section.get("l_end"),
+                    "content_sha": _content_sha(section.get("content", "")),
+                })
     for item in context.get("memory") or []:
         observed.append({
             "kind": "memory",
