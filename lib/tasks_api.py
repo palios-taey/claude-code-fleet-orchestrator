@@ -680,5 +680,16 @@ def root_redirect() -> RedirectResponse:
     return RedirectResponse(url="/ui/", status_code=302)
 
 
-app.mount("/ui/static", StaticFiles(directory=_UI_ROOT / "static"), name="ui-static")
-app.mount("/ui", StaticFiles(directory=_UI_ROOT, html=True), name="ui")
+class _RevalidateStatic(StaticFiles):
+    """Serve UI assets with Cache-Control: no-cache so the browser always
+    revalidates (cheap 304 via ETag when unchanged, fresh 200 when updated).
+    Without this the dashboard can render a stale CSS/JS after an update."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/ui/static", _RevalidateStatic(directory=_UI_ROOT / "static"), name="ui-static")
+app.mount("/ui", _RevalidateStatic(directory=_UI_ROOT, html=True), name="ui")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,22 @@ from lib.easy_setup import (  # noqa: E402
     run_doctor,
     set_compose_managed,
 )
+
+
+def cmd_serve(_: argparse.Namespace) -> int:
+    from lib.easy_setup import api_host, api_port
+
+    host = api_host()
+    port = api_port()
+    chat_on = os.environ.get("ORCH_CHAT_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    reach = "this machine only" if host == "127.0.0.1" else f"your network — open http://{host}:{port}/ui/ from any device on it"
+    print(f"Orchestrator UI -> http://{host}:{port}/ui/  ({reach})")
+    print(f"Chat box: {'enabled' if chat_on else 'off (set ORCH_CHAT_ENABLED=1 in .env on a trusted network)'}")
+    print("Foreground server; Ctrl-C to stop. For a persistent background service use `orch enable`.")
+    return subprocess.run(
+        [sys.executable, "-m", "uvicorn", "lib.tasks_api:app", "--host", host, "--port", str(port)],
+        cwd=str(ROOT),
+    ).returncode
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -85,6 +102,9 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="orch")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    serve = sub.add_parser("serve", help="Run the dashboard/API in the foreground on ORCH_HOST:ORCH_PORT")
+    serve.set_defaults(func=cmd_serve)
 
     doctor = sub.add_parser("doctor")
     doctor.add_argument("--explain-scope", action="store_true")
