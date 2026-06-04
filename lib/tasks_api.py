@@ -34,6 +34,7 @@ from lib.shippability import evaluate_shippability
 from lib.dispatch import bind_current_task, record_outcome
 from lib.orch_schema import (
     CompletionEvidenceError,
+    CompletionGateError,
     ConditionValidationError,
     PauseValidationError,
     PriorityAuditError,
@@ -311,7 +312,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             "completion_evidence": completion_evidence if status == "completed" else task_before.get("completion_evidence"),
             "phase_completed": phase_completed,
         }
-    except CompletionEvidenceError as e:
+    except (CompletionEvidenceError, CompletionGateError) as e:
         return JSONResponse(
             status_code=400,
             content={"ok": False, "error": str(e)},

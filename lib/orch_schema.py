@@ -72,6 +72,13 @@ class CompletionEvidenceError(ValueError):
     pass
 
 
+class CompletionGateError(ValueError):
+    """A 'completed' transition claiming a commit_sha lacks an independent verified gate/gatekeeper
+    PASS for that (task, sha) in the accountability ledger (ANTIFAB P2). Flag-gated; see
+    CF_COMPLETION_GATE_REQUIRED."""
+    pass
+
+
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
@@ -1558,6 +1565,26 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     completion_evidence_value = _normalize_completion_evidence(completion_evidence) if status == "completed" else None
     if status != "completed" and completion_evidence is not None:
         raise CompletionEvidenceError("completion evidence is only valid on a completed transition")
+    # ANTIFAB P2 (flag-gated, default OFF — safe to deploy dormant; activation is a deliberate staged,
+    # conductor-first step AFTER gatekeeper + prod dogfood). When ON: a 'completed' transition that
+    # CLAIMS a commit_sha (i.e. code work) is REJECTED unless the accountability ledger holds an
+    # INDEPENDENT verified PASS (mechanical gate_run and/or gatekeeper audit_verdict) for that
+    # (task, sha). The builder's say-so is not enough — something else must have run/reviewed it.
+    # Completions without a commit_sha (design/doc/measure) are not code-gated by this.
+    if status == "completed" and str(os.environ.get("CF_COMPLETION_GATE_REQUIRED") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        _gate_sha = (completion_evidence_value or {}).get("commit_sha") if completion_evidence_value else None
+        if _gate_sha:
+            try:
+                from .gate_check import verification_status
+            except ImportError:  # pragma: no cover - import-context fallback
+                from lib.gate_check import verification_status
+            _vs = verification_status(task_id, _gate_sha)
+            if not _vs.get("verified"):
+                raise CompletionGateError(
+                    f"completed claims commit {_gate_sha} for {task_id} but no verified gate/gatekeeper "
+                    f"PASS exists in the ledger (status={_vs}). Run the gate (orch-gate-run) or get a "
+                    f"gatekeeper PASS for this exact sha before marking it done."
+                )
     try:
         with driver.session(database=cfg.neo4j_db) as session:
             if result is None:
