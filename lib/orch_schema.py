@@ -32,6 +32,7 @@ SCHEMA_CONSTRAINTS = [
     "CREATE CONSTRAINT orch_project_id IF NOT EXISTS FOR (p:OrchProject) REQUIRE p.id IS UNIQUE",
     "CREATE CONSTRAINT orch_phase_id IF NOT EXISTS FOR (ph:OrchPhase) REQUIRE ph.id IS UNIQUE",
     "CREATE CONSTRAINT orch_question_id IF NOT EXISTS FOR (q:OrchQuestion) REQUIRE q.id IS UNIQUE",
+    "CREATE CONSTRAINT orch_stop_convergence_audit_id IF NOT EXISTS FOR (a:OrchStopConvergenceAudit) REQUIRE a.id IS UNIQUE",
 ]
 
 SCHEMA_INDEXES = [
@@ -622,6 +623,87 @@ def _redis_marker_call(fn, *args):
     return future.result(timeout=_STOP_MARKER_REDIS_TIMEOUT_S)
 
 
+def _record_stop_convergence_audit(session_id: str,
+                                   decision: Dict[str, Any],
+                                   marker_value: str,
+                                   block_count: int,
+                                   config: Optional[OrchConfig] = None) -> str:
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    audit_id = f"stopconv-{uuid.uuid4().hex[:12]}"
+    current_work = get_session_current_work(session_id, config=cfg) or {}
+    task_id = str(
+        decision.get("task_id")
+        or current_work.get("top_task_id")
+        or ""
+    ) or None
+    task = get_task(task_id, config=cfg) if task_id else None
+    blocked_on = _task_blocked_on(task_id, config=cfg)
+    task_state_left_behind = {
+        "session_id": session_id,
+        "task_id": task_id,
+        "task_status": task.get("status") if task else None,
+        "task_owner": task.get("owner") if task else None,
+        "blocked_on": blocked_on,
+        "project_id": decision.get("project_id") or current_work.get("project_id"),
+        "project_name": current_work.get("project_name"),
+        "phase_id": decision.get("phase_id") or current_work.get("phase_id"),
+        "phase_name": current_work.get("phase_name"),
+        "task_priority": decision.get("task_priority") if "task_priority" in decision else (task.get("priority") if task else None),
+        "task_title_short": decision.get("task_title_short") or current_work.get("top_task_desc") or (task.get("description") if task else None),
+        "observed_stop_task_id": _observed_stop_task_id(session_id, config=cfg),
+    }
+    with driver.session(database=cfg.neo4j_db) as session:
+        session.run(
+            """
+            OPTIONAL MATCH (t:OrchTask {id: $task_id})
+            OPTIONAL MATCH (p:OrchProject {id: $project_id})
+            CREATE (a:OrchStopConvergenceAudit {
+                id: $audit_id,
+                event_type: 'stop_converged_allow',
+                session_id: $session_id,
+                marker_value: $marker_value,
+                convergence_count: $convergence_count,
+                wake_type_before: $wake_type_before,
+                reason_before: $reason_before,
+                created_at: datetime($created_at),
+                decision_before_json: $decision_before_json,
+                task_state_left_behind_json: $task_state_left_behind_json,
+                task_id: $task_id,
+                project_id: $project_id,
+                phase_id: $phase_id,
+                task_status: $task_status,
+                task_owner: $task_owner,
+                blocked_on: $blocked_on,
+                task_title_short: $task_title_short
+            })
+            FOREACH (_ IN CASE WHEN t IS NULL THEN [] ELSE [1] END |
+                CREATE (a)-[:LEFT_TASK_STATE]->(t)
+            )
+            FOREACH (_ IN CASE WHEN p IS NULL THEN [] ELSE [1] END |
+                CREATE (a)-[:UNDER_PROJECT]->(p)
+            )
+            """,
+            audit_id=audit_id,
+            session_id=session_id,
+            marker_value=marker_value,
+            convergence_count=int(block_count),
+            wake_type_before=decision.get("wake_type"),
+            reason_before=decision.get("reason"),
+            created_at=_utc_now_iso(),
+            decision_before_json=_json_encode(_normalize_value(dict(decision))),
+            task_state_left_behind_json=_json_encode(task_state_left_behind),
+            task_id=task_state_left_behind["task_id"],
+            project_id=task_state_left_behind["project_id"],
+            phase_id=task_state_left_behind["phase_id"],
+            task_status=task_state_left_behind["task_status"],
+            task_owner=task_state_left_behind["task_owner"],
+            blocked_on=task_state_left_behind["blocked_on"],
+            task_title_short=task_state_left_behind["task_title_short"],
+        )
+    return audit_id
+
+
 def _reason_required_block_reason(active_conditions: list[dict[str, Any]]) -> str:
     labels = [str(cond.get("label")) for cond in active_conditions if cond.get("label")]
     labels_text = ", ".join(labels) if labels else "no active user_stop_conditions"
@@ -850,11 +932,19 @@ def get_session_stop_decision(session_id: str,
         _redis_marker_call(r.set, count_key, str(block_count), _STOP_BLOCK_TTL_SECS)
         decision["convergence_count"] = block_count
         if block_count >= _STOP_BLOCK_CONVERGENCE_LIMIT:
+            audit_id = _record_stop_convergence_audit(
+                session_id,
+                dict(decision),
+                marker_value,
+                block_count,
+                config=cfg,
+            )
             decision["block"] = False
             decision["reason"] = None
             decision["wake_type"] = WAKE_ALLOW_STOP
             decision["task_id"] = None
             decision["converged_allow"] = True
+            decision["convergence_audit_id"] = audit_id
             _redis_marker_call(r.delete, marker_key, count_key)
     except Exception as exc:
         decision = dict(decision)

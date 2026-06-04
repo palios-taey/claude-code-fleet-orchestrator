@@ -39,6 +39,19 @@ CFG = OrchConfig()
 def _cleanup(prefix: str) -> None:
     driver = get_neo4j_driver(CFG)
     with driver.session(database=CFG.neo4j_db) as session:
+        session.run(
+            """
+            MATCH (a:OrchStopConvergenceAudit)
+            WHERE a.id STARTS WITH 'stopconv-'
+              AND (
+                coalesce(a.task_id, '') STARTS WITH $prefix OR
+                coalesce(a.project_id, '') STARTS WITH $prefix OR
+                coalesce(a.phase_id, '') STARTS WITH $prefix
+              )
+            DETACH DELETE a
+            """,
+            prefix=prefix,
+        )
         session.run("MATCH (t:OrchTask) WHERE t.id STARTS WITH $prefix DETACH DELETE t", prefix=prefix)
         session.run("MATCH (ph:OrchPhase) WHERE ph.id STARTS WITH $prefix DETACH DELETE ph", prefix=prefix)
         session.run("MATCH (p:OrchProject) WHERE p.id STARTS WITH $prefix DETACH DELETE p", prefix=prefix)
@@ -78,6 +91,20 @@ def _make_in_progress_fixture(*, blocked_on: str | None = None) -> str:
     create_task(phase_id, task_id, "owned in-progress task", owner="conductor-codex", priority=5, wake_owner_if_ready=False, config=CFG)
     update_task_status(task_id, "in_progress", owner="conductor-codex", blocked_on=blocked_on, config=CFG)
     return task_id
+
+
+def _load_convergence_audits(session_id: str) -> list[dict[str, object]]:
+    driver = get_neo4j_driver(CFG)
+    with driver.session(database=CFG.neo4j_db) as session:
+        result = session.run(
+            """
+            MATCH (a:OrchStopConvergenceAudit {session_id: $session_id})
+            RETURN a
+            ORDER BY a.created_at DESC
+            """,
+            session_id=session_id,
+        )
+        return [dict(record["a"]) for record in result]
 
 
 def main() -> int:
@@ -180,16 +207,27 @@ def main() -> int:
         os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
         os.environ["CF_STOP_INPROGRESS"] = "1"
         os.environ["CF_STOP_INPROGRESS_SESSIONS"] = "conductor-codex"
-        _make_in_progress_fixture(blocked_on=None)
+        task_id = _make_in_progress_fixture(blocked_on=None)
         convergence_results = [
             get_session_stop_decision("conductor-codex", stop_hook_active=True, config=CFG)
             for _ in range(3)
         ]
         converged = convergence_results[-1]
+        convergence_audits = _load_convergence_audits("conductor-codex")
+        latest_audit = convergence_audits[0] if convergence_audits else {}
         print(
             "PASS convergence-limit-force-allows"
-            if converged.get("block") is False and converged.get("converged_allow") is True and converged.get("wake_type") == "ALLOW_STOP"
-            else f"FAIL convergence-limit-force-allows {convergence_results}"
+            if (
+                converged.get("block") is False
+                and converged.get("converged_allow") is True
+                and converged.get("wake_type") == "ALLOW_STOP"
+                and bool(converged.get("convergence_audit_id"))
+                and converged.get("convergence_audit_id") == latest_audit.get("id")
+                and int(latest_audit.get("convergence_count", 0) or 0) == 3
+                and latest_audit.get("event_type") == "stop_converged_allow"
+                and latest_audit.get("task_id") == task_id
+            )
+            else f"FAIL convergence-limit-force-allows results={convergence_results} audits={convergence_audits}"
         )
 
         class HangingMarkerRedis:

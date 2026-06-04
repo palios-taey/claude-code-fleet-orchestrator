@@ -19,6 +19,8 @@ EVID_DIR="$REPO_ROOT/evidence/$SHA"
 mkdir -p "$EVID_DIR"
 LOG="$EVID_DIR/cleanroom.log"
 PORT="${ORCH_GATE_PORT:-5099}"
+COMPOSE_PROJECT="orch-gate-${SHA}-$$"
+COMPOSE_FILE="$(mktemp /tmp/orch-gate-compose.XXXXXX.yml)"
 FAILS=0
 
 log()  { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
@@ -31,20 +33,68 @@ check(){ # check "name" "expected" "actual"
 : > "$LOG"
 log "=== clean-room gate @ $SHA on $(hostname) ==="
 
+free_port() {
+  python3 - <<'PY'
+import socket
+
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
+
+REDIS_PORT="$(free_port)"
+NEO4J_HTTP_PORT="$(free_port)"
+NEO4J_BOLT_PORT="$(free_port)"
+cat > "$COMPOSE_FILE" <<EOF
+services:
+  redis:
+    image: redis:7.4.0
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT}:6379"
+    volumes:
+      - orch_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  neo4j:
+    image: neo4j:5.21.0-community
+    environment:
+      NEO4J_AUTH: "none"
+    ports:
+      - "127.0.0.1:${NEO4J_HTTP_PORT}:7474"
+      - "127.0.0.1:${NEO4J_BOLT_PORT}:7687"
+    volumes:
+      - orch_neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -a bolt://127.0.0.1:7687 'RETURN 1;' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  orch_redis_data:
+  orch_neo4j_data:
+EOF
+
 cleanup() {
   log "=== teardown ==="
   pkill -f "uvicorn lib.tasks_api.*:$PORT" 2>/dev/null
-  docker compose down -v >/dev/null 2>&1
+  docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1
+  rm -f "$COMPOSE_FILE"
 }
 trap cleanup EXIT
 
 # --- infra: isolated redis + neo4j via the repo's own compose ----------------
 log "--- bring up isolated infra (docker compose) ---"
-docker compose up -d >>"$LOG" 2>&1
+docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" up -d >>"$LOG" 2>&1
 healthy=0
 for i in $(seq 1 24); do
   sleep 5
-  st="$(docker compose ps --format '{{.Service}}:{{.Health}}' 2>/dev/null | tr '\n' ' ')"
+  st="$(docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" ps --format '{{.Service}}:{{.Health}}' 2>/dev/null | tr '\n' ' ')"
   if echo "$st" | grep -q "redis:healthy" && echo "$st" | grep -q "neo4j:healthy"; then healthy=1; break; fi
 done
 check "infra-healthy" "1" "$healthy"
@@ -54,10 +104,12 @@ check "infra-healthy" "1" "$healthy"
 log "--- configure .env + install (fresh venv) ---"
 cat > .env <<ENVEOF
 ORCH_REDIS_HOST=127.0.0.1
-ORCH_REDIS_PORT=6379
-ORCH_NEO4J_URI=bolt://127.0.0.1:7687
+ORCH_REDIS_PORT=$REDIS_PORT
+ORCH_NEO4J_URI=bolt://127.0.0.1:$NEO4J_BOLT_PORT
 ORCH_NEO4J_DB=neo4j
 ORCH_DASHBOARD_URL=http://127.0.0.1:$PORT
+CF_STOP_INPROGRESS=1
+CF_STOP_INPROGRESS_SESSIONS=gate-stop-codex
 ENVEOF
 python3 -m venv .venv
 # shellcheck disable=SC1091
@@ -113,6 +165,118 @@ PLAN
   check "dashboard-ui-200" "200" "$ui"
   local title; title="$(curl -s -L "$base/" | grep -c 'Orchestrator Plan UI')"
   check "dashboard-ui-renders" "1" "$title"
+
+  # convergence valve writes durable audit before forcing ALLOW_STOP on the
+  # third repeated stop-hook block for the same in-progress task.
+  local stop_task; stop_task="$(python3 - <<'PY'
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd()
+sys.path.insert(0, str(repo_root))
+
+from lib.config import OrchConfig
+from lib.orch_schema import create_phase, create_project, create_task, update_task_status
+
+cfg = OrchConfig()
+create_project("gate-stop-project", "Gate Stop Project", supervisor="gate-stop", priority=1, config=cfg)
+create_phase("gate-stop-project", "gate-stop-phase", "Main", order=1, config=cfg)
+task_id = create_task(
+    "gate-stop-phase",
+    "gate-stop-task",
+    "gate stop convergence task",
+    owner="gate-stop-codex",
+    priority=5,
+    wake_owner_if_ready=False,
+    config=cfg,
+)
+update_task_status(task_id, "in_progress", owner="gate-stop-codex", config=cfg)
+print(task_id)
+PY
+)"
+  printf 'seeded_stop_task=%s\n' "$stop_task" >>"$LOG"
+  local convergence_json; convergence_json="$(python3 - <<'PY' "$base" "$LOG"
+import json
+import sys
+import urllib.request
+
+base = sys.argv[1]
+log_path = sys.argv[2]
+
+def fetch(url: str) -> dict:
+    with urllib.request.urlopen(url) as response:
+        return json.load(response)
+
+results = [
+    fetch(f"{base}/api/sessions/gate-stop-codex/stop-decision?stop_hook_active=true")
+    for _ in range(3)
+]
+with open(log_path, "a", encoding="utf-8") as handle:
+    handle.write("stop_decision_results=" + json.dumps(results, sort_keys=True) + "\n")
+print(json.dumps(results[-1], sort_keys=True))
+PY
+)"
+  local convergence_ok; convergence_ok="$(python3 - <<'PY' "$convergence_json"
+import json
+import sys
+
+decision = json.loads(sys.argv[1])
+print(
+    decision.get("block") is False
+    and decision.get("converged_allow") is True
+    and decision.get("wake_type") == "ALLOW_STOP"
+    and bool(decision.get("convergence_audit_id"))
+)
+PY
+)"
+  check "stop-convergence-force-allow" "True" "$convergence_ok"
+
+  local audit_json; audit_json="$(python3 - <<'PY'
+import json
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd()
+sys.path.insert(0, str(repo_root))
+
+from lib.config import OrchConfig, get_neo4j_driver
+
+cfg = OrchConfig()
+driver = get_neo4j_driver(cfg)
+with driver.session(database=cfg.neo4j_db) as session:
+    record = session.run(
+        """
+        MATCH (a:OrchStopConvergenceAudit {session_id: 'gate-stop-codex'})
+        RETURN a
+        ORDER BY a.created_at DESC
+        LIMIT 1
+        """
+    ).single()
+row = dict(record["a"]) if record else {}
+normalized = {}
+for key, value in row.items():
+    iso = getattr(value, "iso_format", None)
+    normalized[key] = iso() if callable(iso) else value
+print(json.dumps(normalized, sort_keys=True))
+PY
+)"
+  local audit_ok; audit_ok="$(python3 - <<'PY' "$convergence_json" "$audit_json" "$stop_task"
+import json
+import sys
+
+decision = json.loads(sys.argv[1])
+audit = json.loads(sys.argv[2])
+task_id = sys.argv[3]
+print(
+    bool(audit)
+    and audit.get("id") == decision.get("convergence_audit_id")
+    and int(audit.get("convergence_count", 0) or 0) == 3
+    and audit.get("event_type") == "stop_converged_allow"
+    and audit.get("task_id") == task_id
+)
+PY
+)"
+  check "stop-convergence-audit-persisted" "True" "$audit_ok"
 }
 log "--- production assertions ---"
 phase_assertions
