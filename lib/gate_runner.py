@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -72,7 +73,9 @@ def run_gate(
         return v
 
     try:
-        rc, out = _run(f"git -C {repo} worktree add --detach {wt} {sha}", repo, 120)
+        rc, out = _run(
+            f"git -C {shlex.quote(repo)} worktree add --detach {shlex.quote(wt)} -- {shlex.quote(sha)}",
+            repo, 120)
         if rc != 0:
             return _verdict("FAIL", "checkout", rc, out)
         artifacts["checkout"] = _sha256(out)
@@ -91,5 +94,5 @@ def run_gate(
         rc, out = _run(assert_cmd, wt, timeout)
         return _verdict("PASS" if rc == 0 else "FAIL", "assert", rc, out)
     finally:
-        _run(f"git -C {repo} worktree remove --force {wt}", repo, 60)
+        _run(f"git -C {shlex.quote(repo)} worktree remove --force {shlex.quote(wt)}", repo, 60)
         shutil.rmtree(work, ignore_errors=True)
