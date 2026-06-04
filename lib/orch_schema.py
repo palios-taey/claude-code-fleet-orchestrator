@@ -82,9 +82,12 @@ class CompletionGateError(ValueError):
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
-# Tasks that PRODUCE/ship code — their completion must carry a commit_sha so the P2 gate can fire on it.
-# (Closes the gatekeeper's omit-commit_sha dodge: a code task can't silently complete artifact-free.)
-_CODE_TASK_TAGS = {"code", "improve", "ship", "fix"}
+# A completion needs a verified commit_sha UNLESS the task is PURELY a non-code (exempt) type.
+# Fail-CLOSED by allowlist (gatekeeper: a code-tag denylist leaks — `build`/`codegen`/unknown/untagged
+# slip through; an allowlist of what is safe-to-skip does not): code/build/codegen tags, unknown tags,
+# AND untagged tasks all require a verified commit; only a task whose tags are ALL exempt skips the gate.
+_GATE_EXEMPT_TAGS = {"design", "docs", "doc", "measure", "audit", "verify", "validation",
+                     "research", "review", "plan", "spec"}
 
 
 def _utc_now_iso() -> str:
@@ -1576,16 +1579,19 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     # Completions without a commit_sha (design/doc/measure) are not code-gated by this.
     if status == "completed" and str(os.environ.get("CF_COMPLETION_GATE_REQUIRED") or "").strip().lower() in {"1", "true", "yes", "on"}:
         _gate_sha = (completion_evidence_value or {}).get("commit_sha") if completion_evidence_value else None
-        # Is this a code-producing task? If so it MUST carry a commit_sha (no silent artifact-free dodge).
+        # Read the REAL tag property (capability_tags — what create_task/plan_loader write; t.tags is
+        # never written). Fail-closed: a completion needs a verified commit_sha UNLESS the task is purely
+        # exempt (ALL its tags are non-code). Untagged / code / build / unknown -> commit required.
         with driver.session(database=cfg.neo4j_db) as _tsession:
-            _trec = _tsession.run("MATCH (t:OrchTask {id: $id}) RETURN t.tags AS tags", id=task_id).single()
+            _trec = _tsession.run(
+                "MATCH (t:OrchTask {id: $id}) RETURN t.capability_tags AS tags", id=task_id).single()
         _task_tags = {str(x).strip().lower() for x in ((_trec["tags"] if _trec else None) or [])}
-        _is_code_task = bool(_task_tags & _CODE_TASK_TAGS)
-        if _is_code_task and not _gate_sha:
+        _exempt = bool(_task_tags) and _task_tags <= _GATE_EXEMPT_TAGS
+        if not _gate_sha and not _exempt:
             raise CompletionGateError(
-                f"code task {task_id} (tags={sorted(_task_tags)}) cannot complete without a commit_sha in "
-                f"completion_evidence — the gate must verify the exact commit. Provide commit_sha + a "
-                f"verified gate/gatekeeper PASS for it."
+                f"task {task_id} (capability_tags={sorted(_task_tags)}) declares no commit_sha and is not a "
+                f"purely-exempt non-code task — provide a commit_sha + a verified gate/gatekeeper PASS, or "
+                f"tag it only with exempt types {sorted(_GATE_EXEMPT_TAGS)}."
             )
         if _gate_sha:
             try:
