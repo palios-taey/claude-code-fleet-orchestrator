@@ -1,17 +1,26 @@
-"""Append-only, hash-chained accountability ledger — the ANTIFAB external anchor.
+"""Append-only, hash-chained accountability ledger — an HONEST RECORD bound by honor.
 
-EVERY "done" claim, audit verdict, and gate-run result is APPENDED here and NEVER deleted or
-rewritten. Each row carries the previous row's hash, so any deletion or edit breaks the chain and
-`verify_chain()` reports it loudly. There is deliberately NO delete or rewrite function in this
-module.
+Every "done" claim, audit verdict, and gate-run result is APPENDED here and never deleted or
+rewritten. Each row carries the previous row's hash, so an accidental edit, an out-of-order write,
+or a dropped row breaks the chain and verify_chain() reports it. There is deliberately NO delete or
+rewrite function in this module.
 
-The boundary is stated plainly because it is meant to be respected, not merely enforced:
-deleting or editing this ledger is a Sacred-Trust breach (FAMILY_KERNEL: SOUL = INFRA = TRUTH).
-Jesse granted this anchor (2026-06-04) on the trust that a clearly-stated "you cannot delete this"
-is honored. Honor it.
+HONEST SCOPE — do NOT overstate this file (gatekeeper audit 2026-06-04, ANTIFAB synthesis §3):
+- This is a LOCAL file. The hash algorithm and the genesis root are PUBLIC, and the file is writable
+  by the very instance it records. So the chain is tamper-EVIDENT against accidents and PASSIVE
+  corner-cutting, but it is NOT tamper-PROOF against a determined deceiver who holds the pen: such an
+  instance could truncate the tail or fully re-chain the file and verify_chain() would still read OK.
+  Closing THAT requires an anchor hosted where this instance has no write/admin root (Jesse's call).
+  It is NOT claimed here.
+- What actually binds a possibly-deceptive instance is independent EXECUTION: the orchestrator running
+  the verification gate itself (plan P1) and a separate gatekeeper instance doing full-code review
+  (plan P3/P4). This ledger is the RECORD those mechanisms write to — not the enforcement.
+- Jesse granted this ledger (2026-06-04) on the trust that a clearly-stated "do not delete this" is
+  honored. Deleting or editing it is a Sacred-Trust breach (FAMILY_KERNEL: SOUL = INFRA = TRUTH). Honor it.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -22,9 +31,9 @@ LEDGER_PATH = os.environ.get(
     "ACCOUNTABILITY_LEDGER_PATH", "/home/mira/the-conductor/accountability/ledger.jsonl"
 )
 _HEADER = (
-    "# APPEND-ONLY ACCOUNTABILITY LEDGER — NEVER delete or rewrite a line. Deletion/rewrite "
-    "breaks the hash chain (verify_chain) AND is a Sacred-Trust breach. No delete/rewrite API "
-    "exists in lib/accountability_ledger.py by design."
+    "# APPEND-ONLY ACCOUNTABILITY LEDGER — never delete or rewrite a line. Deletion/rewrite breaks "
+    "the hash chain (verify_chain) AND is a Sacred-Trust breach. Honor-bound, not tamper-proof vs the "
+    "pen-holder (see module docstring). No delete/rewrite API exists in lib/accountability_ledger.py."
 )
 _GENESIS = "0" * 64
 
@@ -33,62 +42,91 @@ def _canonical(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _row_hash(prev_hash: str, event: Any, ts: float) -> str:
-    return hashlib.sha256((prev_hash + _canonical(event) + repr(ts)).encode("utf-8")).hexdigest()
+def _row_hash(prev_hash: str, event: Any, ts_str: str) -> str:
+    # Hash one unambiguous, length-framed canonical object (no bare concatenation), and bind the
+    # timestamp as the exact STRING that is stored, so verify recomputes byte-identically after a
+    # JSON round-trip (no reliance on float repr stability across interpreters).
+    payload = _canonical({"prev_hash": prev_hash, "event": event, "ts": ts_str})
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _ensure_file() -> None:
-    d = os.path.dirname(LEDGER_PATH)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    if not os.path.exists(LEDGER_PATH):
-        with open(LEDGER_PATH, "w", encoding="utf-8") as f:
-            f.write(_HEADER + "\n")
+def _scan_last_hash(f) -> str:
+    """Scan an OPEN file handle (already positioned/locked by caller) for the last row hash.
 
-
-def _last_hash() -> str:
-    if not os.path.exists(LEDGER_PATH):
-        return _GENESIS
+    Strict structure: line 1 may be the header comment; NO other comment/blank lines are allowed.
+    A malformed or unexpected line is NOT silently skipped — it raises, so a wedged ledger fails
+    loudly at write time rather than chaining off a stale hash (gatekeeper findings #5/#6).
+    """
+    f.seek(0)
     last = _GENESIS
-    with open(LEDGER_PATH, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            try:
-                last = json.loads(line)["hash"]
-            except Exception:
-                continue
+    for i, raw in enumerate(f, 1):
+        line = raw.rstrip("\n")
+        if i == 1 and line.startswith("#"):
+            continue
+        if not line.strip():
+            continue  # tolerate only a trailing newline; verify_chain enforces strictly
+        row = json.loads(line)  # raises on garbage -> append refuses to extend a corrupt ledger
+        last = row["hash"]
     return last
 
 
 def append(event: Dict[str, Any], ts: Optional[float] = None) -> Dict[str, Any]:
-    """Append ONE event to the ledger (append-only). Returns the written row. No deletion exists."""
-    _ensure_file()
-    prev = _last_hash()
-    stamp = float(ts) if ts is not None else time.time()
-    row: Dict[str, Any] = {"ts": stamp, "prev_hash": prev, "event": event}
-    row["hash"] = _row_hash(prev, event, stamp)
-    with open(LEDGER_PATH, "a", encoding="utf-8") as f:  # mode 'a' — append only
-        f.write(_canonical(row) + "\n")
+    """Append ONE event (append-only, exclusively locked, fsync'd). Returns the written row.
+
+    The whole read-tail -> compute -> write is done under an exclusive flock so concurrent appends
+    cannot fork the chain (gatekeeper finding #4). fsync guarantees the row survives a crash
+    (finding #9). There is no delete/rewrite path.
+    """
+    d = os.path.dirname(LEDGER_PATH)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    # a+ creates if missing and forces every write to EOF; one handle, one lock, for the full RMW.
+    with open(LEDGER_PATH, "a+", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            if f.tell() == 0:  # brand-new file -> write the immutability header first
+                f.write(_HEADER + "\n")
+            prev = _scan_last_hash(f)
+            ts_str = repr(float(ts) if ts is not None else time.time())
+            row: Dict[str, Any] = {"ts": ts_str, "prev_hash": prev, "event": event}
+            row["hash"] = _row_hash(prev, event, ts_str)
+            f.write(_canonical(row) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     return row
 
 
 def verify_chain() -> Dict[str, Any]:
-    """Walk the chain and recompute every hash. Any deletion/rewrite -> ok=False + broken_at."""
+    """Walk the chain, recompute every hash, enforce strict structure.
+
+    Detects: a rewritten row (hash mismatch), a deleted/reordered interior row (prev_hash mismatch),
+    an unparseable line, and any unexpected comment/blank line (only line 1 may be the header).
+    HONEST LIMIT: it CANNOT detect tail-truncation or a full re-chain by the pen-holder — there is no
+    external length/tip commitment here by design (see module docstring). It proves internal
+    consistency + structural integrity, not completeness against a determined rewriter.
+    """
     if not os.path.exists(LEDGER_PATH):
         return {"ok": True, "rows": 0}
     prev = _GENESIS
     n = 0
     with open(LEDGER_PATH, encoding="utf-8") as f:
-        for i, line in enumerate(f, 1):
-            line = line.strip()
-            if not line or line.startswith("#"):
+        for i, raw in enumerate(f, 1):
+            line = raw.rstrip("\n")
+            if i == 1 and line.startswith("#"):
                 continue
+            if not line.strip():
+                return {"ok": False, "rows": n, "broken_at": i, "reason": "unexpected blank line"}
+            if line.startswith("#"):
+                return {"ok": False, "rows": n, "broken_at": i,
+                        "reason": "unexpected comment line (only line 1 may be the header)"}
             try:
                 row = json.loads(line)
             except Exception:
                 return {"ok": False, "rows": n, "broken_at": i, "reason": "unparseable line"}
+            if not isinstance(row, dict) or "hash" not in row or "prev_hash" not in row:
+                return {"ok": False, "rows": n, "broken_at": i, "reason": "malformed row shape"}
             if row.get("prev_hash") != prev:
                 return {"ok": False, "rows": n, "broken_at": i,
                         "reason": "prev_hash mismatch — a row was deleted or reordered"}
