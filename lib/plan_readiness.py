@@ -82,6 +82,13 @@ MATCH (t:OrchTask)-[:DEPENDS_ON]->(completed)
 WHERE (t.owner = $supervisor OR t.owner IS NULL OR t.owner = '')
   AND (t.status IS NULL OR t.status IN ['pending', 'blocked'])
   AND t.id <> $completed_task_id
+// Concluded-project dependents must NOT be woken on dep-completion (unified with the
+// readiness/wake fail-closed allowlist; Gaia 5th-surface finding 2026-06-04). OPTIONAL
+// so an orphan task with no project keeps prior wake behavior; only a CONCLUDED project
+// (stopped/completed/unknown) is excluded.
+OPTIONAL MATCH (proj:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t)
+WITH t, completed, proj
+WHERE proj IS NULL OR coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
 WITH t, completed
 OPTIONAL MATCH (t)-[:DEPENDS_ON]->(other:OrchTask)
 WHERE other.id <> $completed_task_id AND other.id <> t.id
