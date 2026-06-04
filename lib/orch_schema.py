@@ -880,7 +880,11 @@ def _raw_stop_decision(session_id: str,
 
     for project in projects:
         status = str(project.get("status") or "active")
-        if status == "completed":
+        # Readiness/wake surfaces work ONLY from live projects. Concluded projects
+        # (completed/stopped/archived) and any unknown status are excluded via a
+        # fail-closed allowlist, so a concluded sprint's unclosed in_progress tasks
+        # never force-grind their owner (hunter token-burn root-cause, 2026-06-04).
+        if status not in ("active", "in_progress"):
             continue
         next_ready = get_session_next_ready(ready_owner, project_id=str(project.get("id")), config=cfg)
         if next_ready:
@@ -969,7 +973,11 @@ def _raw_stop_decision(session_id: str,
     reason_required: Optional[Dict[str, Any]] = None
     for project in projects:
         status = str(project.get("status") or "active")
-        if status == "completed":
+        # Readiness/wake surfaces work ONLY from live projects. Concluded projects
+        # (completed/stopped/archived) and any unknown status are excluded via a
+        # fail-closed allowlist, so a concluded sprint's unclosed in_progress tasks
+        # never force-grind their owner (hunter token-burn root-cause, 2026-06-04).
+        if status not in ("active", "in_progress"):
             continue
         active_conditions = _active_conditions(list(project.get("user_stop_conditions") or []))
         stop_state = _project_stop_reason_state(project)
@@ -1888,6 +1896,10 @@ def get_session_current_work(session_id: str,
             result = session.run("""
                 MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
                 WHERE t.owner = $session_id AND t.status = 'in_progress'
+                  // Fail-closed allowlist: an in_progress task in a concluded project
+                  // (stopped/completed/unknown) is NOT live work and must not force-grind
+                  // its owner via the stop-engine in-progress block (hunter token-burn, 2026-06-04).
+                  AND coalesce(p.status, 'active') IN ['active', 'in_progress']
                 RETURN p.id AS project_id,
                        p.name AS project_name,
                        p.source_path AS project_source_path,
@@ -1949,8 +1961,9 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                       MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
                       WHERE dep.status <> 'completed'
                   }
-                  AND coalesce(proj.status, 'active') <> 'stopped'
-                  AND coalesce(proj.status, 'active') <> 'completed'
+                  // Fail-closed allowlist (was a stopped/completed denylist; denylist is
+                  // fail-open for any new concluded status). Live projects only.
+                  AND coalesce(proj.status, 'active') IN ['active', 'in_progress']
                 RETURN t.id AS task_id, t.description AS description,
                        t.priority AS priority, t.owner AS owner,
                        t.blocked_on AS blocked_on,
