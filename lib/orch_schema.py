@@ -2486,13 +2486,18 @@ def get_session_stop_status(session_id: str,
                 "wake_reason": f"ready_work:{project['id']}",
             }
             break
-        if project.get("status") == "completed":
+        # Only an ACTIVE project with no ready work + no valid stop reason demands a
+        # stop_reason. Normalized (strip+lower) + fail-closed: in_progress stays exempt
+        # (work underway); concluded/unknown (stopped/completed/archived/NULL/case-variant)
+        # must NOT fall through to WAKE_REASON_REQUIRED. Unifies this 7th status-decision
+        # surface inside get_session_stop_status with the readiness/wake allowlist
+        # (Gaia round-2 finding, 2026-06-04).
+        status_norm = str(project.get("status") or "").strip().lower()
+        if status_norm != "active":
             continue
         if stop_state["valid"]:
             continue
         if stop_state["deprecated_only"]:
-            continue
-        if project.get("status") == "in_progress":
             continue
         decision = {
             "can_stop": False,
