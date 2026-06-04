@@ -666,6 +666,16 @@ def _observed_stop_task_id(session_id: str, config: Optional[OrchConfig] = None)
     return str(task_id) if task_id else None
 
 
+def _safe_observed_stop_task_id(session_id: str, config: Optional[OrchConfig] = None) -> Optional[str]:
+    """Best-effort observed-stop-task lookup that never raises -- for use inside the keystone
+    fail-CLOSED exception handler, where the original decision already errored and we only
+    want to keep the session on its current task if we can still read it."""
+    try:
+        return _observed_stop_task_id(session_id, config=config)
+    except Exception:
+        return None
+
+
 def _task_blocked_on(task_id: Optional[str], config: Optional[OrchConfig] = None) -> Optional[str]:
     if not task_id:
         return None
@@ -676,6 +686,97 @@ def _task_blocked_on(task_id: Optional[str], config: Optional[OrchConfig] = None
     if blocked_on in (None, "", "null"):
         return None
     return str(blocked_on)
+
+
+# A blocked_on releases a session to STOP only if it names a REAL, non-terminal task (a live
+# resolver) that is not the waiter itself and not part of a blocked_on cycle. This is the
+# narrow, catastrophe-preventing core: a free-text human gate ("waiting on Jesse") is not a
+# task -> not a resolver -> keep working. We deliberately do NOT inspect the DEPENDS_ON
+# execution graph for runnability here: Family-audit R2-R5 showed that can't be made correct
+# without a re-wake/terminalizer mechanism the orchestrator doesn't yet have, and attempting
+# it is how this fix thrashed. Runnability-RECOVERY (a parked waiter on a resolver that never
+# completes) is orch-watch's job, tracked as its own design effort (project phase p-systemic),
+# NOT this engine's. Terminal statuses (completed/failed/interrupted) are excluded.
+_LIVE_RESOLVER_STATUSES = {"pending", "ready", "in_progress", "dispatched"}
+# Max hops when walking the blocked_on chain (cycle/depth guard).
+_MAX_RESOLVER_DEPTH = 8
+
+
+def _blocked_on_has_live_resolver(blocked_on: Optional[str],
+                                  current_task_id: Optional[str] = None,
+                                  config: Optional[OrchConfig] = None) -> bool:
+    """True only if `blocked_on` is the id of a task that will actually make progress and
+    wake the session. The disciplined convention is that `blocked_on` IS a task id (an
+    exact value), not prose -- so a free-text human gate ("waiting on Jesse's pull-forward
+    decision") names no resolver and returns False, keeping the session on its work.
+
+    We do NOT scan prose for embedded ids: "see unrelated-live-task" must not silently
+    license a stop on a task that has no obligation to wake this one (Family-audit H6).
+    The value is matched EXACTLY against the DB (ids may be slugs OR task-<hex>).
+
+    Guards (all fail toward CONTINUING, never toward a silent permanent stop):
+      - self-wait: a task waiting on itself is not an autonomous resolver (H1);
+      - cycle/depth: follow the resolver's own blocked_on; if it loops back to the waiter
+        or to an already-seen task, or runs deeper than _MAX_RESOLVER_DEPTH, it cannot
+        guarantee a wake (H7/N1). A valid resolver chain must terminate in a live task
+        that is NOT itself waiting -- something actually progressing;
+      - stale/missing/terminal-status ref -> not live -> False;
+      - every node must be formally runnable (no incomplete DEPENDS_ON) -- this, not the
+        status set, is the viability filter that makes pending/ready resolvers safe;
+      - DB errors are NOT swallowed here: they bubble to get_session_stop_decision's keystone
+        fail-CLOSED handler (blocks + labels keystone_fail_closed honestly, not as a gate)."""
+    if not blocked_on:
+        return False
+    node = str(blocked_on).strip()
+    if not node:
+        return False
+    seen: set[str] = set()
+    if current_task_id:
+        seen.add(str(current_task_id).strip())
+    # The walk is deliberately NOT wrapped in try/except. A get_task / dep-query error must
+    # BUBBLE to get_session_stop_decision's keystone fail-CLOSED handler, which blocks AND
+    # labels it keystone_fail_closed. Swallowing it here (-> False) would still block, but
+    # would mislabel an infra error as a human gate -- a cannot-lie violation that hides DB
+    # failures from telemetry (Family-audit Cosmos R3 #4). Bubbling = same fail-closed safety,
+    # honest label. (Both resolver call-sites are inside _raw_stop_decision, inside that try.)
+    for _ in range(_MAX_RESOLVER_DEPTH):
+        if node in seen:
+            return False  # self-wait or cycle -- no guaranteed wake
+        seen.add(node)
+        task = get_task(node, config=config)
+        if not task:
+            return False
+        if str(task.get("status") or "").strip().lower() not in _LIVE_RESOLVER_STATUSES:
+            return False
+        # NOTE: we deliberately do NOT inspect the node's DEPENDS_ON execution graph here.
+        # Family-audit R2-R5 proved that a stop-time "is this resolver runnable" check cannot
+        # be made correct without a TERMINALIZER: nothing transitions a crashed/frozen
+        # in_progress task to failed/interrupted, so a frozen/NULL-status dep is never "dead",
+        # the completion-wake never fires, and a strict check either fail-OPENS the frozen
+        # case (Gaia/Cosmos R5) or deadlocks live single-worker pipelines (Cosmos R3/R4).
+        # Runnability-recovery is the system's job via orch-watch + a reaper, NOT this engine's
+        # (tracked separately). Here we validate ONLY the blocked_on delegation chain: a real,
+        # live, non-self, non-cyclic task id. A human gate (free text) is not a task -> not a
+        # resolver -> keep working (the actual catastrophe), which is what this engine owns.
+        nxt = task.get("blocked_on")
+        nxt = str(nxt).strip() if nxt not in (None, "", "null") else ""
+        if not nxt:
+            return True  # live, runnable, not-waiting -> real resolver
+        node = nxt
+    return False  # chain too deep -> cannot prove a wake -> keep working
+
+
+def _human_gate_block_reason(task_id: Optional[str], blocked_on: Optional[str]) -> str:
+    task_id_value = task_id or "your active task"
+    marker = (str(blocked_on or "")[:120]) or "(empty)"
+    return (
+        "You cannot stop here. Your blocked_on names no live autonomous resolver "
+        f"(marker: {marker!r}) -- it is a human gate, and human gates are abolished: "
+        "the only valid gates are live production runs and full-code Family audits. "
+        f"Continue {task_id_value}. If you are genuinely waiting on autonomous work, "
+        "set blocked_on to reference the task id you await (e.g. task-abcd1234) so the "
+        "system can wake you when it resolves; otherwise keep going."
+    )
 
 
 def _queue_block_reason(task_id: Optional[str], description: Optional[str]) -> str:
@@ -789,6 +890,36 @@ def _raw_stop_decision(session_id: str,
                 "task_title_short": (str(current_work.get("top_task_desc") or "")[:80] or None) if current_work else None,
             }
         if current_task_id and blocked_on:
+            if _blocked_on_has_live_resolver(blocked_on, current_task_id=current_task_id, config=cfg):
+                return {
+                    "block": False,
+                    "reason": None,
+                    "wake_type": WAKE_ALLOW_STOP,
+                    "task_id": None,
+                    "blocked_on": blocked_on,
+                }
+            # blocked_on names no live autonomous resolver -> it is a human gate (or a
+            # stale/self/cyclic reference). A human gate must NOT park a session in an
+            # active plan: keep it on its in-progress task. This block is NON_CONVERGABLE
+            # -- a human gate is permanently insoluble, so the wrapper convergence valve
+            # must NOT force-allow it after N attempts (that would just delay the same
+            # indefinite-park bug). See get_session_stop_decision.
+            return {
+                "block": True,
+                "reason": _human_gate_block_reason(current_task_id, blocked_on),
+                "wake_type": "WAKE_WITH_QUEUE",
+                "task_id": current_task_id,
+                "project_id": current_work.get("project_id") if current_work else None,
+                "phase_id": current_work.get("phase_id") if current_work else None,
+                "task_title_short": (str(current_work.get("top_task_desc") or "")[:80] or None) if current_work else None,
+                "blocked_on_rejected": blocked_on,
+                "non_convergable": True,
+            }
+
+    observed_task_id = _observed_stop_task_id(session_id, config=cfg)
+    blocked_on = _task_blocked_on(observed_task_id, config=cfg)
+    if blocked_on:
+        if _blocked_on_has_live_resolver(blocked_on, current_task_id=observed_task_id, config=cfg):
             return {
                 "block": False,
                 "reason": None,
@@ -796,15 +927,18 @@ def _raw_stop_decision(session_id: str,
                 "task_id": None,
                 "blocked_on": blocked_on,
             }
-
-    blocked_on = _task_blocked_on(_observed_stop_task_id(session_id, config=cfg), config=cfg)
-    if blocked_on:
+        # A blocked_on with no live autonomous resolver (a human gate / stale / self /
+        # cyclic ref) must NOT release the stop here either. Hard-block exactly like the
+        # in-progress path -- do NOT fall through to the stop-reason logic, which would
+        # ALLOW_STOP for a project with no active user_stop_conditions (Family-audit
+        # Clarity-F2 / Horizon-H3). Non_convergable for the same reason as the first path.
         return {
-            "block": False,
-            "reason": None,
-            "wake_type": WAKE_ALLOW_STOP,
-            "task_id": None,
-            "blocked_on": blocked_on,
+            "block": True,
+            "reason": _human_gate_block_reason(observed_task_id, blocked_on),
+            "wake_type": "WAKE_WITH_QUEUE",
+            "task_id": observed_task_id,
+            "blocked_on_rejected": blocked_on,
+            "non_convergable": True,
         }
 
     reason_required: Optional[Dict[str, Any]] = None
@@ -858,12 +992,26 @@ def get_session_stop_decision(session_id: str,
     try:
         decision = _raw_stop_decision(session_id, config=cfg)
     except Exception as exc:
+        # FAIL CLOSED. A stop-DISCIPLINE engine must never let an error license a stop:
+        # the human-gate decision path runs live Neo4j/Redis reads (_task_blocked_on ->
+        # get_task, _observed_stop_task_id, get_session_current_work, ...), so a transient
+        # blip -- not just a full DB outage -- would otherwise bubble here and ALLOW_STOP an
+        # unresolved human gate (Family-audit Gaia R2 BLOCKER). Keep working instead; mark
+        # non_convergable so the valve below can't later release it. Anti-wedge is satisfied
+        # by "keep working", not by "allow stop". This is loud (busy-loop visible in logs)
+        # if the engine is persistently broken -- the correct failure mode for a keystone,
+        # vs. a silent fleet-wide stop. (no-fallbacks: works or fails loud.)
         decision = {
-            "block": False,
-            "reason": "keystone stop decision unavailable; fail-open allow used.",
-            "wake_type": WAKE_ALLOW_STOP,
-            "task_id": None,
-            "keystone_fail_open": {
+            "block": True,
+            "reason": "Stop-engine decision errored; failing CLOSED (keep working) so an "
+                      "error cannot license an unverified stop. Stay on your current task; if "
+                      "this persists the orchestrator DB is degraded -- fix that, do not stop.",
+            "wake_type": "WAKE_WITH_QUEUE",
+            # best-effort: keep the session on its CURRENT task rather than detaching it to
+            # fetch a new one (Family-audit Cosmos R3 #5). If even this read fails, None.
+            "task_id": _safe_observed_stop_task_id(session_id, cfg),
+            "non_convergable": True,
+            "keystone_fail_closed": {
                 "session": session_id,
                 "operation": "_raw_stop_decision",
                 "exception_class": exc.__class__.__name__,
@@ -885,15 +1033,25 @@ def get_session_stop_decision(session_id: str,
                 timeout_s=validate_timeout_s,
             )
         except Exception as exc:
-            decision = dict(decision)
-            decision["hv_fail_open"] = {
-                "session": session_id,
-                "operation": "validate_stop_handoff",
-                "exception_class": exc.__class__.__name__,
-                "handoff_id": observed_task_id,
+            # FAIL CLOSED, matching the keystone discipline (Family-audit Cosmos R5 B4). A
+            # transient error in handoff validation must NOT fall through to the unchanged
+            # block:False and license an unverified stop -- keep the session working.
+            decision = {
+                "block": True,
+                "reason": "Handoff validation errored; failing CLOSED (keep working) so a "
+                          "transient error cannot license an unverified stop.",
+                "wake_type": "WAKE_WITH_QUEUE",
+                "task_id": observed_task_id,
+                "non_convergable": True,
+                "hv_fail_closed": {
+                    "session": session_id,
+                    "operation": "validate_stop_handoff",
+                    "exception_class": exc.__class__.__name__,
+                    "handoff_id": observed_task_id,
+                },
             }
             _LOG.warning(
-                "handoff validation fail-open for %s (%s): %s",
+                "handoff validation fail-CLOSED for %s (%s): %s",
                 session_id,
                 observed_task_id,
                 exc.__class__.__name__,
@@ -926,6 +1084,21 @@ def get_session_stop_decision(session_id: str,
                 }
 
     if not stop_hook_active:
+        return decision
+
+    # NON_CONVERGABLE blocks bypass the convergence release valve below. The valve exists
+    # so a session cannot wedge permanently on a repeated block -- but a human-gate /
+    # stale / self / cyclic blocked_on is permanently insoluble BY DESIGN, and the whole
+    # point of rejecting it is that it must NEVER release a stop. Letting the valve
+    # force-allow it after N attempts just delays the indefinite-park bug by N cycles
+    # (Family-audit Clarity-F1 / Horizon-H2). Clear any stale convergence counter so a
+    # later genuine block starts fresh, then return the block unmodified.
+    if decision.get("non_convergable") and decision.get("block"):
+        try:
+            r = get_redis_sync(cfg)
+            _redis_marker_call(r.delete, _stop_block_marker_key(session_id), _stop_block_count_key(session_id))
+        except Exception:
+            pass
         return decision
 
     marker_key = _stop_block_marker_key(session_id)
