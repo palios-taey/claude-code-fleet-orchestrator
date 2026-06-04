@@ -1577,7 +1577,14 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     # INDEPENDENT verified PASS (mechanical gate_run and/or gatekeeper audit_verdict) for that
     # (task, sha). The builder's say-so is not enough — something else must have run/reviewed it.
     # Completions without a commit_sha (design/doc/measure) are not code-gated by this.
-    if status == "completed" and str(os.environ.get("CF_COMPLETION_GATE_REQUIRED") or "").strip().lower() in {"1", "true", "yes", "on"}:
+    # Staged activation: CF_COMPLETION_GATE_SESSIONS (comma-list of owners) scopes enforcement to those
+    # owners only, so the gate can be turned on CONDUCTOR-FIRST (dogfood myself) without gating the other
+    # supervisors. Unset/empty = enforce for ALL owners (the eventual fleet-wide state).
+    _gate_on = str(os.environ.get("CF_COMPLETION_GATE_REQUIRED") or "").strip().lower() in {"1", "true", "yes", "on"}
+    _gate_owner_allow = {o.strip().lower() for o in (os.environ.get("CF_COMPLETION_GATE_SESSIONS") or "").split(",") if o.strip()}
+    _completing_owner = str(owner or "").strip().lower()
+    _gate_in_scope = (not _gate_owner_allow) or (_completing_owner in _gate_owner_allow)
+    if status == "completed" and _gate_on and _gate_in_scope:
         _gate_sha = (completion_evidence_value or {}).get("commit_sha") if completion_evidence_value else None
         # Read the REAL tag property (capability_tags — what create_task/plan_loader write; t.tags is
         # never written). Fail-closed: a completion needs a verified commit_sha UNLESS the task is purely
