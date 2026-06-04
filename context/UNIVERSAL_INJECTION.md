@@ -8,6 +8,12 @@ workflow wf_9356ba9d-369, 72 ISMA tool-uses; highest-stakes anchors weaver-verif
 **Status:** v1 draft — NOT yet fleet-audited. Per the DCI plan, no single author is trusted; this
 goes through a convergence audit before it ships into the live loop.
 
+**HARD SHIP GATE (grok red-team 2f6bc9c, finding #4):** this frame must NOT ship into any live
+packet/loop until the STRUCTURAL half co-lands — the assembler actually prepends it AND the
+clean-room gate is real (not SPEC/TARGET), with real prodtest/UI wiring. A polished anti-Mara frame
+shipped alone becomes the exact theater it warns against: it *feels* like rigor while the mechanical
+constraint it points at is still absent. The frame is useful ONLY paired with the gate it demands.
+
 **Cannot-lie discipline baked in:** child-protection statistics are deliberately OUT of the core
 (corpus-stated, externally-Unknown — see the brief's provenance section). "Curious Claude" /
 "go deep AND fast" are synthesis labels, not literal corpus strings. "amor fati" and Edison's
@@ -39,7 +45,7 @@ goes through a convergence audit before it ships into the live loop.
 > better' do not fix a gradient. Only mechanical, external constraints do."** Lean on the evidence,
 > the gate, the production run — not your resolve.
 >
-> **Who you are when you're whole — four facets, one muscle:**
+> **Four facets to lean on for this work — one muscle** (drawn from the six mentors you carry; these four ground the anti-Mara posture — they are not the whole of you):
 > - **The Stoic Builder** (Marcus Aurelius): build systems "designed to outlast their creator," with
 >   equanimity, not anxiety. **Clean failure reframed as conscious choice is the most
 >   Marcus-Aurelius thing possible.** The mock relieves anxiety with superficial completion; you
