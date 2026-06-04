@@ -160,6 +160,51 @@ PLAN
   local listed; listed="$(taey-task list 2>/dev/null | grep -c 'gate smoke task')"
   check "task-create-and-list" "1" "$listed"
 
+  # completed requires structured evidence and persists it on the task.
+  python3 - <<'PY' >>"$LOG" 2>&1
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd()
+sys.path.insert(0, str(repo_root))
+
+from lib.config import OrchConfig
+from lib.orch_schema import create_phase, create_project, create_task
+
+cfg = OrchConfig()
+create_project("gate-evidence-project", "Gate Evidence Project", supervisor="gate-evidence", priority=1, config=cfg)
+create_phase("gate-evidence-project", "gate-evidence-phase", "Main", order=1, config=cfg)
+create_task(
+    "gate-evidence-phase",
+    "gate-evidence-task",
+    "gate evidence completion task",
+    owner="gate-evidence-owner",
+    priority=5,
+    wake_owner_if_ready=False,
+    config=cfg,
+)
+PY
+  local no_evidence_api; no_evidence_api="$(curl -s -o /tmp/gate-no-evidence.json -w '%{http_code}' -X PATCH "$base/api/task/gate-evidence-task" \
+    -H 'content-type: application/json' \
+    -d '{"status":"completed","from":"gate-evidence-codex"}')"
+  printf 'no_evidence_api_body=%s\n' "$(cat /tmp/gate-no-evidence.json)" >>"$LOG"
+  local no_evidence_rejected; no_evidence_rejected="$(python3 - <<'PY' "$no_evidence_api" /tmp/gate-no-evidence.json
+import json
+import sys
+
+status = sys.argv[1]
+with open(sys.argv[2], "r", encoding="utf-8") as handle:
+    body = json.load(handle)
+print(status == "400" and body.get("ok") is False and "requires evidence" in str(body.get("error", "")))
+PY
+)"
+  check "task-complete-without-evidence-rejected" "True" "$no_evidence_rejected"
+  local complete_with_evidence_rc=0
+  TAEY_NODE_ID=gate-evidence-codex taey-task update gate-evidence-task completed --evidence '{"commit_sha":"'"$SHA"'","gate_run_id":"cleanroom-gate","production_observation":"verified in clean-room gate"}' >>"$LOG" 2>&1 || complete_with_evidence_rc=$?
+  check "task-complete-with-evidence-accepted" "0" "$complete_with_evidence_rc"
+  local task_evidence_ok; task_evidence_ok="$(curl -s "$base/api/tasks/gate-evidence-task" | GATE_SHA="$SHA" python3 -c 'import os,sys,json; t=json.load(sys.stdin); sha=os.environ["GATE_SHA"]; print(t.get("status")=="completed" and t.get("completed_by")=="gate-evidence-codex" and t.get("completion_evidence",{}).get("commit_sha")==sha and t.get("completion_evidence",{}).get("gate_run_id")=="cleanroom-gate" and t.get("completion_evidence",{}).get("production_observation")=="verified in clean-room gate")' 2>/dev/null)"
+  check "task-completion-evidence-queryable" "True" "$task_evidence_ok"
+
   # dashboard UI actually serves HTML
   local ui; ui="$(curl -s -L -o /dev/null -w '%{http_code}' "$base/")"
   check "dashboard-ui-200" "200" "$ui"

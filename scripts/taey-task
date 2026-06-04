@@ -11,7 +11,7 @@ Usage:
     taey-task create "Enhancement: add retry logic to consultation pipeline" --from weaver
     taey-task list                    # Show pending tasks
     taey-task status <task-id>        # Check a task's status
-    taey-task update <task-id> completed   # Mark task done
+    taey-task update <task-id> completed --evidence '{"commit_sha":"abc123","production_observation":"verified live"}'
 """
 import argparse
 import json
@@ -66,6 +66,18 @@ def api_call(method, endpoint, data=None):
         sys.exit(1)
 
 
+def parse_evidence_arg(raw):
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"ERROR: --evidence must be valid JSON: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(value, dict):
+        print("ERROR: --evidence must decode to a JSON object", file=sys.stderr)
+        sys.exit(1)
+    return value
+
+
 def cmd_create(args):
     """Create a new OrchTask."""
     sender = args.sender or detect_from_node()
@@ -110,12 +122,24 @@ def cmd_status(args):
     print(f"  Owner: {t.get('owner', 'unassigned')}")
     print(f"  Blocked on: {t.get('blocked_on') or '-'}")
     print(f"  Priority: {t.get('priority', '?')}")
+    if t.get("completed_by"):
+        print(f"  Completed by: {t.get('completed_by')}")
+    if t.get("completed_at"):
+        print(f"  Completed at: {t.get('completed_at')}")
+    if t.get("completion_evidence"):
+        print(f"  Completion evidence: {json.dumps(t.get('completion_evidence'), sort_keys=True)}")
     print(f"  Description: {t.get('description', '?')[:200]}")
 
 
 def cmd_update(args):
     """Update a task's status via PATCH /api/task/{id}."""
     sender = detect_from_node()
+    if args.status == "completed" and args.evidence is None:
+        print("ERROR: completed status requires --evidence JSON", file=sys.stderr)
+        sys.exit(1)
+    if args.status != "completed" and args.evidence is not None:
+        print("ERROR: --evidence is only valid with completed status", file=sys.stderr)
+        sys.exit(1)
     data = {
         "status": args.status,
         "from": sender,
@@ -124,6 +148,8 @@ def cmd_update(args):
         data["blocked_on"] = ""
     elif args.blocked_on is not None:
         data["blocked_on"] = args.blocked_on
+    if args.evidence is not None:
+        data["evidence"] = parse_evidence_arg(args.evidence)
     result = api_call("PATCH", f"/api/task/{args.task_id}", data)
     if result.get("ok"):
         blocked_on = result.get("blocked_on")
@@ -158,6 +184,8 @@ def main():
     p_update.add_argument("--blocked-on", help="Mark the in-progress task as waiting on an external signal")
     p_update.add_argument("--clear-blocked-on", action="store_true",
                           help="Clear the task's blocked_on marker")
+    p_update.add_argument("--evidence",
+                          help="JSON object with completion evidence, e.g. '{\"commit_sha\":\"abc123\",\"production_observation\":\"verified live\"}'")
 
     args = parser.parse_args()
     if args.command == "create":
