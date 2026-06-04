@@ -131,7 +131,7 @@ def _orch_task_exists(task_id: str) -> bool:
     return record is not None
 
 
-def _claim_ready_orch_task(task_id: str, worker: str) -> None:
+def _claim_ready_orch_task(task_id: str, worker: str, allow_reclaim: bool = False) -> None:
     if not _orch_task_exists(task_id):
         return
 
@@ -140,7 +140,11 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
         record = session.run(
             """
             MATCH (t:OrchTask {id: $task_id})
-            WHERE coalesce(t.status, 'pending') = 'pending'
+            WITH t, coalesce(t.status, 'pending') AS prior_status
+            WHERE (
+                    prior_status = 'pending'
+                    OR ($allow_reclaim AND prior_status IN ['completed', 'in_progress', 'failed', 'interrupted'])
+                  )
               AND NOT EXISTS {
                   MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
                   WHERE dep.status <> 'completed'
@@ -148,11 +152,25 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
             SET t.status = 'in_progress',
                 t.owner = $worker,
                 t.blocked_on = NULL,
+                t.result = '',
+                t.completion_evidence = NULL,
+                t.completed_by = NULL,
+                t.completed_at = NULL,
+                t.dispatch_cycle = CASE
+                    WHEN t.dispatch_cycle IS NULL OR t.dispatch_cycle = '' THEN 1
+                    ELSE toInteger(t.dispatch_cycle) + 1
+                END,
+                t.last_claim_mode = CASE
+                    WHEN $allow_reclaim AND prior_status <> 'pending' THEN 'reclaim'
+                    ELSE 'claim'
+                END,
+                t.last_claim_from_status = prior_status,
                 t.updated_at = datetime()
-            RETURN t.id AS task_id
+            RETURN t.id AS task_id, prior_status AS prior_status, t.dispatch_cycle AS dispatch_cycle
             """,
             task_id=task_id,
             worker=worker,
+            allow_reclaim=allow_reclaim,
         ).single()
 
         if record is not None:
@@ -182,9 +200,10 @@ def dispatch(
     task_id: str,
     description: str,
     supervisor: Optional[str] = None,
-    prompt_body: Optional[str] = None,
-    priority: str = "normal",
-    is_bugfix: bool = False,
+            prompt_body: Optional[str] = None,
+            priority: str = "normal",
+            is_bugfix: bool = False,
+            allow_reclaim: bool = False,
 ) -> None:
     """Record the task on the worker side and inject the prompt.
 
@@ -220,7 +239,7 @@ def dispatch(
             )
             raise BugLockActive(f"BUG_LOCK_ACTIVE for {product_id}: {reason}")
 
-    _claim_ready_orch_task(task_id=task_id, worker=worker)
+    _claim_ready_orch_task(task_id=task_id, worker=worker, allow_reclaim=allow_reclaim)
     mark_superseded_for_task(_redis_connect(), from_session := (supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")), task_id)
 
     bind_current_task(

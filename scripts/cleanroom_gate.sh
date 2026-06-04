@@ -108,6 +108,8 @@ ORCH_REDIS_PORT=$REDIS_PORT
 ORCH_NEO4J_URI=bolt://127.0.0.1:$NEO4J_BOLT_PORT
 ORCH_NEO4J_DB=neo4j
 ORCH_DASHBOARD_URL=http://127.0.0.1:$PORT
+ORCH_NOTIFY_LIB_ROOT=/home/mira/claude-code-fleet-notify
+PYTHONPATH=/home/mira/claude-code-fleet-notify
 CF_STOP_INPROGRESS=1
 CF_STOP_INPROGRESS_SESSIONS=gate-stop-codex
 ENVEOF
@@ -204,6 +206,57 @@ PY
   check "task-complete-with-evidence-accepted" "0" "$complete_with_evidence_rc"
   local task_evidence_ok; task_evidence_ok="$(curl -s "$base/api/tasks/gate-evidence-task" | GATE_SHA="$SHA" python3 -c 'import os,sys,json; t=json.load(sys.stdin); sha=os.environ["GATE_SHA"]; print(t.get("status")=="completed" and t.get("completed_by")=="gate-evidence-codex" and t.get("completion_evidence",{}).get("commit_sha")==sha and t.get("completion_evidence",{}).get("gate_run_id")=="cleanroom-gate" and t.get("completion_evidence",{}).get("production_observation")=="verified in clean-room gate")' 2>/dev/null)"
   check "task-completion-evidence-queryable" "True" "$task_evidence_ok"
+
+  # recurring/new-cycle reclaim: the same OrchTask id can be dispatched again
+  # only when the dispatcher explicitly asks for a reclaim.
+  local reclaim_no_flag; reclaim_no_flag="$(python3 - <<'PY'
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd()
+sys.path.insert(0, str(repo_root))
+
+from lib.config import OrchConfig
+from lib.dispatch import OrchTaskNotReady, dispatch
+from lib.orch_schema import create_phase, create_project, create_task, update_task_status
+
+cfg = OrchConfig()
+create_project("gate-reclaim-project", "Gate Reclaim Project", supervisor="gate-reclaim", priority=1, config=cfg)
+create_phase("gate-reclaim-project", "gate-reclaim-phase", "Main", order=1, config=cfg)
+create_task("gate-reclaim-phase", "gate-reclaim-task", "gate reclaim task", owner="gate-reclaim-codex", priority=5, wake_owner_if_ready=False, config=cfg)
+update_task_status("gate-reclaim-task", "completed", owner="gate-reclaim-codex", completion_evidence={"commit_sha": "seed"}, completed_by="gate-seed", config=cfg)
+try:
+    dispatch("gate-reclaim-codex", "gate-reclaim-task", "gate reclaim task", supervisor="gate-reclaim", allow_reclaim=False)
+except OrchTaskNotReady:
+    print("True")
+else:
+    print("False")
+PY
+)"
+  check "dispatch-completed-without-reclaim-rejected" "True" "$reclaim_no_flag"
+  local reclaim_yes_flag; reclaim_yes_flag="$(python3 - <<'PY'
+import json
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd()
+sys.path.insert(0, str(repo_root))
+
+from lib.dispatch import clear_current_task, dispatch
+from lib.orch_schema import get_task
+
+dispatch("gate-reclaim-codex", "gate-reclaim-task", "gate reclaim task", supervisor="gate-reclaim", allow_reclaim=True)
+task = get_task("gate-reclaim-task")
+clear_current_task("gate-reclaim-codex")
+print(
+    task.get("status") == "in_progress"
+    and task.get("last_claim_mode") == "reclaim"
+    and task.get("last_claim_from_status") == "completed"
+    and int(task.get("dispatch_cycle", 0) or 0) == 1
+)
+PY
+)"
+  check "dispatch-completed-reclaim-allowed" "True" "$reclaim_yes_flag"
 
   # stale ad-hoc default-project in_progress rows close themselves at the source
   # when there is no live current_task backing them.
