@@ -597,6 +597,32 @@ def _task_blocked_on(task_id: Optional[str], config: Optional[OrchConfig] = None
     return str(blocked_on)
 
 
+def _close_stale_ad_hoc_in_progress_tasks(session_id: str,
+                                          config: Optional[OrchConfig] = None) -> List[str]:
+    cfg = config or OrchConfig()
+    live_task_id = _observed_stop_task_id(session_id, config=cfg)
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run(
+            """
+            MATCH (:OrchProject {id: 'default'})-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE t.owner = $session_id
+              AND t.status = 'in_progress'
+              AND ($live_task_id IS NULL OR t.id <> $live_task_id)
+            SET t.status = 'interrupted',
+                t.blocked_on = NULL,
+                t.result = 'stale ad-hoc in_progress reconciled: no live current_task',
+                t.completed_by = NULL,
+                t.completed_at = NULL,
+                t.updated_at = datetime()
+            RETURN t.id AS task_id
+            """,
+            session_id=session_id,
+            live_task_id=live_task_id,
+        )
+        return [str(record["task_id"]) for record in result]
+
+
 def _queue_block_reason(task_id: Optional[str], description: Optional[str]) -> str:
     task_id_value = task_id or "unknown-task"
     task_title = (description or "untitled task")[:80]
@@ -1572,6 +1598,7 @@ def get_session_current_work(session_id: str,
                              config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
     """Return the highest-priority in-progress task for a session with project context."""
     cfg = config or OrchConfig()
+    _close_stale_ad_hoc_in_progress_tasks(session_id, config=cfg)
     driver = get_neo4j_driver(cfg)
     try:
         with driver.session(database=cfg.neo4j_db) as session:

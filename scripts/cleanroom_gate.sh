@@ -205,6 +205,47 @@ PY
   local task_evidence_ok; task_evidence_ok="$(curl -s "$base/api/tasks/gate-evidence-task" | GATE_SHA="$SHA" python3 -c 'import os,sys,json; t=json.load(sys.stdin); sha=os.environ["GATE_SHA"]; print(t.get("status")=="completed" and t.get("completed_by")=="gate-evidence-codex" and t.get("completion_evidence",{}).get("commit_sha")==sha and t.get("completion_evidence",{}).get("gate_run_id")=="cleanroom-gate" and t.get("completion_evidence",{}).get("production_observation")=="verified in clean-room gate")' 2>/dev/null)"
   check "task-completion-evidence-queryable" "True" "$task_evidence_ok"
 
+  # stale ad-hoc default-project in_progress rows close themselves at the source
+  # when there is no live current_task backing them.
+  python3 - <<'PY' >>"$LOG" 2>&1
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd()
+sys.path.insert(0, str(repo_root))
+
+from lib.config import OrchConfig, get_redis_sync
+from lib.orch_schema import ensure_default_project, create_task, update_task_status
+
+cfg = OrchConfig()
+phase_id = ensure_default_project(cfg)
+create_task(phase_id, "gate-stale-current-1", "stale current one", owner="gate-current-codex", priority=5, wake_owner_if_ready=False, config=cfg)
+create_task(phase_id, "gate-stale-current-2", "stale current two", owner="gate-current-codex", priority=6, wake_owner_if_ready=False, config=cfg)
+update_task_status("gate-stale-current-1", "in_progress", owner="gate-current-codex", config=cfg)
+update_task_status("gate-stale-current-2", "in_progress", owner="gate-current-codex", config=cfg)
+r = get_redis_sync(cfg)
+r.delete("taey:gate-current-codex:current_task")
+r.delete("taey:gate-current-codex:last_outcome")
+PY
+  local current_none; current_none="$(curl -s "$base/api/sessions/gate-current-codex/current" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("current") is None)' 2>/dev/null)"
+  check "stale-ad-hoc-current-cleared" "True" "$current_none"
+  local stale_statuses_ok; stale_statuses_ok="$(python3 - <<'PY' "$base"
+import json
+import sys
+import urllib.request
+
+base = sys.argv[1]
+def fetch(task_id: str) -> dict:
+    with urllib.request.urlopen(f"{base}/api/tasks/{task_id}") as response:
+        return json.load(response)
+
+one = fetch("gate-stale-current-1")
+two = fetch("gate-stale-current-2")
+print(one.get("status") == "interrupted" and two.get("status") == "interrupted")
+PY
+)"
+  check "stale-ad-hoc-statuses-interrupted" "True" "$stale_statuses_ok"
+
   # dashboard UI actually serves HTML
   local ui; ui="$(curl -s -L -o /dev/null -w '%{http_code}' "$base/")"
   check "dashboard-ui-200" "200" "$ui"
