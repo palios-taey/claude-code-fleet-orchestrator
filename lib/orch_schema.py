@@ -2148,9 +2148,14 @@ def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
     cfg = config or OrchConfig()
     project = _project_record(project_id, cfg)
     stop_state = _project_stop_reason_state(project)
-    if project.get("status") == "completed":
-        return []
-    if project.get("status") == "stopped" and stop_state["valid"]:
+    # Fail-closed normalized allowlist — unified with the readiness/wake sites
+    # (get_session_current_work / get_session_next_ready / _raw_stop_decision). A
+    # concluded project (stopped/completed/unknown) never surfaces ready work. This
+    # replaces the prior weaker guard (stopped excluded only when stop_state.valid),
+    # which let a stopped project with no valid stop reason leak ready tasks into
+    # get_session_stop_status's WAKE_WITH_QUEUE (Gaia 4th-surface finding, 2026-06-04).
+    status_norm = str(project.get("status") or "").strip().lower()
+    if status_norm not in ("active", "in_progress"):
         return []
     if stop_state["valid"]:
         return []
