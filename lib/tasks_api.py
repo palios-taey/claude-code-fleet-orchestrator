@@ -33,6 +33,7 @@ from lib.easy_setup import package_version
 from lib.shippability import evaluate_shippability
 from lib.dispatch import bind_current_task, record_outcome
 from lib.orch_schema import (
+    CompletionEvidenceError,
     ConditionValidationError,
     PauseValidationError,
     PriorityAuditError,
@@ -265,6 +266,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         if owner is None:
             owner = task_before.get("owner", "")
         blocked_on = data["blocked_on"] if "blocked_on" in data else None
+        completion_evidence = data.get("evidence")
 
         update_task_status(
             task_id,
@@ -272,6 +274,8 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             owner=owner,
             result=result,
             blocked_on=blocked_on,
+            completion_evidence=completion_evidence,
+            completed_by=sender or owner or "",
             config=cfg,
         )
 
@@ -304,8 +308,14 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             "status": status,
             "owner": owner,
             "blocked_on": blocked_on if blocked_on is not None else task_before.get("blocked_on"),
+            "completion_evidence": completion_evidence if status == "completed" else task_before.get("completion_evidence"),
             "phase_completed": phase_completed,
         }
+    except CompletionEvidenceError as e:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": str(e)},
+        )
     except Exception as e:
         return JSONResponse(
             status_code=500,

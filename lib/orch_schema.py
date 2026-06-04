@@ -68,8 +68,13 @@ class PauseValidationError(ValueError):
     pass
 
 
+class CompletionEvidenceError(ValueError):
+    pass
+
+
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
+_COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
 
 
 def _utc_now_iso() -> str:
@@ -89,6 +94,26 @@ def _decode_json_field(raw: Any, default: Any) -> Any:
         except json.JSONDecodeError:
             return copy.deepcopy(default)
     return raw
+
+
+def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    if evidence is None:
+        return None
+    if not isinstance(evidence, dict):
+        raise CompletionEvidenceError("completion evidence must be a JSON object")
+    normalized: Dict[str, str] = {}
+    for key in _COMPLETION_EVIDENCE_KEYS:
+        value = evidence.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            normalized[key] = text
+    if not normalized:
+        raise CompletionEvidenceError(
+            "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
+        )
+    return normalized
 
 
 def _normalize_owner_session(owner: str) -> str:
@@ -1500,11 +1525,27 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
 def update_task_status(task_id: str, status: str, owner: str = "",
                        result: Optional[str] = None,
                        blocked_on: Optional[str] = None,
+                       completion_evidence: Optional[Dict[str, Any]] = None,
+                       completed_by: Optional[str] = None,
                        config: Optional[OrchConfig] = None) -> bool:
     """Update task status, owner, and optional result."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     blocked_on_value = "__KEEP__" if blocked_on is None else blocked_on
+    # Evidence REQUIREMENT is flag-gated (default OFF) for staged rollout. Deploying this
+    # dormant does not break existing completion flows; activation
+    # (CF_COMPLETION_EVIDENCE_REQUIRED=1) is a deliberate fleet-wide step taken AFTER the CLI
+    # + all completion call-sites pass evidence (stage-gate discipline). When OFF, completion
+    # without evidence is allowed (current behavior); evidence that IS provided is still
+    # validated below regardless of the flag.
+    _evidence_required = str(os.environ.get("CF_COMPLETION_EVIDENCE_REQUIRED") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if status == "completed" and completion_evidence is None and _evidence_required:
+        raise CompletionEvidenceError(
+            "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
+        )
+    completion_evidence_value = _normalize_completion_evidence(completion_evidence) if status == "completed" else None
+    if status != "completed" and completion_evidence is not None:
+        raise CompletionEvidenceError("completion evidence is only valid on a completed transition")
     try:
         with driver.session(database=cfg.neo4j_db) as session:
             if result is None:
@@ -1530,9 +1571,23 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                             ) THEN 0
                             ELSE coalesce(t.forced_continuation_count, 0)
                         END,
+                        t.completion_evidence = CASE
+                            WHEN $status = 'completed' THEN $completion_evidence
+                            ELSE NULL
+                        END,
+                        t.completed_by = CASE
+                            WHEN $status = 'completed' THEN $completed_by
+                            ELSE NULL
+                        END,
+                        t.completed_at = CASE
+                            WHEN $status = 'completed' THEN datetime()
+                            ELSE NULL
+                        END,
                         t.updated_at = datetime()
                     RETURN t.id AS id
-                """, task_id=task_id, status=status, owner=owner, blocked_on=blocked_on_value)
+                """, task_id=task_id, status=status, owner=owner, blocked_on=blocked_on_value,
+                     completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
+                     completed_by=completed_by or owner or "")
             else:
                 rec = session.run("""
                     MATCH (t:OrchTask {id: $task_id})
@@ -1557,10 +1612,24 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                             ) THEN 0
                             ELSE coalesce(t.forced_continuation_count, 0)
                         END,
+                        t.completion_evidence = CASE
+                            WHEN $status = 'completed' THEN $completion_evidence
+                            ELSE NULL
+                        END,
+                        t.completed_by = CASE
+                            WHEN $status = 'completed' THEN $completed_by
+                            ELSE NULL
+                        END,
+                        t.completed_at = CASE
+                            WHEN $status = 'completed' THEN datetime()
+                            ELSE NULL
+                        END,
                         t.updated_at = datetime()
                     RETURN t.id AS id
                 """, task_id=task_id, status=status, owner=owner, result=result,
-                     blocked_on=blocked_on_value)
+                     blocked_on=blocked_on_value,
+                     completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
+                     completed_by=completed_by or owner or "")
             if rec.single() is None:
                 return False
             session.run("""
@@ -1597,6 +1666,7 @@ def get_task(task_id: str,
                 return None
             task = _normalize_map(dict(result["t"]))
             task["forced_continuation_count"] = int(task.get("forced_continuation_count", 0) or 0)
+            task["completion_evidence"] = _decode_json_field(task.get("completion_evidence"), None)
             return _attach_ref_runtime(task, source_path=task.get("source_path"))
     finally:
         pass  # Driver is singleton; do not close
