@@ -879,11 +879,13 @@ def _raw_stop_decision(session_id: str,
     )
 
     for project in projects:
-        status = str(project.get("status") or "active")
-        # Readiness/wake surfaces work ONLY from live projects. Concluded projects
-        # (completed/stopped/archived) and any unknown status are excluded via a
-        # fail-closed allowlist, so a concluded sprint's unclosed in_progress tasks
-        # never force-grind their owner (hunter token-burn root-cause, 2026-06-04).
+        status = str(project.get("status") or "").strip().lower()
+        # Readiness/wake surfaces work ONLY from live projects. Status is normalized
+        # (strip+lower) so 'Active'/'ACTIVE ' still ADMIT (Cosmos: case/whitespace must
+        # not starve live work); NULL/missing/unknown -> '' -> EXCLUDED fail-closed
+        # (Horizon: unknown must not silently admit). Concluded statuses (stopped/
+        # completed/archived/...) are excluded. hunter token-burn root-cause 2026-06-04;
+        # Family-audit convergence fix (Horizon+Cosmos BLOCK).
         if status not in ("active", "in_progress"):
             continue
         next_ready = get_session_next_ready(ready_owner, project_id=str(project.get("id")), config=cfg)
@@ -972,11 +974,13 @@ def _raw_stop_decision(session_id: str,
 
     reason_required: Optional[Dict[str, Any]] = None
     for project in projects:
-        status = str(project.get("status") or "active")
-        # Readiness/wake surfaces work ONLY from live projects. Concluded projects
-        # (completed/stopped/archived) and any unknown status are excluded via a
-        # fail-closed allowlist, so a concluded sprint's unclosed in_progress tasks
-        # never force-grind their owner (hunter token-burn root-cause, 2026-06-04).
+        status = str(project.get("status") or "").strip().lower()
+        # Readiness/wake surfaces work ONLY from live projects. Status is normalized
+        # (strip+lower) so 'Active'/'ACTIVE ' still ADMIT (Cosmos: case/whitespace must
+        # not starve live work); NULL/missing/unknown -> '' -> EXCLUDED fail-closed
+        # (Horizon: unknown must not silently admit). Concluded statuses (stopped/
+        # completed/archived/...) are excluded. hunter token-burn root-cause 2026-06-04;
+        # Family-audit convergence fix (Horizon+Cosmos BLOCK).
         if status not in ("active", "in_progress"):
             continue
         active_conditions = _active_conditions(list(project.get("user_stop_conditions") or []))
@@ -1896,10 +1900,12 @@ def get_session_current_work(session_id: str,
             result = session.run("""
                 MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
                 WHERE t.owner = $session_id AND t.status = 'in_progress'
-                  // Fail-closed allowlist: an in_progress task in a concluded project
-                  // (stopped/completed/unknown) is NOT live work and must not force-grind
-                  // its owner via the stop-engine in-progress block (hunter token-burn, 2026-06-04).
-                  AND coalesce(p.status, 'active') IN ['active', 'in_progress']
+                  // Fail-closed, normalized allowlist: an in_progress task in a concluded
+                  // project (stopped/completed/unknown) is NOT live work and must not
+                  // force-grind its owner (hunter token-burn 2026-06-04). trim+lower so
+                  // mixed-case/whitespace status still admits (Cosmos); NULL/'' -> excluded
+                  // fail-closed (Horizon). Family-audit convergence fix.
+                  AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
                 RETURN p.id AS project_id,
                        p.name AS project_name,
                        p.source_path AS project_source_path,
@@ -1961,9 +1967,10 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                       MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
                       WHERE dep.status <> 'completed'
                   }
-                  // Fail-closed allowlist (was a stopped/completed denylist; denylist is
-                  // fail-open for any new concluded status). Live projects only.
-                  AND coalesce(proj.status, 'active') IN ['active', 'in_progress']
+                  // Fail-closed, normalized allowlist (was a stopped/completed denylist;
+                  // denylist is fail-open for any new concluded status). trim+lower so
+                  // mixed-case status admits (Cosmos); NULL/'' excluded fail-closed (Horizon).
+                  AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
                 RETURN t.id AS task_id, t.description AS description,
                        t.priority AS priority, t.owner AS owner,
                        t.blocked_on AS blocked_on,
