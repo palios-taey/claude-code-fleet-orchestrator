@@ -84,8 +84,15 @@ def append(event: Dict[str, Any], ts: Optional[float] = None) -> Dict[str, Any]:
     with open(LEDGER_PATH, "a+", encoding="utf-8") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         try:
-            if f.tell() == 0:  # brand-new file -> write the immutability header first
+            # Decide the header-write from the LIVE on-disk size while holding the lock — NOT from
+            # f.tell() (a stale per-handle position). On a cold-start race, N procs each open a+ on a
+            # size-0 file and each saw tell()==0, so each wrote a duplicate _HEADER mid-file via
+            # O_APPEND and corrupted the chain (gatekeeper BLOCK a454603, observed repro). fstat under
+            # the lock is idempotent across racing initializers: only the proc that observes a truly
+            # empty file writes the header; every later lock-holder sees size>0 and skips it.
+            if os.fstat(f.fileno()).st_size == 0:
                 f.write(_HEADER + "\n")
+                f.flush()
             prev = _scan_last_hash(f)
             ts_str = repr(float(ts) if ts is not None else time.time())
             row: Dict[str, Any] = {"ts": ts_str, "prev_hash": prev, "event": event}
