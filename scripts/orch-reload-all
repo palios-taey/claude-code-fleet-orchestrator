@@ -1,39 +1,40 @@
 #!/usr/bin/env python3
-"""orch-reload-all — clear ALL orchestrator project data and re-ingest every project from source.
+"""orch-reload-all — re-ingest projects from source under project-scoped identity, SAFELY.
 
 Why: task/phase identity became PROJECT-SCOPED (<project>::<id>, lib/plan_loader). Data ingested under
 the old GLOBAL-id model may have silently fused unrelated plans into shared nodes. The markdown is the
-source of truth, so the migration is: re-ingest every project from its source under the new scoping,
-which dissolves the fusion.
+source of truth, so re-ingesting each project from its source under the new scoping dissolves the fusion.
 
-SAFE BY CONSTRUCTION — VALIDATE-ALL-BEFORE-WIPE (R3 audit, Gemini data-loss fix):
-  1. snapshot every project's ingest metadata + source path.
-  2. DRY-VALIDATE each source (parse + scope every id) WITHOUT writing.
-  3. if ANY project's source is missing OR would fail to reload (e.g. a legacy id with a space/slash
-     that the strict id charset now rejects), ABORT before touching the DB — nothing is lost. The
-     operator fixes the offending source(s) and re-runs. --force drops the unreloadable ones on purpose.
-  4. only when ALL remaining sources validate: wipe + re-ingest.
---dry-run writes nothing and just prints the validation report.
+SAFETY (R4 audit FINDING-3 — closes all three loss windows it named):
+  * NO global wipe. We only ever touch projects that are NON-exempt AND whose source is present AND
+    validates (parses + scopes cleanly). Everything else — exempt projects, missing-source, would-fail,
+    and anything created concurrently after the snapshot — is LEFT UNTOUCHED (preserved legacy), never
+    dropped. So there is no wipe-then-lose path and no concurrent-ingest loss.
+  * FULL BACKUP before any write: the entire Orch* subgraph (nodes + rels) is dumped to a timestamped
+    JSON rollback artifact, path printed, before a single delete.
+  * --dry-run writes nothing and reports exactly what would migrate vs be left as legacy.
+Run with the orch-watch / notify daemons PAUSED for cleanliness (single-user, but avoids churn).
 
 Usage:
-  orch-reload-all --dry-run     # validate every source; report missing/invalid; write nothing
-  orch-reload-all --yes         # wipe + reload (ABORTS if anything is missing/invalid)
-  orch-reload-all --yes --force # drop the missing/invalid projects on purpose, reload the rest
+  orch-reload-all --dry-run    # report migrate-set vs left-as-legacy; write nothing
+  orch-reload-all --yes        # backup -> per-project wipe+reload of the reloadable set only
 """
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+import json
 import os
 import sys
 
-# Use the lib next to THIS script (its own repo root), so it works installed, in a worktree, and in
-# the live checkout — without hardcoding an absolute path that could shadow the intended tree.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.config import OrchConfig, get_neo4j_driver
 from lib.plan_loader import (
     load_plan_from_text, _parse_plan, scope_declared_id, validate_project_id, PlanIdError,
 )
+
+BACKUP_DIR = os.environ.get("ORCH_RELOAD_BACKUP_DIR", "/home/mira/the-conductor/accountability")
 
 
 def _snapshot(cfg):
@@ -46,7 +47,6 @@ def _snapshot(cfg):
 
 
 def _dry_validate(md: str):
-    """Parse + scope every declared id WITHOUT writing. Returns (ok, reason)."""
     parsed = _parse_plan(md)
     proj = parsed.get("project")
     if proj is None:
@@ -62,53 +62,74 @@ def _dry_validate(md: str):
         return False, f"PlanIdError: {e}"
 
 
-def _wipe(cfg):
+def _backup(cfg) -> str:
+    """Dump the whole Orch* subgraph (nodes + rels) to a timestamped JSON rollback artifact."""
+    drv = get_neo4j_driver(cfg)
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    path = os.path.join(BACKUP_DIR, f"orch-reload-backup-{_dt.datetime.now(_dt.timezone.utc):%Y%m%dT%H%M%SZ}.json")
+    with drv.session(database=cfg.neo4j_db) as s:
+        nodes = [{"labels": r["labels"], "props": r["props"]} for r in s.run(
+            "MATCH (n) WHERE n:OrchProject OR n:OrchPhase OR n:OrchTask "
+            "RETURN labels(n) AS labels, properties(n) AS props")]
+        rels = [{"type": r["t"], "start": r["a"], "end": r["b"]} for r in s.run(
+            "MATCH (a)-[r]->(b) WHERE (a:OrchProject OR a:OrchPhase OR a:OrchTask) "
+            "AND (b:OrchProject OR b:OrchPhase OR b:OrchTask) "
+            "RETURN type(r) AS t, a.id AS a, b.id AS b")]
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"nodes": nodes, "rels": rels}, f)
+    return path
+
+
+def _wipe_projects(cfg, project_ids):
+    """Delete ONLY the named projects' subgraphs (project + its phases + its tasks). Never global."""
     drv = get_neo4j_driver(cfg)
     with drv.session(database=cfg.neo4j_db) as s:
-        s.run("MATCH (t:OrchTask) DETACH DELETE t")
-        s.run("MATCH (ph:OrchPhase) DETACH DELETE ph")
-        s.run("MATCH (p:OrchProject) DETACH DELETE p")
+        s.run(
+            """UNWIND $pids AS pid
+               MATCH (p:OrchProject {id: pid})
+               OPTIONAL MATCH (p)-[:HAS_PHASE]->(ph:OrchPhase)
+               OPTIONAL MATCH (ph)-[:HAS_TASK]->(t:OrchTask)
+               DETACH DELETE t, ph, p""",
+            pids=list(project_ids),
+        )
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Clear + reload all orchestrator projects from source.")
-    ap.add_argument("--dry-run", action="store_true", help="validate only; write nothing")
-    ap.add_argument("--yes", action="store_true", help="perform the wipe + reload")
-    ap.add_argument("--force", action="store_true",
-                    help="drop projects whose source is missing/invalid instead of aborting")
+    ap = argparse.ArgumentParser(description="Re-ingest projects from source under project-scoped identity.")
+    ap.add_argument("--dry-run", action="store_true", help="report only; write nothing")
+    ap.add_argument("--yes", action="store_true", help="backup, then per-project wipe + reload the reloadable set")
     args = ap.parse_args()
 
     cfg = OrchConfig()
     projects = _snapshot(cfg)
 
-    reloadable, missing, invalid = [], [], []
+    exempt, reloadable, legacy = [], [], []  # legacy = left untouched (missing/would-fail)
     for p in projects:
+        if p.get("exempt"):
+            exempt.append(p["id"]); continue
         src = p.get("src")
         if not (src and os.path.isfile(src)):
-            missing.append((p["id"], src or "none")); continue
+            legacy.append((p["id"], "missing-source")); continue
         with open(src, encoding="utf-8") as f:
-            md = f.read()
-        ok, why = _dry_validate(md)
-        (reloadable if ok else invalid).append((p, why) if not ok else p)
+            ok, why = _dry_validate(f.read())
+        (reloadable if ok else legacy).append(p if ok else (p["id"], why))
 
-    print(f"projects: {len(projects)}  reloadable: {len(reloadable)}  "
-          f"missing-source: {len(missing)}  would-fail: {len(invalid)}")
-    for pid, src in missing:
-        print(f"  MISSING-SOURCE {pid}  (src={src})")
-    for p, why in invalid:
-        print(f"  WOULD-FAIL     {p['id']}  ({why})")
+    print(f"projects: {len(projects)}  -> migrate(reloadable): {len(reloadable)}  "
+          f"left-as-legacy: {len(legacy)}  exempt(preserved): {len(exempt)}")
+    for pid in exempt:
+        print(f"  EXEMPT(preserved)  {pid}")
+    for pid, why in legacy:
+        print(f"  LEFT-AS-LEGACY     {pid}  ({why})")
 
     if args.dry_run or not args.yes:
-        print("\n[dry-run] nothing written. Re-run with --yes (and --force only if the missing/would-fail "
-              "list above is acceptable to DROP) to perform the wipe + reload.")
+        print("\n[dry-run] nothing written. Only the migrate(reloadable) set above would be wiped+reloaded; "
+              "everything else is preserved untouched. Re-run with --yes to apply.")
         return 0
 
-    if (missing or invalid) and not args.force:
-        print(f"\nABORT: {len(missing)+len(invalid)} project(s) cannot be reloaded and would be LOST by the "
-              f"wipe. Fix their source (or pass --force to drop them on purpose). Nothing was written.")
-        return 2
-
-    _wipe(cfg)
+    backup = _backup(cfg)
+    print(f"\nbackup written: {backup}")
+    ids = [p["id"] for p in reloadable]
+    _wipe_projects(cfg, ids)
     ok_n, failed = 0, []
     for p in reloadable:
         try:
@@ -120,13 +141,12 @@ def main() -> int:
                 migration_exempt=bool(p.get("exempt")), config=cfg,
             )
             ok_n += 1
-        except Exception as e:  # validated above, so this is unexpected — report, don't silently swallow
+        except Exception as e:  # validated pre-wipe; if it still fails, the backup is the rollback
             failed.append((p["id"], f"{type(e).__name__}: {e}"))
 
-    dropped = len(missing) + len(invalid) if args.force else 0
-    print(f"\nreloaded OK: {ok_n}   unexpected-failures: {len(failed)}   dropped(--force): {dropped}")
+    print(f"\nmigrated OK: {ok_n}   failed: {len(failed)}   preserved(exempt+legacy): {len(exempt)+len(legacy)}")
     for pid, why in failed:
-        print(f"  FAILED {pid}: {why}")
+        print(f"  FAILED {pid}: {why}  (restore from backup: {backup})")
     return 1 if failed else 0
 
 

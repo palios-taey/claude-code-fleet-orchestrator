@@ -1382,6 +1382,26 @@ def _guard_creatable(session, *, label: str, node_id: str, target_project_id: st
         )
 
 
+def _resolve_phase_project(session, phase_id: str) -> str:
+    """Return the SINGLE OrchProject id that owns this phase, else RAISE (fail-closed). A task may only
+    be created/assigned under a phase that resolves to exactly one project — never an unparented/missing
+    phase (0 owners) or a fused phase (>=2 owners). R4 audit: the old `if _trow and pid` guard FAILED
+    OPEN on the resolution-miss branch (skipped the guard, then MERGEd). Collect (not .single()) so a
+    fused phase is a clean refusal, not a ResultNotSingleError 500."""
+    rec = session.run(
+        "MATCH (ph:OrchPhase {id: $pid})<-[:HAS_PHASE]-(p:OrchProject) "
+        "RETURN collect(DISTINCT p.id) AS owners",
+        pid=phase_id,
+    ).single()
+    owners = (rec["owners"] if rec else []) or []
+    if len(owners) != 1:
+        raise TaskIdCollisionError(
+            f"phase '{phase_id}' does not resolve to exactly one project (owners={owners or 'none'}); "
+            f"refusing to create/assign a task under a missing, orphan, or fused phase."
+        )
+    return owners[0]
+
+
 def create_task(
     phase_id: str,
     task_id: str,
@@ -1405,15 +1425,12 @@ def create_task(
     driver = get_neo4j_driver(cfg)
     try:
         with driver.session(database=cfg.neo4j_db) as session:
-            # Ownership guard via the shared chokepoint (R2/R3 audit — do NOT delete). Resolve THIS
-            # phase's project, then refuse if $task_id already exists owned by anyone other than it
+            # Ownership guard via the shared chokepoint (R2/R3/R4 audit — do NOT delete, do NOT make
+            # conditional). Resolve THIS phase's project FAIL-CLOSED (raises on missing/orphan/fused
+            # phase), then refuse if $task_id already exists owned by anyone other than it
             # (foreign/fused/orphan). Legit ingest never trips this (declared ids are auto-scoped).
-            _trow = session.run(
-                "MATCH (ph:OrchPhase {id: $phase_id})<-[:HAS_PHASE]-(p:OrchProject) RETURN p.id AS pid",
-                phase_id=phase_id,
-            ).single()
-            if _trow and _trow["pid"]:
-                _guard_creatable(session, label="OrchTask", node_id=task_id, target_project_id=_trow["pid"])
+            _target = _resolve_phase_project(session, phase_id)
+            _guard_creatable(session, label="OrchTask", node_id=task_id, target_project_id=_target)
             result = session.run("""
                 MATCH (ph:OrchPhase {id: $phase_id})
                 MERGE (t:OrchTask {id: $task_id})
@@ -1783,24 +1800,13 @@ def assign_task_to_phase(task_id: str, phase_id: str,
     driver = get_neo4j_driver(cfg)
     try:
         with driver.session(database=cfg.neo4j_db) as session:
-            # Guard (R3 audit, Perplexity): this re-parents a task (DELETE+MERGE HAS_TASK). Refuse moving a
-            # task currently owned by ANOTHER project into this phase's project (foreign re-parent /
-            # adoption). Latent today (only the same-project loader calls it) — hardened with the class.
-            _v = session.run(
-                """
-                MATCH (ph:OrchPhase {id: $phase_id})<-[:HAS_PHASE]-(target:OrchProject)
-                OPTIONAL MATCH (t:OrchTask {id: $task_id})<-[:HAS_TASK]-(:OrchPhase)<-[:HAS_PHASE]-(op:OrchProject)
-                WITH target.id AS target, collect(DISTINCT op.id) AS owners
-                WHERE size([o IN owners WHERE o <> target]) > 0
-                RETURN owners AS owners
-                """,
-                task_id=task_id, phase_id=phase_id,
-            ).single()
-            if _v is not None:
-                raise TaskIdCollisionError(
-                    f"task '{task_id}' is owned by project(s) {_v['owners']}; refusing to re-parent it "
-                    f"into a phase of a different project."
-                )
+            # Guard via the SHARED chokepoint (R4 audit BLOCK-2: the prior bespoke predicate here was
+            # orphan-blind — it permitted owners==[] and re-opened the poisoned-orphan ship-gate bypass on
+            # the re-parent path). Resolve the phase's project fail-closed, then run the SAME _guard_creatable
+            # the create paths use (refuses foreign/fused/orphan; allows the same-project re-parent the
+            # loader does, where the task is already owned by target). One helper, no per-path divergence.
+            _target = _resolve_phase_project(session, phase_id)
+            _guard_creatable(session, label="OrchTask", node_id=task_id, target_project_id=_target)
             result = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
                 MATCH (ph:OrchPhase {id: $phase_id})
