@@ -1,0 +1,243 @@
+# Walkthrough — zero to a running supervised loop
+
+A guided, end-to-end path: install → configure → define a plan → run the loop → observe →
+release through the ship-gate. Each step says **what to run** and **what you should see**, so you
+can validate as you go. For reference detail see [README.md](../README.md), [SETUP.md](../SETUP.md),
+[docs/PLAN_FORMAT.md](PLAN_FORMAT.md), [docs/SHIPPABILITY.md](SHIPPABILITY.md).
+
+> **What you are setting up.** One *local, single-user* coordinator. It tracks your work as a
+> plan (project → phases → tasks) in Neo4j, hands ready tasks to worker sessions, wakes a
+> supervisor when a worker finishes, refuses to let a session stop while ready work exists, and
+> refuses to call a project "released" until its gate tasks pass. There is **no auth** — it trusts
+> the local machine. Do not expose the mutable API (`:5002`) to an untrusted network.
+
+---
+
+## Step 0 — Prerequisites
+
+- Python 3.10+ with the stdlib `venv` module (Debian/Ubuntu: `python3-venv`).
+- Redis and Neo4j reachable locally (defaults `127.0.0.1:6379` and `127.0.0.1:7687`), **or** let the
+  installer bring them up via Docker.
+- A sibling checkout of [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify)
+  (the hook/daemon/inbox layer), or `ORCH_NOTIFY_LIB_ROOT` pointing at one.
+- Claude Code installed (uses `~/.claude/settings.json`).
+
+**Expect:** `python3 --version` ≥ 3.10; the notify repo present beside this one.
+
+---
+
+## Step 1 — Install
+
+Preview first (writes nothing):
+
+```bash
+scripts/install --dry-run
+```
+
+**Expect:** a printed install plan + a Claude-settings diff, no files changed.
+
+Then install. If Redis/Neo4j are already running, skip Docker:
+
+```bash
+scripts/install --skip-compose     # BYO infra
+# or
+scripts/install                    # let Docker bring up Redis + Neo4j
+```
+
+**Expect (install flow):** venv created → package installed → Claude settings + notify hooks wired →
+notify daemons started → orchestrator services started → `orch doctor` runs at the end.
+
+Verify:
+
+```bash
+python3 -c "import fleet_orchestrator; print(fleet_orchestrator.__version__)"
+scripts/orch doctor --explain-scope
+```
+
+**Expect:** a version string, and doctor reporting **green** on: Redis PING, Neo4j query, env
+validation, `/health`, the managed Claude deny entries (exactly once), the installed hooks (exactly
+once), the stop-decision round trip, the notify daemon, and `orch-watch` running. Anything red here
+is a setup problem to fix *before* going further — doctor is your single source of truth for "is the
+substrate healthy."
+
+---
+
+## Step 2 — Configure
+
+`scripts/install` seeds `.env` from [.env.example](../.env.example). The five you must get right:
+
+```bash
+ORCH_REDIS_HOST=127.0.0.1
+ORCH_REDIS_PORT=6379
+ORCH_NEO4J_URI=bolt://127.0.0.1:7687
+ORCH_NEO4J_DB=neo4j
+ORCH_DASHBOARD_URL=http://127.0.0.1:5002
+```
+
+Enable the optional features you intend to use:
+
+- **Plan refs** (clickable file-slice pointers): `ORCH_REF_ALLOWED_ROOT=/abs/path/to/your/repos`
+  (one path, comma-list, or JSON list). Refs are *disabled* until this is set.
+- **LAN access** to the dashboard: `ORCH_HOST=0.0.0.0` + a reachable `ORCH_DASHBOARD_URL`. No auth —
+  trusted network only.
+- **Two-way chat** (an injection vector — off by default): `ORCH_CHAT_ENABLED=1`.
+
+**Expect:** re-run `scripts/orch doctor` after edits; still green.
+
+---
+
+## Step 3 — Define your plan (the planning exercise)
+
+This is the part you author. A plan is one markdown file: exactly one **Project**, one or more
+**Phases** (ordered), and **Tasks** under them. The bracketed metadata is where the orchestration
+behavior comes from. Full spec: [docs/PLAN_FORMAT.md](PLAN_FORMAT.md).
+
+```md
+# Project: my-thing — My Thing
+
+## Phase: build — Build it  [order: 1]
+
+### Task: scaffold — Stand up the skeleton            [priority: 10] [owner: worker-a] [tags: code]
+### Task: feature — Implement the feature             [priority: 20] [owner: worker-a] [tags: code] [depends: scaffold]
+### Task: docs — Write the docs                       [priority: 30] [owner: worker-a] [tags: docs] [depends: feature]
+
+## Phase: release — Release it  [order: 2]
+
+### Task: my-thing-prodtest — Full production run     [priority: 10] [owner: worker-a] [tags: prodtest] [depends: docs]
+### Task: my-thing-audit — Full-code audit + sign-off [priority: 20] [owner: worker-a] [tags: audit] [depends: my-thing-prodtest]
+```
+
+**What to define, and why it matters:**
+
+| Field | Required? | What it controls |
+|---|---|---|
+| `# Project:` id + name | yes | the project node; one per file |
+| `## Phase:` id + name | yes | grouping; `[order: N]` sets phase sequence |
+| `### Task:` id + description | yes | the unit of work |
+| `[owner: <session>]` | optional | which session pulls/owns the task |
+| `[priority: <int>]` | optional | ranking among ready tasks (lower = higher) |
+| `[depends: a,b]` | optional | **the gate** — the task stays unready until `a` and `b` are `completed` |
+| `[tags: ...]` | optional | capability tags; gate tasks use `prodtest` / `audit` |
+| `[ref: path:Lx-Ly]` | optional | clickable file-slice pointer in the dashboard (needs `ORCH_REF_ALLOWED_ROOT`) |
+
+**Design tip:** make the last tasks of a project its release gate (`<project>-prodtest`,
+`<project>-audit`) and wire everything else to `depends` into them. That is what makes "shippable"
+unreachable without the validation steps actually closing (Step 7).
+
+---
+
+## Step 4 — Ingest and verify the gating
+
+```bash
+taey-plan ingest /path/to/my-thing.md
+taey-plan list
+```
+
+**Expect:** `phases_created=2 tasks_created=5 errors=0`. The source file does not move — it's hashed
+for provenance and loaded into Neo4j. Re-ingesting after edits is **idempotent** (updates in place;
+tasks deleted from the markdown are reported as `stale_tasks`, not auto-removed).
+
+Now prove the dependency gate works:
+
+```bash
+taey-plan next worker-a
+```
+
+**Expect:** only **`scaffold`** comes back — it's the one task with no `depends`. `feature`, `docs`,
+and the two gate tasks are *not* offered until their predecessors complete. That is the engine
+enforcing the DAG, not a convention.
+
+---
+
+## Step 5 — Run the dashboard and observe
+
+```bash
+scripts/orch serve          # foreground, Ctrl-C to stop
+# or: scripts/orch enable   # background service
+```
+
+Open `http://127.0.0.1:5002/ui/`.
+
+**Expect:** a session-first board (auto-refresh ~5s). Each session card shows its current
+in-progress task and next ready task; selecting a session filters its projects; project detail shows
+phases + a task table (status / owner / priority / blocked-on); `[ref:]` pointers are clickable and
+drill down to live file lines. The **pause** checkbox only freezes the UI refresh — it does *not*
+pause sessions or the stop engine.
+
+> Note: the visible session strip is currently hardcoded in `ui/static/app.js`. If your session
+> names differ from the defaults, edit that list. (Tracked as a rough edge to make configurable.)
+
+---
+
+## Step 6 — The supervisor loop
+
+This is the cycle a supervisor session runs (see README "Core loop"):
+
+1. **Pull** — `taey-plan next <session>` → the top ready task you own.
+2. **Dispatch** — hand it to a worker: `lib.dispatch.dispatch(worker, task_id, description, ...)`.
+   It claims the task (`in_progress`), writes the worker's `current_task`, and the notify daemon
+   injects the prompt when that worker is idle.
+3. **Wake** — when the worker stops, its Stop hook notifies the supervisor; the daemon injects the
+   result when the supervisor is idle. No human relay.
+4. **Stop-discipline** — a session must not stop while ready work exists. The only legitimate wait is
+   `blocked_on`; a stop must cite a `user_stop_condition`.
+5. **Watcher** — run `orch-watch --redis-host 127.0.0.1 --readiness-checker lib/plan_readiness.py:check_readiness`
+   so a supervisor is paged the moment a worker's completion unblocks its work, or a task goes stuck.
+
+**Expect:** completing a task flips the next dependent task to ready (watch `taey-plan next` or the
+dashboard). Try to stop a session with ready work and the stop-discipline engine blocks the stop and
+tells you why.
+
+**Mark work done — with evidence:**
+
+```bash
+curl -s -X PATCH http://127.0.0.1:5002/api/task/scaffold \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"completed","completion_evidence":{"commit_sha":"<sha>","production_observation":"<what you observed>"}}'
+```
+
+**Expect:** `{"ok": true, ...}` and `feature` becomes the next ready task. (Evidence is recorded as
+task metadata; it is what the release gate in Step 7 reads.)
+
+---
+
+## Step 7 — Release through the ship-gate
+
+A project is **not** shippable on your say-so. It is shippable only when every gate task passes.
+Gate tasks are identified by suffix (`ORCH_SHIP_GATES`, default `-prodtest,-audit`).
+
+```bash
+# before the gate tasks are completed:
+curl -s -X POST http://127.0.0.1:5002/api/projects/my-thing/ship
+```
+
+**Expect:** **409** — refused, listing the gate tasks not yet passed. There is no human-approval
+override.
+
+Complete the gate tasks (each with its evidence — the production run for `-prodtest`, the independent
+audit sign-off for `-audit`), then:
+
+```bash
+curl -s -X GET  http://127.0.0.1:5002/api/projects/my-thing/shippability   # verdict dict
+curl -s -X POST http://127.0.0.1:5002/api/projects/my-thing/ship           # now succeeds
+```
+
+**Expect:** `shippability` reports each gate satisfied; `ship` transitions the project. See
+[docs/SHIPPABILITY.md](SHIPPABILITY.md) for the gate definition.
+
+> **Coming next release:** the gate is being extended so you *define the steps per project* in the
+> plan (`[ship-gates: prodtest, audit, …]`) and each step demands typed evidence — `-audit` evidence
+> must come from an identity *other than the task's owner* (read from the ledger, not typed). That
+> raises the bar from "mark it done" to "forge multiple independent artifacts." Honest scope: it is
+> strong structural deterrence + a tamper-evident record, not cryptographic un-forgeability.
+
+---
+
+## When something's wrong
+
+`scripts/orch doctor --explain-scope` is the first stop — it does real connectivity checks (Redis
+PING, Neo4j query), confirms the hooks/daemon/watcher are installed and running, and round-trips a
+stop decision. Stop hooks are intentionally **fail-open**: if the local API is down, a session can
+still stop (availability over enforcement on a dev box) — so a "stop wasn't blocked" symptom often
+means the API isn't reachable; check doctor.
+```
