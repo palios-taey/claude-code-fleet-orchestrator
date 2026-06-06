@@ -13,10 +13,14 @@ from .orch_schema import (
     create_phase,
     create_project,
     create_task,
-    cross_project_task_collisions,
     resolve_ref_path,
-    TaskIdCollisionError,
 )
+
+# Stored phase/task node ids are scoped to their project: <project_id>::<bare_id>. This makes task
+# identity project-local so two unrelated plans can both use a generic id (audit, scaffold, ...) without
+# colliding into one shared node (the global-id fusion bug, audit 2026-06-06 B1-B4). Idempotent: an id
+# that already contains the separator is left as-is (handles re-ingest + deliberate cross-project depends).
+TASK_ID_SEP = "::"
 
 META_RE = re.compile(r"\[([^\]]+)\]")
 HEADER_SEPARATOR_RE = re.compile(r"\s+[—-]\s+")
@@ -394,6 +398,22 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
             "stale_tasks": [],
         }
 
+    # Project-scope every phase/task id (and intra-plan depends) to <project_id>::<bare_id> BEFORE any
+    # existence check or write, so identity is project-local: two plans may reuse a generic id (audit,
+    # scaffold, ...) without fusing into one shared node (audit 2026-06-06 B1-B4). Idempotent — an id
+    # already containing the separator is left intact (re-ingest + deliberate cross-project depends like
+    # 'otherproj::task'). Everything downstream then operates on the namespaced ids unchanged.
+    _pid = project["id"]
+
+    def _ns(x: str) -> str:
+        return x if (not x or TASK_ID_SEP in x) else f"{_pid}{TASK_ID_SEP}{x}"
+
+    for _ph in parsed["phases"]:
+        _ph["id"] = _ns(_ph["id"])
+        for _t in _ph["tasks"]:
+            _t["id"] = _ns(_t["id"])
+            _t["depends"] = [_ns(d) for d in _t.get("depends", [])]
+
     cfg = config or OrchConfig()
     existing = _existing_project_state(project["id"], cfg)
     existing_phase_ids: Set[str] = set(existing["phase_ids"])
@@ -402,22 +422,6 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
 
     ingested_at = datetime.now(timezone.utc).isoformat()
     source_sha256 = hashlib.sha256(md.encode("utf-8")).hexdigest()
-
-    # Atomic cross-project id-collision pre-flight: OrchTask ids are global keys, so reusing an id
-    # already owned by another plan would silently clobber+fuse it. Refuse the WHOLE ingest BEFORE
-    # any write (no partial state) if any parsed task id collides. Re-ingest of this project is fine.
-    _all_task_ids = [t["id"] for ph in parsed["phases"] for t in ph["tasks"]]
-    _collisions = cross_project_task_collisions(_all_task_ids, project["id"], cfg)
-    if _collisions:
-        _detail = "; ".join(
-            f"'{tid}' already owned by {owners or ['(orphan — no project)']}"
-            for tid, owners in sorted(_collisions.items())
-        )
-        raise TaskIdCollisionError(
-            f"plan '{project['id']}' reuses task id(s) already owned by other project(s): {_detail}. "
-            f"Task ids are global keys — prefix them with the project id (e.g. "
-            f"'{project['id']}-<task>') and re-ingest. Nothing was written."
-        )
 
     create_project(
         project_id=project["id"],

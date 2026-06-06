@@ -21,12 +21,18 @@ from typing import Any, Dict, List, Optional, Tuple
 from lib.config import OrchConfig
 from lib.orch_schema import get_project_summary
 
-DEFAULT_SHIP_GATES = "-prodtest,-audit"  # reference operator's standard (example, not mandated)
+DEFAULT_SHIP_GATES = "prodtest,audit"  # reference operator's standard (example, not mandated)
+_ID_SEP = "::"  # task ids are project-scoped <project>::<bare>; gate-match on the bare name
 
 
 def _gate_suffixes() -> Tuple[str, ...]:
     raw = (os.environ.get("ORCH_SHIP_GATES") or DEFAULT_SHIP_GATES).strip()
     return tuple(s.strip() for s in raw.split(",") if s.strip())
+
+
+def _bare_id(task_id: str) -> str:
+    """The project-local task name: the part after the <project>:: prefix (or the whole id if unscoped)."""
+    return str(task_id or "").rsplit(_ID_SEP, 1)[-1]
 
 
 def _all_tasks(summary: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -42,7 +48,7 @@ def evaluate_shippability(project_id: str, config: Optional[OrchConfig] = None) 
                 "gate_tasks": 0, "incomplete_gates": []}
     tasks = _all_tasks(summary)
     suffixes = _gate_suffixes()
-    gates = [t for t in tasks if str(t.get("id") or "").endswith(suffixes)]
+    gates = [t for t in tasks if _bare_id(t.get("id")).endswith(suffixes)]
     if not gates:
         return {"project": project_id, "shippable": False,
                 "reason": f"no ship-gate tasks declared (fail-closed); configured gates={list(suffixes)}",
