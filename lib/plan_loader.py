@@ -32,6 +32,29 @@ class PlanIdError(ValueError):
     pass
 
 
+def validate_project_id(project_id: str) -> str:
+    """A project id must be plain (it becomes the namespace prefix + appears in URLs)."""
+    if not project_id or TASK_ID_SEP in project_id or not _ID_OK.match(project_id):
+        raise PlanIdError(
+            f"project id '{project_id}' must be plain (no '{TASK_ID_SEP}', chars A-Za-z0-9._-)."
+        )
+    return project_id
+
+
+def scope_declared_id(project_id: str, raw_id: str) -> str:
+    """THE single chokepoint for a caller-influenced DECLARED phase/task id: scope it to
+    <project>::<raw>, rejecting a declared '::' (namespace injection) or invalid charset. Every path
+    that creates a node from a caller id (plan ingest AND the /phases route) MUST route through this."""
+    if not raw_id:
+        return raw_id
+    if TASK_ID_SEP in raw_id or not _ID_OK.match(raw_id):
+        raise PlanIdError(
+            f"declared id '{raw_id}' is invalid — declared phase/task ids are auto-scoped to "
+            f"'{project_id}{TASK_ID_SEP}<id>' and must be plain (no '{TASK_ID_SEP}', chars A-Za-z0-9._-)."
+        )
+    return f"{project_id}{TASK_ID_SEP}{raw_id}"
+
+
 META_RE = re.compile(r"\[([^\]]+)\]")
 HEADER_SEPARATOR_RE = re.compile(r"\s+[—-]\s+")
 _PLAN_LINE_BYTE_CAP = 4096
@@ -411,24 +434,11 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
     # Project-scope every phase/task id (and intra-plan depends) to <project_id>::<bare_id> BEFORE any
     # existence check or write, so identity is project-local: two plans may reuse a generic id (audit,
     # scaffold, ...) without fusing into one shared node (audit 2026-06-06 B1-B4).
-    _pid = project["id"]
-    if TASK_ID_SEP in _pid or not _ID_OK.match(_pid or ""):
-        raise PlanIdError(
-            f"project id '{_pid}' must be plain (no '{TASK_ID_SEP}', chars A-Za-z0-9._-)."
-        )
+    _pid = validate_project_id(project["id"])
 
     def _ns_decl(x: str) -> str:
-        # DECLARED phase/task id: ALWAYS scope to THIS project. A declared id may NOT itself contain the
-        # separator — honoring it would let a plan declare 'victimproj::audit' and MERGE onto the victim's
-        # node (R2 blocker, namespace-injection). Fail loud + charset-validate (ids land in URLs).
-        if not x:
-            return x
-        if TASK_ID_SEP in x or not _ID_OK.match(x):
-            raise PlanIdError(
-                f"declared id '{x}' is invalid — declared phase/task ids are auto-scoped to "
-                f"'{_pid}{TASK_ID_SEP}<id>' and must be plain (no '{TASK_ID_SEP}', chars A-Za-z0-9._-)."
-            )
-        return f"{_pid}{TASK_ID_SEP}{x}"
+        # DECLARED phase/task id -> the shared chokepoint (force-scope; reject declared '::' + bad charset).
+        return scope_declared_id(_pid, x)
 
     def _ns_dep(x: str) -> str:
         # depends: idempotent — honor a '::' already present (a DELIBERATE cross-project dependency on

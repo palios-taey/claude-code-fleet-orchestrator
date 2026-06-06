@@ -70,7 +70,7 @@ from lib.orch_schema import (
     update_task_status,
     validate_source_path_for_refs,
 )
-from lib.plan_loader import load_plan_from_text, plan_declares_refs, PlanIdError
+from lib.plan_loader import load_plan_from_text, plan_declares_refs, PlanIdError, scope_declared_id
 from lib.orch_schema import TaskIdCollisionError
 
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
@@ -421,17 +421,27 @@ async def create_phase_endpoint(project_id: str, req: Request) -> Dict[str, Any]
     name = data.get("name", phase_id)
     if not phase_id:
         raise HTTPException(status_code=400, detail="id required")
+    # Caller-supplied phase id MUST go through the same scoping chokepoint as plan ingest (R3 audit
+    # CRITICAL: this route fed a bare phase_id straight to create_phase's MERGE). Scope to <project>::<id>
+    # + reject a declared '::' / bad charset; the create_phase ownership guard is the second layer.
+    try:
+        scoped_phase_id = scope_declared_id(project_id, phase_id)
+    except PlanIdError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     refs = data.get("refs") if isinstance(data.get("refs"), list) else None
     source_path = _validated_source_path(data.get("source_path"), refs_present=bool(refs))
-    pid = create_phase(
-        project_id=project_id,
-        phase_id=phase_id,
-        name=name,
-        order=int(data.get("order", 0)),
-        refs=refs,
-        source_path=source_path,
-        config=_cfg(),
-    )
+    try:
+        pid = create_phase(
+            project_id=project_id,
+            phase_id=scoped_phase_id,
+            name=name,
+            order=int(data.get("order", 0)),
+            refs=refs,
+            source_path=source_path,
+            config=_cfg(),
+        )
+    except TaskIdCollisionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return {"ok": True, "phase_id": pid}
 
 

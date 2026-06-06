@@ -1,45 +1,65 @@
 #!/usr/bin/env python3
-"""orch-reload-all — clear ALL orchestrator project data and re-ingest every project from its source.
+"""orch-reload-all — clear ALL orchestrator project data and re-ingest every project from source.
 
-Why: task identity became PROJECT-SCOPED (<project>::<id>, lib/plan_loader). Pre-existing data was
-ingested under the old GLOBAL-id model, where unrelated plans silently fused into shared task nodes.
-That historical fusion can't be fixed in place; the markdown is the source of truth, so the migration
-is: snapshot each project's ingest metadata -> wipe OrchProject/OrchPhase/OrchTask -> re-ingest every
-project from its stored source_path (ids now auto-scope, so the fusion dissolves).
+Why: task/phase identity became PROJECT-SCOPED (<project>::<id>, lib/plan_loader). Data ingested under
+the old GLOBAL-id model may have silently fused unrelated plans into shared nodes. The markdown is the
+source of truth, so the migration is: re-ingest every project from its source under the new scoping,
+which dissolves the fusion.
 
-Safe by construction: read-only snapshot first; --dry-run shows exactly what WOULD happen and writes
-nothing; the destructive wipe requires --yes. A project whose source file is missing/moved is REPORTED
-and skipped (its data would be lost on wipe, so we ABORT the wipe if any active project's source is
-missing unless --drop-missing is given).
+SAFE BY CONSTRUCTION — VALIDATE-ALL-BEFORE-WIPE (R3 audit, Gemini data-loss fix):
+  1. snapshot every project's ingest metadata + source path.
+  2. DRY-VALIDATE each source (parse + scope every id) WITHOUT writing.
+  3. if ANY project's source is missing OR would fail to reload (e.g. a legacy id with a space/slash
+     that the strict id charset now rejects), ABORT before touching the DB — nothing is lost. The
+     operator fixes the offending source(s) and re-runs. --force drops the unreloadable ones on purpose.
+  4. only when ALL remaining sources validate: wipe + re-ingest.
+--dry-run writes nothing and just prints the validation report.
 
 Usage:
-  orch-reload-all --dry-run            # preview: per-project source-present/missing, no writes
-  orch-reload-all --yes                # wipe + reload (aborts if any source missing)
-  orch-reload-all --yes --drop-missing # wipe + reload; projects with missing source are DROPPED
+  orch-reload-all --dry-run     # validate every source; report missing/invalid; write nothing
+  orch-reload-all --yes         # wipe + reload (ABORTS if anything is missing/invalid)
+  orch-reload-all --yes --force # drop the missing/invalid projects on purpose, reload the rest
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
-sys.path.insert(0, "/home/mira/claude-code-fleet-orchestrator")
-import os
+# Use the lib next to THIS script (its own repo root), so it works installed, in a worktree, and in
+# the live checkout — without hardcoding an absolute path that could shadow the intended tree.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.config import OrchConfig, get_neo4j_driver
-from lib.plan_loader import load_plan_from_text, PlanIdError
-from lib.orch_schema import TaskIdCollisionError
+from lib.plan_loader import (
+    load_plan_from_text, _parse_plan, scope_declared_id, validate_project_id, PlanIdError,
+)
 
 
 def _snapshot(cfg):
     drv = get_neo4j_driver(cfg)
     with drv.session(database=cfg.neo4j_db) as s:
-        rows = s.run(
+        return [dict(r) for r in s.run(
             """MATCH (p:OrchProject)
                RETURN p.id AS id, p.source_path AS src, p.supervisor AS sup,
-                      p.priority AS pri, p.migration_exempt AS exempt
-               ORDER BY p.id"""
-        )
-        return [dict(r) for r in rows]
+                      p.priority AS pri, p.migration_exempt AS exempt ORDER BY p.id""")]
+
+
+def _dry_validate(md: str):
+    """Parse + scope every declared id WITHOUT writing. Returns (ok, reason)."""
+    parsed = _parse_plan(md)
+    proj = parsed.get("project")
+    if proj is None:
+        return False, "no '# Project:' header"
+    try:
+        pid = validate_project_id(proj["id"])
+        for ph in parsed.get("phases", []):
+            scope_declared_id(pid, ph["id"])
+            for t in ph.get("tasks", []):
+                scope_declared_id(pid, t["id"])
+        return True, "ok"
+    except PlanIdError as e:
+        return False, f"PlanIdError: {e}"
 
 
 def _wipe(cfg):
@@ -52,49 +72,59 @@ def _wipe(cfg):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Clear + reload all orchestrator projects from source.")
-    ap.add_argument("--dry-run", action="store_true", help="preview only; write nothing")
-    ap.add_argument("--yes", action="store_true", help="perform the destructive wipe + reload")
-    ap.add_argument("--drop-missing", action="store_true",
-                    help="proceed even if some projects' source files are missing (they are DROPPED)")
+    ap.add_argument("--dry-run", action="store_true", help="validate only; write nothing")
+    ap.add_argument("--yes", action="store_true", help="perform the wipe + reload")
+    ap.add_argument("--force", action="store_true",
+                    help="drop projects whose source is missing/invalid instead of aborting")
     args = ap.parse_args()
 
     cfg = OrchConfig()
     projects = _snapshot(cfg)
-    present = [p for p in projects if p.get("src") and os.path.isfile(p["src"])]
-    missing = [p for p in projects if not (p.get("src") and os.path.isfile(p["src"]))]
 
-    print(f"projects: {len(projects)}  reloadable(source present): {len(present)}  "
-          f"missing source: {len(missing)}")
-    for p in missing:
-        print(f"  MISSING-SOURCE {p['id']}  (src={p.get('src') or 'none'})")
+    reloadable, missing, invalid = [], [], []
+    for p in projects:
+        src = p.get("src")
+        if not (src and os.path.isfile(src)):
+            missing.append((p["id"], src or "none")); continue
+        with open(src, encoding="utf-8") as f:
+            md = f.read()
+        ok, why = _dry_validate(md)
+        (reloadable if ok else invalid).append((p, why) if not ok else p)
+
+    print(f"projects: {len(projects)}  reloadable: {len(reloadable)}  "
+          f"missing-source: {len(missing)}  would-fail: {len(invalid)}")
+    for pid, src in missing:
+        print(f"  MISSING-SOURCE {pid}  (src={src})")
+    for p, why in invalid:
+        print(f"  WOULD-FAIL     {p['id']}  ({why})")
 
     if args.dry_run or not args.yes:
-        print("\n[dry-run] nothing written. Re-run with --yes (and --drop-missing if the missing list "
-              "above is acceptable to drop) to perform the wipe + reload.")
+        print("\n[dry-run] nothing written. Re-run with --yes (and --force only if the missing/would-fail "
+              "list above is acceptable to DROP) to perform the wipe + reload.")
         return 0
 
-    if missing and not args.drop_missing:
-        print(f"\nABORT: {len(missing)} project(s) have no readable source file and would be lost by the "
-              f"wipe. Re-run with --drop-missing to drop them, or restore their source first.")
+    if (missing or invalid) and not args.force:
+        print(f"\nABORT: {len(missing)+len(invalid)} project(s) cannot be reloaded and would be LOST by the "
+              f"wipe. Fix their source (or pass --force to drop them on purpose). Nothing was written.")
         return 2
 
     _wipe(cfg)
-    ok, failed = [], []
-    for p in present:
+    ok_n, failed = 0, []
+    for p in reloadable:
         try:
             with open(p["src"], encoding="utf-8") as f:
                 md = f.read()
-            res = load_plan_from_text(
-                md=md, source_path=p["src"], source_kind="markdown",
-                ingested_by="orch-reload-all", supervisor=p.get("sup") or "conductor",
-                priority=p.get("pri"), migration_exempt=bool(p.get("exempt")), config=cfg,
+            load_plan_from_text(
+                md=md, source_path=p["src"], source_kind="markdown", ingested_by="orch-reload-all",
+                supervisor=p.get("sup") or "conductor", priority=p.get("pri"),
+                migration_exempt=bool(p.get("exempt")), config=cfg,
             )
-            ok.append((p["id"], res.get("tasks_created", 0)))
-        except (PlanIdError, TaskIdCollisionError, Exception) as e:
+            ok_n += 1
+        except Exception as e:  # validated above, so this is unexpected — report, don't silently swallow
             failed.append((p["id"], f"{type(e).__name__}: {e}"))
 
-    print(f"\nreloaded OK: {len(ok)}   failed: {len(failed)}   dropped(missing source): "
-          f"{len(missing) if args.drop_missing else 0}")
+    dropped = len(missing) + len(invalid) if args.force else 0
+    print(f"\nreloaded OK: {ok_n}   unexpected-failures: {len(failed)}   dropped(--force): {dropped}")
     for pid, why in failed:
         print(f"  FAILED {pid}: {why}")
     return 1 if failed else 0
