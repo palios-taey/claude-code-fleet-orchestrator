@@ -7,6 +7,9 @@
 - a FastAPI surface for tasks, projects, and plan ingestion
 - CLI tools for plan and task operations
 
+**New here?** [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) is the guided zero-to-running-loop path
+(install → define a plan → run the loop → release), with "what you should see" at every step.
+
 ## Requirements
 
 - Python 3.10+
@@ -263,6 +266,7 @@ The orchestrator is the core. A few small, separately released products compose 
 
 ## Documentation
 
+- [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) — guided end-to-end setup + first loop (start here)
 - [docs/SCHEMA.md](docs/SCHEMA.md) — Neo4j/Redis data model
 - [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md) — markdown plan spec (project/phase/task/refs)
 - [docs/SHIPPABILITY.md](docs/SHIPPABILITY.md) — the ship-gate definition + enforcement
