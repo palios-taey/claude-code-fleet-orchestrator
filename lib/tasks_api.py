@@ -34,6 +34,7 @@ from lib.shippability import evaluate_shippability
 from lib.dispatch import bind_current_task, record_outcome
 from lib.orch_schema import (
     CompletionEvidenceError,
+    TaskIdCollisionError,
     ConditionValidationError,
     PauseValidationError,
     PriorityAuditError,
@@ -453,15 +454,19 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
         )
     refs_present = plan_declares_refs(md_text)
     source_path = _validated_source_path(data.get("source_path", ""), refs_present=refs_present)
-    return load_plan_from_text(
-        md=md_text,
-        source_path=source_path or "",
-        source_kind=data.get("source_kind", "markdown"),
-        ingested_by=data.get("ingested_by", "unknown"),
-        supervisor=supervisor,
-        priority=ingest_priority,
-        migration_exempt=bool(data.get("migration_exempt", False)),
-    )
+    try:
+        return load_plan_from_text(
+            md=md_text,
+            source_path=source_path or "",
+            source_kind=data.get("source_kind", "markdown"),
+            ingested_by=data.get("ingested_by", "unknown"),
+            supervisor=supervisor,
+            priority=ingest_priority,
+            migration_exempt=bool(data.get("migration_exempt", False)),
+        )
+    except TaskIdCollisionError as exc:
+        # Global task-id collision with another project — refuse the ingest (nothing written).
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.post("/api/projects/{project_id}/complete")

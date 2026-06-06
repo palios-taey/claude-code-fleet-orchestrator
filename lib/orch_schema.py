@@ -72,6 +72,14 @@ class CompletionEvidenceError(ValueError):
     pass
 
 
+class TaskIdCollisionError(ValueError):
+    """A task id is already owned by a DIFFERENT project. OrchTask ids are global keys, so a bare
+    MERGE on {id} would silently ADOPT and clobber the other project's task — overwriting its fields
+    and fusing the two plans' dependency graphs. Fail loud instead: task ids must be unique across
+    plans (prefix them with the project id)."""
+    pass
+
+
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
@@ -1338,6 +1346,36 @@ def create_phase(project_id: str, phase_id: str, name: str,
         pass  # Driver is singleton; do not close
 
 
+def cross_project_task_collisions(
+    task_ids: List[str], target_project_id: str, config: Optional[OrchConfig] = None
+) -> Dict[str, List[str]]:
+    """Return {task_id: [owning_project_ids]} for any id that ALREADY exists under a project other
+    than target_project_id (or as a project-less orphan -> []). OrchTask ids are global keys; this
+    lets an ingest fail loud BEFORE it clobbers another plan's task. An id already owned only by the
+    target project is NOT a collision (idempotent re-ingest)."""
+    if not task_ids:
+        return {}
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    out: Dict[str, List[str]] = {}
+    with driver.session(database=cfg.neo4j_db) as session:
+        rows = session.run(
+            """
+            UNWIND $ids AS tid
+            MATCH (t:OrchTask {id: tid})
+            OPTIONAL MATCH (t)<-[:HAS_TASK]-(:OrchPhase)<-[:HAS_PHASE]-(p:OrchProject)
+            WITH tid, collect(DISTINCT p.id) AS owners
+            WHERE NOT $target IN owners
+            RETURN tid AS tid, owners AS owners
+            """,
+            ids=list(task_ids),
+            target=target_project_id,
+        )
+        for r in rows:
+            out[r["tid"]] = r["owners"]
+    return out
+
+
 def create_task(
     phase_id: str,
     task_id: str,
@@ -1361,6 +1399,28 @@ def create_task(
     driver = get_neo4j_driver(cfg)
     try:
         with driver.session(database=cfg.neo4j_db) as session:
+            # Cross-project id-collision guard (root cause: OrchTask ids are GLOBAL keys, so the bare
+            # MERGE below would silently adopt+clobber a same-id task owned by ANOTHER project and fuse
+            # the two plans). Enforce the invariant: a task id may not be claimed by a second project.
+            # Re-creating within the SAME project (idempotent ingest) is allowed.
+            guard = session.run(
+                """
+                MATCH (ph:OrchPhase {id: $phase_id})<-[:HAS_PHASE]-(target:OrchProject)
+                OPTIONAL MATCH (existing:OrchTask {id: $task_id})
+                OPTIONAL MATCH (existing)<-[:HAS_TASK]-(:OrchPhase)<-[:HAS_PHASE]-(p:OrchProject)
+                WITH target.id AS target_id, existing, collect(DISTINCT p.id) AS owners
+                WHERE existing IS NOT NULL AND NOT target_id IN owners
+                RETURN target_id AS target, owners AS owners
+                """,
+                phase_id=phase_id, task_id=task_id,
+            ).single()
+            if guard is not None:
+                owners = guard["owners"] or ["(orphan — no project)"]
+                raise TaskIdCollisionError(
+                    f"task id '{task_id}' is already owned by project(s) {owners}; it cannot be "
+                    f"claimed by project '{guard['target']}'. Task ids are global — use a "
+                    f"project-prefixed id (e.g. '{guard['target']}-{task_id}')."
+                )
             result = session.run("""
                 MATCH (ph:OrchPhase {id: $phase_id})
                 MERGE (t:OrchTask {id: $task_id})
