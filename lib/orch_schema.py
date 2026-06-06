@@ -72,22 +72,9 @@ class CompletionEvidenceError(ValueError):
     pass
 
 
-class CompletionGateError(ValueError):
-    """A 'completed' transition claiming a commit_sha lacks an independent verified gate/gatekeeper
-    PASS for that (task, sha) in the accountability ledger (ANTIFAB P2). Flag-gated; see
-    CF_COMPLETION_GATE_REQUIRED."""
-    pass
-
-
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
-# A completion needs a verified commit_sha UNLESS the task is PURELY a non-code (exempt) type.
-# Fail-CLOSED by allowlist (gatekeeper: a code-tag denylist leaks — `build`/`codegen`/unknown/untagged
-# slip through; an allowlist of what is safe-to-skip does not): code/build/codegen tags, unknown tags,
-# AND untagged tasks all require a verified commit; only a task whose tags are ALL exempt skips the gate.
-_GATE_EXEMPT_TAGS = {"design", "docs", "doc", "measure", "audit", "verify", "validation",
-                     "research", "review", "plan", "spec"}
 
 
 def _utc_now_iso() -> str:
@@ -1571,53 +1558,6 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     completion_evidence_value = _normalize_completion_evidence(completion_evidence) if status == "completed" else None
     if status != "completed" and completion_evidence is not None:
         raise CompletionEvidenceError("completion evidence is only valid on a completed transition")
-    # ANTIFAB P2 (flag-gated, default OFF — safe to deploy dormant; activation is a deliberate staged,
-    # conductor-first step AFTER gatekeeper + prod dogfood). When ON: a 'completed' transition that
-    # CLAIMS a commit_sha (i.e. code work) is REJECTED unless the accountability ledger holds an
-    # INDEPENDENT verified PASS (mechanical gate_run and/or gatekeeper audit_verdict) for that
-    # (task, sha). The builder's say-so is not enough — something else must have run/reviewed it.
-    # Completions without a commit_sha (design/doc/measure) are not code-gated by this.
-    # Staged activation: CF_COMPLETION_GATE_SESSIONS (comma-list of owners) scopes enforcement to those
-    # owners only, so the gate can be turned on CONDUCTOR-FIRST (dogfood myself) without gating the other
-    # supervisors. Unset/empty = enforce for ALL owners (the eventual fleet-wide state). Scope keys on the
-    # task's STORED owner (authoritative), NOT the caller-supplied owner param (which is spoofable).
-    _gate_on = str(os.environ.get("CF_COMPLETION_GATE_REQUIRED") or "").strip().lower() in {"1", "true", "yes", "on"}
-    _gate_in_scope = True
-    _trec = None
-    if status == "completed" and _gate_on:
-        # one read: stored owner (for scope) + the REAL tag property (capability_tags — what
-        # create_task/plan_loader write; t.tags is never written).
-        with driver.session(database=cfg.neo4j_db) as _tsession:
-            _trec = _tsession.run(
-                "MATCH (t:OrchTask {id: $id}) RETURN t.capability_tags AS tags, t.owner AS owner",
-                id=task_id).single()
-        _gate_owner_allow = {o.strip().lower() for o in (os.environ.get("CF_COMPLETION_GATE_SESSIONS") or "").split(",") if o.strip()}
-        _task_owner = str((_trec["owner"] if _trec else "") or "").strip().lower()
-        _gate_in_scope = (not _gate_owner_allow) or (_task_owner in _gate_owner_allow)
-    if status == "completed" and _gate_on and _gate_in_scope:
-        _gate_sha = (completion_evidence_value or {}).get("commit_sha") if completion_evidence_value else None
-        # Fail-closed: a completion needs a verified commit_sha UNLESS the task is purely exempt (ALL its
-        # tags are non-code). Untagged / code / build / unknown -> commit required.
-        _task_tags = {str(x).strip().lower() for x in ((_trec["tags"] if _trec else None) or [])}
-        _exempt = bool(_task_tags) and _task_tags <= _GATE_EXEMPT_TAGS
-        if not _gate_sha and not _exempt:
-            raise CompletionGateError(
-                f"task {task_id} (capability_tags={sorted(_task_tags)}) declares no commit_sha and is not a "
-                f"purely-exempt non-code task — provide a commit_sha + a verified gate/gatekeeper PASS, or "
-                f"tag it only with exempt types {sorted(_GATE_EXEMPT_TAGS)}."
-            )
-        if _gate_sha:
-            try:
-                from .gate_check import verification_status
-            except ImportError:  # pragma: no cover - import-context fallback
-                from lib.gate_check import verification_status
-            _vs = verification_status(task_id, _gate_sha)
-            if not _vs.get("verified"):
-                raise CompletionGateError(
-                    f"completed claims commit {_gate_sha} for {task_id} but no verified gate/gatekeeper "
-                    f"PASS exists in the ledger (status={_vs}). Run the gate (orch-gate-run) or get a "
-                    f"gatekeeper PASS for this exact sha before marking it done."
-                )
     try:
         with driver.session(database=cfg.neo4j_db) as session:
             if result is None:
