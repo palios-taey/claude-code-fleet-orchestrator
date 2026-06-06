@@ -70,7 +70,8 @@ from lib.orch_schema import (
     update_task_status,
     validate_source_path_for_refs,
 )
-from lib.plan_loader import load_plan_from_text, plan_declares_refs
+from lib.plan_loader import load_plan_from_text, plan_declares_refs, PlanIdError
+from lib.orch_schema import TaskIdCollisionError
 
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
 # SECURITY: chat is an injection vector (posts become content an AI session reads). It is the
@@ -453,15 +454,20 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
         )
     refs_present = plan_declares_refs(md_text)
     source_path = _validated_source_path(data.get("source_path", ""), refs_present=refs_present)
-    return load_plan_from_text(
-        md=md_text,
-        source_path=source_path or "",
-        source_kind=data.get("source_kind", "markdown"),
-        ingested_by=data.get("ingested_by", "unknown"),
-        supervisor=supervisor,
-        priority=ingest_priority,
-        migration_exempt=bool(data.get("migration_exempt", False)),
-    )
+    try:
+        return load_plan_from_text(
+            md=md_text,
+            source_path=source_path or "",
+            source_kind=data.get("source_kind", "markdown"),
+            ingested_by=data.get("ingested_by", "unknown"),
+            supervisor=supervisor,
+            priority=ingest_priority,
+            migration_exempt=bool(data.get("migration_exempt", False)),
+        )
+    except PlanIdError as exc:                 # invalid/injected declared id — nothing written
+        raise HTTPException(status_code=400, detail=str(exc))
+    except TaskIdCollisionError as exc:        # id owned by another project — refuse adoption
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.post("/api/projects/{project_id}/complete")

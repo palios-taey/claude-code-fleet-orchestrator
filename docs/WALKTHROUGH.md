@@ -233,7 +233,7 @@ curl -s -X POST http://127.0.0.1:5002/api/projects/my-thing/ship           # now
 [docs/SHIPPABILITY.md](SHIPPABILITY.md) for the gate definition.
 
 > **Coming next release:** the gate is being extended so you *define the steps per project* in the
-> plan (`[ship-gates: prodtest, audit, …]`) and each step demands typed evidence — `-audit` evidence
+> plan (`[ship-gates: prodtest, audit, …]`) and each step demands typed evidence — the `audit` gate's evidence
 > must come from an identity *other than the task's owner* (read from the ledger, not typed). That
 > raises the bar from "mark it done" to "forge multiple independent artifacts." Honest scope: it is
 > strong structural deterrence + a tamper-evident record, not cryptographic un-forgeability.

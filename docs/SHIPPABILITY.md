@@ -10,10 +10,11 @@ Chat-audited. (This file exists because the failure it prevents was: code marked
 ## The gates are CONFIGURABLE per user — these are the reference standard, not a mandate
 
 WHICH gates a project must pass is **configured by each operator**, not baked in.
-Set `ORCH_SHIP_GATES` to a comma-separated list of task-id **suffixes** your
-standard requires; the engine enforces exactly those. The default
-(`-prodtest,-audit`) is the **reference operator's** standard documented below —
-an example. A different shop might use `ORCH_SHIP_GATES=-ci,-review1,-review2`.
+Set `ORCH_SHIP_GATES` to a comma-separated list of project-local gate **names**
+your standard requires; a task is a gate iff its project-local name (the part after
+`<project>::`) EXACTLY equals one of them. The default (`prodtest,audit`) is the
+**reference operator's** standard documented below — an example. A different shop
+might use `ORCH_SHIP_GATES=ci,review1,review2`.
 
 It is **not optional**: the engine is **fail-closed** — a project whose plan
 declares NO matching ship-gate tasks can never be marked shippable. So any plan
@@ -23,7 +24,7 @@ real `### Task:` gate entries, in the author's face.
 
 ## Definition (the REFERENCE operator's standard — example to copy or replace)
 
-With the default `ORCH_SHIP_GATES=-prodtest,-audit`, a change is **SHIPPABLE**
+With the default `ORCH_SHIP_GATES=prodtest,audit`, a change is **SHIPPABLE**
 only when **BOTH** gates below have recorded, passing evidence. **There is NO
 human-approval step.** The process is the authority. A "clean" judgment by any
 agent (including the conductor) is necessary but never sufficient and never a

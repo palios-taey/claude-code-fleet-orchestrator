@@ -72,6 +72,14 @@ class CompletionEvidenceError(ValueError):
     pass
 
 
+class TaskIdCollisionError(ValueError):
+    """create_task was asked to create/MERGE a task id that is ALREADY owned by a DIFFERENT project.
+    Allowing it would adopt + clobber the other project's node and fuse the two plans. Plan ingest
+    auto-scopes declared ids to <project>::<id> (lib/plan_loader) so legit ingest never trips this;
+    this guard is the lower-choke backstop for every other path (R2 audit: do not delete it)."""
+    pass
+
+
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
@@ -1361,10 +1369,32 @@ def create_task(
     driver = get_neo4j_driver(cfg)
     try:
         with driver.session(database=cfg.neo4j_db) as session:
-            # Task ids are project-scoped at ingest (lib/plan_loader namespaces them <project>::<id>),
-            # so a cross-project clobber is structurally impossible — distinct projects produce distinct
-            # node ids. The orch_task_id UNIQUE constraint is the atomic integrity backstop. No app-level
-            # ownership guard is needed here (the prior global-id guard was superseded — audit 2026-06-06).
+            # Cross-project ownership guard (R2 audit B1/B3 — do NOT delete). create_task's MERGE on a bare
+            # {id} would ADOPT a node already owned by another project (clobber + fuse). Plan ingest
+            # auto-scopes declared ids to <project>::<id> (lib/plan_loader), so legit ingest never trips
+            # this; the guard is the lower-choke backstop for every other path (ad-hoc, future callers,
+            # any id that reaches here unscoped). Predicate (Clarity R1 B3): refuse if the existing node is
+            # owned by ANY project other than this phase's project. Not a TOCTOU risk: the adoption case
+            # requires a PRE-EXISTING foreign node (stable, not racing); the only same-new-id race is ruled
+            # out (declared ids are namespaced, ad-hoc ids are auto-uuid) and the orch_task_id UNIQUE
+            # constraint makes the MERGE itself atomic regardless.
+            guard = session.run(
+                """
+                MATCH (ph:OrchPhase {id: $phase_id})<-[:HAS_PHASE]-(target:OrchProject)
+                OPTIONAL MATCH (ex:OrchTask {id: $task_id})<-[:HAS_TASK]-(:OrchPhase)<-[:HAS_PHASE]-(op:OrchProject)
+                    WHERE op.id <> target.id
+                WITH target.id AS target, collect(DISTINCT op.id) AS foreign
+                WHERE size(foreign) > 0
+                RETURN target AS target, foreign AS foreign
+                """,
+                phase_id=phase_id, task_id=task_id,
+            ).single()
+            if guard is not None:
+                raise TaskIdCollisionError(
+                    f"task id '{task_id}' is already owned by project(s) {guard['foreign']}; project "
+                    f"'{guard['target']}' may not adopt it. Plan task ids auto-scope to <project>::<id>; "
+                    f"an id reaching create_task already owned elsewhere is an unscoped/injected id."
+                )
             result = session.run("""
                 MATCH (ph:OrchPhase {id: $phase_id})
                 MERGE (t:OrchTask {id: $task_id})
