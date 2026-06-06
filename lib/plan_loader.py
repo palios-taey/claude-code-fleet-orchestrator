@@ -13,7 +13,9 @@ from .orch_schema import (
     create_phase,
     create_project,
     create_task,
+    cross_project_task_collisions,
     resolve_ref_path,
+    TaskIdCollisionError,
 )
 
 META_RE = re.compile(r"\[([^\]]+)\]")
@@ -400,6 +402,22 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
 
     ingested_at = datetime.now(timezone.utc).isoformat()
     source_sha256 = hashlib.sha256(md.encode("utf-8")).hexdigest()
+
+    # Atomic cross-project id-collision pre-flight: OrchTask ids are global keys, so reusing an id
+    # already owned by another plan would silently clobber+fuse it. Refuse the WHOLE ingest BEFORE
+    # any write (no partial state) if any parsed task id collides. Re-ingest of this project is fine.
+    _all_task_ids = [t["id"] for ph in parsed["phases"] for t in ph["tasks"]]
+    _collisions = cross_project_task_collisions(_all_task_ids, project["id"], cfg)
+    if _collisions:
+        _detail = "; ".join(
+            f"'{tid}' already owned by {owners or ['(orphan — no project)']}"
+            for tid, owners in sorted(_collisions.items())
+        )
+        raise TaskIdCollisionError(
+            f"plan '{project['id']}' reuses task id(s) already owned by other project(s): {_detail}. "
+            f"Task ids are global keys — prefix them with the project id (e.g. "
+            f"'{project['id']}-<task>') and re-ingest. Nothing was written."
+        )
 
     create_project(
         project_id=project["id"],
