@@ -236,19 +236,24 @@ async def create(req: Request) -> Dict[str, Any]:
     requested_phase_id = data.get("phase_id")
     phase_id = requested_phase_id if requested_phase_id else ensure_default_project(cfg)
     task_id = f"task-{uuid.uuid4().hex[:8]}"
-    create_task(
-        phase_id=phase_id,
-        task_id=task_id,
-        description=description,
-        priority=priority,
-        owner=owner,
-        created_by=sender,
-        task_type=task_type,
-        capability_tags=capability_tags,
-        file_blast_radius=file_blast_radius,
-        estimated_tokens=estimated_tokens,
-        config=cfg,
-    )
+    try:
+        create_task(
+            phase_id=phase_id,
+            task_id=task_id,
+            description=description,
+            priority=priority,
+            owner=owner,
+            created_by=sender,
+            task_type=task_type,
+            capability_tags=capability_tags,
+            file_blast_radius=file_blast_radius,
+            estimated_tokens=estimated_tokens,
+            config=cfg,
+        )
+    except TaskIdCollisionError as exc:
+        # Fail-closed (bad/orphan/fused phase_id, or an owned id) -> 409, not a raw 500 (R5 audit:
+        # match the /phases + /plan routes which already map this to 4xx).
+        raise HTTPException(status_code=409, detail=str(exc))
 
     return {"ok": True, "task_id": task_id, "from": sender, "owner": owner, "task_type": task_type}
 
