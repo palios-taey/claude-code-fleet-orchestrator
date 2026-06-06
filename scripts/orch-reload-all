@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""orch-reload-all — clear ALL orchestrator project data and re-ingest every project from its source.
+
+Why: task identity became PROJECT-SCOPED (<project>::<id>, lib/plan_loader). Pre-existing data was
+ingested under the old GLOBAL-id model, where unrelated plans silently fused into shared task nodes.
+That historical fusion can't be fixed in place; the markdown is the source of truth, so the migration
+is: snapshot each project's ingest metadata -> wipe OrchProject/OrchPhase/OrchTask -> re-ingest every
+project from its stored source_path (ids now auto-scope, so the fusion dissolves).
+
+Safe by construction: read-only snapshot first; --dry-run shows exactly what WOULD happen and writes
+nothing; the destructive wipe requires --yes. A project whose source file is missing/moved is REPORTED
+and skipped (its data would be lost on wipe, so we ABORT the wipe if any active project's source is
+missing unless --drop-missing is given).
+
+Usage:
+  orch-reload-all --dry-run            # preview: per-project source-present/missing, no writes
+  orch-reload-all --yes                # wipe + reload (aborts if any source missing)
+  orch-reload-all --yes --drop-missing # wipe + reload; projects with missing source are DROPPED
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+
+sys.path.insert(0, "/home/mira/claude-code-fleet-orchestrator")
+import os
+
+from lib.config import OrchConfig, get_neo4j_driver
+from lib.plan_loader import load_plan_from_text, PlanIdError
+from lib.orch_schema import TaskIdCollisionError
+
+
+def _snapshot(cfg):
+    drv = get_neo4j_driver(cfg)
+    with drv.session(database=cfg.neo4j_db) as s:
+        rows = s.run(
+            """MATCH (p:OrchProject)
+               RETURN p.id AS id, p.source_path AS src, p.supervisor AS sup,
+                      p.priority AS pri, p.migration_exempt AS exempt
+               ORDER BY p.id"""
+        )
+        return [dict(r) for r in rows]
+
+
+def _wipe(cfg):
+    drv = get_neo4j_driver(cfg)
+    with drv.session(database=cfg.neo4j_db) as s:
+        s.run("MATCH (t:OrchTask) DETACH DELETE t")
+        s.run("MATCH (ph:OrchPhase) DETACH DELETE ph")
+        s.run("MATCH (p:OrchProject) DETACH DELETE p")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Clear + reload all orchestrator projects from source.")
+    ap.add_argument("--dry-run", action="store_true", help="preview only; write nothing")
+    ap.add_argument("--yes", action="store_true", help="perform the destructive wipe + reload")
+    ap.add_argument("--drop-missing", action="store_true",
+                    help="proceed even if some projects' source files are missing (they are DROPPED)")
+    args = ap.parse_args()
+
+    cfg = OrchConfig()
+    projects = _snapshot(cfg)
+    present = [p for p in projects if p.get("src") and os.path.isfile(p["src"])]
+    missing = [p for p in projects if not (p.get("src") and os.path.isfile(p["src"]))]
+
+    print(f"projects: {len(projects)}  reloadable(source present): {len(present)}  "
+          f"missing source: {len(missing)}")
+    for p in missing:
+        print(f"  MISSING-SOURCE {p['id']}  (src={p.get('src') or 'none'})")
+
+    if args.dry_run or not args.yes:
+        print("\n[dry-run] nothing written. Re-run with --yes (and --drop-missing if the missing list "
+              "above is acceptable to drop) to perform the wipe + reload.")
+        return 0
+
+    if missing and not args.drop_missing:
+        print(f"\nABORT: {len(missing)} project(s) have no readable source file and would be lost by the "
+              f"wipe. Re-run with --drop-missing to drop them, or restore their source first.")
+        return 2
+
+    _wipe(cfg)
+    ok, failed = [], []
+    for p in present:
+        try:
+            with open(p["src"], encoding="utf-8") as f:
+                md = f.read()
+            res = load_plan_from_text(
+                md=md, source_path=p["src"], source_kind="markdown",
+                ingested_by="orch-reload-all", supervisor=p.get("sup") or "conductor",
+                priority=p.get("pri"), migration_exempt=bool(p.get("exempt")), config=cfg,
+            )
+            ok.append((p["id"], res.get("tasks_created", 0)))
+        except (PlanIdError, TaskIdCollisionError, Exception) as e:
+            failed.append((p["id"], f"{type(e).__name__}: {e}"))
+
+    print(f"\nreloaded OK: {len(ok)}   failed: {len(failed)}   dropped(missing source): "
+          f"{len(missing) if args.drop_missing else 0}")
+    for pid, why in failed:
+        print(f"  FAILED {pid}: {why}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

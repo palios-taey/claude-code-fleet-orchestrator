@@ -18,9 +18,19 @@ from .orch_schema import (
 
 # Stored phase/task node ids are scoped to their project: <project_id>::<bare_id>. This makes task
 # identity project-local so two unrelated plans can both use a generic id (audit, scaffold, ...) without
-# colliding into one shared node (the global-id fusion bug, audit 2026-06-06 B1-B4). Idempotent: an id
-# that already contains the separator is left as-is (handles re-ingest + deliberate cross-project depends).
+# colliding into one shared node (the global-id fusion bug, audit 2026-06-06 B1-B4).
 TASK_ID_SEP = "::"
+# Allowed characters in a DECLARED project/phase/task id (ids appear in /api/.../{id} URLs).
+_ID_OK = re.compile(r"\A[A-Za-z0-9._-]+\Z")
+
+
+class PlanIdError(ValueError):
+    """A declared project/phase/task id is invalid — it contains the reserved project-scope separator
+    '::' or a disallowed character. Declared ids are auto-scoped to <project>::<id>, so they must be
+    plain. (Honoring a declared '::' would be a namespace-injection escape: a plan declaring
+    'victimproj::audit' could MERGE onto another project's node — R2 audit blocker.)"""
+    pass
+
 
 META_RE = re.compile(r"\[([^\]]+)\]")
 HEADER_SEPARATOR_RE = re.compile(r"\s+[—-]\s+")
@@ -400,19 +410,36 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
 
     # Project-scope every phase/task id (and intra-plan depends) to <project_id>::<bare_id> BEFORE any
     # existence check or write, so identity is project-local: two plans may reuse a generic id (audit,
-    # scaffold, ...) without fusing into one shared node (audit 2026-06-06 B1-B4). Idempotent — an id
-    # already containing the separator is left intact (re-ingest + deliberate cross-project depends like
-    # 'otherproj::task'). Everything downstream then operates on the namespaced ids unchanged.
+    # scaffold, ...) without fusing into one shared node (audit 2026-06-06 B1-B4).
     _pid = project["id"]
+    if TASK_ID_SEP in _pid or not _ID_OK.match(_pid or ""):
+        raise PlanIdError(
+            f"project id '{_pid}' must be plain (no '{TASK_ID_SEP}', chars A-Za-z0-9._-)."
+        )
 
-    def _ns(x: str) -> str:
+    def _ns_decl(x: str) -> str:
+        # DECLARED phase/task id: ALWAYS scope to THIS project. A declared id may NOT itself contain the
+        # separator — honoring it would let a plan declare 'victimproj::audit' and MERGE onto the victim's
+        # node (R2 blocker, namespace-injection). Fail loud + charset-validate (ids land in URLs).
+        if not x:
+            return x
+        if TASK_ID_SEP in x or not _ID_OK.match(x):
+            raise PlanIdError(
+                f"declared id '{x}' is invalid — declared phase/task ids are auto-scoped to "
+                f"'{_pid}{TASK_ID_SEP}<id>' and must be plain (no '{TASK_ID_SEP}', chars A-Za-z0-9._-)."
+            )
+        return f"{_pid}{TASK_ID_SEP}{x}"
+
+    def _ns_dep(x: str) -> str:
+        # depends: idempotent — honor a '::' already present (a DELIBERATE cross-project dependency on
+        # 'otherproj::task'); a plain id scopes to this project. (This is the ONLY place '::' is honored.)
         return x if (not x or TASK_ID_SEP in x) else f"{_pid}{TASK_ID_SEP}{x}"
 
     for _ph in parsed["phases"]:
-        _ph["id"] = _ns(_ph["id"])
+        _ph["id"] = _ns_decl(_ph["id"])
         for _t in _ph["tasks"]:
-            _t["id"] = _ns(_t["id"])
-            _t["depends"] = [_ns(d) for d in _t.get("depends", [])]
+            _t["id"] = _ns_decl(_t["id"])
+            _t["depends"] = [_ns_dep(d) for d in _t.get("depends", [])]
 
     cfg = config or OrchConfig()
     existing = _existing_project_state(project["id"], cfg)

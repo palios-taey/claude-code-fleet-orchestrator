@@ -211,7 +211,7 @@ the project plans with clickable drill-down refs, and a two-way chat per session
 | **Decision receipts** | Each stop/chat/wake/cycle/assembly can emit a content-hashed receipt (`why_this_context`, `refs_used`, `observable_state_hash`). | `lib.decision_receipt` |
 | **Rules tier** | Supervisor- + project-level standing rules auto-loaded by the assembler; promotable from chat. | `lib.rules_tier` |
 | **Project template** | Auto-injects the sub-role gate scaffold (scout → code → audit → verify → family) as `depends`-encoded gate tasks. | `lib.orch_template` |
-| **Shippability gate** | A project is shippable only when every `-prodtest`/`-audit` gate task is completed; `POST /api/projects/{id}/ship` returns 409 otherwise. No human-approval override. | `GET/POST /api/projects/{id}/shippability\|ship` · [docs/SHIPPABILITY.md](docs/SHIPPABILITY.md) |
+| **Shippability gate** | A project is shippable only when every gate task (project-local name in `ORCH_SHIP_GATES`, default `prodtest`/`audit`) is completed; `POST /api/projects/{id}/ship` returns 409 otherwise. No human-approval override. | `GET/POST /api/projects/{id}/shippability\|ship` · [docs/SHIPPABILITY.md](docs/SHIPPABILITY.md) |
 
 ## Run the watcher
 

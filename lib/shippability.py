@@ -7,11 +7,12 @@ with NO matching gate tasks is NOT shippable, so declaring ship-gates is not
 optional — a plan that ships must include them.
 
 WHICH tasks count as ship-gates is CONFIGURABLE per user/deployment, NOT baked
-in. Set ``ORCH_SHIP_GATES`` to a comma-separated list of task-id SUFFIXES your
-standard requires. The default below ("-prodtest,-audit") is just the reference
-operator's standard (real production test + full-code audit) — an EXAMPLE, not a
-mandate. e.g. ``ORCH_SHIP_GATES=-ci,-review1,-review2`` for a different shop.
-See docs/SHIPPABILITY.md.
+in. Set ``ORCH_SHIP_GATES`` to a comma-separated list of project-local gate NAMES
+your standard requires; a task is a gate iff its project-local name (the part after
+``<project>::``) EXACTLY equals one of them. The default ("prodtest,audit") is just
+the reference operator's standard (real production test + full-code audit) — an
+EXAMPLE, not a mandate. e.g. ``ORCH_SHIP_GATES=ci,review1,review2`` for a different
+shop. See docs/SHIPPABILITY.md.
 """
 from __future__ import annotations
 
@@ -41,14 +42,14 @@ def _all_tasks(summary: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def evaluate_shippability(project_id: str, config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     """Return a structured shippability verdict. shippable=True ONLY when every
-    -prodtest and -audit gate task is completed."""
+    gate task (project-local name in ORCH_SHIP_GATES, default prodtest/audit) is completed."""
     summary = get_project_summary(project_id, config)
     if not summary:
         return {"project": project_id, "shippable": False, "reason": "project not found",
                 "gate_tasks": 0, "incomplete_gates": []}
     tasks = _all_tasks(summary)
     suffixes = _gate_suffixes()
-    gates = [t for t in tasks if _bare_id(t.get("id")).endswith(suffixes)]
+    gates = [t for t in tasks if _bare_id(t.get("id")) in suffixes]
     if not gates:
         return {"project": project_id, "shippable": False,
                 "reason": f"no ship-gate tasks declared (fail-closed); configured gates={list(suffixes)}",
