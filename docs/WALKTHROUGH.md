@@ -103,9 +103,15 @@ behavior comes from. Full spec: [docs/PLAN_FORMAT.md](PLAN_FORMAT.md).
 
 ## Phase: release — Release it  [order: 2]
 
-### Task: my-thing-prodtest — Full production run     [priority: 10] [owner: worker-a] [tags: prodtest] [depends: docs]
-### Task: my-thing-audit — Full-code audit + sign-off [priority: 20] [owner: worker-a] [tags: audit] [depends: my-thing-prodtest]
+### Task: prodtest — Full production run              [priority: 10] [owner: worker-a] [tags: prodtest] [depends: docs]
+### Task: audit — Full-code audit + sign-off          [priority: 20] [owner: worker-a] [tags: audit] [depends: prodtest]
 ```
+
+> **Task ids are scoped to your project.** You write plain ids (`scaffold`, `audit`, …); the
+> orchestrator stores them as `<project-id>::<id>` (e.g. `my-thing::audit`), so a *second* project can
+> reuse the same generic ids with zero collision. `[depends: <id>]` resolves within the same project;
+> to depend on another project's task, write its full `other-project::task` id. The dashboard/CLIs show
+> and accept the scoped id.
 
 **What to define, and why it matters:**
 
@@ -120,9 +126,9 @@ behavior comes from. Full spec: [docs/PLAN_FORMAT.md](PLAN_FORMAT.md).
 | `[tags: ...]` | optional | capability tags; gate tasks use `prodtest` / `audit` |
 | `[ref: path:Lx-Ly]` | optional | clickable file-slice pointer in the dashboard (needs `ORCH_REF_ALLOWED_ROOT`) |
 
-**Design tip:** make the last tasks of a project its release gate (`<project>-prodtest`,
-`<project>-audit`) and wire everything else to `depends` into them. That is what makes "shippable"
-unreachable without the validation steps actually closing (Step 7).
+**Design tip:** make the last tasks of a project its release gate (a `prodtest` task + an `audit`
+task) and wire everything else to `depends` into them. That is what makes "shippable" unreachable
+without the validation steps actually closing (Step 7).
 
 ---
 
@@ -204,7 +210,8 @@ task metadata; it is what the release gate in Step 7 reads.)
 ## Step 7 — Release through the ship-gate
 
 A project is **not** shippable on your say-so. It is shippable only when every gate task passes.
-Gate tasks are identified by suffix (`ORCH_SHIP_GATES`, default `-prodtest,-audit`).
+Gate tasks are matched by their project-local name (`ORCH_SHIP_GATES`, default `prodtest,audit`) — so
+the `prodtest` / `audit` tasks from Step 3 (stored `my-thing::prodtest`, `my-thing::audit`) are the gates.
 
 ```bash
 # before the gate tasks are completed:
@@ -214,8 +221,8 @@ curl -s -X POST http://127.0.0.1:5002/api/projects/my-thing/ship
 **Expect:** **409** — refused, listing the gate tasks not yet passed. There is no human-approval
 override.
 
-Complete the gate tasks (each with its evidence — the production run for `-prodtest`, the independent
-audit sign-off for `-audit`), then:
+Complete the gate tasks (each with its evidence — the production run for the `prodtest` gate, the
+independent audit sign-off for the `audit` gate), then:
 
 ```bash
 curl -s -X GET  http://127.0.0.1:5002/api/projects/my-thing/shippability   # verdict dict
