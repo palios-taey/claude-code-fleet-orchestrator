@@ -1798,6 +1798,28 @@ def update_task_status(task_id: str, status: str, owner: str = "",
         pass  # Driver is singleton; do not close
 
 
+def resolve_task_id(task_id: str, config: Optional[OrchConfig] = None) -> str:
+    """Resolve a possibly-bare task id to its canonical namespaced node id.
+
+    Post-v1.7.0 tasks are namespaced '<project>::<bare>', so a session that references the BARE id
+    (e.g. 'task-abcd1234') would 404 — the cause of the recurring stop-engine "phantom" a session
+    could not self-clear. Resolution: an exact match always wins; else, if the id is bare (no '::')
+    and EXACTLY ONE OrchTask ends with '::<id>', return that node id; else return the id unchanged
+    (an honest 404 downstream). Ambiguous (>1) matches are never guessed."""
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        if session.run("MATCH (t:OrchTask {id: $id}) RETURN count(t) AS n", id=task_id).single()["n"] > 0:
+            return task_id
+        if "::" in task_id:
+            return task_id
+        rows = session.run(
+            "MATCH (t:OrchTask) WHERE t.id ENDS WITH $sfx RETURN t.id AS id LIMIT 2",
+            sfx="::" + task_id,
+        ).data()
+    return rows[0]["id"] if len(rows) == 1 else task_id
+
+
 def get_task(task_id: str,
              config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
     """Return one OrchTask node as a plain dict."""
