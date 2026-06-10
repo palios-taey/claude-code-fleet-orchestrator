@@ -95,6 +95,34 @@ def main() -> int:
         finally:
             if saved is not None:
                 os.environ["ORCH_HOST"] = saved
+
+        # --- 4. PUBLIC-SURFACE SECURITY (gatekeeper + grok p0-foundation BLOCK fixes) ---
+        import json as _json
+        import lib.public_readonly as PR  # noqa: E402
+        for _k in ("ORCH_PUBLIC_SHOW_SESSIONS", "ORCH_PUBLIC_HIDE_SESSIONS"):
+            os.environ.pop(_k, None)
+        # 4a. XSS: script-context-safe encoding neutralizes a </script> breakout, stays valid JSON
+        xss = 'x</script><script>alert(1)</script>'
+        enc = PR._script_safe_json([xss])
+        _check("script-safe JSON has no raw '<' (no </script> breakout)", "<" not in enc)
+        _check("script-safe JSON round-trips to the original value", _json.loads(enc) == [xss])
+        # 4b. fail-closed: public surface exposes NOTHING unless the operator opts sessions in
+        _check("public _shown_sessions empty by default (fail-closed)", PR._shown_sessions() == set())
+        _check("public _public_sessions empty by default (no data leaked)", PR._public_sessions() == [])
+        # 4c. opt-in allowlist works
+        os.environ["ORCH_PUBLIC_SHOW_SESSIONS"] = sup_a
+        try:
+            _check("public shows ONLY the opted-in session", PR._public_sessions() == [sup_a])
+        finally:
+            os.environ.pop("ORCH_PUBLIC_SHOW_SESSIONS", None)
+        # 4d. rendered public HTML with a malicious opted-in supervisor has no script breakout
+        create_project(project_id=f"{_PFX}-px", name="px", supervisor=xss, config=CFG)
+        os.environ["ORCH_PUBLIC_SHOW_SESSIONS"] = xss
+        try:
+            html = PR._public_index_html()
+            _check("rendered public HTML has no </script> breakout", "</script><script>alert" not in html)
+        finally:
+            os.environ.pop("ORCH_PUBLIC_SHOW_SESSIONS", None)
     finally:
         _cleanup()
 

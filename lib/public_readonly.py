@@ -61,11 +61,12 @@ def _hidden_sessions() -> set[str]:
 
 def _shown_sessions() -> set[str]:
     raw = os.environ.get("ORCH_PUBLIC_SHOW_SESSIONS")
-    # Default: show all data-derived sessions. An operator pins a subset via the env var.
+    # FAIL-CLOSED for a PUBLIC surface (gatekeeper/grok p0-foundation audit): show NOTHING unless the
+    # operator explicitly opts sessions in. A public dashboard must not leak data-derived session names
+    # by default — an allowlist, never a show-all denylist.
     if raw is None:
-        values = _all_sessions()
-    else:
-        values = [item.strip() for item in raw.replace(";", ",").split(",")]
+        return set()
+    values = [item.strip() for item in raw.replace(";", ",").split(",")]
     return {item for item in values if item} - _hidden_sessions()
 
 
@@ -80,7 +81,14 @@ def _hidden_project_ids() -> set[str]:
 
 def _public_sessions() -> List[str]:
     shown = _shown_sessions()
-    return [session_id for session_id in _all_sessions() if session_id in shown]
+    if not shown:
+        return []  # fail-closed: nothing opted in -> nothing to query or expose
+    try:
+        universe = _all_sessions()
+    except Exception:
+        # Public render must not 500 / leak a stack trace if Neo4j is unreachable (grok F4).
+        return []
+    return [session_id for session_id in universe if session_id in shown]
 
 
 def _require_visible_session(session_id: str) -> None:
@@ -336,9 +344,23 @@ def _session_projects_visible(session_id: str) -> Dict[str, Any]:
     return {"session": session_id, "projects": projects}
 
 
+def _script_safe_json(obj: Any) -> str:
+    """JSON safe to embed inside an inline <script>. json.dumps escapes quotes/backslashes but NOT
+    ``<`` ``>`` ``&`` — so (ensure_ascii also escapes U+2028/U+2029) a data-derived value containing
+    ``</script>`` would break out of the inline script and execute (stored XSS; gatekeeper + grok
+    p0-foundation BLOCK, both with executed PoCs). Neutralize those so the value can never close the
+    script element or terminate a JS string."""
+    return (
+        json.dumps(obj)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
 def _public_index_html() -> str:
     template = _PUBLIC_INDEX.read_text(encoding="utf-8")
-    template = template.replace("__PUBLIC_SESSIONS__", json.dumps(_public_sessions()))
+    template = template.replace("__PUBLIC_SESSIONS__", _script_safe_json(_public_sessions()))
     return template
 
 

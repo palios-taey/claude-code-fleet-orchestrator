@@ -25,7 +25,11 @@ def data_dir() -> Path:
     """
     explicit = os.environ.get("ORCH_DATA_DIR")
     if explicit and explicit.strip():
-        return Path(explicit).expanduser()
+        # ORCH_DATA_DIR is OPERATOR-trusted config: single-user local product, no attacker input, and
+        # the operator already owns the filesystem — so this is not a privilege boundary (grok F2 noted;
+        # gatekeeper did not block on it). resolve() canonicalizes any '..' so the location is explicit
+        # rather than obscured; it does not (and need not) confine the operator to a sandbox.
+        return Path(explicit).expanduser().resolve()
     xdg = os.environ.get("XDG_DATA_HOME")
     base = Path(xdg).expanduser() if xdg and xdg.strip() else Path.home() / ".local" / "share"
     return base / "claude-code-fleet-orchestrator"
