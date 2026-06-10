@@ -547,19 +547,26 @@ async function loadSessionList() {
   }
 }
 
+let _refreshing = false;
 async function refresh() {
-  if (state.paused) {
+  // In-flight guard (gemini p0-foundation R2 #3): the 5s setInterval must not overlap — a slow
+  // refresh resolving after a newer one would clobber DOM/state. Skip if one is still running.
+  if (state.paused || _refreshing) {
     return;
   }
-
-  await loadSessionList();
-  await Promise.all([loadSessions(), loadSessionProjects(), loadChat()]);
-  ensureSelectedProject();
-  renderSessionCards();
-  renderProjectList();
-  renderChatPanel();
-  await loadSelectedProject();
-  elements.lastUpdated.textContent = new Date().toLocaleTimeString();
+  _refreshing = true;
+  try {
+    await loadSessionList();
+    await Promise.all([loadSessions(), loadSessionProjects(), loadChat()]);
+    ensureSelectedProject();
+    renderSessionCards();
+    renderProjectList();
+    renderChatPanel();
+    await loadSelectedProject();
+    elements.lastUpdated.textContent = new Date().toLocaleTimeString();
+  } finally {
+    _refreshing = false;
+  }
 }
 
 elements.pauseToggle.addEventListener("change", (event) => {
