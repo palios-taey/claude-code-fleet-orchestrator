@@ -83,6 +83,9 @@ class TaskIdCollisionError(ValueError):
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
+# Closed set of legal task statuses. Validated BEFORE any completed-specific logic so a
+# non-canonical spelling can never slip past the evidence gate (GAIA ws0 audit #2).
+_VALID_TASK_STATUSES = frozenset({"pending", "in_progress", "completed", "failed", "interrupted"})
 
 
 def _utc_now_iso() -> str:
@@ -114,7 +117,13 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         value = evidence.get(key)
         if value is None:
             continue
-        text = str(value).strip()
+        # Must be a real non-empty string — not 0/False/[] coerced via str() (GAIA ws0 audit #5).
+        # "done" must not be self-reportable with junk evidence like {"commit_sha": 0}.
+        if not isinstance(value, str):
+            raise CompletionEvidenceError(
+                f"completion evidence {key!r} must be a string, got {type(value).__name__}"
+            )
+        text = value.strip()
         if text:
             normalized[key] = text
     if not normalized:
@@ -1643,12 +1652,19 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     blocked_on_value = "__KEEP__" if blocked_on is None else blocked_on
+    # Status must be one of the closed legal set BEFORE any completed-specific logic. Without this,
+    # a non-canonical spelling ({"status":"Completed"} / {"status":"done"}) would slip past the
+    # `== "completed"` evidence check and persist a junk status with no evidence (GAIA ws0 audit #2).
+    if status not in _VALID_TASK_STATUSES:
+        raise CompletionEvidenceError(
+            f"invalid status {status!r}; must be one of {sorted(_VALID_TASK_STATUSES)}"
+        )
     # Evidence is ALWAYS required to mark a task completed — this is the keystone of the whole
     # product (ws0-done-evidence): "done" is not a self-report, it is a commit SHA / gate run /
-    # production observation. update_task_status is the single chokepoint every completion flows
-    # through (only caller: the tasks API PATCH), and every caller path (taey-task --evidence, the
-    # API body) can supply it, so enforcing here is the root-cause shape, not a bolted-on guard.
-    # No flag, no default-off bypass: an evidence-less completed transition is rejected, period.
+    # production observation. Every task-completion writer routes through this single function (the
+    # API PATCH and the migration acceptance scripts), and no raw Cypher sets a task's status
+    # outside it (the other 'completed' SETs are phase/project status), so enforcing here is the
+    # root-cause shape, not a bolted-on guard. No flag, no default-off bypass.
     if status == "completed" and completion_evidence is None:
         raise CompletionEvidenceError(
             "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
