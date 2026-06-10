@@ -110,7 +110,8 @@ def _decode_json_field(raw: Any, default: Any) -> Any:
 def _evidence_value_well_formed(key: str, text: str) -> bool:
     """Cheap shape check per evidence key — rejects trivial junk, never claims to verify truth."""
     if key == "commit_sha":
-        return 7 <= len(text) <= 40 and all(c in "0123456789abcdefABCDEF" for c in text)
+        # 4 (git --short min) to 64 (SHA-256) hex — future-proofs the sha256 transition (ChatGPT ws0 audit).
+        return 4 <= len(text) <= 64 and all(c in "0123456789abcdefABCDEF" for c in text)
     if key == "gate_run_id":
         return len(text) >= 3 and all(c.isalnum() or c in "._:-/" for c in text)
     if key == "production_observation":
@@ -1681,9 +1682,10 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     # Evidence is ALWAYS required to mark a task completed — this is the keystone of the whole
     # product (ws0-done-evidence): "done" is not a self-report, it is a commit SHA / gate run /
     # production observation. Every task-completion writer routes through this single function (the
-    # API PATCH and the migration acceptance scripts), and no raw Cypher sets a task's status
-    # outside it (the other 'completed' SETs are phase/project status), so enforcing here is the
-    # root-cause shape, not a bolted-on guard. No flag, no default-off bypass.
+    # API PATCH and the migration acceptance scripts), and no raw Cypher writes a task to
+    # 'completed' outside it (other raw status writes exist — e.g. dispatch.py sets 'in_progress' —
+    # but the only 'completed' SETs elsewhere are phase/project status), so enforcing the
+    # completed-evidence rule here is the root-cause shape, not a bolted-on guard. No flag, no bypass.
     if status == "completed" and completion_evidence is None:
         raise CompletionEvidenceError(
             "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
