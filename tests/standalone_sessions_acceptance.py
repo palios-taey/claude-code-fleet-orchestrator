@@ -128,8 +128,10 @@ def main() -> int:
         from pathlib import Path as _Path
         _check("macOS /Users path redacted on public text",
                "/Users/alice" not in PR._scrub_public_text("see /Users/alice/secret/repo"))
-        _check("Windows C:\\Users path redacted on public text",
+        _check("Windows C:\\Users (backslash) path redacted on public text",
                "alice" not in PR._scrub_public_text(r"at C:\Users\alice\proj here"))
+        _check("Windows C:/Users (forward-slash) path redacted on public text",
+               "alice" not in PR._scrub_public_text("at C:/Users/alice/proj here"))
         _check("Linux /home path still redacted", "/home/bob" not in PR._scrub_public_text("/home/bob/x y"))
         _home = str(_Path.home())
         _check("actual resolved home prefix redacted dynamically (cross-platform)",

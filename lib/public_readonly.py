@@ -30,7 +30,7 @@ _PUBLIC_JS = _UI_ROOT / "static" / "public-app.js"
 # (`/home/...`), so on macOS (`/Users/...`) or Windows (`C:\Users\...`) the public dashboard leaked the
 # operator's username + dir layout — directly contradicting the "runs on ANY machine" goal of this PR.
 _HOME_PATH_RE = re.compile(
-    r"(?:/home/[^/\s:]+|/Users/[^/\s:]+|/root|[A-Za-z]:\\Users\\[^\\\s:]+)"
+    r"(?:/home/[^/\s:]+|/Users/[^/\s:]+|/root|[A-Za-z]:[/\\]Users[/\\][^/\\\s:]+)"
     r"(?:[/\\][^\s,;)\]}\"']*)?"
 )
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
