@@ -329,8 +329,11 @@ async function loadSessions() {
   }));
 }
 
+let _refreshing = false;
 async function refresh() {
-  if (state.paused) {
+  // In-flight guard (gemini p0-foundation R2 #3, completed for the PUBLIC surface per grok e637a01):
+  // the public dashboard's 5s setInterval must not overlap either — same race as the authenticated app.
+  if (state.paused || _refreshing) {
     return;
   }
   if (!SESSIONS.length) {
@@ -340,13 +343,17 @@ async function refresh() {
     elements.lastUpdated.textContent = new Date().toLocaleTimeString();
     return;
   }
-
-  await Promise.all([loadSessions(), loadSessionProjects()]);
-  ensureSelectedProject();
-  renderSessionCards();
-  renderProjectList();
-  await loadSelectedProject();
-  elements.lastUpdated.textContent = new Date().toLocaleTimeString();
+  _refreshing = true;
+  try {
+    await Promise.all([loadSessions(), loadSessionProjects()]);
+    ensureSelectedProject();
+    renderSessionCards();
+    renderProjectList();
+    await loadSelectedProject();
+    elements.lastUpdated.textContent = new Date().toLocaleTimeString();
+  } finally {
+    _refreshing = false;
+  }
 }
 
 elements.pauseToggle.addEventListener("change", (event) => {
