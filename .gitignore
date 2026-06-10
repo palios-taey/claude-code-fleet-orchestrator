@@ -12,3 +12,6 @@ CLAUDE.md
 .env.local
 .env.*.local
 audit_logs/
+
+# dead/parked code kept locally as .bak, never tracked (main stays clean)
+*.bak
