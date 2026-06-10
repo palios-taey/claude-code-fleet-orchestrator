@@ -683,6 +683,35 @@ def _resolve_supervisor_session(session_id: str, config: Optional[OrchConfig] = 
     return session_id
 
 
+def list_sessions(config: Optional[OrchConfig] = None) -> list:
+    """Sessions to surface (dashboard cards, etc.), derived from DATA — never hardcoded.
+
+    Union of: distinct ``OrchProject.supervisor``, ``OrchSupervisor.session``, the
+    ``ORCH_SESSION_IDS`` notify-allowlist, and an optional ``ORCH_DASHBOARD_SESSIONS`` pin
+    (comma/semicolon list, for sessions that have no project yet). Sorted + de-duplicated.
+    A fresh install with no data and no env pin returns ``[]`` — no operator-specific session
+    names are baked into the product.
+    """
+    cfg = config or OrchConfig()
+    found: set = set()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        for record in session.run(
+            "MATCH (p:OrchProject) WHERE coalesce(p.supervisor, '') <> '' "
+            "RETURN DISTINCT p.supervisor AS s"
+        ):
+            found.add(str(record["s"]))
+        for record in session.run(
+            "MATCH (s:OrchSupervisor) WHERE coalesce(s.session, '') <> '' RETURN s.session AS s"
+        ):
+            found.add(str(record["s"]))
+    found.update(cfg.session_ids or [])
+    raw = os.environ.get("ORCH_DASHBOARD_SESSIONS", "")
+    if raw:
+        found.update(item.strip() for item in raw.replace(";", ",").split(",") if item.strip())
+    return sorted(found)
+
+
 def _observed_stop_task_id(session_id: str, config: Optional[OrchConfig] = None) -> Optional[str]:
     from .config import get_redis_sync
 

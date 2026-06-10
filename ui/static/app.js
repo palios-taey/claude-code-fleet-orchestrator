@@ -8,21 +8,12 @@ const SESSION_NOTIFY_ENDPOINT = (sessionId) => `/api/sessions/${encodeURICompone
 const CHAT_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}`;
 const CHAT_PROMOTE_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}/promote`;
 const POLL_INTERVAL_MS = 5000;
-const SESSIONS = [
-  "conductor",
-  "weaver",
-  "tutor",
-  "infra",
-  "taeys-hands",
-  "treasurer",
-  "hunter",
-  "taey-ed",
-  "x-claude",
-];
+// Populated at runtime from GET /api/sessions (data-derived; no hardcoded operator fleet).
+let SESSIONS = [];
 
 const state = {
   paused: false,
-  selectedSessionId: SESSIONS[0],
+  selectedSessionId: null,
   selectedProjectIdBySession: new Map(),
   sessionCards: new Map(),
   sessionProjects: new Map(),
@@ -542,11 +533,26 @@ async function loadChat() {
   }));
 }
 
+async function loadSessionList() {
+  try {
+    const data = await fetchJson("/api/sessions");
+    SESSIONS = Array.isArray(data.sessions) ? data.sessions : [];
+  } catch (error) {
+    if (!Array.isArray(SESSIONS)) {
+      SESSIONS = [];
+    }
+  }
+  if (!state.selectedSessionId || !SESSIONS.includes(state.selectedSessionId)) {
+    state.selectedSessionId = SESSIONS[0] || null;
+  }
+}
+
 async function refresh() {
   if (state.paused) {
     return;
   }
 
+  await loadSessionList();
   await Promise.all([loadSessions(), loadSessionProjects(), loadChat()]);
   ensureSelectedProject();
   renderSessionCards();
@@ -658,8 +664,11 @@ elements.chatForm.addEventListener("submit", async (event) => {
   }
 });
 
-syncChatTarget();
-setChatExpanded(true);
-updateChatButtonState();
-refresh();
-window.setInterval(refresh, POLL_INTERVAL_MS);
+(async () => {
+  await loadSessionList();
+  syncChatTarget();
+  setChatExpanded(true);
+  updateChatButtonState();
+  await refresh();
+  window.setInterval(refresh, POLL_INTERVAL_MS);
+})();
