@@ -27,8 +27,11 @@ import os
 import time
 from typing import Any, Dict, Optional
 
-LEDGER_PATH = os.environ.get(
-    "ACCOUNTABILITY_LEDGER_PATH", "/home/mira/the-conductor/accountability/ledger.jsonl"
+from lib.paths import data_dir
+
+# No operator-specific default: explicit override wins, else under the user's data dir.
+LEDGER_PATH = os.environ.get("ACCOUNTABILITY_LEDGER_PATH") or str(
+    data_dir() / "accountability" / "ledger.jsonl"
 )
 _HEADER = (
     "# APPEND-ONLY ACCOUNTABILITY LEDGER — never delete or rewrite a line. Deletion/rewrite breaks "

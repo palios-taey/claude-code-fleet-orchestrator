@@ -22,8 +22,11 @@ import tempfile
 from typing import Any, Dict, Optional
 
 from lib.accountability_ledger import append as ledger_append
+from lib.paths import repo_root
 
-DEFAULT_REPO = os.environ.get("ORCH_GATE_REPO", "/home/mira/claude-code-fleet-orchestrator")
+# No operator-specific default: explicit override wins, else the install root (the repo
+# this orchestrator is running from), so gates target a real repo on any user's machine.
+DEFAULT_REPO = os.environ.get("ORCH_GATE_REPO") or str(repo_root())
 _EMPTY = (None, "", "-")
 
 
