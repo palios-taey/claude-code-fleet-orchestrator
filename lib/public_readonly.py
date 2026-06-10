@@ -20,12 +20,19 @@ from lib.orch_schema import (
     get_session_supervised_projects,
     list_sessions,
 )
+from lib.paths import data_dir, repo_root
 
 _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
 _PUBLIC_INDEX = _UI_ROOT / "public_index.html"
 _PUBLIC_CSS = _UI_ROOT / "static" / "app.css"
 _PUBLIC_JS = _UI_ROOT / "static" / "public-app.js"
-_HOME_PATH_RE = re.compile(r"/home/[^/\s:]+/[^\s,;)\]}\"']+")
+# Cross-platform operator-path redaction (gemini p0-foundation R2 #1): the old regex was Linux-only
+# (`/home/...`), so on macOS (`/Users/...`) or Windows (`C:\Users\...`) the public dashboard leaked the
+# operator's username + dir layout — directly contradicting the "runs on ANY machine" goal of this PR.
+_HOME_PATH_RE = re.compile(
+    r"(?:/home/[^/\s:]+|/Users/[^/\s:]+|/root|[A-Za-z]:\\Users\\[^\\\s:]+)"
+    r"(?:[/\\][^\s,;)\]}\"']*)?"
+)
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _IPV6_RE = re.compile(r"\b(?:[0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4}\b")
 _SECRET_TOKEN_RE = re.compile(
@@ -119,8 +126,28 @@ def _decode_json(raw: Any, default: Any) -> Any:
     return raw
 
 
+def _operator_path_prefixes() -> List[str]:
+    """The ACTUAL resolved operator-specific path prefixes to redact — derived from this machine's
+    environment (home / data dir / install root), so redaction is cross-platform and exact rather than
+    a hardcoded OS literal. Longest-first so the most specific prefix wins."""
+    prefixes: set[str] = set()
+    for candidate in (Path.home(), data_dir(), repo_root()):
+        try:
+            s = str(candidate)
+        except Exception:
+            continue
+        if s and s not in ("/", "\\"):
+            prefixes.add(s)
+    return sorted(prefixes, key=len, reverse=True)
+
+
 def _scrub_public_text(s: Any) -> str:
     text = "" if s is None else str(s)
+    # 1. dynamic: redact the actual resolved operator prefixes (cross-platform, exact)
+    for prefix in _operator_path_prefixes():
+        if prefix in text:
+            text = text.replace(prefix, "[path]")
+    # 2. generic cross-platform home-path fallback (Linux/macOS/Windows/root)
     text = _HOME_PATH_RE.sub("[path]", text)
     text = _IPV4_RE.sub("[host]", text)
     text = _IPV6_RE.sub("[host]", text)

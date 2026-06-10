@@ -123,6 +123,17 @@ def main() -> int:
             _check("rendered public HTML has no </script> breakout", "</script><script>alert" not in html)
         finally:
             os.environ.pop("ORCH_PUBLIC_SHOW_SESSIONS", None)
+
+        # --- 5. CROSS-PLATFORM PATH REDACTION (gemini R2 #1: scrubber was Linux-only) ---
+        from pathlib import Path as _Path
+        _check("macOS /Users path redacted on public text",
+               "/Users/alice" not in PR._scrub_public_text("see /Users/alice/secret/repo"))
+        _check("Windows C:\\Users path redacted on public text",
+               "alice" not in PR._scrub_public_text(r"at C:\Users\alice\proj here"))
+        _check("Linux /home path still redacted", "/home/bob" not in PR._scrub_public_text("/home/bob/x y"))
+        _home = str(_Path.home())
+        _check("actual resolved home prefix redacted dynamically (cross-platform)",
+               _home not in PR._scrub_public_text(f"path {_home}/myfile rest"))
     finally:
         _cleanup()
 
