@@ -286,7 +286,8 @@ def main() -> int:
     )
     # After marking pri=1 completed, expect priority=2 next
     if first:
-        update_task_status(first["task_id"], "completed")
+        update_task_status(first["task_id"], "completed",
+                           completion_evidence={"production_observation": "v1.3.0 stage-a queue-order acceptance"})
     second = get_session_next_ready("conductor", project_id=queue_pid)
     second_pri = second.get("priority") if second else None
     record(
@@ -296,7 +297,8 @@ def main() -> int:
     )
     # After marking pri=2 completed, expect priority=6 last
     if second:
-        update_task_status(second["task_id"], "completed")
+        update_task_status(second["task_id"], "completed",
+                           completion_evidence={"production_observation": "v1.3.0 stage-a queue-order acceptance"})
     third = get_session_next_ready("conductor", project_id=queue_pid)
     third_pri = third.get("priority") if third else None
     record(
