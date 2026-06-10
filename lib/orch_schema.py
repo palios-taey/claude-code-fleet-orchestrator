@@ -817,10 +817,17 @@ def _blocked_on_has_live_resolver(blocked_on: Optional[str],
       - cycle/depth: follow the resolver's own blocked_on; if it loops back to the waiter
         or to an already-seen task, or runs deeper than _MAX_RESOLVER_DEPTH, it cannot
         guarantee a wake (H7/N1). A valid resolver chain must terminate in a live task
-        that is NOT itself waiting -- something actually progressing;
+        that is NOT itself waiting -- something actually progressing. TRANSITIVE consequence
+        (Family-audit F3, intended): if B is in_progress but is itself blocked_on a PENDING C,
+        the chain does NOT bottom out in an actively-progressing node, so the waiter keeps
+        going. A chain that ends in a not-yet-worked task offers no guaranteed wake;
       - stale/missing/terminal-status ref -> not live -> False;
-      - every node must be formally runnable (no incomplete DEPENDS_ON) -- this, not the
-        status set, is the viability filter that makes pending/ready resolvers safe;
+      - STATUS FILTER (the real filter): only {in_progress, dispatched} are live -- a pending/ready
+        task is not actively being resolved and cannot guarantee a wake, so it is NOT live. We do
+        NOT inspect the DEPENDS_ON runnability graph here (Family-audit R2-R5: it can't be made
+        correct without a terminalizer; orch-watch / p-systemic owns parked-resolver recovery).
+        Re-adding pending/ready to _LIVE_RESOLVER_STATUSES reopens the stale-tracking-task
+        false-stop this fix closed -- do not;
       - DB errors are NOT swallowed here: they bubble to get_session_stop_decision's keystone
         fail-CLOSED handler (blocks + labels keystone_fail_closed honestly, not as a gate)."""
     if not blocked_on:

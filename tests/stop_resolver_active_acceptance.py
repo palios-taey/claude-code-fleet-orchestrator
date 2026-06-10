@@ -49,6 +49,30 @@ def main() -> int:
         _check("completed resolver is NOT live", _blocked_on_has_live_resolver(f"{_PFX}::active", config=CFG) is False)
         _check("non-existent resolver is NOT live", _blocked_on_has_live_resolver("task-does-not-exist-9", config=CFG) is False)
         _check("empty/None blocked_on is NOT live", _blocked_on_has_live_resolver("", config=CFG) is False)
+
+        # F2: 'ready' (not-live) + 'dispatched' (live) membership. These are not canonical task
+        # statuses (the API rejects them), so set them directly to exercise _LIVE_RESOLVER_STATUSES.
+        create_task(phase_id=f"{_PFX}::p", task_id=f"{_PFX}::rdy", description="r", wake_owner_if_ready=False, config=CFG)
+        create_task(phase_id=f"{_PFX}::p", task_id=f"{_PFX}::disp", description="d", wake_owner_if_ready=False, config=CFG)
+        with drv.session(database=CFG.neo4j_db) as s:
+            s.run("MATCH (t:OrchTask {id:$i}) SET t.status='ready'", i=f"{_PFX}::rdy")
+            s.run("MATCH (t:OrchTask {id:$i}) SET t.status='dispatched'", i=f"{_PFX}::disp")
+        _check("ready resolver is NOT live", _blocked_on_has_live_resolver(f"{_PFX}::rdy", config=CFG) is False)
+        _check("dispatched resolver IS live", _blocked_on_has_live_resolver(f"{_PFX}::disp", config=CFG) is True)
+
+        # F3 transitive: A->B(in_progress)->C(pending) -> NOT live (chain bottoms at a pending node)
+        for n in ("B", "C", "D", "X", "Y"):
+            create_task(phase_id=f"{_PFX}::p", task_id=f"{_PFX}::{n}", description=n, wake_owner_if_ready=False, config=CFG)
+        update_task_status(f"{_PFX}::B", "in_progress", blocked_on=f"{_PFX}::C", config=CFG)
+        _check("transitive in_progress B blocked_on pending C -> NOT live (keep going)", _blocked_on_has_live_resolver(f"{_PFX}::B", config=CFG) is False)
+        # multi-hop chain that DOES terminate in an active, not-waiting node -> live
+        update_task_status(f"{_PFX}::D", "in_progress", config=CFG)
+        update_task_status(f"{_PFX}::B", "in_progress", blocked_on=f"{_PFX}::D", config=CFG)
+        _check("multi-hop chain ending in active resolver -> live", _blocked_on_has_live_resolver(f"{_PFX}::B", config=CFG) is True)
+        # cycle X<->Y -> NOT live (cycle guard exercises the chain walk)
+        update_task_status(f"{_PFX}::Y", "in_progress", blocked_on=f"{_PFX}::X", config=CFG)
+        update_task_status(f"{_PFX}::X", "in_progress", blocked_on=f"{_PFX}::Y", config=CFG)
+        _check("cycle X<->Y -> NOT live (cycle guard)", _blocked_on_has_live_resolver(f"{_PFX}::X", config=CFG) is False)
     finally:
         with drv.session(database=CFG.neo4j_db) as s:
             s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
