@@ -1643,14 +1643,13 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     blocked_on_value = "__KEEP__" if blocked_on is None else blocked_on
-    # Evidence REQUIREMENT is flag-gated (default OFF) for staged rollout. Deploying this
-    # dormant does not break existing completion flows; activation
-    # (CF_COMPLETION_EVIDENCE_REQUIRED=1) is a deliberate fleet-wide step taken AFTER the CLI
-    # + all completion call-sites pass evidence (stage-gate discipline). When OFF, completion
-    # without evidence is allowed (current behavior); evidence that IS provided is still
-    # validated below regardless of the flag.
-    _evidence_required = str(os.environ.get("CF_COMPLETION_EVIDENCE_REQUIRED") or "").strip().lower() in {"1", "true", "yes", "on"}
-    if status == "completed" and completion_evidence is None and _evidence_required:
+    # Evidence is ALWAYS required to mark a task completed — this is the keystone of the whole
+    # product (ws0-done-evidence): "done" is not a self-report, it is a commit SHA / gate run /
+    # production observation. update_task_status is the single chokepoint every completion flows
+    # through (only caller: the tasks API PATCH), and every caller path (taey-task --evidence, the
+    # API body) can supply it, so enforcing here is the root-cause shape, not a bolted-on guard.
+    # No flag, no default-off bypass: an evidence-less completed transition is rejected, period.
+    if status == "completed" and completion_evidence is None:
         raise CompletionEvidenceError(
             "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
         )
