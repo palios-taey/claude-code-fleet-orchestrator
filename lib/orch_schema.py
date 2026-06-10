@@ -788,7 +788,14 @@ def _task_blocked_on(task_id: Optional[str], config: Optional[OrchConfig] = None
 # it is how this fix thrashed. Runnability-RECOVERY (a parked waiter on a resolver that never
 # completes) is orch-watch's job, tracked as its own design effort (project phase p-systemic),
 # NOT this engine's. Terminal statuses (completed/failed/interrupted) are excluded.
-_LIVE_RESOLVER_STATUSES = {"pending", "ready", "in_progress", "dispatched"}
+#
+# A resolver must be ACTIVELY being resolved to license a stop -- 'in_progress'/'dispatched', NOT
+# merely 'pending'/'ready'. A pending task that nobody is working is not a live wait: that was the
+# hole that let a stale, self-created tracking task (made to satisfy blocked_on, then left pending)
+# license a false stop -- the recurring "why did you stop" failure. If the only thing you are
+# "waiting on" is pending, you are not waiting, you are stopping: keep going. You may validly wait
+# only once a resolver is actually being worked (in_progress), which is what wakes you on completion.
+_LIVE_RESOLVER_STATUSES = {"in_progress", "dispatched"}
 # Max hops when walking the blocked_on chain (cycle/depth guard).
 _MAX_RESOLVER_DEPTH = 8
 
