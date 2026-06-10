@@ -60,6 +60,7 @@ from lib.orch_schema import (
     get_ready_tasks,
     get_session_current_work,
     list_sessions,
+    resolve_task_id,
     get_task as load_task_record,
     get_session_stop_decision,
     get_task_phase,
@@ -202,7 +203,9 @@ def _load_task(task_id: str, cfg: OrchConfig) -> Dict[str, Any]:
 
 @app.get("/api/tasks/{task_id}")
 def get_task(task_id: str) -> Dict[str, Any]:
-    task = load_task_record(task_id, config=_cfg())
+    cfg = _cfg()
+    task_id = resolve_task_id(task_id, config=cfg)  # bare id -> canonical namespaced node
+    task = load_task_record(task_id, config=cfg)
     if not task:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     return task
@@ -268,6 +271,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
 
     try:
         cfg = _cfg()
+        task_id = resolve_task_id(task_id, config=cfg)  # bare id -> canonical namespaced node
         task_before = _load_task(task_id, cfg)
         owner = data.get("owner")
         if owner is None:
