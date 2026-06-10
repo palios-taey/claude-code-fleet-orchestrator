@@ -18,25 +18,13 @@ from lib.orch_schema import (
     get_session_current_work,
     get_session_next_ready,
     get_session_supervised_projects,
+    list_sessions,
 )
 
 _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
 _PUBLIC_INDEX = _UI_ROOT / "public_index.html"
 _PUBLIC_CSS = _UI_ROOT / "static" / "app.css"
 _PUBLIC_JS = _UI_ROOT / "static" / "public-app.js"
-_DEFAULT_SHOW_SESSIONS = ("conductor", "weaver", "tutor", "infra", "hunter", "taey-ed")
-_DEFAULT_HIDE_SESSIONS = ("taeys-hands", "x-claude", "treasurer")
-_UI_SESSIONS = (
-    "conductor",
-    "weaver",
-    "tutor",
-    "infra",
-    "taeys-hands",
-    "treasurer",
-    "hunter",
-    "taey-ed",
-    "x-claude",
-)
 _HOME_PATH_RE = re.compile(r"/home/[^/\s:]+/[^\s,;)\]}\"']+")
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _IPV6_RE = re.compile(r"\b(?:[0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4}\b")
@@ -59,19 +47,23 @@ def _cfg() -> OrchConfig:
     return OrchConfig()
 
 
+def _all_sessions() -> List[str]:
+    """The session universe for the public view — data-derived, never hardcoded."""
+    return list_sessions(_cfg())
+
+
 def _hidden_sessions() -> set[str]:
     raw = os.environ.get("ORCH_PUBLIC_HIDE_SESSIONS")
-    if raw is None:
-        values = list(_DEFAULT_HIDE_SESSIONS)
-    else:
-        values = [item.strip() for item in raw.replace(";", ",").split(",")]
+    # Default: hide nothing. An operator opts specific sessions out via the env var.
+    values = [] if raw is None else [item.strip() for item in raw.replace(";", ",").split(",")]
     return {item for item in values if item}
 
 
 def _shown_sessions() -> set[str]:
     raw = os.environ.get("ORCH_PUBLIC_SHOW_SESSIONS")
+    # Default: show all data-derived sessions. An operator pins a subset via the env var.
     if raw is None:
-        values = list(_DEFAULT_SHOW_SESSIONS)
+        values = _all_sessions()
     else:
         values = [item.strip() for item in raw.replace(";", ",").split(",")]
     return {item for item in values if item} - _hidden_sessions()
@@ -88,7 +80,7 @@ def _hidden_project_ids() -> set[str]:
 
 def _public_sessions() -> List[str]:
     shown = _shown_sessions()
-    return [session_id for session_id in _UI_SESSIONS if session_id in shown]
+    return [session_id for session_id in _all_sessions() if session_id in shown]
 
 
 def _require_visible_session(session_id: str) -> None:

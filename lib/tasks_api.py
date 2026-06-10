@@ -59,6 +59,7 @@ from lib.orch_schema import (
     get_project_summary,
     get_ready_tasks,
     get_session_current_work,
+    list_sessions,
     get_task as load_task_record,
     get_session_stop_decision,
     get_task_phase,
@@ -530,6 +531,14 @@ async def reset_project_endpoint(project_id: str, req: Request) -> Dict[str, Any
         )
     except ProjectNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/sessions")
+def sessions() -> Dict[str, Any]:
+    """Sessions to render as dashboard cards — derived from data (supervisors + OrchSupervisor)
+    plus any ORCH_SESSION_IDS / ORCH_DASHBOARD_SESSIONS env pin. Never a hardcoded list, so the
+    dashboard shows the running user's own sessions on any machine."""
+    return {"sessions": list_sessions(config=_cfg())}
 
 
 @app.get("/api/sessions/{session_id}/current")
