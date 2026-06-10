@@ -107,6 +107,17 @@ def _decode_json_field(raw: Any, default: Any) -> Any:
     return raw
 
 
+def _evidence_value_well_formed(key: str, text: str) -> bool:
+    """Cheap shape check per evidence key — rejects trivial junk, never claims to verify truth."""
+    if key == "commit_sha":
+        return 7 <= len(text) <= 40 and all(c in "0123456789abcdefABCDEF" for c in text)
+    if key == "gate_run_id":
+        return len(text) >= 3 and all(c.isalnum() or c in "._:-/" for c in text)
+    if key == "production_observation":
+        return len(text) >= 8
+    return False
+
+
 def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
     if evidence is None:
         return None
@@ -118,14 +129,22 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         if value is None:
             continue
         # Must be a real non-empty string — not 0/False/[] coerced via str() (GAIA ws0 audit #5).
-        # "done" must not be self-reportable with junk evidence like {"commit_sha": 0}.
         if not isinstance(value, str):
             raise CompletionEvidenceError(
                 f"completion evidence {key!r} must be a string, got {type(value).__name__}"
             )
         text = value.strip()
-        if text:
-            normalized[key] = text
+        if not text:
+            continue
+        # Per-key shape so trivial junk ("x"/"0") cannot pass as evidence (GAIA+ChatGPT ws0 audit #5).
+        # NOT a truth check (no git access at runtime — SHA-existence is correctly out of scope);
+        # this only rejects values that cannot plausibly BE the thing they claim to be.
+        if not _evidence_value_well_formed(key, text):
+            raise CompletionEvidenceError(
+                f"completion evidence {key!r}={text!r} is not well-formed "
+                f"(commit_sha=7-40 hex, gate_run_id>=3 id-chars, production_observation>=8 chars)"
+            )
+        normalized[key] = text
     if not normalized:
         raise CompletionEvidenceError(
             "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
