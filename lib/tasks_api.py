@@ -73,7 +73,7 @@ from lib.orch_schema import (
     validate_source_path_for_refs,
 )
 from lib.plan_loader import load_plan_from_text, plan_declares_refs, PlanIdError, scope_declared_id
-from lib.orch_schema import TaskIdCollisionError
+from lib.orch_schema import TaskIdCollisionError, TaskParentNotFoundError
 
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
 # SECURITY: chat is an injection vector (posts become content an AI session reads). It is the
@@ -254,6 +254,8 @@ async def create(req: Request) -> Dict[str, Any]:
             estimated_tokens=estimated_tokens,
             config=cfg,
         )
+    except TaskParentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except TaskIdCollisionError as exc:
         # Fail-closed (bad/orphan/fused phase_id, or an owned id) -> 409, not a raw 500 (R5 audit:
         # match the /phases + /plan routes which already map this to 4xx).
@@ -327,6 +329,8 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             status_code=400,
             content={"ok": False, "error": str(e)},
         )
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse(
             status_code=500,
