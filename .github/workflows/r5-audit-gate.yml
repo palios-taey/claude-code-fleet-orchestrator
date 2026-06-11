@@ -8,6 +8,12 @@
 # PR head SHA. GitHub branch protection requires the `r5-audit-gate` context this
 # workflow sets, so no human discipline is involved.
 #
+# Known limitation (Gatekeeper PR#57, non-blocking): this verifies the status
+# CONTEXT + STATE, not WHO posted it — anyone with statuses:write could forge an
+# auditor success. That is inherent to commit-status gates and bounded by repo
+# write access + branch protection (the fleet is a single trusted account). A
+# future hardening could verify the status creator / require signed verdicts.
+#
 # Auditors post their verdict (on ENDORSE / BLOCK) with:
 #   gh api repos/$REPO/statuses/$SHA -f state=success -f context=audit/grok \
 #     -f description="ENDORSE" -f target_url=<verdict-log-url>

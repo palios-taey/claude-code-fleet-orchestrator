@@ -1,18 +1,22 @@
 # R5 risky surfaces — a PR touching ANY of these requires both adversarial
 # auditors (audit/grok + audit/gatekeeper) to post a success commit status
 # before it can merge. The r5-audit-gate workflow enforces this mechanically.
-# One glob per line; '#' comments and blank lines ignored.
-# Fleet-core / session-driving surfaces (a bug here = fleet-wide blast radius):
-fleet_orchestrator/orch_schema.py
-fleet_orchestrator/tasks_api.py
-fleet_orchestrator/dispatch.py
-fleet_orchestrator/cli.py
-fleet_orchestrator/config.py
-fleet_orchestrator/context_assembler.py
-fleet_orchestrator/loop_engine.py
-fleet_orchestrator/decision_receipt.py
-fleet_orchestrator/plan_readiness.py
-fleet_orchestrator/accountability_ledger.py
-setup.py
-.github/workflows/r5-audit-gate.yml
+#
+# DESIGN: broad GLOBS that DEFAULT-COVER (fail-closed), NOT an enumerated
+# allowlist that silently drifts as new modules are added (Gatekeeper PR#57
+# BLOCK: an allowlist omitting gate_runner/plan_loader/chat_layer/ui app.js —
+# each of which had a real bug — would false-green an un-audited PR). Better to
+# over-gate (a trivial change asks for a fast ENDORSE) than under-gate (skip the
+# audit on a risky file). One glob per line; '#' and blank lines ignored.
+#
+# All orchestrator package code (fleet-core; bug here = fleet-wide blast radius):
+fleet_orchestrator/*.py
+# The dashboard / wake-packet render surface (XSS class):
+ui/static/*.js
+ui/*.html
+# CI/gate config itself (self-protecting — a PR weakening the gate is gated):
+.github/workflows/*.yml
 .github/r5-risky-paths
+# Packaging / entrypoint + the installed CLIs:
+setup.py
+scripts/orch-*
