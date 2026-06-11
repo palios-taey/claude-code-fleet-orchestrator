@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from lib.accountability_ledger import LEDGER_PATH
-from lib.orch_schema import get_project_summary, get_session_next_ready, get_task_project
+from lib.orch_schema import (
+    get_overall_refs,
+    get_project_summary,
+    get_session_next_ready,
+    get_supervisor_refs,
+    get_task_project,
+)
 from lib.paths import repo_root
 from lib.rules_tier import get_rules
 
@@ -58,15 +64,17 @@ VALID_CLIS = {"claude", "codex", "gemini", "grok"}
 def select_context(session: str, task_id: Optional[str] = None, cli: str = "claude",
                    max_memory: int = DEFAULT_MAX_MEMORY,
                    session_roots: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    raw_session = (session or "").strip()
     session_key = _normalize_session(session)
+    aliases = _session_aliases(raw_session, session_key)
     roots = session_roots if session_roots is not None else _load_session_roots()
-    _load_session_env(session_key, roots)
+    _load_session_env(aliases, roots)
     work = _resolve_work(session_key, task_id)
     summary = get_project_summary(work["project_id"]) if work.get("project_id") else None
 
     task_text = _task_text(work, summary, task_id)
-    refs = _select_refs(summary, work, task_id)
-    memory_files = _read_memory_files(_memory_dirs(session_key, work, summary, roots))
+    refs = _select_refs(summary, work, task_id, session_key)
+    memory_files = _read_memory_files(_memory_dirs(session_key, work, summary, roots, aliases))
     selected_memory = _rank_memory(memory_files, task_text, max_memory=max_memory)
     rules = _select_rules(session_key, work, summary, task_text)
 
@@ -170,6 +178,18 @@ def _normalize_session(session: str) -> str:
     return value
 
 
+def _session_aliases(raw_session: str, normalized_session: str) -> List[str]:
+    aliases = []
+    for value in (raw_session, normalized_session):
+        if value and value not in aliases:
+            aliases.append(value)
+    for suffix in ("-codex", "-gemini", "-grok"):
+        value = f"{normalized_session}{suffix}"
+        if normalized_session and value not in aliases:
+            aliases.append(value)
+    return aliases
+
+
 def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
     if task_id:
         task_project = get_task_project(task_id)
@@ -198,8 +218,8 @@ def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
     return {"project_id": None, "description": "", "task_id": None}
 
 
-def _load_session_env(session: str, session_roots: Dict[str, str]) -> None:
-    root = session_roots.get(session)
+def _load_session_env(session_aliases: Iterable[str], session_roots: Dict[str, str]) -> None:
+    root = _session_root(session_aliases, session_roots)
     if not root:
         return
     env_path = Path(root) / ".env"
@@ -229,7 +249,7 @@ def _task_text(work: Dict[str, Any], summary: Optional[Dict[str, Any]], task_id:
 
 
 def _select_refs(summary: Optional[Dict[str, Any]], work: Dict[str, Any],
-                 task_id: Optional[str]) -> Dict[str, List[Dict[str, Any]]]:
+                 task_id: Optional[str], session: str) -> Dict[str, List[Dict[str, Any]]]:
     tiers = {"overall": [], "supervisor": [], "project": [], "phase": [], "task": []}
     if summary:
         ref_tiers = summary.get("ref_tiers") or {}
@@ -255,7 +275,18 @@ def _select_refs(summary: Optional[Dict[str, Any]], work: Dict[str, Any],
         tiers["phase"] = _ref_context_entries({"ref_context": work.get("phase_ref_context")})
     if not tiers["task"] and work.get("task_ref_context"):
         tiers["task"] = _ref_context_entries({"ref_context": work.get("task_ref_context")})
+    if not tiers["overall"]:
+        tiers["overall"] = _ref_context_entries(_safe_context_record(get_overall_refs))
+    if not tiers["supervisor"]:
+        tiers["supervisor"] = _ref_context_entries(_safe_context_record(get_supervisor_refs, session))
     return tiers
+
+
+def _safe_context_record(fn: Any, *args: Any) -> Optional[Dict[str, Any]]:
+    try:
+        return fn(*args)
+    except Exception:
+        return None
 
 
 def _ref_context_entries(tier: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -266,9 +297,10 @@ def _ref_context_entries(tier: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 
 def _memory_dirs(session: str, work: Dict[str, Any], summary: Optional[Dict[str, Any]],
-                 session_roots: Dict[str, str]) -> List[Path]:
+                 session_roots: Dict[str, str], session_aliases: Optional[Iterable[str]] = None) -> List[Path]:
     candidates: List[str] = []
-    root = session_roots.get(session)
+    aliases = list(session_aliases or [session])
+    root = _session_root(aliases, session_roots)
     if root:
         candidates.append(root)
     for source in (
@@ -284,10 +316,19 @@ def _memory_dirs(session: str, work: Dict[str, Any], summary: Optional[Dict[str,
         memory_dir = MEMORY_BASE / mangled / "memory"
         if memory_dir.is_dir() and memory_dir not in dirs:
             dirs.append(memory_dir)
-    direct = MEMORY_BASE / _safe_memory_key(session) / "memory"
-    if direct.is_dir() and direct not in dirs:
-        dirs.append(direct)
+    for alias in aliases:
+        direct = MEMORY_BASE / _safe_memory_key(alias) / "memory"
+        if direct.is_dir() and direct not in dirs:
+            dirs.append(direct)
     return dirs
+
+
+def _session_root(session_aliases: Iterable[str], session_roots: Dict[str, str]) -> Optional[str]:
+    for alias in session_aliases:
+        root = session_roots.get(alias)
+        if root:
+            return root
+    return None
 
 
 def _safe_memory_key(value: str) -> str:
