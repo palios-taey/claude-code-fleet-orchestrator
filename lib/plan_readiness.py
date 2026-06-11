@@ -57,17 +57,20 @@ if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
 
 from lib.config import OrchConfig, get_neo4j_session  # noqa: E402
-from lib.orch_schema import get_session_next_ready  # noqa: E402
+from lib.orch_schema import (  # noqa: E402
+    _READY_DEPENDENCIES_SATISFIED_CYPHER,
+    get_session_next_ready,
+)
 
 log = logging.getLogger(__name__)
 
 
 # Cypher: find tasks T newly-unblocked by ``completed_task_id``'s completion.
 #
-#   - T is owned by the supervisor (or unowned)
+#   - T is owned by the supervisor
 #   - T has a DEPENDS_ON edge to the completed task
-#   - T's status is pending or blocked (not already in_progress / completed)
-#   - All of T's OTHER dependencies are status=completed
+#   - T's status is pending
+#   - All of T's dependencies satisfy the canonical ready predicate
 #   - Self-loops excluded (t.id != completed_task_id) — guards against the
 #     degenerate case where a task depends on itself (Gaia Phase D edge #4).
 #
@@ -76,12 +79,13 @@ log = logging.getLogger(__name__)
 # deps of the same downstream T, each seeing the OTHER as still-pending)
 # is handled by a Redis SETNX dedup keyed on T.id AFTER the read — see
 # the "wake_dedup" block below.
-_READY_TRANSITION_CYPHER = """
-MATCH (completed:OrchTask {id: $completed_task_id})
+_READY_TRANSITION_CYPHER = f"""
+MATCH (completed:OrchTask {{id: $completed_task_id}})
 MATCH (t:OrchTask)-[:DEPENDS_ON]->(completed)
-WHERE (t.owner = $supervisor OR t.owner IS NULL OR t.owner = '')
-  AND (t.status IS NULL OR t.status IN ['pending', 'blocked'])
+WHERE t.owner = $supervisor
+  AND coalesce(t.status, 'pending') = 'pending'
   AND t.id <> $completed_task_id
+  AND {_READY_DEPENDENCIES_SATISFIED_CYPHER}
 // Concluded-project dependents must NOT be woken on dep-completion (unified with the
 // readiness/wake fail-closed allowlist; Gaia 5th-surface finding 2026-06-04). OPTIONAL
 // so an orphan task with no project keeps prior wake behavior; only a CONCLUDED project
@@ -93,7 +97,6 @@ WITH t, completed
 OPTIONAL MATCH (t)-[:DEPENDS_ON]->(other:OrchTask)
 WHERE other.id <> $completed_task_id AND other.id <> t.id
 WITH t, completed, collect(other) AS others
-WHERE ALL(o IN others WHERE o.status = 'completed')
 RETURN
   t.id          AS task_id,
   t.description AS description,
@@ -128,7 +131,8 @@ def _dedup_wake(redis_client, downstream_task_id: str, ttl_sec: int = 600) -> bo
     if redis_client is None:
         return True  # No dedup available — fall through to wake.
     try:
-        key = f"taey:orch-wake-fired:{downstream_task_id}"
+        prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+        key = f"{prefix}:orch-wake-fired:{downstream_task_id}"
         return bool(redis_client.set(key, "1", nx=True, ex=ttl_sec))
     except Exception as exc:
         log.debug("wake dedup SETNX failed for %s: %s — allowing wake.",

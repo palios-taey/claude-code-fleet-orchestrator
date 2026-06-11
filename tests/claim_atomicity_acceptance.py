@@ -37,8 +37,17 @@ def main() -> int:
 
     def status_owner(tid):
         with drv.session(database=CFG.neo4j_db) as s:
-            r = s.run("MATCH (t:OrchTask {id:$i}) RETURN t.status AS st, t.owner AS o, t.dispatched_to AS d", i=tid).single()
-            return (r["st"], r["o"], r["d"]) if r else (None, None, None)
+            r = s.run(
+                """
+                MATCH (t:OrchTask {id:$i})
+                RETURN t.status AS st,
+                       t.owner AS o,
+                       t.dispatched_to AS d,
+                       t._claim_lock AS claim_lock
+                """,
+                i=tid,
+            ).single()
+            return (r["st"], r["o"], r["d"], r["claim_lock"]) if r else (None, None, None, None)
 
     with drv.session(database=CFG.neo4j_db) as s:
         s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
@@ -65,18 +74,20 @@ def main() -> int:
                 results = list(ex.map(claim, workers))
             winners = [w for (r, w) in results if r == "won"]
             errors = [w for (r, w) in results if r == "error"]
-            st, owner, disp = status_owner(T)
+            st, owner, disp, claim_lock = status_owner(T)
             _check(f"trial {trial}: EXACTLY ONE concurrent claimer wins ({len(winners)})", len(winners) == 1, str(results))
             _check(f"trial {trial}: no unexpected errors", not errors, str(errors))
             _check(f"trial {trial}: task ends in_progress owned by the single winner",
                    st == "in_progress" and disp == winners[0] if winners else False, f"st={st} disp={disp} winners={winners}")
+            _check(f"trial {trial}: claim lock is non-growing boolean true",
+                   claim_lock is True, f"_claim_lock={claim_lock!r}")
     finally:
         with drv.session(database=CFG.neo4j_db) as s:
             s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
     if _FAILURES:
         print(f"\nFAIL — {len(_FAILURES)}: {_FAILURES}")
         return 1
-    print("\nPASS — claim is atomic under concurrency: exactly one winner, no clobber (F11 claim-path).")
+    print("\nPASS — claim is atomic under concurrency and _claim_lock does not grow (F11 claim-path).")
     return 0
 
 
