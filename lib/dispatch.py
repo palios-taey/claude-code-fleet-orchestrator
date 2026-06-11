@@ -58,6 +58,12 @@ from .handoff_validation import mark_superseded_for_task
 
 logger = logging.getLogger(__name__)
 
+# Bounded Redis WATCH retry (grok ws2-state WATCH-livelock note): a hot current_task key
+# must not let an optimistic-lock loop spin forever. ~8 attempts with linear backoff caps
+# the worst case at well under a second, after which we give up rather than livelock.
+_WATCH_MAX_ATTEMPTS = 8
+_WATCH_BACKOFF_S = 0.02
+
 
 class BugLockActive(Exception):
     """Dispatch blocked because the target product is under an active bug lock."""
@@ -154,6 +160,8 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
         record = session.run(
             """
             MATCH (t:OrchTask {id: $task_id})
+            SET t._claim_lock = coalesce(t._claim_lock, 0) + 1
+            WITH t
             WHERE coalesce(t.status, 'pending') = 'pending'
               AND NOT EXISTS {
                   MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
@@ -292,7 +300,7 @@ def _rollback_claim(worker: str, task_id: str, binding_nonce: Optional[float]) -
         return
     try:
         with r.pipeline() as pipe:
-            while True:
+            for _attempt in range(_WATCH_MAX_ATTEMPTS):
                 try:
                     pipe.watch(key)
                     if not _binding_is_ours(pipe.get(key), task_id, binding_nonce):
@@ -303,6 +311,9 @@ def _rollback_claim(worker: str, task_id: str, binding_nonce: Optional[float]) -
                     pipe.execute()
                     break
                 except WatchError:
+                    # Bounded retry + small backoff so a hot current_task key cannot
+                    # livelock this loop (grok ws2-state WATCH-livelock note).
+                    time.sleep(_WATCH_BACKOFF_S * (_attempt + 1))
                     continue
     except Exception as exc:
         logger.warning(
@@ -326,6 +337,8 @@ def _mark_in_progress_best_effort(task_id: str, worker: str) -> bool:
         record = session.run(
             """
             MATCH (t:OrchTask {id: $task_id})
+            SET t._claim_lock = coalesce(t._claim_lock, 0) + 1
+            WITH t
             WHERE coalesce(t.status, 'pending') = 'pending'
               AND NOT EXISTS {
                   MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
@@ -543,7 +556,7 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
     from redis import WatchError
 
     current_task_id: Optional[str] = None
-    while True:
+    for _attempt in range(_WATCH_MAX_ATTEMPTS):
         with r.pipeline() as pipe:
             try:
                 pipe.watch(current_task_key)
@@ -553,6 +566,9 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
                 pipe.execute()
                 break
             except WatchError:
+                # Bounded retry + small backoff so a hot current_task key cannot
+                # livelock this loop (grok ws2-state WATCH-livelock note).
+                time.sleep(_WATCH_BACKOFF_S * (_attempt + 1))
                 continue
     if current_task_id:
         _revert_outcome_claim(worker, current_task_id)
