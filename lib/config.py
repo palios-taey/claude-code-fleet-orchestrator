@@ -70,6 +70,49 @@ def _int_env(name: str, default: Optional[int] = None) -> int:
         raise OrchConfigError(f"{name} must be an integer") from exc
 
 
+# ---------------------------------------------------------------------------
+# THE ENV CONTRACT (no-fallback discipline, made auditable).
+#
+# The no-fallback rule is: config whose ABSENCE would silently produce WRONG
+# behavior must fail LOUD; config that is genuinely OPTIONAL may carry a
+# documented default, because an absent value then selects a *supported mode*,
+# not a masked-missing-config fallback. These two categories are declared here
+# so an auditor can verify the contract by reading one place instead of tracing
+# every _optional_env call. (ws1-grok-audit Check-3 resolution, 2026-06-11: the
+# distinction was correct in behavior but implicit; this makes it explicit.)
+#
+# REQUIRED — _require_env / _int_env(no default): absence raises OrchConfigError.
+# These are connectivity-critical; a silent default would point the product at
+# the wrong store and corrupt state.
+REQUIRED_ENV = (
+    "ORCH_REDIS_HOST",      # _require via redis_host
+    "ORCH_REDIS_PORT",      # _int_env (no default) via redis_port
+    "ORCH_NEO4J_URI",       # _require via neo4j_uri
+    "ORCH_NEO4J_DB",        # _require via neo4j_db
+    "ORCH_DASHBOARD_URL",   # _require via dashboard_url
+)
+# OPTIONAL — _optional_env with a documented default. Absent => the named mode,
+# which is a fully supported operating state, NOT a silent fallback for missing
+# required config. Each entry: (var, default, why-the-default-is-a-real-mode).
+# Note: when one of these IS present but MALFORMED, its parser fails loud
+# (e.g. _parse_product_owner_map raises on bad JSON/format) — only true ABSENCE
+# selects the default. A typo'd variable *name* is indistinguishable from unset
+# for any program and is out of scope for the product to detect.
+OPTIONAL_ENV = (
+    # var, default, supported-mode rationale
+    ("ORCH_PRODUCT_OWNER_MAP", "{} (no remap)",
+     "no product remap -> dispatch routes session->worker directly; the common single-fleet case"),
+    ("ORCH_SESSION_IDS", "[] (deny-all notify allowlist)",
+     "empty allowlist fail-CLOSES: an unlisted notify target raises 400, never silently delivers"),
+    ("NOTIFY_KEY_PREFIX", "taey",
+     "canonical redis namespace; override only to run a second isolated fleet on one redis"),
+    ("ORCH_NOTIFY_CLI", "taey-notify",
+     "the released CLI name on PATH; override for a vendored/renamed install"),
+    ("ORCH_DATA_DIR", "$XDG_DATA_HOME or ~/.local/share (XDG Base Dir spec)",
+     "standard local-tool data location; zero-config by design for a single-user local product"),
+)
+
+
 def _parse_sentinels(raw: str) -> list[tuple[str, int]]:
     if not raw.strip():
         return []
