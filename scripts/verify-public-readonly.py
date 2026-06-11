@@ -24,9 +24,9 @@ for candidate in (ROOT / ".env", Path.home() / "claude-code-fleet-orchestrator/.
 os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
-from lib.config import OrchConfig, get_neo4j_driver  # noqa: E402
-from lib.orch_schema import create_phase, create_project, create_task  # noqa: E402
-from lib.public_readonly import _UI_SESSIONS, _hidden_sessions  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
+from fleet_orchestrator.orch_schema import create_phase, create_project, create_task  # noqa: E402
+from fleet_orchestrator.public_readonly import _UI_SESSIONS, _hidden_sessions  # noqa: E402
 
 
 CFG = OrchConfig()

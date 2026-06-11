@@ -20,8 +20,8 @@ import uuid
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO)
 
-from lib.orch_schema import create_project, init_schema, get_neo4j_driver, list_sessions  # noqa: E402
-from lib.config import OrchConfig  # noqa: E402
+from fleet_orchestrator.orch_schema import create_project, init_schema, get_neo4j_driver, list_sessions  # noqa: E402
+from fleet_orchestrator.config import OrchConfig  # noqa: E402
 
 CFG = OrchConfig()
 _PFX = f"sess-ci-{uuid.uuid4().hex[:8]}"
@@ -51,8 +51,8 @@ def _resolve_paths_under_home(home: str) -> dict:
     env["HOME"] = home
     env["PYTHONPATH"] = _REPO
     code = (
-        "import json, lib.accountability_ledger as L, lib.gate_runner as G;"
-        "from lib.paths import data_dir;"
+        "import json, fleet_orchestrator.accountability_ledger as L, fleet_orchestrator.gate_runner as G;"
+        "from fleet_orchestrator.paths import data_dir;"
         "print(json.dumps({'ledger': L.LEDGER_PATH, 'repo': G.DEFAULT_REPO, 'data_dir': str(data_dir())}))"
     )
     out = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
@@ -90,7 +90,7 @@ def main() -> int:
         # --- 3. LOOPBACK DEFAULT ---
         saved = os.environ.pop("ORCH_HOST", None)
         try:
-            from lib.easy_setup import api_host  # noqa: E402
+            from fleet_orchestrator.easy_setup import api_host  # noqa: E402
             _check("product launcher defaults to 127.0.0.1", api_host() == "127.0.0.1")
         finally:
             if saved is not None:
@@ -98,7 +98,7 @@ def main() -> int:
 
         # --- 4. PUBLIC-SURFACE SECURITY (gatekeeper + grok p0-foundation BLOCK fixes) ---
         import json as _json
-        import lib.public_readonly as PR  # noqa: E402
+        import fleet_orchestrator.public_readonly as PR  # noqa: E402
         for _k in ("ORCH_PUBLIC_SHOW_SESSIONS", "ORCH_PUBLIC_HIDE_SESSIONS"):
             os.environ.pop(_k, None)
         # 4a. XSS: script-context-safe encoding neutralizes a </script> breakout, stays valid JSON

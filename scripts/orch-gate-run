@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.gate_runner import DEFAULT_REPO, run_gate
+from fleet_orchestrator.gate_runner import DEFAULT_REPO, run_gate
 
 
 def main() -> int:

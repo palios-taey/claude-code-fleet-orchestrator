@@ -183,7 +183,7 @@ This is the cycle a supervisor session follows (see README "Core loop"). In this
 exercise the cycle manually; it does not create an autonomous always-running supervisor by itself.
 
 1. **Pull** — `taey-plan next <session>` → the top ready task you own.
-2. **Dispatch** — hand it to a worker: `lib.dispatch.dispatch(worker, task_id, description, ...)`.
+2. **Dispatch** — hand it to a worker: `fleet_orchestrator.dispatch.dispatch(worker, task_id, description, ...)`.
    It claims the task (`in_progress`), writes the worker's `current_task`, and the notify daemon
    injects the prompt when that worker is idle.
 3. **Wake** — when the worker stops, its Stop hook notifies the supervisor; the daemon injects the
@@ -191,7 +191,7 @@ exercise the cycle manually; it does not create an autonomous always-running sup
    for that wake.
 4. **Stop-discipline** — a session must not stop while ready work exists. The only legitimate wait is
    `blocked_on`; a stop must cite a `user_stop_condition`.
-5. **Watcher** — run `orch-watch --redis-host 127.0.0.1 --readiness-checker lib/plan_readiness.py:check_readiness`
+5. **Watcher** — run `orch-watch --redis-host 127.0.0.1 --readiness-checker fleet_orchestrator/plan_readiness.py:check_readiness`
    so a supervisor is paged the moment a worker's completion unblocks its work, or a task goes stuck.
 
 **Expect:** completing a task flips the next dependent task to ready (watch `taey-plan next` or the

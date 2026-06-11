@@ -18,8 +18,8 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.config import OrchConfig, get_neo4j_driver  # noqa: E402
-from lib.orch_schema import (  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
+from fleet_orchestrator.orch_schema import (  # noqa: E402
     _ZERO_DEP_READY_CYPHER,
     add_dependency,
     create_phase,

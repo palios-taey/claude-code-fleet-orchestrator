@@ -4,8 +4,8 @@ No operator-specific (``/home/mira/...``) defaults live anywhere in the product.
 state resolves under the user's data dir (or an explicit override) and gate targets resolve
 to the install root, so the orchestrator runs on ANY user's machine with zero config.
 
-Kept import-light on purpose: ``lib.accountability_ledger`` (a low-level module) must not be
-forced to pull in the heavy ``lib.config`` (which requires the full ORCH_* environment) just
+Kept import-light on purpose: ``fleet_orchestrator.accountability_ledger`` (a low-level module) must not be
+forced to pull in the heavy ``fleet_orchestrator.config`` (which requires the full ORCH_* environment) just
 to decide where its file lives.
 """
 
@@ -36,5 +36,5 @@ def data_dir() -> Path:
 
 
 def repo_root() -> Path:
-    """The orchestrator install/repo root (the directory containing ``lib/``)."""
+    """The orchestrator install/repo root (the directory containing ``fleet_orchestrator/``)."""
     return Path(__file__).resolve().parent.parent

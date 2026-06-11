@@ -12,16 +12,16 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from lib.accountability_ledger import LEDGER_PATH
-from lib.orch_schema import (
+from fleet_orchestrator.accountability_ledger import LEDGER_PATH
+from fleet_orchestrator.orch_schema import (
     get_overall_refs,
     get_project_summary,
     get_session_next_ready,
     get_supervisor_refs,
     get_task_project,
 )
-from lib.paths import repo_root
-from lib.rules_tier import get_rules
+from fleet_orchestrator.paths import repo_root
+from fleet_orchestrator.rules_tier import get_rules
 
 
 CORE_BUDGET_BYTES = 15 * 1024

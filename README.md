@@ -38,7 +38,7 @@ Optional variables:
 - `ORCH_NOTIFY_CLI` — override the notify CLI binary; defaults to `taey-notify`.
 - `ORCH_REF_ALLOWED_ROOT` — trusted root, comma-separated roots, or a JSON list of roots under which plan source files must live before `[ref:...]` slices are enabled. Refs are disabled fail-safe when unset.
 - `ORCH_SESSION_IDS` — optional allowlist for the browser notify form target validation. When set, `POST /api/sessions/{target}/notify` rejects targets not listed here.
-- `ORCH_PRODUCT_OWNER_MAP` — optional session-to-product map used by `lib.dispatch` bug-lock enforcement. Accepts JSON or comma-separated `session=product` pairs. `PRODUCT_OWNER_MAP` is also accepted as a fallback alias.
+- `ORCH_PRODUCT_OWNER_MAP` — optional session-to-product map used by `fleet_orchestrator.dispatch` bug-lock enforcement. Accepts JSON or comma-separated `session=product` pairs. `PRODUCT_OWNER_MAP` is also accepted as a fallback alias.
 - `ORCH_DOTENV` — explicit `.env` file path to load before config validation.
 
 ## Install
@@ -99,7 +99,7 @@ launch with one command. To verify:
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5002/api/projects
 ```
 
-(You can still run uvicorn directly — `python3 -m uvicorn lib.tasks_api:app --host "$ORCH_HOST" --port "$ORCH_PORT"` — but `orch serve` is the supported path.)
+(You can still run uvicorn directly — `python3 -m uvicorn fleet_orchestrator.tasks_api:app --host "$ORCH_HOST" --port "$ORCH_PORT"` — but `orch serve` is the supported path.)
 
 ### Security boundary: localhost by default
 
@@ -132,7 +132,7 @@ The API root redirects to the browser UI, and the static dashboard is served at
 
 ### Public read-only dashboard (v1.6.0+)
 
-A separate, **read-only-by-construction** app (`lib/public_readonly.py`, launched via `scripts/orch-public`, default `127.0.0.1:5005`) serves the same session-first view safely for public exposure behind a single tunnel route. It defines **only GET routes** — no create/update/notify endpoint exists in the app, so a write request is a 404/405 because the route is absent, not guarded. It applies a **fail-closed session allowlist** (`ORCH_PUBLIC_SHOW_SESSIONS`, default approved sessions only; everything unassigned/denied is hidden), an **outbound field allowlist** that scrubs operator filesystem paths and hosts from free-text and drops source paths / internal-ops fields, serves **ref pointers only** (never file contents), sanitizes `/health`, and disables the interactive API docs. Never point a tunnel at the live mutable `:5002` API — use `:5005`.
+A separate, **read-only-by-construction** app (`fleet_orchestrator/public_readonly.py`, launched via `scripts/orch-public`, default `127.0.0.1:5005`) serves the same session-first view safely for public exposure behind a single tunnel route. It defines **only GET routes** — no create/update/notify endpoint exists in the app, so a write request is a 404/405 because the route is absent, not guarded. It applies a **fail-closed session allowlist** (`ORCH_PUBLIC_SHOW_SESSIONS`, default approved sessions only; everything unassigned/denied is hidden), an **outbound field allowlist** that scrubs operator filesystem paths and hosts from free-text and drops source paths / internal-ops fields, serves **ref pointers only** (never file contents), sanitizes `/health`, and disables the interactive API docs. Never point a tunnel at the live mutable `:5002` API — use `:5005`.
 
 Observed in [`ui/static/app.js`](ui/static/app.js) and [`ui/index.html`](ui/index.html):
 
@@ -183,7 +183,7 @@ Plans can attach repeatable file refs on project, phase, or task headers:
 ### Task: sample-task - Verify install [priority: 50] [ref: docs/PLAN_FORMAT.md:1-40]
 ```
 
-Observed in [`lib/orch_schema.py`](lib/orch_schema.py):
+Observed in [`fleet_orchestrator/orch_schema.py`](fleet_orchestrator/orch_schema.py):
 
 - refs are stored as structured metadata, not copied into Neo4j as file contents
 - file slices are read fresh when the orchestrator builds runtime `ref_context` payloads
@@ -205,7 +205,7 @@ The walkthrough exercises the loop manually; it is not a self-running autonomous
    own. A task is *ready* only when its `[depends]` predecessors are `completed`
    (engine-enforced via `DEPENDS_ON` edges) — a phase can't start until its
    prerequisites close.
-3. **Dispatch** — hand work to a peer worker with `lib.dispatch.dispatch(...)`. It
+3. **Dispatch** — hand work to a peer worker with `fleet_orchestrator.dispatch.dispatch(...)`. It
    claims the task (`in_progress`), writes the worker's `current_task`, and the
    notify daemon injects the prompt when the worker is idle.
 4. **Wake** — when a worker stops, its Stop hook notifies the supervisor; the
@@ -235,7 +235,7 @@ verify packet content instead of assuming non-empty context.
 ```bash
 orch-watch \
   --redis-host 127.0.0.1 \
-  --readiness-checker lib/plan_readiness.py:check_readiness
+  --readiness-checker fleet_orchestrator/plan_readiness.py:check_readiness
 ```
 
 ## `taey-task`

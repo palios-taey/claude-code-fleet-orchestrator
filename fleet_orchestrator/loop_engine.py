@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from lib.config import OrchConfig, get_neo4j_driver, get_redis_sync
+from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync
 
 
 TRIGGER_KINDS = {"clock", "signal", "task-state"}

@@ -22,10 +22,10 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.orch_schema import (  # noqa: E402
+from fleet_orchestrator.orch_schema import (  # noqa: E402
     _state_key, _peer_actively_working_task, _PEER_HEARTBEAT_STALE_SEC,
 )
-from lib.config import OrchConfig, get_redis_sync  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
 
 CFG = OrchConfig()
 _R = get_redis_sync(CFG)

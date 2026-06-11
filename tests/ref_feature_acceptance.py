@@ -27,8 +27,8 @@ if "ORCH_DOTENV" not in os.environ:
 os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
-from lib.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
-from lib.orch_schema import (  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
+from fleet_orchestrator.orch_schema import (  # noqa: E402
     _REF_READ_BYTE_CAP,
     _read_ref_context,
     _stop_block_count_key,
@@ -41,8 +41,8 @@ from lib.orch_schema import (  # noqa: E402
     reset_project,
     resolve_ref_path,
 )
-from lib.plan_loader import _META_BLOB_BYTE_CAP, _PLAN_LINE_BYTE_CAP, _parse_plan, _parse_ref  # noqa: E402
-from lib.tasks_api import app  # noqa: E402
+from fleet_orchestrator.plan_loader import _META_BLOB_BYTE_CAP, _PLAN_LINE_BYTE_CAP, _parse_plan, _parse_ref  # noqa: E402
+from fleet_orchestrator.tasks_api import app  # noqa: E402
 
 CFG = OrchConfig()
 CLIENT = TestClient(app)

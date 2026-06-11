@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lib.easy_setup import (  # noqa: E402
+from fleet_orchestrator.easy_setup import (  # noqa: E402
     compose_managed,
     disable_services,
     docker_compose_down,
@@ -28,7 +28,7 @@ from lib.easy_setup import (  # noqa: E402
 
 
 def cmd_serve(_: argparse.Namespace) -> int:
-    from lib.easy_setup import api_host, api_port
+    from fleet_orchestrator.easy_setup import api_host, api_port
 
     host = api_host()
     port = api_port()
@@ -38,7 +38,7 @@ def cmd_serve(_: argparse.Namespace) -> int:
     print(f"Chat box: {'enabled' if chat_on else 'off (set ORCH_CHAT_ENABLED=1 in .env on a trusted network)'}")
     print("Foreground server; Ctrl-C to stop. For a persistent background service use `orch enable`.")
     return subprocess.run(
-        [sys.executable, "-m", "uvicorn", "lib.tasks_api:app", "--host", host, "--port", str(port)],
+        [sys.executable, "-m", "uvicorn", "fleet_orchestrator.tasks_api:app", "--host", host, "--port", str(port)],
         cwd=str(ROOT),
     ).returncode
 

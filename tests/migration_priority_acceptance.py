@@ -14,8 +14,8 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.config import OrchConfig, get_neo4j_driver  # noqa: E402
-from lib.orch_schema import init_schema  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
+from fleet_orchestrator.orch_schema import init_schema  # noqa: E402
 from migrations.v1_3_0_stage_a.v1_3_0_stage_a_migrate import (  # noqa: E402
     _epoch_priority,
     apply_migration,

@@ -17,9 +17,9 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.orch_schema import create_project, create_phase, create_task, get_neo4j_driver  # noqa: E402
-from lib.dispatch import _claim_ready_orch_task, OrchTaskNotReady  # noqa: E402
-from lib.config import OrchConfig  # noqa: E402
+from fleet_orchestrator.orch_schema import create_project, create_phase, create_task, get_neo4j_driver  # noqa: E402
+from fleet_orchestrator.dispatch import _claim_ready_orch_task, OrchTaskNotReady  # noqa: E402
+from fleet_orchestrator.config import OrchConfig  # noqa: E402
 
 CFG = OrchConfig()
 _PFX = f"claimatomic-{uuid.uuid4().hex[:8]}"

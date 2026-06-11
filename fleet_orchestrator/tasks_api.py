@@ -8,7 +8,7 @@ Endpoints:
   PATCH /api/task/{task_id}        — update status/owner
 
 Run:
-  python3 -m uvicorn lib.tasks_api:app --host 127.0.0.1 --port 5002
+  python3 -m uvicorn fleet_orchestrator.tasks_api:app --host 127.0.0.1 --port 5002
 """
 from __future__ import annotations
 
@@ -28,9 +28,9 @@ from fastapi.staticfiles import StaticFiles
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lib.config import OrchConfig
-from lib.chat_layer import router as chat_router
-from lib.context_assembler import (
+from fleet_orchestrator.config import OrchConfig
+from fleet_orchestrator.chat_layer import router as chat_router
+from fleet_orchestrator.context_assembler import (
     CORE_BUDGET_BYTES,
     VALID_CLIS,
     assemble as assemble_wake_packet,
@@ -38,9 +38,9 @@ from lib.context_assembler import (
     select_context as select_wake_context,
     size_report as wake_size_report,
 )
-from lib.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
-from lib.easy_setup import package_version
-from lib.loop_engine import (
+from fleet_orchestrator.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
+from fleet_orchestrator.easy_setup import package_version
+from fleet_orchestrator.loop_engine import (
     ArtifactNotObservedError,
     ArtifactStore,
     Loop,
@@ -51,9 +51,9 @@ from lib.loop_engine import (
     declare_loop,
     loops_enabled,
 )
-from lib.shippability import evaluate_shippability
-from lib.dispatch import bind_current_task, record_outcome
-from lib.orch_schema import (
+from fleet_orchestrator.shippability import evaluate_shippability
+from fleet_orchestrator.dispatch import bind_current_task, record_outcome
+from fleet_orchestrator.orch_schema import (
     CompletionEvidenceError,
     ConditionValidationError,
     PauseValidationError,
@@ -94,8 +94,8 @@ from lib.orch_schema import (
     update_task_status,
     validate_source_path_for_refs,
 )
-from lib.plan_loader import load_plan_from_text, plan_declares_refs, PlanIdError, scope_declared_id
-from lib.orch_schema import TaskIdCollisionError, TaskParentNotFoundError
+from fleet_orchestrator.plan_loader import load_plan_from_text, plan_declares_refs, PlanIdError, scope_declared_id
+from fleet_orchestrator.orch_schema import TaskIdCollisionError, TaskParentNotFoundError
 
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
 # SECURITY: chat is an injection vector (posts become content an AI session reads). It is the

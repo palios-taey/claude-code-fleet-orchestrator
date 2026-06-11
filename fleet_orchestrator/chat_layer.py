@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from lib.config import OrchConfig, get_redis_async
-from lib.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
+from fleet_orchestrator.config import OrchConfig, get_redis_async
+from fleet_orchestrator.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 
 _NOTIFY_KEY_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
 CHAT_KEY_PREFIX = f"{_NOTIFY_KEY_PREFIX}:chat:"

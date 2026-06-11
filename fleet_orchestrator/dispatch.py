@@ -22,7 +22,7 @@ For single-level use, leave it None and the Stop hook uses
 
 Usage from a Python supervisor session::
 
-    from lib.dispatch import dispatch
+    from fleet_orchestrator.dispatch import dispatch
 
     dispatch(
         worker="treasurer-codex",

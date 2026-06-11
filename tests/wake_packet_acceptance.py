@@ -12,8 +12,8 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import lib.context_assembler as assembler  # noqa: E402
-import lib.tasks_api as tasks_api  # noqa: E402
+import fleet_orchestrator.context_assembler as assembler  # noqa: E402
+import fleet_orchestrator.tasks_api as tasks_api  # noqa: E402
 
 
 FAILURES: list[str] = []
