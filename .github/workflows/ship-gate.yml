@@ -124,6 +124,12 @@ jobs:
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
         run: python tests/stop_supervisor_dispatch_acceptance.py
       - name: non-binding peer liveness (codex/grok busy-loop fix)
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
         run: python tests/peer_liveness_nonbinding_acceptance.py
       - name: Ship-gate — update_task_status preserves owner on status-only update (no orphan)
         env:
