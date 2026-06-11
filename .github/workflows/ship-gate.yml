@@ -1,9 +1,10 @@
-# Ship-gate CI — the merge gate required by main's branch protection (context: ship-gate-prod-ui-e2e).
+# Ship-gate CI — the merge gate required by main's branch protection (context: ship-gate-acceptance).
 #
 # HONEST SCOPE: this currently runs an INTEGRATION e2e of the v1.7.0 project-scoped task-identity
 # invariant (the guards the Family + Gatekeeper verified) against an ephemeral Neo4j. It is NOT yet a
-# browser UI e2e — the job keeps the legacy required-check name so branch protection is satisfied; a
-# real prod-UI e2e on a self-hosted runner is a planned upgrade. It needs Neo4j only (no fleet-notify):
+# browser UI e2e — the check is NAMED for what it does
+# (acceptance tests, ephemeral services) per the 2026-06-11 four-lane Chat review: a check name
+# must never claim coverage it doesn't have. A real prod-UI e2e remains a planned, separate check. It needs Neo4j only (no fleet-notify):
 # every identity guard raises before the notify path, happy-paths pass wake_owner_if_ready=False, and a
 # tiny stub `identity` module satisfies the import check.
 name: ship-gate
@@ -16,7 +17,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  ship-gate-prod-ui-e2e:          # <- this job name IS the required status-check context on main
+  ship-gate-acceptance:           # <- this job name IS the required status-check context on main
     runs-on: ubuntu-latest
     services:
       neo4j:
