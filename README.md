@@ -7,8 +7,8 @@
 - a FastAPI surface for tasks, projects, and plan ingestion
 - CLI tools for plan and task operations
 
-**New here?** [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) is the guided zero-to-running-loop path
-(install → define a plan → run the loop → release), with "what you should see" at every step.
+**New here?** [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) is the guided setup and first supervised-loop exercise
+(install → define a plan → manually dispatch one loop → release gate), with "what you should see" at every step.
 
 ## Requirements
 
@@ -47,6 +47,10 @@ Optional variables:
 scripts/install
 source .venv/bin/activate
 ```
+
+`scripts/install` expects `claude-code-fleet-notify` either as a sibling checkout
+or via `ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify`.
+Without that notify layer, hook wiring and daemon startup cannot be installed.
 
 The install creates a virtualenv at `.venv` and puts every CLI (`orch`,
 `orch-cron`, `orch-watch`, `taey-plan`, `taey-task`) inside it — the
@@ -191,7 +195,8 @@ Observed in [`lib/orch_schema.py`](lib/orch_schema.py):
 
 ## Core loop — how a supervisor uses it
 
-The orchestrator runs one loop per supervisor session (a Claude Code / CLI instance):
+The orchestrator supports one supervised loop per supervisor session (a Claude Code / CLI instance).
+The walkthrough exercises the loop manually; it is not a self-running autonomous loop after install.
 
 1. **Plan** — author a markdown plan (`# Project` / `## Phase` / `### Task` with
    `[priority]`, `[owner]`, `[depends]`, `[ref]`) and `taey-plan ingest <file>`.
