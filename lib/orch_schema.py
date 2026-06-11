@@ -788,7 +788,14 @@ def _task_blocked_on(task_id: Optional[str], config: Optional[OrchConfig] = None
 # it is how this fix thrashed. Runnability-RECOVERY (a parked waiter on a resolver that never
 # completes) is orch-watch's job, tracked as its own design effort (project phase p-systemic),
 # NOT this engine's. Terminal statuses (completed/failed/interrupted) are excluded.
-_LIVE_RESOLVER_STATUSES = {"pending", "ready", "in_progress", "dispatched"}
+#
+# A resolver must be ACTIVELY being resolved to license a stop -- 'in_progress'/'dispatched', NOT
+# merely 'pending'/'ready'. A pending task that nobody is working is not a live wait: that was the
+# hole that let a stale, self-created tracking task (made to satisfy blocked_on, then left pending)
+# license a false stop -- the recurring "why did you stop" failure. If the only thing you are
+# "waiting on" is pending, you are not waiting, you are stopping: keep going. You may validly wait
+# only once a resolver is actually being worked (in_progress), which is what wakes you on completion.
+_LIVE_RESOLVER_STATUSES = {"in_progress", "dispatched"}
 # Max hops when walking the blocked_on chain (cycle/depth guard).
 _MAX_RESOLVER_DEPTH = 8
 
@@ -810,10 +817,17 @@ def _blocked_on_has_live_resolver(blocked_on: Optional[str],
       - cycle/depth: follow the resolver's own blocked_on; if it loops back to the waiter
         or to an already-seen task, or runs deeper than _MAX_RESOLVER_DEPTH, it cannot
         guarantee a wake (H7/N1). A valid resolver chain must terminate in a live task
-        that is NOT itself waiting -- something actually progressing;
+        that is NOT itself waiting -- something actually progressing. TRANSITIVE consequence
+        (Family-audit F3, intended): if B is in_progress but is itself blocked_on a PENDING C,
+        the chain does NOT bottom out in an actively-progressing node, so the waiter keeps
+        going. A chain that ends in a not-yet-worked task offers no guaranteed wake;
       - stale/missing/terminal-status ref -> not live -> False;
-      - every node must be formally runnable (no incomplete DEPENDS_ON) -- this, not the
-        status set, is the viability filter that makes pending/ready resolvers safe;
+      - STATUS FILTER (the real filter): only {in_progress, dispatched} are live -- a pending/ready
+        task is not actively being resolved and cannot guarantee a wake, so it is NOT live. We do
+        NOT inspect the DEPENDS_ON runnability graph here (Family-audit R2-R5: it can't be made
+        correct without a terminalizer; orch-watch / p-systemic owns parked-resolver recovery).
+        Re-adding pending/ready to _LIVE_RESOLVER_STATUSES reopens the stale-tracking-task
+        false-stop this fix closed -- do not;
       - DB errors are NOT swallowed here: they bubble to get_session_stop_decision's keystone
         fail-CLOSED handler (blocks + labels keystone_fail_closed honestly, not as a gate)."""
     if not blocked_on:
