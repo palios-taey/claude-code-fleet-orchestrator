@@ -45,6 +45,7 @@ peer_idle body.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -54,6 +55,7 @@ import time
 from typing import Optional
 
 from .config import OrchConfig, ensure_notify_importable, get_neo4j_session
+from .decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from .handoff_validation import mark_superseded_for_task
 
 logger = logging.getLogger(__name__)
@@ -476,6 +478,25 @@ def dispatch(
         # means the wake was not delivered (V3): reverting is correct.
         _rollback_claim(worker, task_id, binding_nonce)
         raise RuntimeError(result.stderr.strip() or f"{cli} failed")
+    maybe_emit_decision_receipt(
+        "wake",
+        {
+            "why_this_context": "dispatch delivered a task wake through taey-notify",
+            "refs_used": [],
+            "rule_tier_applied": "dispatch",
+            "observable_state": {
+                "source": "dispatch",
+                "worker": worker,
+                "task_id": task_id,
+                "supervisor": supervisor,
+                "priority": priority,
+                "prompt_sha256": hashlib.sha256(prompt_body.encode("utf-8")).hexdigest(),
+            },
+            "target": worker,
+            "task_id": task_id,
+            "next_contract": "worker records outcome when the dispatched task is complete",
+        },
+    )
 
 
 _VALID_OUTCOMES = ("done", "error", "interrupted")
