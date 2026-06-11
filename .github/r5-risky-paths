@@ -1,0 +1,18 @@
+# R5 risky surfaces — a PR touching ANY of these requires both adversarial
+# auditors (audit/grok + audit/gatekeeper) to post a success commit status
+# before it can merge. The r5-audit-gate workflow enforces this mechanically.
+# One glob per line; '#' comments and blank lines ignored.
+# Fleet-core / session-driving surfaces (a bug here = fleet-wide blast radius):
+fleet_orchestrator/orch_schema.py
+fleet_orchestrator/tasks_api.py
+fleet_orchestrator/dispatch.py
+fleet_orchestrator/cli.py
+fleet_orchestrator/config.py
+fleet_orchestrator/context_assembler.py
+fleet_orchestrator/loop_engine.py
+fleet_orchestrator/decision_receipt.py
+fleet_orchestrator/plan_readiness.py
+fleet_orchestrator/accountability_ledger.py
+setup.py
+.github/workflows/r5-audit-gate.yml
+.github/r5-risky-paths
