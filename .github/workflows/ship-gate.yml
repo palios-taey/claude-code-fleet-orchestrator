@@ -111,3 +111,11 @@ jobs:
           ORCH_REDIS_PORT: "6379"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
         run: python tests/dispatch_wake_atomic_acceptance.py
+      - name: Ship-gate — supervisor-dispatch stop-block (peer-owned ready work keeps the supervisor up)
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+        run: python tests/stop_supervisor_dispatch_acceptance.py
