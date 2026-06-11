@@ -215,16 +215,15 @@ the project plans with clickable drill-down refs, and a two-way chat per session
 
 ## Dynamic context + automation features
 
-| Feature | What it does | Entry point |
-|---|---|---|
-| **Refs (5-level)** | `[ref: path:Lx-Ly]` at overall/supervisor/project/phase/task level; the dashboard renders clickable pointers that drill down to the live file lines + provenance. | plan `[ref:]` + `ORCH_REF_ALLOWED_ROOT` |
-| **Context assembler** | Per-task wake packet: selects relevant MEMORY + refs + rules, renders to a per-CLI token budget, stamps a content-bound provenance hash. | `orch-assemble <session> [task] --cli claude\|codex\|gemini\|grok` |
-| **Loop engine** | Loops that advance on *validated artifact presence* (never self-report); rejects unmeetable stop-conditions at declaration. | `orch-loop` / `lib.loop_engine` |
-| **Two-way chat** | Per-session dashboard chat: send delivers to the session inbox + stores history; expand/collapse; permanent-stop escalations surface as a "needs you" badge. OFF by default. | dashboard chat bar + `ORCH_CHAT_ENABLED` |
-| **Decision receipts** | Each stop/chat/wake/cycle/assembly can emit a content-hashed receipt (`why_this_context`, `refs_used`, `observable_state_hash`). | `lib.decision_receipt` |
-| **Rules tier** | Supervisor- + project-level standing rules auto-loaded by the assembler; promotable from chat. | `lib.rules_tier` |
-| **Project template** | Auto-injects the sub-role gate scaffold (scout → code → audit → verify → family) as `depends`-encoded gate tasks. | `lib.orch_template` |
-| **Shippability gate** | A project is shippable only when every gate task (project-local name in `ORCH_SHIP_GATES`, default `prodtest`/`audit`) is completed; `POST /api/projects/{id}/ship` returns 409 otherwise. No human-approval override. | `GET/POST /api/projects/{id}/shippability\|ship` · [docs/SHIPPABILITY.md](docs/SHIPPABILITY.md) |
+See [docs/CAPABILITIES.md](docs/CAPABILITIES.md) for the live status,
+flags, and observation command for tasks, plans, stop-engine, dispatch, chat,
+refs, wake packets, decision receipts, gate templates, loops, notify, daemon,
+handoff, and trace.
+
+Important current caveat: the wake-packet endpoint is live and
+provenance-bound, but a 2026-06-11 live finding shows some packets can select
+no refs/memory/rules even mid-plan. That is tracked as H4; until it lands,
+verify packet content instead of assuming non-empty context.
 
 ## Run the watcher
 
