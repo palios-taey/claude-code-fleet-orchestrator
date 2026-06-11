@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -81,7 +82,17 @@ def _post_install(args: argparse.Namespace) -> int:
         print(f"python: installed version {package_version()} into {ROOT / '.venv'}")
         if integration["guard"]["diff"]:
             print(integration["guard"]["diff"], end="")
-        subprocess.run([str(notify_script("start_notify_daemons.sh")), "start"], check=True, cwd=str(resolve_notify_root()))
+        # The starter launches the daemon with bare `python3`; on a fresh machine its
+        # redis dep lives only in this repo's venv, so the daemon dies on import in
+        # under a second (stranger-install gate, red runs 1+2 — run 2 proved my fix at
+        # the install-hooks call-site was the WRONG SITE; THIS is where the daemon is
+        # spawned). Prefix the venv bin so `python3` resolves to an interpreter that
+        # has the daemon's deps.
+        daemon_env = os.environ.copy()
+        venv_bin = ROOT / ".venv" / "bin"
+        if venv_bin.is_dir():
+            daemon_env["PATH"] = f"{venv_bin}{os.pathsep}{daemon_env.get('PATH', '')}"
+        subprocess.run([str(notify_script("start_notify_daemons.sh")), "start"], check=True, cwd=str(resolve_notify_root()), env=daemon_env)
         for line in enable_services():
             print(line)
         return print_doctor_results(run_doctor(), explain_scope=False)

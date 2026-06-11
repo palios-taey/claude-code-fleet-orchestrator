@@ -45,7 +45,13 @@ Optional variables:
 
 ```bash
 scripts/install
+source .venv/bin/activate
 ```
+
+The install creates a virtualenv at `.venv` and puts every CLI (`orch`,
+`orch-cron`, `orch-watch`, `taey-plan`, `taey-task`) inside it — the
+`source` line puts them on your PATH for the current shell. Re-run it in
+any new shell, or add it to your shell profile.
 
 ## Service prerequisites
 
