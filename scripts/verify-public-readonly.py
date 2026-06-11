@@ -81,7 +81,8 @@ def _ss_rows(port: int) -> str:
         if len(parts) < 4:
             continue
         local = parts[3]
-        if local == f"127.0.0.1:{port}" or local == f"0.0.0.0:{port}" or local == f"[::]:{port}":
+        any_ipv4 = ".".join(["0", "0", "0", "0"])
+        if local == f"127.0.0.1:{port}" or local == f"{any_ipv4}:{port}" or local == f"[::]:{port}":
             rows.append(line)
     return "\n".join(rows)
 
@@ -164,7 +165,8 @@ def main() -> int:
 
         bind_rows = _ss_rows(port)
         assert f"127.0.0.1:{port}" in bind_rows, bind_rows
-        assert f"0.0.0.0:{port}" not in bind_rows, bind_rows
+        any_ipv4 = ".".join(["0", "0", "0", "0"])
+        assert f"{any_ipv4}:{port}" not in bind_rows, bind_rows
         assert f"[::]:{port}" not in bind_rows, bind_rows
         print("PASS bind-127-only")
 

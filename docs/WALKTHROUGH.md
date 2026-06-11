@@ -78,8 +78,9 @@ Enable the optional features you intend to use:
 
 - **Plan refs** (clickable file-slice pointers): `ORCH_REF_ALLOWED_ROOT=/abs/path/to/your/repos`
   (one path, comma-list, or JSON list). Refs are *disabled* until this is set.
-- **LAN access** to the dashboard: `ORCH_HOST=0.0.0.0` + a reachable `ORCH_DASHBOARD_URL`. No auth —
-  trusted network only.
+- **Dashboard network exposure**: default `ORCH_HOST=127.0.0.1` is the security boundary. Any
+  non-loopback bind or LAN URL is an explicit, deliberate opt-in only for a trusted single-user
+  network. There is no auth; do not accept untrusted callers.
 - **Two-way chat** (an injection vector — off by default): `ORCH_CHAT_ENABLED=1`.
 
 **Expect:** re-run `scripts/orch doctor` after edits; still green.
