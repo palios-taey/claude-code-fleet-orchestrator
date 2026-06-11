@@ -607,12 +607,20 @@ def _project_record(project_id: str, config: Optional[OrchConfig] = None) -> Dic
     return _decode_project_node(dict(record["p"]))
 
 
-_ZERO_DEP_READY_CYPHER = """
-MATCH (t:OrchTask {id: $task_id})
+_READY_DEPENDENCIES_SATISFIED_CYPHER = """
+NOT EXISTS {
+    MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+    WHERE dep.status <> 'completed'
+}
+"""
+
+_ZERO_DEP_READY_CYPHER = f"""
+MATCH (t:OrchTask {{id: $task_id}})
 WHERE coalesce(t.owner, '') <> ''
-  AND NOT EXISTS {
+  AND {_READY_DEPENDENCIES_SATISFIED_CYPHER}
+  AND NOT EXISTS {{
       MATCH (t)-[:DEPENDS_ON]->(:OrchTask)
-  }
+  }}
 RETURN t.id AS task_id,
        t.owner AS owner,
        t.description AS description
@@ -1797,12 +1805,9 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
-        result = session.run("""
-            MATCH (t:OrchTask {status: 'pending'})
-            WHERE NOT EXISTS {
-                MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                WHERE dep.status <> 'completed'
-            }
+        result = session.run(f"""
+            MATCH (t:OrchTask {{status: 'pending'}})
+            WHERE {_READY_DEPENDENCIES_SATISFIED_CYPHER}
             RETURN t.id AS id, t.description AS description,
                    t.priority AS priority, t.owner AS owner,
                    t.capability_tags AS capability_tags,
@@ -2258,17 +2263,14 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
-        result = session.run("""
+        result = session.run(f"""
             MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status = 'pending'
               AND coalesce(t.owner, '') = $sess
               AND coalesce(t.blocked_on, '') = ''
               AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)
               AND ($project_id IS NULL OR proj.id = $project_id)
-              AND NOT EXISTS {
-                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                  WHERE dep.status <> 'completed'
-              }
+              AND {_READY_DEPENDENCIES_SATISFIED_CYPHER}
               // Fail-closed, normalized allowlist (was a stopped/completed denylist;
               // denylist is fail-open for any new concluded status). trim+lower so
               // mixed-case status admits (Cosmos); NULL/'' excluded fail-closed (Horizon).
@@ -2449,15 +2451,12 @@ def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
         return []
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
-        result = session.run("""
-            MATCH (p:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+        result = session.run(f"""
+            MATCH (p:OrchProject {{id: $project_id}})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status = 'pending'
               AND coalesce(t.owner, '') = $owner
               AND coalesce(t.blocked_on, '') = ''
-              AND NOT EXISTS {
-                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                  WHERE dep.status <> 'completed'
-              }
+              AND {_READY_DEPENDENCIES_SATISFIED_CYPHER}
             RETURN t.id AS id,
                    t.description AS description,
                    t.priority AS priority,
