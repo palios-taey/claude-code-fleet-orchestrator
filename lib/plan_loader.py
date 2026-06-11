@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from .config import OrchConfig, get_neo4j_driver
+from .orch_template import GATE_PHASE_ID, apply_gate_template
 from .orch_schema import (
     _has_control_chars,
     add_dependency,
@@ -22,6 +24,7 @@ from .orch_schema import (
 TASK_ID_SEP = "::"
 # Allowed characters in a DECLARED project/phase/task id (ids appear in /api/.../{id} URLs).
 _ID_OK = re.compile(r"\A[A-Za-z0-9._-]+\Z")
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 class PlanIdError(ValueError):
@@ -288,6 +291,8 @@ def _parse_plan(md: str) -> Dict[str, Any]:
                 "id": project_match["id"],
                 "name": project_match["name"],
                 "refs": meta.get("refs", []),
+                "template": meta.get("template") or meta.get("gate_template"),
+                "tags": meta.get("tags", []),
             }
             for bad_ref in meta.get("_ref_errors", []):
                 errors.append(f"line {line_no}: invalid ref '{bad_ref}'")
@@ -394,6 +399,16 @@ def _parse_plan(md: str) -> Dict[str, Any]:
     return {"project": project, "phases": phases, "errors": errors, "warnings": warnings}
 
 
+def _gate_template_enabled() -> bool:
+    return os.environ.get("ORCH_GATE_TEMPLATE_ENABLED", "").strip().lower() in TRUE_ENV_VALUES
+
+
+def _gate_template_requested(project: Dict[str, Any]) -> bool:
+    template = str(project.get("template") or "").strip().lower()
+    tags = {str(tag).strip().lower() for tag in project.get("tags") or []}
+    return template in {GATE_PHASE_ID, "forced-subrole", "forced-subrole-gate"} or GATE_PHASE_ID in tags
+
+
 def plan_declares_refs(md: str) -> bool:
     parsed = _parse_plan(md)
     project = parsed.get("project") or {}
@@ -430,6 +445,10 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
             "warnings": warnings,
             "stale_tasks": [],
         }
+    if _gate_template_enabled() and _gate_template_requested(project):
+        parsed = apply_gate_template(parsed)
+        project = parsed["project"]
+        warnings = list(parsed.get("warnings", warnings))
 
     # Project-scope every phase/task id (and intra-plan depends) to <project_id>::<bare_id> BEFORE any
     # existence check or write, so identity is project-local: two plans may reuse a generic id (audit,
