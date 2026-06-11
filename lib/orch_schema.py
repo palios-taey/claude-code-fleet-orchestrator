@@ -1118,56 +1118,55 @@ def _peer_actively_working_task(workers: List[str], task_id: Optional[str],
     from .config import get_redis_sync
 
     r = get_redis_sync(cfg)
+    now = time.time()
     for worker in workers:
         if not worker:
             continue
+        # current_task is a BONUS precision signal only (the CLI peers bind it
+        # INCONSISTENTLY -- empirically absent for some dispatches, bound for others).
+        # If it IS bound to a DIFFERENT task, this worker is provably on other work -> skip.
         try:
             raw = r.get(_state_key(worker, "current_task"))
         except Exception:
-            continue
-        cur = None
+            raw = None
         if raw:
             try:
                 cur = json.loads(raw)
             except Exception:
                 cur = None
-        bound_task = cur.get("task_id") if isinstance(cur, dict) else None
-
-        if bound_task and bound_task != task_id:
-            # BINDING peer is on a DIFFERENT task -> it is not working THIS one.
-            continue
-
-        if bound_task == task_id:
-            # BINDING peer on this task -- precise liveness, both fail-closed to BLOCK:
-            #  (1) idle CLEAR (its Stop hook sets idle on ANY stop incl. non-done);
-            #  (2) heartbeat FRESH (last_activity within _PEER_HEARTBEAT_STALE_SEC;
-            #      catches a hard kill that runs no hook so idle never sets).
-            try:
-                if r.get(_state_key(worker, "idle")):
-                    continue
-                last_activity = r.get(_state_key(worker, "last_activity"))
-            except Exception:
+            if isinstance(cur, dict) and cur.get("task_id") and cur.get("task_id") != task_id:
                 continue
-            if last_activity is None:
-                continue
-            try:
-                age = time.time() - float(last_activity)
-            except (TypeError, ValueError):
-                continue
-            if age < _PEER_HEARTBEAT_STALE_SEC:
-                return True
-            continue
 
-        # NON-BINDING peer (current_task absent -- codex/grok). No working-heartbeat
-        # exists, so presume working (ALLOW; RESPONSE_READY re-wakes) UNLESS the peer
-        # reported this task terminal (awaits gate) or the dispatch is stale with no
-        # terminal outcome (dropped/dead -> re-check). Unknown age fails to BLOCK.
+        # DONE signal -- the peer reported this task terminal (done/error/interrupt) ->
+        # it awaits the supervisor's GATE, not still working. last_outcome is the one
+        # reliable queryable done-marker (set on completion by record_outcome / the CLI
+        # peers' RESPONSE_READY). Fires immediately on a clean finish.
         if _peer_reported_terminal_for(worker, task_id, r):
             continue
-        d_age = _dispatch_age_seconds(task_id, config=cfg)
-        if d_age is None or d_age >= _PEER_DISPATCH_STALE_SEC:
+
+        # WORKING signal -- the last_activity HEARTBEAT is the one reliable UNIVERSAL
+        # liveness signal (empirically mapped 2026-06-11, /tmp/codex_signal_lifecycle.log:
+        # it refreshes per tool-call while a peer works -- codex/grok INCLUDED -- and goes
+        # monotonically stale the instant it stops). idle is useless for the CLI peers
+        # (stuck/oscillating per step) and current_task binds only inconsistently, so the
+        # heartbeat is what works for every peer class. Fresh -> actively working -> ALLOW
+        # (the proven RESPONSE_READY re-wakes the supervisor on done). Stale/absent ->
+        # stopped/dropped/dead -> fall through to BLOCK (gate/investigate). The previous
+        # idle/current_task gates busy-looped on codex (idle stuck=1, current_task absent
+        # -- verified live); the stale-heartbeat catch subsumes PR#39's idle/hard-kill
+        # anti-strand (a stopped/dead peer's heartbeat goes stale -> BLOCK), bounded by
+        # _PEER_HEARTBEAT_STALE_SEC. All reads fail-closed to BLOCK.
+        try:
+            last_activity = r.get(_state_key(worker, "last_activity"))
+        except Exception:
             continue
-        return True
+        if last_activity is None:
+            continue
+        try:
+            if now - float(last_activity) < _PEER_HEARTBEAT_STALE_SEC:
+                return True
+        except (TypeError, ValueError):
+            continue
     return False
 
 
