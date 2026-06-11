@@ -1,16 +1,24 @@
-"""Ship-gate e2e — supervisor keep-going is DEFAULT-ON (no flag) and covers BOTH
-pending peer work (dispatch) AND in-flight peer work (stay up to gate).
+"""Ship-gate e2e — supervisor keep-going is DEFAULT-ON (no flag) and blocks the
+stop ONLY when there is peer work for the SUPERVISOR to act on.
 
 The stop-engine's whole purpose is that a supervisor does not stop while there is fleet
-work. The own-ready loop only surfaces the supervisor's OWN tasks; a supervised active
-project with peer-owned work that is pending (must dispatch) OR in_progress/dispatched
-(must stay up to gate when the peer reports done) must BLOCK the stop. There is no flag
-to turn this off -- the in-flight gap is what stranded a supervisor for hours.
+work that NEEDS IT. The own-ready loop only surfaces the supervisor's OWN tasks; a
+supervised active project with peer-owned work must BLOCK the stop when the supervisor
+must act:
+  - pending  -> must DISPATCH it;
+  - in-flight AND the peer is NOT actively working it (reported done -> gate, or
+    stalled -> investigate) -> must act.
+But in-flight work that the peer IS actively working (its live current_task is bound to
+the task) does NOT block: the peer's RESPONSE_READY re-wakes the supervisor when done, so
+blocking during that window is a busy-loop with nothing to do (the repeated-Stop-hook
+symptom). There is no flag to turn keep-going off; the actively-working carve-out is the
+difference between "wait for the right moment" and "spin uselessly."
 
 Env: ORCH_NEO4J_URI, ORCH_NEO4J_DB, ORCH_REDIS_HOST/PORT, ORCH_DASHBOARD_URL.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import uuid
@@ -19,15 +27,26 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.orch_schema import (  # noqa: E402
     create_project, create_phase, create_task, update_task_status,
-    _raw_stop_decision, init_schema, get_neo4j_driver,
+    _raw_stop_decision, init_schema, get_neo4j_driver, _state_key,
 )
-from lib.config import OrchConfig  # noqa: E402
+from lib.config import OrchConfig, get_redis_sync  # noqa: E402
 
 CFG = OrchConfig()
+_R = get_redis_sync(CFG)
 _PFX = f"supkeep-ci-{uuid.uuid4().hex[:8]}"
 _SUP = f"{_PFX}-sup"
 _PEER = f"{_SUP}-codex"
 _FAILURES: list[str] = []
+
+
+def _bind_ct(worker: str, task_id: str) -> None:
+    """Simulate the peer actively working a task (dispatch.bind_current_task)."""
+    _R.set(_state_key(worker, "current_task"), json.dumps({"task_id": task_id}))
+
+
+def _clear_ct(worker: str) -> None:
+    """Simulate the peer's Stop hook clearing current_task after outcome=done."""
+    _R.delete(_state_key(worker, "current_task"))
 
 
 def _check(label: str, cond: bool, extra: str = "") -> None:
@@ -70,16 +89,30 @@ def main() -> int:
         _check("pending peer work BLOCKS (default-on, no flag)", d.get("block") is True and d.get("task_id") == peer, str(d))
         _check("pending -> dispatch_to the peer", d.get("dispatch_to") == _PEER, str(d.get("dispatch_to")))
 
-        # 2. THE 7h-stop fix: in-flight (in_progress) peer task -> BLOCK to GATE (stay up)
+        # 2. in-flight (in_progress) peer task.
         update_task_status(peer, "in_progress", owner=_PEER, config=CFG)
+        #   2a. BUSY-LOOP FIX: peer is ACTIVELY working it (live current_task bound)
+        #       -> ALLOW_STOP. Blocking here is the repeated-Stop-hook busy-loop
+        #       (nothing for the supervisor to do; RESPONSE_READY re-wakes on done).
+        _bind_ct(_PEER, peer)
+        _check("in-flight + peer ACTIVELY working -> ALLOW_STOP (busy-loop fix)",
+               _decide().get("wake_type") == "ALLOW_STOP", str(_decide()))
+        #   2b. peer reported done / stalled (current_task CLEARED) -> BLOCK to GATE.
+        #       This is the real anti-strand case (the 7h-stop hole) -- still blocks.
+        _clear_ct(_PEER)
         d = _decide()
-        _check("in_progress peer work BLOCKS to GATE (the 7h-stop hole)", d.get("block") is True and d.get("task_id") == peer, str(d))
-        _check("in-flight -> gate_for the peer", d.get("gate_for") == _PEER, str(d.get("gate_for")))
+        _check("in-flight + peer NOT working BLOCKS to GATE (the 7h-stop hole)",
+               d.get("block") is True and d.get("task_id") == peer, str(d))
+        _check("in-flight gate -> gate_for the peer", d.get("gate_for") == _PEER, str(d.get("gate_for")))
 
-        # 3. dispatched peer task -> also BLOCK to GATE
+        # 3. dispatched peer task, peer not working -> also BLOCK to GATE
         with drv.session(database=CFG.neo4j_db) as s:
             s.run("MATCH (t:OrchTask {id:$i}) SET t.status='dispatched'", i=peer)
-        _check("dispatched peer work BLOCKS to GATE", _decide().get("block") is True)
+        _check("dispatched peer work (not actively worked) BLOCKS to GATE", _decide().get("block") is True)
+        #   3b. ...but a dispatched task the peer IS actively working -> ALLOW_STOP
+        _bind_ct(_PEER, peer)
+        _check("dispatched + peer ACTIVELY working -> ALLOW_STOP", _decide().get("wake_type") == "ALLOW_STOP")
+        _clear_ct(_PEER)
 
         # 4. peer task terminal (completed) -> nothing in-flight -> ALLOW_STOP
         update_task_status(peer, "completed", owner=_PEER,
@@ -104,6 +137,7 @@ def main() -> int:
         _check("pending DISPATCH takes precedence over in-flight GATE",
                d.get("task_id") == live and d.get("dispatch_to") == _PEER, str(d))
     finally:
+        _clear_ct(_PEER)
         with drv.session(database=CFG.neo4j_db) as s:
             s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
     if _FAILURES:
