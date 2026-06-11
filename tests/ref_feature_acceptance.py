@@ -126,6 +126,10 @@ def main() -> int:
             source_dir.mkdir()
             in_root = source_dir / "module.py"
             in_root.write_text("line1\nline2\nline3\n", encoding="utf-8")
+            allowed_root_source_dir = root / "src"
+            allowed_root_source_dir.mkdir()
+            allowed_root_file = allowed_root_source_dir / "module.py"
+            allowed_root_file.write_text("root1\nroot2\nroot3\n", encoding="utf-8")
 
             resolved, warning = resolve_ref_path("/etc/passwd", str(plan_path))
             _assert("absolute-path-rejected", resolved is None and warning == "ref outside allowed root: /etc/passwd", (resolved, warning))
@@ -137,21 +141,23 @@ def main() -> int:
             )
             no_root_first = no_root["refs"][0]
             _assert(
-                "no-source-root-rejected",
-                no_root_first.get("warning") == "ref has no plan-source root (sandbox undefined)" and "content" not in no_root_first,
+                "no-source-root-falls-back-to-allowed-root",
+                no_root_first.get("content") == "root1\nroot2" and "resolved_path" not in no_root_first and not no_root_first.get("warning"),
                 no_root_first,
             )
 
             _assert("null-byte-parse-rejected", _parse_ref("bad\x00path:1-2") is None, _parse_ref("bad\x00path:1-2"))
+            resolved, warning = resolve_ref_path("bad\x00path", str(plan_path))
+            _assert("null-byte-resolve-rejected", resolved is None and warning == "ref unreadable: control characters in path", (resolved, warning))
             null_ctx = _read_ref_context(
                 [{"path": "bad\x00path", "l_start": 1, "l_end": 2}],
                 source_path=str(plan_path),
                 line_cap=200,
             )
             _assert(
-                "null-byte-graceful",
-                null_ctx["refs"][0].get("warning") == "ref unreadable: control characters in path",
-                null_ctx["refs"][0],
+                "null-byte-context-normalized-out",
+                null_ctx["refs"] == [] and null_ctx["warnings"] == [],
+                null_ctx,
             )
 
             resolved, warning = resolve_ref_path("../secrets.txt", str(plan_path))
@@ -162,7 +168,7 @@ def main() -> int:
             symlink_path = plan_dir / "escape.txt"
             os.symlink(outside, symlink_path)
             resolved, warning = resolve_ref_path("escape.txt", str(plan_path))
-            _assert("symlink-escape-rejected", resolved is None and warning == "ref outside allowed root: escape.txt", (resolved, warning))
+            _assert("symlink-within-allowed-root-accepted", resolved == outside.resolve() and warning is None, (resolved, warning))
 
             bad_source_resp = CLIENT.post(
                 "/api/projects/load-md",
