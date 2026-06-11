@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from lib.config import OrchConfig, get_redis_async
+from lib.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 
 _NOTIFY_KEY_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
 CHAT_KEY_PREFIX = f"{_NOTIFY_KEY_PREFIX}:chat:"
@@ -99,6 +100,19 @@ async def append_message(
     }
     client = redis_client or get_redis_async(config)
     await client.rpush(_message_key(lineage_value), json.dumps(record, separators=(",", ":")))
+    if record["type"] != "escalation":
+        maybe_emit_decision_receipt(
+            "chat_send",
+            {
+                "why_this_context": "chat message appended to durable lineage",
+                "refs_used": [],
+                "rule_tier_applied": "chat",
+                "observable_state": {"chat_record": record},
+                "lineage": lineage_value,
+                "next_contract": "lineage conversation is available to future wake context",
+            },
+            config=config,
+        )
     return record
 
 
@@ -193,6 +207,19 @@ async def escalate(
         message_type="escalation",
         metadata={"open_question_id": record["id"], "needs_you": True},
         redis_client=client,
+    )
+    maybe_emit_decision_receipt(
+        "chat_escalate",
+        {
+            "why_this_context": "chat escalation opened a needs-you question",
+            "refs_used": [],
+            "rule_tier_applied": "chat",
+            "observable_state": {"open_question": record},
+            "lineage": lineage_value,
+            "blocked_on": record["id"],
+            "next_contract": "human or supervising session answers the open question",
+        },
+        config=config,
     )
     return record
 

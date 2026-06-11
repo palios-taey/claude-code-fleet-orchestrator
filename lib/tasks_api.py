@@ -12,6 +12,7 @@ Run:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -37,6 +38,7 @@ from lib.context_assembler import (
     select_context as select_wake_context,
     size_report as wake_size_report,
 )
+from lib.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from lib.easy_setup import package_version
 from lib.shippability import evaluate_shippability
 from lib.dispatch import bind_current_task, record_outcome
@@ -740,6 +742,22 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
             status_code=502,
             detail=result.stderr.strip() or "taey-notify failed",
         )
+    maybe_emit_decision_receipt(
+        "wake",
+        {
+            "why_this_context": "session notify endpoint delivered a wake through taey-notify",
+            "refs_used": [],
+            "rule_tier_applied": "notify",
+            "observable_state": {
+                "source": "session_notify",
+                "target": target,
+                "notify_type": notify_type,
+                "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest(),
+            },
+            "target": target,
+            "next_contract": "fleet-notify daemon delivers the queued message to the target session",
+        },
+    )
     return {"ok": True}
 
 
@@ -767,6 +785,32 @@ def session_wake_packet(
         packet = build_wake_packet(session_id, context)
         rendered = assemble_wake_packet(packet, cli_key, budget_bytes=budget_bytes)
         report = wake_size_report(rendered, packet, budget_bytes=budget_bytes)
+        maybe_emit_decision_receipt(
+            "wake_packet_assembly",
+            {
+                "why_this_context": "wake packet assembled for session wake",
+                "context": context,
+                "rule_tier_applied": [
+                    {"scope": rule.get("scope", ""), "path": rule.get("path", "")}
+                    for rule in context.get("rules") or []
+                ],
+                "observable_state": {
+                    "session_id": session_id,
+                    "cli": cli_key,
+                    "task_id": task_id,
+                    "packet_id": packet.get("packet_id", ""),
+                    "provenance_hash": packet.get("provenance_hash", ""),
+                    "size_report": report,
+                    "snapshot": packet.get("snapshot") or {},
+                },
+                "session": session_id,
+                "task_id": task_id,
+                "packet_id": packet.get("packet_id", ""),
+                "provenance_hash": packet.get("provenance_hash", ""),
+                "blocked_on": (packet.get("stop") or {}).get("blocked_on"),
+                "next_contract": (packet.get("stop") or {}).get("next_contract"),
+            },
+        )
         return {
             "ok": True,
             "enabled": True,
