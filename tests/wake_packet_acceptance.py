@@ -132,9 +132,45 @@ def _assembler_contract() -> None:
     _check("provenance binds rendered packet plus snapshot", bool(packet.get("provenance_hash")) and report["under_budget"] is True and "AGENTS.md Dynamic Context" in rendered, report)
 
 
+def _memory_traversal_contract() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        memory_root = tmp / "memory-base"
+        memory_root.mkdir()
+        outside = tmp / "memory"
+        outside.mkdir()
+        outside_secret = "OUTSIDE_MEMORY_SHOULD_NOT_RENDER"
+        (outside / "SECRET.md").write_text(outside_secret, encoding="utf-8")
+
+        abs_dir = tmp / "absolute-session" / "memory"
+        abs_dir.mkdir(parents=True)
+        absolute_secret = "ABSOLUTE_MEMORY_SHOULD_NOT_RENDER"
+        (abs_dir / "SECRET.md").write_text(absolute_secret, encoding="utf-8")
+
+        old_memory_base = assembler.MEMORY_BASE
+        assembler.MEMORY_BASE = memory_root
+        try:
+            cases = ["..", "../..", str(abs_dir.parent), "bad\x00session"]
+            for session in cases:
+                try:
+                    dirs = assembler._memory_dirs(session, {"project_id": None}, None, {})
+                    items = assembler._read_memory_files(dirs)
+                    rendered = "\n".join(str(item.get("content", "")) for item in items)
+                    _check(
+                        f"memory traversal blocked for {session!r}",
+                        not dirs and outside_secret not in rendered and absolute_secret not in rendered,
+                        {"dirs": [str(path) for path in dirs], "rendered": rendered},
+                    )
+                except ValueError:
+                    _check(f"memory traversal rejected for {session!r}", True)
+        finally:
+            assembler.MEMORY_BASE = old_memory_base
+
+
 def main() -> int:
     _endpoint_contract()
     _assembler_contract()
+    _memory_traversal_contract()
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
         return 1

@@ -284,10 +284,14 @@ def _memory_dirs(session: str, work: Dict[str, Any], summary: Optional[Dict[str,
         memory_dir = MEMORY_BASE / mangled / "memory"
         if memory_dir.is_dir() and memory_dir not in dirs:
             dirs.append(memory_dir)
-    direct = MEMORY_BASE / session / "memory"
+    direct = MEMORY_BASE / _safe_memory_key(session) / "memory"
     if direct.is_dir() and direct not in dirs:
         dirs.append(direct)
     return dirs
+
+
+def _safe_memory_key(value: str) -> str:
+    return _mangle_project_path(value)
 
 
 def _mangle_project_path(path: str) -> str:
