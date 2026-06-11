@@ -249,13 +249,24 @@ _sync_pool: Optional[redis.ConnectionPool] = None
 _async_pool: Optional[aioredis.ConnectionPool] = None
 _sentinel_sync = None
 _sentinel_async = None
+_sync_redis_config: Optional[tuple[str, int, str, str]] = None
+_async_redis_config: Optional[tuple[str, int, str, str]] = None
 _neo4j_driver = None
 _neo4j_driver_config: Optional[tuple[str, Optional[str], Optional[str], str]] = None
 
 
+def _redis_config_tuple(cfg: OrchConfig) -> tuple[str, int, str, str]:
+    return (cfg.redis_host, cfg.redis_port, cfg.redis_sentinels, cfg.redis_sentinel_master)
+
+
 def get_redis_sync(config: Optional[OrchConfig] = None) -> redis.Redis:
-    global _sync_pool, _sentinel_sync
+    global _sync_pool, _sentinel_sync, _sync_redis_config
     cfg = config or OrchConfig()
+    config_tuple = _redis_config_tuple(cfg)
+    if (_sync_pool is not None or _sentinel_sync is not None) and _sync_redis_config != config_tuple:
+        raise OrchConfigError(
+            "Redis sync client already initialized with a different configuration; restart the process to change ORCH_REDIS_*"
+        )
     sentinels = _parse_sentinels(cfg.redis_sentinels)
 
     if sentinels:
@@ -263,6 +274,7 @@ def get_redis_sync(config: Optional[OrchConfig] = None) -> redis.Redis:
             from redis.sentinel import Sentinel
 
             _sentinel_sync = Sentinel(sentinels, socket_timeout=3, decode_responses=True)
+            _sync_redis_config = config_tuple
         return _sentinel_sync.master_for(cfg.redis_sentinel_master, socket_timeout=3)
 
     if _sync_pool is None:
@@ -272,12 +284,18 @@ def get_redis_sync(config: Optional[OrchConfig] = None) -> redis.Redis:
             decode_responses=True,
             max_connections=20,
         )
+        _sync_redis_config = config_tuple
     return redis.Redis(connection_pool=_sync_pool)
 
 
 def get_redis_async(config: Optional[OrchConfig] = None) -> aioredis.Redis:
-    global _async_pool, _sentinel_async
+    global _async_pool, _sentinel_async, _async_redis_config
     cfg = config or OrchConfig()
+    config_tuple = _redis_config_tuple(cfg)
+    if (_async_pool is not None or _sentinel_async is not None) and _async_redis_config != config_tuple:
+        raise OrchConfigError(
+            "Redis async client already initialized with a different configuration; restart the process to change ORCH_REDIS_*"
+        )
     sentinels = _parse_sentinels(cfg.redis_sentinels)
 
     if sentinels:
@@ -285,6 +303,7 @@ def get_redis_async(config: Optional[OrchConfig] = None) -> aioredis.Redis:
             from redis.asyncio.sentinel import Sentinel as AsyncSentinel
 
             _sentinel_async = AsyncSentinel(sentinels, socket_timeout=3, decode_responses=True)
+            _async_redis_config = config_tuple
         return _sentinel_async.master_for(cfg.redis_sentinel_master, socket_timeout=3)
 
     if _async_pool is None:
@@ -294,6 +313,7 @@ def get_redis_async(config: Optional[OrchConfig] = None) -> aioredis.Redis:
             decode_responses=True,
             max_connections=20,
         )
+        _async_redis_config = config_tuple
     return aioredis.Redis(connection_pool=_async_pool)
 
 

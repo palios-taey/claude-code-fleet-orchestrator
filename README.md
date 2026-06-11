@@ -47,6 +47,20 @@ Optional variables:
 scripts/install
 ```
 
+## Service prerequisites
+
+Start Redis and Neo4j before launching the API. The API startup runs the Neo4j
+schema initializer (`init_schema`) and fails if constraints or indexes cannot be
+created, so a missing or unreachable Neo4j instance is a startup error, not a
+deferred runtime surprise.
+
+Local example:
+
+```bash
+redis-server
+neo4j console
+```
+
 ## Smoke test
 
 ```bash

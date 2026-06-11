@@ -1018,7 +1018,7 @@ def get_supervisor_inflight_peer_task(supervisor: str, project_id: str,
             """
             MATCH (proj:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status IN ['in_progress', 'dispatched']
-              AND t.owner IN $peer_owners
+              AND (t.owner IN $peer_owners OR t.dispatched_to IN $peer_owners)
               AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
             RETURN t.id AS task_id, t.description AS description, t.owner AS owner,
                    t.priority AS priority, ph.id AS phase_id, proj.id AS project_id
@@ -1933,14 +1933,20 @@ def update_task_status(task_id: str, status: str, owner: str = "",
             return False
         session.run("""
             MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            WITH p
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(sibling:OrchTask)
+            WHERE sibling.id <> $task_id AND sibling.status = 'in_progress'
+            WITH p, count(sibling) AS in_progress_siblings
             SET p.in_progress_heartbeat_at = CASE
                     WHEN $status = 'in_progress' THEN datetime()
-                    WHEN $status IN ['completed', 'failed', 'interrupted'] THEN ''
+                    WHEN $status IN ['completed', 'failed', 'interrupted'] AND in_progress_siblings = 0 THEN ''
                     ELSE p.in_progress_heartbeat_at
                 END,
                 p.status = CASE
                     WHEN $status = 'in_progress' THEN 'in_progress'
-                    WHEN $status IN ['completed', 'failed', 'interrupted'] AND p.status = 'in_progress' THEN 'active'
+                    WHEN $status IN ['completed', 'failed', 'interrupted']
+                         AND p.status = 'in_progress'
+                         AND in_progress_siblings = 0 THEN 'active'
                     ELSE p.status
                 END,
                 p.updated_at = datetime()
@@ -2197,7 +2203,8 @@ def get_session_current_work(session_id: str,
     with driver.session(database=cfg.neo4j_db) as session:
         result = session.run("""
             MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
-            WHERE t.owner = $session_id AND t.status = 'in_progress'
+            WHERE (t.owner = $session_id OR t.dispatched_to = $session_id)
+              AND t.status = 'in_progress'
               // Fail-closed, normalized allowlist: an in_progress task in a concluded
               // project (stopped/completed/unknown) is NOT live work and must not
               // force-grind its owner (hunter token-burn 2026-06-04). trim+lower so
@@ -2809,7 +2816,7 @@ def get_agent_tasks(agent_id: str, config: Optional[OrchConfig] = None) -> List[
     with driver.session(database=cfg.neo4j_db) as session:
         result = session.run("""
             MATCH (t:OrchTask)
-            WHERE t.owner = $agent_id
+            WHERE (t.owner = $agent_id OR t.dispatched_to = $agent_id)
               AND t.status IN ['pending', 'in_progress']
             RETURN t.id AS id, t.description AS description,
                    t.status AS status, t.priority AS priority
