@@ -199,6 +199,25 @@ def _untrusted_envelope_contract() -> None:
     _check("ref content no longer uses bare markdown fences", "```\n" not in "\n".join(outside), outside)
 
 
+def _context_selection_error_contract() -> None:
+    with mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
+         mock.patch.object(assembler, "get_overall_refs", side_effect=RuntimeError("overall down")), \
+         mock.patch.object(assembler, "get_supervisor_refs", side_effect=RuntimeError("supervisor down")):
+        context = assembler.select_context("conductor-codex", cli="codex", session_roots={})
+    packet = assembler.build_packet("conductor-codex", context)
+    rendered = assembler.assemble(packet, "codex")
+
+    _check("overall context error renders visible unavailable ref",
+           "### overall\n- ref 1" in rendered and "### overall\n- none" not in rendered,
+           rendered)
+    _check("supervisor context error renders visible unavailable ref",
+           "### supervisor\n- ref 1" in rendered and "### supervisor\n- none" not in rendered,
+           rendered)
+    _check("unavailable marker is rendered in packet",
+           assembler.UNAVAILABLE_CONTEXT_MARKER in rendered,
+           rendered)
+
+
 def _empty_work_context_contract() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -275,6 +294,7 @@ def main() -> int:
     _endpoint_contract()
     _assembler_contract()
     _untrusted_envelope_contract()
+    _context_selection_error_contract()
     _empty_work_context_contract()
     _memory_traversal_contract()
     if FAILURES:
