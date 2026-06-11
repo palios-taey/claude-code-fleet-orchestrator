@@ -195,11 +195,13 @@ function renderProjectList() {
     return `
       <article class="project-card ${activeClass}" data-project-id="${escapeHtml(project.id)}">
         <div class="status-row">
-          <h3>${escapeHtml(project.name || project.id)}</h3>
+          <div>
+            <h3>${escapeHtml(project.name || project.id)}</h3>
+            <p class="project-slug">${escapeHtml(project.id || "")}</p>
+          </div>
           ${renderStatusBadge(project.status || "active")}
         </div>
         <div class="project-stats">
-          <span><strong>${escapeHtml(project.id)}</strong></span>
           <span>${project.phase_count ?? 0} phases</span>
           <span>${project.task_total ?? 0} tasks</span>
         </div>
@@ -215,9 +217,14 @@ function renderProjectList() {
 
   for (const card of elements.projectsList.querySelectorAll(".project-card")) {
     card.addEventListener("click", () => {
-      state.selectedProjectIdBySession.set(state.selectedSessionId, card.dataset.projectId);
+      const projectId = card.dataset.projectId;
+      if (projectId === selectedProjectId()) {
+        return;
+      }
+      state.selectedProjectIdBySession.set(state.selectedSessionId, projectId);
       renderProjectList();
-      loadSelectedProject();
+      renderProjectLoading(projectId);
+      loadSelectedProject(projectId);
     });
   }
 }
@@ -445,6 +452,12 @@ function renderProjectError(error) {
   elements.projectDetail.innerHTML = `<p class="empty-hint">Failed to load project: ${escapeHtml(error.message)}</p>`;
 }
 
+function renderProjectLoading(projectId) {
+  state.refDrilldowns.clear();
+  elements.projectDetail.classList.remove("empty-state");
+  elements.projectDetail.innerHTML = `<p class="empty-hint">Loading ${escapeHtml(projectId)}...</p>`;
+}
+
 function syncChatTarget() {
   elements.chatTarget.textContent = selectedLineage();
   elements.chatInput.placeholder = `Message to ${selectedLineage()}...`;
@@ -468,9 +481,9 @@ function updateChatButtonState() {
   elements.chatSubmit.disabled = !elements.chatInput.value.trim();
 }
 
-async function loadSelectedProject() {
+async function loadSelectedProject(expectedProjectId = selectedProjectId()) {
   ensureSelectedProject();
-  const projectId = selectedProjectId();
+  const projectId = expectedProjectId || selectedProjectId();
   if (!projectId) {
     renderSessionSummary();
     return;
@@ -481,8 +494,14 @@ async function loadSelectedProject() {
       fetchJson(PROJECT_DETAIL_ENDPOINT(projectId)),
       fetchJson(PROJECT_STOP_CONDITIONS_ENDPOINT(projectId)),
     ]);
+    if (projectId !== selectedProjectId()) {
+      return;
+    }
     renderProjectDetail(summary, stopConditions);
   } catch (error) {
+    if (projectId !== selectedProjectId()) {
+      return;
+    }
     renderProjectError(error);
   }
 }
