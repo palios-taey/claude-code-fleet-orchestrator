@@ -638,6 +638,16 @@ def _state_key(node_id: str, suffix: str) -> str:
     return f"{prefix}:{node_id}:{suffix}"
 
 
+# A peer counts as "actively working" (so the supervisor may ALLOW_STOP and wait
+# for its RESPONSE_READY) only if its liveness heartbeat is fresher than this. The
+# activity hooks (pre_tool_activity / prompt_activity / check_notifications) stamp
+# `<peer>:last_activity` on every tool call / prompt / notification, so a live peer
+# -- even on a long task -- refreshes it continuously; a hard-killed peer (no Stop
+# hook fires, so the idle flag never sets) goes stale within this window and the
+# supervisor BLOCKs to investigate. 300s tolerates normal think/tool gaps; the
+# failure direction past it is a brief busy-loop (bounded by the convergence
+# valve), never a strand.
+_PEER_HEARTBEAT_STALE_SEC = 300
 _STOP_BLOCK_CONVERGENCE_LIMIT = 3
 # This TTL deliberately survives short-lived process restarts so a stop cycle
 # can still converge after a crash/restart. The tradeoff is a stale marker/count
@@ -1011,31 +1021,127 @@ def _supervisor_dispatch_block_reason(task_id: Optional[str], owner: Optional[st
     )
 
 
+def _peer_actively_working_task(workers: List[str], task_id: Optional[str],
+                                config: Optional[OrchConfig] = None) -> bool:
+    """True iff some worker in ``workers`` is ALIVE and actively working
+    ``task_id`` right now: its live ``current_task`` is bound to the task AND it
+    is not idle (its Stop hook has not fired).
+
+    The ``current_task`` binding ALONE is NOT sufficient. It persists across
+    NON-done terminations -- it is the 'previous dispatch did not finish
+    cleanly' signal: dispatch.record_outcome clears it ONLY on outcome=done. A
+    peer that errored / was interrupted / stopped without a clean done leaves
+    current_task bound but is NOT working, and would send no RESPONSE_READY --
+    so treating bound-alone as 'actively working' and letting the caller
+    ALLOW_STOP strands the task (grok PR#39 V1, the 7-hour-stop reopened for
+    crash/error paths). The idle flag is the event-driven liveness signal: the
+    peer's OWN Stop hook sets it whenever it stops for any reason that runs the
+    hook (done, error, interrupt, graceful crash), and activity clears it. So:
+      - current_task == task AND NOT idle -> peer is alive + mid-flight -> True
+        (caller ALLOW_STOPs; the peer's RESPONSE_READY re-wakes it on done);
+      - current_task != task, OR idle is set -> peer is not working it (finished
+        / errored / stopped / not yet started) -> False (caller must gate or
+        investigate -- the anti-strand path).
+
+    Two adjacent paths cover what idle cannot: (1) error/interrupt WITH
+    record_outcome reverts the task to 'pending' (dispatch._revert_outcome_claim)
+    so it leaves in_progress entirely and is caught by the pending-dispatch
+    block, not here; (2) a hard kill (kill -9 / OOM) runs no Stop hook, so idle
+    stays clear and a dead peer can briefly look active here -- a pre-existing
+    fleet-wide liveness gap (it stranded the OLD all-in-flight-block code too,
+    via the convergence valve) bounded by the orch-watch stuck detector
+    (notify_supervisor_of_stuck after --stuck-threshold-sec), which re-wakes the
+    supervisor to investigate. That backstop is out of scope for this decision.
+    """
+    if not task_id:
+        return False
+    cfg = config or OrchConfig()
+    from .config import get_redis_sync
+
+    r = get_redis_sync(cfg)
+    for worker in workers:
+        if not worker:
+            continue
+        try:
+            raw = r.get(_state_key(worker, "current_task"))
+        except Exception:
+            continue
+        if not raw:
+            continue
+        try:
+            cur = json.loads(raw)
+        except Exception:
+            continue
+        if not (isinstance(cur, dict) and cur.get("task_id") == task_id):
+            continue
+        # current_task is bound to this task -- but is the peer ALIVE and working?
+        # Two liveness gates, both fail-closed to BLOCK on any read error:
+        #  (1) idle flag CLEAR. A set idle flag means the peer's own Stop hook fired
+        #      = it stopped without a clean done (record_outcome clears current_task
+        #      ONLY on done), so it is not working and will send no RESPONSE_READY.
+        #  (2) heartbeat FRESH. last_activity (stamped by the activity hooks on every
+        #      tool call/prompt/notification) within _PEER_HEARTBEAT_STALE_SEC. A
+        #      hard kill (kill -9 / OOM / hook failure) runs no Stop hook, so idle
+        #      never sets -- the stale heartbeat is what catches it.
+        try:
+            if r.get(_state_key(worker, "idle")):
+                continue
+            last_activity = r.get(_state_key(worker, "last_activity"))
+        except Exception:
+            continue
+        if last_activity is None:
+            continue
+        try:
+            age = time.time() - float(last_activity)
+        except (TypeError, ValueError):
+            continue
+        if age < _PEER_HEARTBEAT_STALE_SEC:
+            return True
+    return False
+
+
 def get_supervisor_inflight_peer_task(supervisor: str, project_id: str,
                                       config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
-    """Top IN-FLIGHT peer task in ``project_id`` (owned by an autonomous peer of
-    ``supervisor``, status in_progress/dispatched, project live). The supervisor
-    must stay up to GATE it the moment the peer reports done -- a peer finishing
-    un-gated is exactly how the supervisor strands work (the 7-hour-stop hole).
-    Returns enough to build a 'stay up to gate' reason, or None."""
+    """Top in-flight peer task in ``project_id`` that NEEDS THE SUPERVISOR TO
+    ACT -- owned/dispatched to an autonomous peer, status in_progress/dispatched,
+    project live, AND the peer is NOT actively working it right now.
+
+    A peer that is actively mid-flight (its live current_task is bound to the
+    task) does NOT need the supervisor awake: the peer's RESPONSE_READY
+    notification re-wakes the supervisor the instant the work is done, to gate
+    it. Blocking the supervisor's stop during that window is a busy-loop with
+    nothing to do -- the repeated-Stop-hook symptom. So actively-worked tasks
+    are EXCLUDED here (they ALLOW_STOP). What remains DOES need the supervisor:
+    a peer that reported done (current_task cleared, awaiting gate) or stalled
+    (dispatched but never bound / died). That is the real anti-strand case (the
+    7-hour-stop hole) and it still BLOCKs. Returns the gate/investigate task,
+    or None."""
     cfg = config or OrchConfig()
     peer_owners = [f"{supervisor}{suf}" for suf in _AUTONOMOUS_PEER_SUFFIXES]
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
-        record = session.run(
+        rows = [dict(record) for record in session.run(
             """
             MATCH (proj:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status IN ['in_progress', 'dispatched']
               AND (t.owner IN $peer_owners OR t.dispatched_to IN $peer_owners)
               AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
             RETURN t.id AS task_id, t.description AS description, t.owner AS owner,
+                   t.dispatched_to AS dispatched_to,
                    t.priority AS priority, ph.id AS phase_id, proj.id AS project_id
             ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, t.created_at ASC
-            LIMIT 1
+            LIMIT 25
             """,
             project_id=project_id, peer_owners=peer_owners,
-        ).single()
-        return dict(record) if record else None
+        )]
+    for row in rows:
+        workers = [w for w in (row.get("owner"), row.get("dispatched_to"))
+                   if w in peer_owners]
+        if _peer_actively_working_task(workers, row.get("task_id"), config=cfg):
+            # Peer is mid-flight -> ALLOW_STOP; its RESPONSE_READY re-wakes us.
+            continue
+        return row
+    return None
 
 
 def _supervisor_gate_block_reason(task_id: Optional[str], owner: Optional[str],
@@ -1044,11 +1150,13 @@ def _supervisor_gate_block_reason(task_id: Optional[str], owner: Optional[str],
     owner_value = owner or "a peer"
     task_title = (description or "untitled task")[:80]
     return (
-        "Your peer has supervised in-flight work and you must stay up to GATE it: "
-        f"{task_id_value} — {task_title} is owned by {owner_value} and not yet terminal. "
-        "Do NOT stop. Check whether the peer reported done (record_outcome / its branch + PR); "
-        "if so, verify + gate it (audit -> merge -> close with evidence); if it is still running, "
-        "stay available. A supervisor with in-flight peer work has not finished."
+        "Your peer finished or stalled on supervised work and it needs YOU to act: "
+        f"{task_id_value} — {task_title} (peer {owner_value}) is in_progress/dispatched "
+        "but the peer is NOT actively working it (its current_task is clear). Either it "
+        "reported done and awaits your gate (verify -> audit -> merge -> close with "
+        "evidence), or it stalled (re-dispatch / investigate). Do NOT stop with un-gated "
+        "peer work. (A peer that is actively mid-flight does NOT block your stop -- its "
+        "RESPONSE_READY re-wakes you the instant it is done.)"
     )
 
 
@@ -1091,14 +1199,18 @@ def _raw_stop_decision(session_id: str,
 
     # Supervisor keep-going (DEFAULT-ON, no flag). The own-ready loop above only
     # surfaces work the supervisor owns ITSELF. A supervisor is ALSO not finished while
-    # a supervised active project has peer-owned work that is either (a) pending-ready
-    # -> the supervisor must DISPATCH it, or (b) in-flight (in_progress/dispatched) ->
-    # the supervisor must STAY UP to gate it the moment the peer reports done. Leaving
-    # either case to ALLOW_STOP is what stranded a supervisor for HOURS while a peer's
-    # work sat un-dispatched or finished-but-un-gated. This is the keep-going invariant;
-    # there is NO off-switch -- the only release is the wrapper convergence valve
-    # (force-allow after N stop-hook attempts), which exists solely to prevent a
-    # permanent wedge on genuinely-stuck state, not to let a supervisor opt out.
+    # a supervised active project has peer-owned work that NEEDS THE SUPERVISOR TO ACT:
+    # (a) pending-ready -> the supervisor must DISPATCH it, or (b) in-flight but the peer
+    # is NOT actively working it (reported done -> gate it, or stalled -> investigate).
+    # The keep-going invariant is "not finished while there is work for ME to act on" --
+    # NOT "not finished while a peer is busy." A peer that is actively mid-flight does
+    # NOT block the supervisor's stop: its RESPONSE_READY notification re-wakes the
+    # supervisor the instant the work is done, so blocking during that window is a
+    # busy-loop with nothing to do (the repeated-Stop-hook symptom). Leaving a
+    # dispatchable or finished-but-un-gated task to ALLOW_STOP is what stranded a
+    # supervisor for HOURS; that case still BLOCKs. There is NO off-switch -- the only
+    # release is the wrapper convergence valve (force-allow after N stop-hook attempts),
+    # which exists solely to prevent a permanent wedge on genuinely-stuck state.
     for project in projects:
         status = str(project.get("status") or "").strip().lower()
         if status not in ("active", "in_progress"):
