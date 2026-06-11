@@ -27,16 +27,16 @@ Required variables:
 - `ORCH_REDIS_PORT` — Redis port for the orchestrator API and watcher.
 - `ORCH_NEO4J_URI` — Neo4j Bolt URI, for example `bolt://127.0.0.1:7687`.
 - `ORCH_NEO4J_DB` — Neo4j database name.
-- `ORCH_DASHBOARD_URL` — base URL for the API and browser UI, for example `http://127.0.0.1:5002`.
 
 Optional variables:
 
+- `ORCH_DASHBOARD_URL` — base URL for the API and browser UI; defaults to `http://127.0.0.1:5002`.
 - `ORCH_REDIS_SENTINELS` — comma-separated Redis Sentinel `host:port` pairs.
 - `ORCH_REDIS_SENTINEL_MASTER` — Sentinel master name; defaults to `orch-master`.
 - `ORCH_NEO4J_USER` / `ORCH_NEO4J_PASS` — Neo4j credentials when auth is enabled.
-- `ORCH_NOTIFY_LIB_ROOT` — path to a local `claude-code-fleet-notify` checkout when `identity` is not already importable.
+- `ORCH_NOTIFY_LIB_ROOT` — path to a local `claude-code-fleet-notify` checkout; required only when `identity` is not already importable.
 - `ORCH_NOTIFY_CLI` — override the notify CLI binary; defaults to `taey-notify`.
-- `ORCH_REF_ALLOWED_ROOT` — trusted root, comma-separated roots, or a JSON list of roots under which plan source files must live before `[ref:...]` slices are enabled.
+- `ORCH_REF_ALLOWED_ROOT` — trusted root, comma-separated roots, or a JSON list of roots under which plan source files must live before `[ref:...]` slices are enabled. Refs are disabled fail-safe when unset.
 - `ORCH_SESSION_IDS` — optional allowlist for the browser notify form target validation. When set, `POST /api/sessions/{target}/notify` rejects targets not listed here.
 - `ORCH_PRODUCT_OWNER_MAP` — optional session-to-product map used by `lib.dispatch` bug-lock enforcement. Accepts JSON or comma-separated `session=product` pairs. `PRODUCT_OWNER_MAP` is also accepted as a fallback alias.
 - `ORCH_DOTENV` — explicit `.env` file path to load before config validation.
