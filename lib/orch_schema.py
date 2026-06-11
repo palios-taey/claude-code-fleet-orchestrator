@@ -2833,7 +2833,18 @@ def create_question(question_id: str, text: str, context: str = "",
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
-        task_clause = ""
+        # No f-string in the executed query (F19 defense-in-depth): the query is built
+        # by concatenating only developer-controlled CONSTANTS; every user value
+        # (id/text/context/task_id/asked_by) is a Cypher parameter, never interpolated.
+        _BASE_Q = (
+            "MERGE (q:OrchQuestion {id: $id}) "
+            "SET q.text = $text, q.context = $context, q.task_id = $task_id, "
+            "q.asked_by = $asked_by, q.status = 'open', q.created_at = datetime() "
+        )
+        _LINK_TASK = (
+            "WITH q MATCH (t:OrchTask {id: $task_id}) "
+            "MERGE (q)-[:CONCERNS_TASK]->(t) "
+        )
         if task_id:
             task_record = session.run(
                 "MATCH (t:OrchTask {id: $task_id}) RETURN t.id AS id",
@@ -2841,23 +2852,12 @@ def create_question(question_id: str, text: str, context: str = "",
             ).single()
             if task_record is None:
                 raise TaskParentNotFoundError(f"task '{task_id}' not found; cannot create question '{question_id}'")
-            task_clause = """
-            WITH q
-            MATCH (t:OrchTask {id: $task_id})
-            MERGE (q)-[:CONCERNS_TASK]->(t)
-            """
+            query = _BASE_Q + _LINK_TASK + "RETURN q.id AS id"
+        else:
+            query = _BASE_Q + "RETURN q.id AS id"
 
-        result = session.run(f"""
-            MERGE (q:OrchQuestion {{id: $id}})
-            SET q.text = $text,
-                q.context = $context,
-                q.task_id = $task_id,
-                q.asked_by = $asked_by,
-                q.status = 'open',
-                q.created_at = datetime()
-            {task_clause}
-            RETURN q.id AS id
-        """, id=question_id, text=text, context=context,
+        result = session.run(
+            query, id=question_id, text=text, context=context,
             task_id=task_id, asked_by=asked_by)
         record = result.single()
         if record is None:
