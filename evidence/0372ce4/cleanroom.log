@@ -1,0 +1,16 @@
+[14:05:47] === clean-room gate @ 0372ce4 on mira ===
+[14:05:47] --- bring up isolated infra (docker compose) ---
+ Network orch-gate-0372ce4-4118045_default Creating 
+ Network orch-gate-0372ce4-4118045_default Created 
+ Volume orch-gate-0372ce4-4118045_orch_redis_data Creating 
+ Volume orch-gate-0372ce4-4118045_orch_redis_data Created 
+ Volume orch-gate-0372ce4-4118045_orch_neo4j_data Creating 
+ Volume orch-gate-0372ce4-4118045_orch_neo4j_data Created 
+ Container orch-gate-0372ce4-4118045-redis-1 Creating 
+ Container orch-gate-0372ce4-4118045-neo4j-1 Creating 
+ Container orch-gate-0372ce4-4118045-redis-1 Created 
+ Container orch-gate-0372ce4-4118045-neo4j-1 Created 
+ Container orch-gate-0372ce4-4118045-neo4j-1 Starting 
+ Container orch-gate-0372ce4-4118045-redis-1 Starting 
+Error response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint orch-gate-0372ce4-4118045-redis-1 (979d935af437551630550e09f099bb6ea9b89d83582966be5646812760706f4b): failed to bind host port 127.0.0.1:6379/tcp: address already in use
+[14:07:17] === teardown ===

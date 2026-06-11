@@ -1,0 +1,467 @@
+[14:08:40] === clean-room gate @ 3ee1a7a on mira ===
+[14:08:40] --- bring up isolated infra (docker compose) ---
+ Network orch-gate-3ee1a7a-4126528_default Creating 
+ Network orch-gate-3ee1a7a-4126528_default Created 
+ Volume orch-gate-3ee1a7a-4126528_orch_neo4j_data Creating 
+ Volume orch-gate-3ee1a7a-4126528_orch_neo4j_data Created 
+ Volume orch-gate-3ee1a7a-4126528_orch_redis_data Creating 
+ Volume orch-gate-3ee1a7a-4126528_orch_redis_data Created 
+ Container orch-gate-3ee1a7a-4126528-neo4j-1 Creating 
+ Container orch-gate-3ee1a7a-4126528-redis-1 Creating 
+ Container orch-gate-3ee1a7a-4126528-neo4j-1 Created 
+ Container orch-gate-3ee1a7a-4126528-redis-1 Created 
+ Container orch-gate-3ee1a7a-4126528-redis-1 Starting 
+ Container orch-gate-3ee1a7a-4126528-neo4j-1 Starting 
+ Container orch-gate-3ee1a7a-4126528-redis-1 Started 
+ Container orch-gate-3ee1a7a-4126528-neo4j-1 Started 
+[14:08:55] PASS  infra-healthy (1)
+[14:08:55] --- configure .env + install (fresh venv) ---
+Requirement already satisfied: pip in ./.venv/lib/python3.12/site-packages (26.1.2)
+Processing ./.
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Requirement already satisfied: fastapi in ./.venv/lib/python3.12/site-packages (from fleet-orchestrator==1.5.1) (0.136.3)
+Requirement already satisfied: neo4j in ./.venv/lib/python3.12/site-packages (from fleet-orchestrator==1.5.1) (6.2.0)
+Requirement already satisfied: redis in ./.venv/lib/python3.12/site-packages (from fleet-orchestrator==1.5.1) (8.0.0)
+Requirement already satisfied: uvicorn in ./.venv/lib/python3.12/site-packages (from fleet-orchestrator==1.5.1) (0.49.0)
+Requirement already satisfied: starlette>=0.46.0 in ./.venv/lib/python3.12/site-packages (from fastapi->fleet-orchestrator==1.5.1) (1.2.1)
+Requirement already satisfied: pydantic>=2.9.0 in ./.venv/lib/python3.12/site-packages (from fastapi->fleet-orchestrator==1.5.1) (2.13.4)
+Requirement already satisfied: typing-extensions>=4.8.0 in ./.venv/lib/python3.12/site-packages (from fastapi->fleet-orchestrator==1.5.1) (4.15.0)
+Requirement already satisfied: typing-inspection>=0.4.2 in ./.venv/lib/python3.12/site-packages (from fastapi->fleet-orchestrator==1.5.1) (0.4.2)
+Requirement already satisfied: annotated-doc>=0.0.2 in ./.venv/lib/python3.12/site-packages (from fastapi->fleet-orchestrator==1.5.1) (0.0.4)
+Requirement already satisfied: annotated-types>=0.6.0 in ./.venv/lib/python3.12/site-packages (from pydantic>=2.9.0->fastapi->fleet-orchestrator==1.5.1) (0.7.0)
+Requirement already satisfied: pydantic-core==2.46.4 in ./.venv/lib/python3.12/site-packages (from pydantic>=2.9.0->fastapi->fleet-orchestrator==1.5.1) (2.46.4)
+Requirement already satisfied: anyio<5,>=3.6.2 in ./.venv/lib/python3.12/site-packages (from starlette>=0.46.0->fastapi->fleet-orchestrator==1.5.1) (4.13.0)
+Requirement already satisfied: idna>=2.8 in ./.venv/lib/python3.12/site-packages (from anyio<5,>=3.6.2->starlette>=0.46.0->fastapi->fleet-orchestrator==1.5.1) (3.18)
+Requirement already satisfied: pytz in ./.venv/lib/python3.12/site-packages (from neo4j->fleet-orchestrator==1.5.1) (2026.2)
+Requirement already satisfied: click>=7.0 in ./.venv/lib/python3.12/site-packages (from uvicorn->fleet-orchestrator==1.5.1) (8.4.1)
+Requirement already satisfied: h11>=0.8 in ./.venv/lib/python3.12/site-packages (from uvicorn->fleet-orchestrator==1.5.1) (0.16.0)
+Building wheels for collected packages: fleet-orchestrator
+  Building wheel for fleet-orchestrator (pyproject.toml): started
+  Building wheel for fleet-orchestrator (pyproject.toml): finished with status 'done'
+  Created wheel for fleet-orchestrator: filename=fleet_orchestrator-1.5.1-py3-none-any.whl size=91232 sha256=06b1fa2afb1d65de7d423005377c9d8531c72175104351b315fe9086272be229
+  Stored in directory: /home/mira/.cache/pip/wheels/db/c8/63/d453e15d0c067008de1f89a0760b2770241b482d86f64f4286
+Successfully built fleet-orchestrator
+Installing collected packages: fleet-orchestrator
+  Attempting uninstall: fleet-orchestrator
+    Found existing installation: fleet-orchestrator 1.5.1
+    Uninstalling fleet-orchestrator-1.5.1:
+      Successfully uninstalled fleet-orchestrator-1.5.1
+Successfully installed fleet-orchestrator-1.5.1
+=== claude: diff for /home/mira/.claude/settings.json ===
+--- claude: /home/mira/.claude/settings.json
++++ claude: /home/mira/.claude/settings.json
+@@ -54,6 +54,15 @@
+             "timeout": 5000
+           }
+         ]
++      },
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "python3 /home/mira/claude-code-fleet-notify-versions/enforcer-1a3fcb4/hooks/stop_idle.py",
++            "timeout": 5000
++          }
++        ]
+       }
+     ],
+     "UserPromptSubmit": [
+@@ -62,6 +71,15 @@
+           {
+             "type": "command",
+             "command": "python3 /home/mira/claude-code-fleet-notify/hooks/prompt_activity.py",
++            "timeout": 5000
++          }
++        ]
++      },
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "python3 /home/mira/claude-code-fleet-notify-versions/enforcer-1a3fcb4/hooks/prompt_activity.py",
+             "timeout": 5000
+           }
+         ]
+@@ -76,6 +94,15 @@
+             "timeout": 5000
+           }
+         ]
++      },
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "python3 /home/mira/claude-code-fleet-notify-versions/enforcer-1a3fcb4/hooks/check_notifications.py",
++            "timeout": 5000
++          }
++        ]
+       }
+     ],
+     "PreToolUse": [
+@@ -84,6 +111,15 @@
+           {
+             "type": "command",
+             "command": "python3 /home/mira/claude-code-fleet-notify/hooks/pre_tool_activity.py",
++            "timeout": 3000
++          }
++        ]
++      },
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "python3 /home/mira/claude-code-fleet-notify-versions/enforcer-1a3fcb4/hooks/pre_tool_activity.py",
+             "timeout": 3000
+           }
+         ]
+[claude] Applied. Backup: /home/mira/.claude/settings.json.bak.20260604-140857
+
+[grok] Separate wiring required: use ~/.grok/hooks/cf-notify.json
+       and point it at hooks/grok_session_start.py, grok_stop.py,
+       and grok_user_prompt.py. See docs/grok-hooks.md.
+[notify] Daemon already running (pid=3166978). Use restart if needed.
+=== claude: diff for /home/mira/.claude/settings.json ===
+--- claude: /home/mira/.claude/settings.json
++++ claude: /home/mira/.claude/settings.json
+@@ -54,6 +54,15 @@
+             "timeout": 5000
+           }
+         ]
++      },
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "python3 /home/mira/claude-code-fleet-notify-versions/enforcer-1a3fcb4/hooks/stop_idle.py",
++            "timeout": 5000
++          }
++        ]
+       }
+     ],
+     "UserPromptSubmit": [
+@@ -62,6 +71,15 @@
+           {
+             "type": "command",
+             "command": "python3 /home/mira/claude-code-fleet-notify/hooks/prompt_activity.py",
++            "timeout": 5000
++          }
++        ]
++      },
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "python3 /home/mira/claude-code-fleet-notify-versions/enforcer-1a3fcb4/hooks/prompt_activity.py",
+             "timeout": 5000
+           }
+         ]
+@@ -76,6 +94,15 @@
+             "timeout": 5000
+           }
+         ]
++      },
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "python3 /home/mira/claude-code-fleet-notify-versions/enforcer-1a3fcb4/hooks/check_notifications.py",
++            "timeout": 5000
++          }
++        ]
+       }
+     ],
+     "PreToolUse": [
+@@ -84,6 +111,15 @@
+           {
+             "type": "command",
+             "command": "python3 /home/mira/claude-code-fleet-notify/hooks/pre_tool_activity.py",
++            "timeout": 3000
++          }
++        ]
++      },
++      {
++        "hooks": [
++          {
++            "type": "command",
++            "command": "python3 /home/mira/claude-code-fleet-notify-versions/enforcer-1a3fcb4/hooks/pre_tool_activity.py",
+             "timeout": 3000
+           }
+         ]
+[claude] Applied. Backup: /home/mira/.claude/settings.json.bak.20260604-140857
+
+[grok] Separate wiring required: use ~/.grok/hooks/cf-notify.json
+       and point it at hooks/grok_session_start.py, grok_stop.py,
+       and grok_user_prompt.py. See docs/grok-hooks.md.
+python: installed version 1.5.1 into /home/mira/orch-dci/.venv
+--- /home/mira/.claude/settings.json
++++ /home/mira/.claude/settings.json
+@@ -54,15 +54,6 @@
+             "timeout": 5000
+           }
+         ]
+-      },
+-      {
+-        "hooks": [
+-          {
+-            "type": "command",
+-            "command": "python3 /home/mira/claude-code-fleet-notify-versions/enforcer-1a3fcb4/hooks/stop_idle.py",
+-            "timeout": 5000
+-          }
+-        ]
+       }
+     ],
+     "UserPromptSubmit": [
+@@ -71,15 +62,6 @@
+           {
+             "type": "command",
+             "command": "python3 /home/mira/claude-code-fleet-notify/hooks/prompt_activity.py",
+-            "timeout": 5000
+-          }
+-        ]
+-      },
+-      {
+-        "hooks": [
+-          {
+-            "type": "command",
+-            "command": "python3 /home/mira/claude-code-fleet-notify-versions/enforcer-1a3fcb4/hooks/prompt_activity.py",
+             "timeout": 5000
+           }
+         ]
+@@ -94,15 +76,6 @@
+             "timeout": 5000
+           }
+         ]
+-      },
+-      {
+-        "hooks": [
+-          {
+-            "type": "command",
+-            "command": "python3 /home/mira/claude-code-fleet-notify-versions/enforcer-1a3fcb4/hooks/check_notifications.py",
+-            "timeout": 5000
+-          }
+-        ]
+       }
+     ],
+     "PreToolUse": [
+@@ -111,15 +84,6 @@
+           {
+             "type": "command",
+             "command": "python3 /home/mira/claude-code-fleet-notify/hooks/pre_tool_activity.py",
+-            "timeout": 3000
+-          }
+-        ]
+-      },
+-      {
+-        "hooks": [
+-          {
+-            "type": "command",
+-            "command": "python3 /home/mira/claude-code-fleet-notify-versions/enforcer-1a3fcb4/hooks/pre_tool_activity.py",
+             "timeout": 3000
+           }
+         ]
+claude-settings: reconciled managed delta
+api: external listener detected on 127.0.0.1:5002
+watch: already managed
+✅ docker: skipped: BYO infra mode
+✅ infra: redis=127.0.0.1:59255 neo4j=bolt://127.0.0.1:38623
+✅ env: config values parse
+❌ health: http://127.0.0.1:5099/health unreachable: <urlopen error [Errno 111] Connection refused>
+   remediation: run `orch enable` or start uvicorn on :5002
+✅ claude-settings: deny entries present exactly-once: {'AskUserQuestion': 1, 'AskUserQuestion(*)': 1}
+✅ claude-hooks: hook commands present exactly-once at expected paths
+❌ stop-round-trip: <urlopen error [Errno 111] Connection refused>
+   remediation: ensure API and Neo4j are reachable
+✅ notify-daemon: pid=3166978
+✅ orch-watch: pid=4124005 managed
+✅ notify-hook-fail-open: codex_stop.py returns {} and exit 0 when API is down
+✅ orch-hook-fail-open: stop_idle.py returns {} and exit 0 when API is down
+compose: skipped (BYO/existing infra; redis=open, neo4j=open)
+[14:08:58] --- start API on :5099 ---
+INFO:     Started server process [4127970]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:5099 (Press CTRL+C to quit)
+INFO:     127.0.0.1:57190 - "GET /api/projects HTTP/1.1" 200 OK
+[14:09:00] PASS  api-up (1)
+[14:09:00] --- production assertions ---
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: DEPENDS_ON)", position=<SummaryInputPosition line=4, column=33, offset=123>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 33, 'offset': 123, 'line': 4}}> for query: "\n                MATCH (t:OrchTask {status: 'pending'})\n                WHERE NOT EXISTS {\n                    MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                    WHERE dep.status <> 'completed'\n                }\n                RETURN t.id AS id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.capability_tags AS capability_tags,\n                       t.file_blast_radius AS file_blast_radius,\n                       t.estimated_tokens AS estimated_tokens\n                ORDER BY coalesce(t.priority, 999999999) ASC\n            "
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the property names in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing property name is: capability_tags)", position=<SummaryInputPosition line=9, column=26, offset=376>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 26, 'offset': 376, 'line': 9}}> for query: "\n                MATCH (t:OrchTask {status: 'pending'})\n                WHERE NOT EXISTS {\n                    MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                    WHERE dep.status <> 'completed'\n                }\n                RETURN t.id AS id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.capability_tags AS capability_tags,\n                       t.file_blast_radius AS file_blast_radius,\n                       t.estimated_tokens AS estimated_tokens\n                ORDER BY coalesce(t.priority, 999999999) ASC\n            "
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the property names in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing property name is: file_blast_radius)", position=<SummaryInputPosition line=10, column=26, offset=437>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 26, 'offset': 437, 'line': 10}}> for query: "\n                MATCH (t:OrchTask {status: 'pending'})\n                WHERE NOT EXISTS {\n                    MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                    WHERE dep.status <> 'completed'\n                }\n                RETURN t.id AS id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.capability_tags AS capability_tags,\n                       t.file_blast_radius AS file_blast_radius,\n                       t.estimated_tokens AS estimated_tokens\n                ORDER BY coalesce(t.priority, 999999999) ASC\n            "
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the property names in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing property name is: estimated_tokens)", position=<SummaryInputPosition line=11, column=26, offset=502>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 26, 'offset': 502, 'line': 11}}> for query: "\n                MATCH (t:OrchTask {status: 'pending'})\n                WHERE NOT EXISTS {\n                    MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                    WHERE dep.status <> 'completed'\n                }\n                RETURN t.id AS id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.capability_tags AS capability_tags,\n                       t.file_blast_radius AS file_blast_radius,\n                       t.estimated_tokens AS estimated_tokens\n                ORDER BY coalesce(t.priority, 999999999) ASC\n            "
+INFO:     127.0.0.1:57194 - "GET /health HTTP/1.1" 200 OK
+[14:09:01] PASS  health-version-matches-package (1.5.1)
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: DEPENDS_ON)", position=<SummaryInputPosition line=5, column=19, offset=106>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 19, 'offset': 106, 'line': 5}}> for query: "\nMATCH (t:OrchTask {id: $task_id})\nWHERE coalesce(t.owner, '') <> ''\n  AND NOT EXISTS {\n      MATCH (t)-[:DEPENDS_ON]->(:OrchTask)\n  }\nRETURN t.id AS task_id,\n       t.owner AS owner,\n       t.description AS description\n"
+INFO:     127.0.0.1:57198 - "POST /api/projects/load-md HTTP/1.1" 500 Internal Server Error
+ERROR: HTTP 500: Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/home/mira/orch-dci/lib/config.py", line 142, in ensure_notify_importable
+    import identity  # noqa: F401
+    ^^^^^^^^^^^^^^^
+ModuleNotFoundError: No module named 'identity'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/uvicorn/protocols/http/h11_impl.py", line 415, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/lib/tasks_api.py", line 436, in load_plan_md
+    return load_plan_from_text(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/lib/plan_loader.py", line 428, in load_plan_from_text
+    create_task(
+  File "/home/mira/orch-dci/lib/orch_schema.py", line 1185, in create_task
+    _wake_owner_for_zero_dep_task(created_id, cfg)
+  File "/home/mira/orch-dci/lib/orch_schema.py", line 496, in _wake_owner_for_zero_dep_task
+    redis_client = _fleet_redis_connect()
+                   ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/lib/orch_schema.py", line 451, in _fleet_redis_connect
+    ensure_notify_importable()
+  File "/home/mira/orch-dci/lib/config.py", line 147, in ensure_notify_importable
+    raise OrchConfigError(
+lib.config.OrchConfigError: ORCH_NOTIFY_LIB_ROOT must be set when fleet-notify is not already importable
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the property names in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing property name is: blocked_on)", position=<SummaryInputPosition line=22, column=48, offset=1180>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 48, 'offset': 1180, 'line': 22}}> for query: "\n                MATCH (p:OrchProject {id: $project_id})\n                OPTIONAL MATCH (p)-[:HAS_PHASE]->(ph:OrchPhase)\n                OPTIONAL MATCH (ph)-[:HAS_TASK]->(t:OrchTask)\n                WITH p, ph, t\n                ORDER BY coalesce(t.priority, 999999999) ASC, t.created_at ASC\n                WITH p, ph,\n                     count(t) AS total_tasks,\n                     sum(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END) AS pending,\n                     sum(CASE WHEN t.status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,\n                     sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS completed,\n                     sum(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed,\n                     collect(\n                         CASE\n                             WHEN t IS NULL THEN NULL\n                             ELSE {\n                                 id: t.id,\n                                 description: t.description,\n                                 status: t.status,\n                                 owner: t.owner,\n                                 priority: t.priority,\n                                 blocked_on: t.blocked_on,\n                                 refs: t.refs,\n                                 source_path: t.source_path\n                             }\n                         END\n                     ) AS tasks\n                ORDER BY ph.order ASC, ph.name ASC\n                RETURN p, collect(\n                    CASE\n                        WHEN ph IS NULL THEN NULL\n                        ELSE {\n                            phase: ph,\n                            task_counts: {\n                                total: total_tasks,\n                                pending: pending,\n                                in_progress: in_progress,\n                                completed: completed,\n                                failed: failed\n                            },\n                            tasks: tasks\n                        }\n                    END\n                ) AS phases\n            "
+INFO:     127.0.0.1:57214 - "GET /api/projects HTTP/1.1" 200 OK
+[14:09:01] PASS  plan-ingest-persists-project (True)
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: DEPENDS_ON)", position=<SummaryInputPosition line=5, column=19, offset=106>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 19, 'offset': 106, 'line': 5}}> for query: "\nMATCH (t:OrchTask {id: $task_id})\nWHERE coalesce(t.owner, '') <> ''\n  AND NOT EXISTS {\n      MATCH (t)-[:DEPENDS_ON]->(:OrchTask)\n  }\nRETURN t.id AS task_id,\n       t.owner AS owner,\n       t.description AS description\n"
+INFO:     127.0.0.1:57228 - "POST /api/task/create HTTP/1.1" 500 Internal Server Error
+ERROR: HTTP 500: Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/home/mira/orch-dci/lib/config.py", line 142, in ensure_notify_importable
+    import identity  # noqa: F401
+    ^^^^^^^^^^^^^^^
+ModuleNotFoundError: No module named 'identity'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/uvicorn/protocols/http/h11_impl.py", line 415, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/uvicorn/middleware/proxy_headers.py", line 62, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/fastapi/routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/fastapi/routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/fastapi/routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/.venv/lib/python3.12/site-packages/fastapi/routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/lib/tasks_api.py", line 227, in create
+    create_task(
+  File "/home/mira/orch-dci/lib/orch_schema.py", line 1185, in create_task
+    _wake_owner_for_zero_dep_task(created_id, cfg)
+  File "/home/mira/orch-dci/lib/orch_schema.py", line 496, in _wake_owner_for_zero_dep_task
+    redis_client = _fleet_redis_connect()
+                   ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mira/orch-dci/lib/orch_schema.py", line 451, in _fleet_redis_connect
+    ensure_notify_importable()
+  File "/home/mira/orch-dci/lib/config.py", line 147, in ensure_notify_importable
+    raise OrchConfigError(
+lib.config.OrchConfigError: ORCH_NOTIFY_LIB_ROOT must be set when fleet-notify is not already importable
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: DEPENDS_ON)", position=<SummaryInputPosition line=4, column=33, offset=123>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 33, 'offset': 123, 'line': 4}}> for query: "\n                MATCH (t:OrchTask {status: 'pending'})\n                WHERE NOT EXISTS {\n                    MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                    WHERE dep.status <> 'completed'\n                }\n                RETURN t.id AS id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.capability_tags AS capability_tags,\n                       t.file_blast_radius AS file_blast_radius,\n                       t.estimated_tokens AS estimated_tokens\n                ORDER BY coalesce(t.priority, 999999999) ASC\n            "
+INFO:     127.0.0.1:57236 - "GET /api/tasks/ranked HTTP/1.1" 200 OK
+[14:09:02] PASS  task-create-and-list (1)
+INFO:     127.0.0.1:57248 - "GET / HTTP/1.1" 302 Found
+INFO:     127.0.0.1:57248 - "GET /ui/ HTTP/1.1" 200 OK
+[14:09:02] PASS  dashboard-ui-200 (200)
+INFO:     127.0.0.1:57264 - "GET / HTTP/1.1" 302 Found
+INFO:     127.0.0.1:57264 - "GET /ui/ HTTP/1.1" 200 OK
+[14:09:02] PASS  dashboard-ui-renders (1)
+seeded_stop_task=gate-stop-task
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the property names in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing property name is: blocked_on)", position=<SummaryInputPosition line=5, column=34, offset=225>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 34, 'offset': 225, 'line': 5}}> for query: "\n                MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)\n                WHERE t.status = 'pending'\n                  AND coalesce(t.owner, '') = $sess\n                  AND coalesce(t.blocked_on, '') = ''\n                  AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)\n                  AND ($project_id IS NULL OR proj.id = $project_id)\n                  AND NOT EXISTS {\n                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                      WHERE dep.status <> 'completed'\n                  }\n                  AND coalesce(proj.status, 'active') <> 'stopped'\n                  AND coalesce(proj.status, 'active') <> 'completed'\n                RETURN t.id AS task_id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.blocked_on AS blocked_on,\n                       t.refs AS task_refs,\n                       t.source_path AS task_source_path,\n                       ph.id AS phase_id, ph.name AS phase_name,\n                       ph.refs AS phase_refs, ph.source_path AS phase_source_path,\n                       proj.id AS project_id, proj.name AS project_name,\n                       proj.refs AS project_refs, proj.source_path AS project_source_path\n                ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,\n                         toInteger(coalesce(t.priority, 999999999)) ASC,\n                         t.created_at ASC\n                LIMIT 1\n            "
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: DEPENDS_ON)", position=<SummaryInputPosition line=9, column=35, offset=461>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 35, 'offset': 461, 'line': 9}}> for query: "\n                MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)\n                WHERE t.status = 'pending'\n                  AND coalesce(t.owner, '') = $sess\n                  AND coalesce(t.blocked_on, '') = ''\n                  AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)\n                  AND ($project_id IS NULL OR proj.id = $project_id)\n                  AND NOT EXISTS {\n                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                      WHERE dep.status <> 'completed'\n                  }\n                  AND coalesce(proj.status, 'active') <> 'stopped'\n                  AND coalesce(proj.status, 'active') <> 'completed'\n                RETURN t.id AS task_id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.blocked_on AS blocked_on,\n                       t.refs AS task_refs,\n                       t.source_path AS task_source_path,\n                       ph.id AS phase_id, ph.name AS phase_name,\n                       ph.refs AS phase_refs, ph.source_path AS phase_source_path,\n                       proj.id AS project_id, proj.name AS project_name,\n                       proj.refs AS project_refs, proj.source_path AS project_source_path\n                ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,\n                         toInteger(coalesce(t.priority, 999999999)) ASC,\n                         t.created_at ASC\n                LIMIT 1\n            "
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the property names in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing property name is: blocked_on)", position=<SummaryInputPosition line=16, column=26, offset=859>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 26, 'offset': 859, 'line': 16}}> for query: "\n                MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)\n                WHERE t.status = 'pending'\n                  AND coalesce(t.owner, '') = $sess\n                  AND coalesce(t.blocked_on, '') = ''\n                  AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)\n                  AND ($project_id IS NULL OR proj.id = $project_id)\n                  AND NOT EXISTS {\n                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                      WHERE dep.status <> 'completed'\n                  }\n                  AND coalesce(proj.status, 'active') <> 'stopped'\n                  AND coalesce(proj.status, 'active') <> 'completed'\n                RETURN t.id AS task_id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.blocked_on AS blocked_on,\n                       t.refs AS task_refs,\n                       t.source_path AS task_source_path,\n                       ph.id AS phase_id, ph.name AS phase_name,\n                       ph.refs AS phase_refs, ph.source_path AS phase_source_path,\n                       proj.id AS project_id, proj.name AS project_name,\n                       proj.refs AS project_refs, proj.source_path AS project_source_path\n                ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,\n                         toInteger(coalesce(t.priority, 999999999)) ASC,\n                         t.created_at ASC\n                LIMIT 1\n            "
+INFO:     127.0.0.1:57280 - "GET /api/sessions/gate-stop-codex/stop-decision?stop_hook_active=true HTTP/1.1" 200 OK
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the property names in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing property name is: blocked_on)", position=<SummaryInputPosition line=5, column=34, offset=225>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 34, 'offset': 225, 'line': 5}}> for query: "\n                MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)\n                WHERE t.status = 'pending'\n                  AND coalesce(t.owner, '') = $sess\n                  AND coalesce(t.blocked_on, '') = ''\n                  AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)\n                  AND ($project_id IS NULL OR proj.id = $project_id)\n                  AND NOT EXISTS {\n                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                      WHERE dep.status <> 'completed'\n                  }\n                  AND coalesce(proj.status, 'active') <> 'stopped'\n                  AND coalesce(proj.status, 'active') <> 'completed'\n                RETURN t.id AS task_id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.blocked_on AS blocked_on,\n                       t.refs AS task_refs,\n                       t.source_path AS task_source_path,\n                       ph.id AS phase_id, ph.name AS phase_name,\n                       ph.refs AS phase_refs, ph.source_path AS phase_source_path,\n                       proj.id AS project_id, proj.name AS project_name,\n                       proj.refs AS project_refs, proj.source_path AS project_source_path\n                ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,\n                         toInteger(coalesce(t.priority, 999999999)) ASC,\n                         t.created_at ASC\n                LIMIT 1\n            "
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: DEPENDS_ON)", position=<SummaryInputPosition line=9, column=35, offset=461>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 35, 'offset': 461, 'line': 9}}> for query: "\n                MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)\n                WHERE t.status = 'pending'\n                  AND coalesce(t.owner, '') = $sess\n                  AND coalesce(t.blocked_on, '') = ''\n                  AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)\n                  AND ($project_id IS NULL OR proj.id = $project_id)\n                  AND NOT EXISTS {\n                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                      WHERE dep.status <> 'completed'\n                  }\n                  AND coalesce(proj.status, 'active') <> 'stopped'\n                  AND coalesce(proj.status, 'active') <> 'completed'\n                RETURN t.id AS task_id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.blocked_on AS blocked_on,\n                       t.refs AS task_refs,\n                       t.source_path AS task_source_path,\n                       ph.id AS phase_id, ph.name AS phase_name,\n                       ph.refs AS phase_refs, ph.source_path AS phase_source_path,\n                       proj.id AS project_id, proj.name AS project_name,\n                       proj.refs AS project_refs, proj.source_path AS project_source_path\n                ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,\n                         toInteger(coalesce(t.priority, 999999999)) ASC,\n                         t.created_at ASC\n                LIMIT 1\n            "
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the property names in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing property name is: blocked_on)", position=<SummaryInputPosition line=16, column=26, offset=859>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 26, 'offset': 859, 'line': 16}}> for query: "\n                MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)\n                WHERE t.status = 'pending'\n                  AND coalesce(t.owner, '') = $sess\n                  AND coalesce(t.blocked_on, '') = ''\n                  AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)\n                  AND ($project_id IS NULL OR proj.id = $project_id)\n                  AND NOT EXISTS {\n                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                      WHERE dep.status <> 'completed'\n                  }\n                  AND coalesce(proj.status, 'active') <> 'stopped'\n                  AND coalesce(proj.status, 'active') <> 'completed'\n                RETURN t.id AS task_id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.blocked_on AS blocked_on,\n                       t.refs AS task_refs,\n                       t.source_path AS task_source_path,\n                       ph.id AS phase_id, ph.name AS phase_name,\n                       ph.refs AS phase_refs, ph.source_path AS phase_source_path,\n                       proj.id AS project_id, proj.name AS project_name,\n                       proj.refs AS project_refs, proj.source_path AS project_source_path\n                ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,\n                         toInteger(coalesce(t.priority, 999999999)) ASC,\n                         t.created_at ASC\n                LIMIT 1\n            "
+INFO:     127.0.0.1:57292 - "GET /api/sessions/gate-stop-codex/stop-decision?stop_hook_active=true HTTP/1.1" 200 OK
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the property names in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing property name is: blocked_on)", position=<SummaryInputPosition line=5, column=34, offset=225>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 34, 'offset': 225, 'line': 5}}> for query: "\n                MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)\n                WHERE t.status = 'pending'\n                  AND coalesce(t.owner, '') = $sess\n                  AND coalesce(t.blocked_on, '') = ''\n                  AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)\n                  AND ($project_id IS NULL OR proj.id = $project_id)\n                  AND NOT EXISTS {\n                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                      WHERE dep.status <> 'completed'\n                  }\n                  AND coalesce(proj.status, 'active') <> 'stopped'\n                  AND coalesce(proj.status, 'active') <> 'completed'\n                RETURN t.id AS task_id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.blocked_on AS blocked_on,\n                       t.refs AS task_refs,\n                       t.source_path AS task_source_path,\n                       ph.id AS phase_id, ph.name AS phase_name,\n                       ph.refs AS phase_refs, ph.source_path AS phase_source_path,\n                       proj.id AS project_id, proj.name AS project_name,\n                       proj.refs AS project_refs, proj.source_path AS project_source_path\n                ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,\n                         toInteger(coalesce(t.priority, 999999999)) ASC,\n                         t.created_at ASC\n                LIMIT 1\n            "
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the relationship types in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing relationship type is: DEPENDS_ON)", position=<SummaryInputPosition line=9, column=35, offset=461>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 35, 'offset': 461, 'line': 9}}> for query: "\n                MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)\n                WHERE t.status = 'pending'\n                  AND coalesce(t.owner, '') = $sess\n                  AND coalesce(t.blocked_on, '') = ''\n                  AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)\n                  AND ($project_id IS NULL OR proj.id = $project_id)\n                  AND NOT EXISTS {\n                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                      WHERE dep.status <> 'completed'\n                  }\n                  AND coalesce(proj.status, 'active') <> 'stopped'\n                  AND coalesce(proj.status, 'active') <> 'completed'\n                RETURN t.id AS task_id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.blocked_on AS blocked_on,\n                       t.refs AS task_refs,\n                       t.source_path AS task_source_path,\n                       ph.id AS phase_id, ph.name AS phase_name,\n                       ph.refs AS phase_refs, ph.source_path AS phase_source_path,\n                       proj.id AS project_id, proj.name AS project_name,\n                       proj.refs AS project_refs, proj.source_path AS project_source_path\n                ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,\n                         toInteger(coalesce(t.priority, 999999999)) ASC,\n                         t.created_at ASC\n                LIMIT 1\n            "
+Received notification from DBMS server: <GqlStatusObject gql_status='01N42', status_description="One of the property names in your query is not available in the database, make sure you didn't misspell it or that the label is available when you run this statement in your application (the missing property name is: blocked_on)", position=<SummaryInputPosition line=16, column=26, offset=859>, raw_classification='UNRECOGNIZED', classification=<NotificationClassification.UNRECOGNIZED: 'UNRECOGNIZED'>, raw_severity='WARNING', severity=<NotificationSeverity.WARNING: 'WARNING'>, diagnostic_record={'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/', '_classification': 'UNRECOGNIZED', '_severity': 'WARNING', '_position': {'column': 26, 'offset': 859, 'line': 16}}> for query: "\n                MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)\n                WHERE t.status = 'pending'\n                  AND coalesce(t.owner, '') = $sess\n                  AND coalesce(t.blocked_on, '') = ''\n                  AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)\n                  AND ($project_id IS NULL OR proj.id = $project_id)\n                  AND NOT EXISTS {\n                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)\n                      WHERE dep.status <> 'completed'\n                  }\n                  AND coalesce(proj.status, 'active') <> 'stopped'\n                  AND coalesce(proj.status, 'active') <> 'completed'\n                RETURN t.id AS task_id, t.description AS description,\n                       t.priority AS priority, t.owner AS owner,\n                       t.blocked_on AS blocked_on,\n                       t.refs AS task_refs,\n                       t.source_path AS task_source_path,\n                       ph.id AS phase_id, ph.name AS phase_name,\n                       ph.refs AS phase_refs, ph.source_path AS phase_source_path,\n                       proj.id AS project_id, proj.name AS project_name,\n                       proj.refs AS project_refs, proj.source_path AS project_source_path\n                ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,\n                         toInteger(coalesce(t.priority, 999999999)) ASC,\n                         t.created_at ASC\n                LIMIT 1\n            "
+INFO:     127.0.0.1:57306 - "GET /api/sessions/gate-stop-codex/stop-decision?stop_hook_active=true HTTP/1.1" 200 OK
+stop_decision_results=[{"block": true, "convergence_count": 1, "phase_id": "gate-stop-phase", "project_id": "gate-stop-project", "reason": "Finish in-progress task gate-stop-task: gate stop convergence task.", "session": "gate-stop-codex", "task_id": "gate-stop-task", "task_title_short": "gate stop convergence task", "wake_type": "WAKE_WITH_QUEUE"}, {"block": true, "convergence_count": 2, "phase_id": "gate-stop-phase", "project_id": "gate-stop-project", "reason": "Finish in-progress task gate-stop-task: gate stop convergence task.", "session": "gate-stop-codex", "task_id": "gate-stop-task", "task_title_short": "gate stop convergence task", "wake_type": "WAKE_WITH_QUEUE"}, {"block": false, "converged_allow": true, "convergence_audit_id": "stopconv-6607fb2d69bb", "convergence_count": 3, "phase_id": "gate-stop-phase", "project_id": "gate-stop-project", "reason": null, "session": "gate-stop-codex", "task_id": null, "task_title_short": "gate stop convergence task", "wake_type": "ALLOW_STOP"}]
+[14:09:03] PASS  stop-convergence-force-allow (True)
+[14:09:03] PASS  stop-convergence-audit-persisted (True)
+[14:09:03] === RESULT: 0 failure(s) @ 3ee1a7a ===
+[14:09:03] GATE GREEN
+[14:09:03] === teardown ===
