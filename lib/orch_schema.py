@@ -945,6 +945,88 @@ def _reason_required_block_reason(active_conditions: list[dict[str, Any]]) -> st
     )
 
 
+def _supervisor_dispatch_block_enabled(session_id: str, config: Optional[OrchConfig] = None) -> bool:
+    """Flag (default OFF) for the supervisor-dispatch stop-block. When enabled for
+    a session, the stop-decision keeps a SUPERVISOR up while a supervised active
+    project has a pending-ready task owned by one of its autonomous peers, so the
+    supervisor dispatches it rather than stopping. Mirrors _stop_inprogress_enabled:
+    env CF_SUPERVISOR_DISPATCH (truthy) + CF_SUPERVISOR_DISPATCH_SESSIONS allowlist,
+    OR redis set {prefix}:supervisor_dispatch_enabled. Stage-gate: off by default,
+    conductor-first rollout after audit."""
+    from .config import get_redis_sync
+
+    cfg = config or OrchConfig()
+    if str(os.environ.get("CF_SUPERVISOR_DISPATCH") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        allowed = {
+            item.strip()
+            for item in str(os.environ.get("CF_SUPERVISOR_DISPATCH_SESSIONS") or "").replace(";", ",").split(",")
+            if item.strip()
+        }
+        if session_id in allowed:
+            return True
+    try:
+        prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+        redis_client = get_redis_sync(cfg)
+        future = _STOP_INPROGRESS_EXECUTOR.submit(
+            redis_client.sismember,
+            f"{prefix}:supervisor_dispatch_enabled",
+            session_id,
+        )
+        return bool(future.result(timeout=_STOP_INPROGRESS_REDIS_TIMEOUT_S))
+    except FuturesTimeoutError:
+        return False
+    except Exception:
+        return False
+
+
+_AUTONOMOUS_PEER_SUFFIXES = ("-codex", "-gemini", "-grok", "-claude")
+
+
+def get_supervisor_dispatchable_peer_task(supervisor: str, project_id: str,
+                                          config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
+    """Top task in ``project_id`` that is dispatchable to an AUTONOMOUS PEER of
+    ``supervisor`` (``{supervisor}-codex`` / ``-gemini`` / ``-grok`` / ``-claude``)
+    RIGHT NOW: status='pending' (NOT in_progress/dispatched -- a peer already on it
+    must not block the supervisor), blocked_on empty, all DEPENDS_ON satisfied,
+    project live. Returns enough to build a dispatch reason, or None."""
+    cfg = config or OrchConfig()
+    peer_owners = [f"{supervisor}{suf}" for suf in _AUTONOMOUS_PEER_SUFFIXES]
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run(
+            """
+            MATCH (proj:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE t.status = 'pending'
+              AND t.owner IN $peer_owners
+              AND coalesce(t.blocked_on, '') = ''
+              AND NOT EXISTS {
+                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+                  WHERE dep.status <> 'completed'
+              }
+              AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
+            RETURN t.id AS task_id, t.description AS description, t.owner AS owner,
+                   t.priority AS priority, ph.id AS phase_id, proj.id AS project_id
+            ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, t.created_at ASC
+            LIMIT 1
+            """,
+            project_id=project_id, peer_owners=peer_owners,
+        ).single()
+        return dict(record) if record else None
+
+
+def _supervisor_dispatch_block_reason(task_id: Optional[str], owner: Optional[str],
+                                      description: Optional[str]) -> str:
+    task_id_value = task_id or "unknown-task"
+    owner_value = owner or "a peer"
+    task_title = (description or "untitled task")[:80]
+    return (
+        "You supervise ready work that is NOT being worked: "
+        f"{task_id_value} — {task_title} is pending and owned by your peer "
+        f"{owner_value} but undispatched. DISPATCH it to that peer now; do not stop. "
+        "A supervisor with dispatchable peer-owned work has not finished."
+    )
+
+
 def _raw_stop_decision(session_id: str,
                        config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     cfg = config or OrchConfig()
@@ -981,6 +1063,34 @@ def _raw_stop_decision(session_id: str,
                 "task_priority": next_ready.get("priority"),
                 "task_title_short": (str(next_ready.get("description") or "")[:80] or None),
             }
+
+    # Supervisor-dispatch stop-block (flag-default-OFF): the own-ready loop above
+    # only surfaces work owned by the supervisor ITSELF. If all of that is done/gated
+    # but a supervised active project still has a pending-ready task owned by an
+    # autonomous PEER, the supervisor's job is to DISPATCH it -- not stop. Without
+    # this, the supervisor gets ALLOW_STOP and peer-owned ready work dead-locks until
+    # a human re-dispatches (the second stop-engine hole).
+    if _supervisor_dispatch_block_enabled(session_id, config=cfg):
+        for project in projects:
+            status = str(project.get("status") or "").strip().lower()
+            if status not in ("active", "in_progress"):
+                continue
+            peer_task = get_supervisor_dispatchable_peer_task(
+                supervisor, str(project.get("id")), config=cfg)
+            if peer_task:
+                task_id = peer_task.get("task_id")
+                return {
+                    "block": True,
+                    "reason": _supervisor_dispatch_block_reason(
+                        task_id, peer_task.get("owner"), peer_task.get("description")),
+                    "wake_type": "WAKE_WITH_QUEUE",
+                    "task_id": task_id,
+                    "project_id": peer_task.get("project_id"),
+                    "phase_id": peer_task.get("phase_id"),
+                    "task_priority": peer_task.get("priority"),
+                    "task_title_short": (str(peer_task.get("description") or "")[:80] or None),
+                    "dispatch_to": peer_task.get("owner"),
+                }
 
     if _stop_inprogress_enabled(session_id, config=cfg):
         current_work = get_session_current_work(session_id, config=cfg)
