@@ -640,11 +640,10 @@ def _state_key(node_id: str, suffix: str) -> str:
 
 # A peer counts as "actively working" (so the supervisor may ALLOW_STOP and wait
 # for its RESPONSE_READY) only if its liveness heartbeat is fresher than this. The
-# activity hooks (pre_tool_activity / prompt_activity / check_notifications) stamp
-# `<peer>:last_activity` on every tool call / prompt / notification, so a live peer
-# -- even on a long task -- refreshes it continuously; a hard-killed peer (no Stop
-# hook fires, so the idle flag never sets) goes stale within this window and the
-# supervisor BLOCKs to investigate. 300s tolerates normal think/tool gaps; the
+# tool hooks stamp `<peer>:last_tool_activity` on pre/post-tool only. Prompt
+# activity is intentionally excluded: daemon-injected prompts stamp
+# `<peer>:last_activity`, and using that key created a false-working window for
+# peers that were merely woken. 300s tolerates normal think/tool gaps; the
 # failure direction past it is a brief busy-loop (bounded by the convergence
 # valve), never a strand.
 _PEER_HEARTBEAT_STALE_SEC = 300
@@ -1092,23 +1091,16 @@ def _peer_actively_working_task(workers: List[str], task_id: Optional[str],
     RESPONSE_READY re-wake it. Two peer classes:
 
     BINDING peers (claude-clones via dispatch.bind_current_task) expose a live
-    ``current_task`` + idle + last_activity heartbeat. The signal is precise:
+    ``current_task`` + idle + last_tool_activity heartbeat. The signal is precise:
     current_task == task AND idle CLEAR AND heartbeat FRESH. current_task persists
     across NON-done terminations (record_outcome clears it only on done) and a
     hard kill clears nothing -- so requiring idle-clear + fresh heartbeat is what
     stops the PR#39 strand (a stopped/dead peer must NOT look working).
 
-    NON-BINDING peers (codex/grok CLIs) NEVER bind current_task and their idle
-    oscillates per step with no working-heartbeat, so the binding check can never
-    see them as working -> the supervisor busy-loops on EVERY codex/grok dispatch
-    (the real, general form of the PR#39 busy-loop). Their one reliable queryable
-    signal is last_outcome (set on done/error) + the RESPONSE_READY that re-wakes
-    the supervisor. So for a worker with NO current_task: presume working (ALLOW)
-    UNLESS (a) it reported this task terminal -> awaits gate -> not working, or
-    (b) the dispatch is older than _PEER_DISPATCH_STALE_SEC with no terminal
-    outcome -> a DROPPED/dead dispatch -> re-check. That age bound keeps the
-    dropped-dispatch / hard-kill strand from being silent while a normal long
-    build never trips it.
+    NON-BINDING peers (codex/grok CLIs) bind current_task inconsistently and
+    their idle oscillates per step, so the binding check can never be the only
+    working signal. Their reliable queryable signals are last_outcome (set on
+    done/error) + the tool-only heartbeat while work is actively using tools.
 
     All reads fail-closed toward BLOCK (not-working) so an outage / parse failure
     keeps the supervisor up rather than stranding work."""
@@ -1144,20 +1136,14 @@ def _peer_actively_working_task(workers: List[str], task_id: Optional[str],
         if _peer_reported_terminal_for(worker, task_id, r):
             continue
 
-        # WORKING signal -- the last_activity HEARTBEAT is the one reliable UNIVERSAL
-        # liveness signal (empirically mapped 2026-06-11, /tmp/codex_signal_lifecycle.log:
-        # it refreshes per tool-call while a peer works -- codex/grok INCLUDED -- and goes
-        # monotonically stale the instant it stops). idle is useless for the CLI peers
-        # (stuck/oscillating per step) and current_task binds only inconsistently, so the
-        # heartbeat is what works for every peer class. Fresh -> actively working -> ALLOW
-        # (the proven RESPONSE_READY re-wakes the supervisor on done). Stale/absent ->
-        # stopped/dropped/dead -> fall through to BLOCK (gate/investigate). The previous
-        # idle/current_task gates busy-looped on codex (idle stuck=1, current_task absent
-        # -- verified live); the stale-heartbeat catch subsumes PR#39's idle/hard-kill
-        # anti-strand (a stopped/dead peer's heartbeat goes stale -> BLOCK), bounded by
-        # _PEER_HEARTBEAT_STALE_SEC. All reads fail-closed to BLOCK.
+        # WORKING signal -- the tool-only heartbeat refreshes from pre/post-tool
+        # hooks while a peer is actually executing tools. The broader last_activity
+        # key also refreshes on daemon-injected prompts, so it can make a merely
+        # woken peer look active; do not use it for stop-engine liveness. Fresh
+        # last_tool_activity -> actively working -> ALLOW (RESPONSE_READY re-wakes
+        # the supervisor on done). Stale/absent -> stopped/dropped/dead -> BLOCK.
         try:
-            last_activity = r.get(_state_key(worker, "last_activity"))
+            last_activity = r.get(_state_key(worker, "last_tool_activity"))
         except Exception:
             continue
         if last_activity is None:

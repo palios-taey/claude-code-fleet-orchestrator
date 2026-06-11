@@ -1,9 +1,9 @@
-# Walkthrough — zero to a running supervised loop
+# Walkthrough — setup and a first supervised-loop exercise
 
-A guided, end-to-end path: install → configure → define a plan → run the loop → observe →
-release through the ship-gate. Each step says **what to run** and **what you should see**, so you
-can validate as you go. For reference detail see [README.md](../README.md), [SETUP.md](../SETUP.md),
-[docs/PLAN_FORMAT.md](PLAN_FORMAT.md), [docs/SHIPPABILITY.md](SHIPPABILITY.md).
+A guided path: install → configure → define a plan → manually exercise one supervised loop →
+observe → release through the ship-gate. Each step says **what to run** and **what you should see**,
+so you can validate as you go. For reference detail see [README.md](../README.md),
+[SETUP.md](../SETUP.md), [docs/PLAN_FORMAT.md](PLAN_FORMAT.md), [docs/SHIPPABILITY.md](SHIPPABILITY.md).
 
 > **What you are setting up.** One *local, single-user* coordinator. It tracks your work as a
 > plan (project → phases → tasks) in Neo4j, hands ready tasks to worker sessions, wakes a
@@ -44,8 +44,9 @@ scripts/install --skip-compose     # BYO infra
 scripts/install                    # let Docker bring up Redis + Neo4j
 ```
 
-**Expect (install flow):** venv created → package installed → Claude settings + notify hooks wired →
-notify daemons started → orchestrator services started → `orch doctor` runs at the end.
+**Expect (install flow):** venv created → package installed → Claude settings + notify hooks wired
+when the notify checkout is available → delegated notify daemon started → orchestrator services
+started → `orch doctor` runs at the end.
 
 Verify:
 
@@ -178,14 +179,16 @@ pause sessions or the stop engine.
 
 ## Step 6 — The supervisor loop
 
-This is the cycle a supervisor session runs (see README "Core loop"):
+This is the cycle a supervisor session follows (see README "Core loop"). In this walkthrough you
+exercise the cycle manually; it does not create an autonomous always-running supervisor by itself.
 
 1. **Pull** — `taey-plan next <session>` → the top ready task you own.
 2. **Dispatch** — hand it to a worker: `lib.dispatch.dispatch(worker, task_id, description, ...)`.
    It claims the task (`in_progress`), writes the worker's `current_task`, and the notify daemon
    injects the prompt when that worker is idle.
 3. **Wake** — when the worker stops, its Stop hook notifies the supervisor; the daemon injects the
-   result when the supervisor is idle. No human relay.
+   result when the supervisor is idle. With hooks and the daemon healthy, no manual relay is needed
+   for that wake.
 4. **Stop-discipline** — a session must not stop while ready work exists. The only legitimate wait is
    `blocked_on`; a stop must cite a `user_stop_condition`.
 5. **Watcher** — run `orch-watch --redis-host 127.0.0.1 --readiness-checker lib/plan_readiness.py:check_readiness`
