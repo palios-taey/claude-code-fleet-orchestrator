@@ -10,6 +10,30 @@
 **New here?** [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) is the guided setup and first supervised-loop exercise
 (install → define a plan → manually dispatch one loop → release gate), with "what you should see" at every step.
 
+## AI-native quickstart
+
+Point Claude Code, Codex, or another coding agent at a clean checkout and have it run this sequence end to end:
+
+```bash
+git clone https://github.com/palios-taey/claude-code-fleet-orchestrator.git
+cd claude-code-fleet-orchestrator
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+cp .env.example .env
+```
+
+Edit `.env` for your Redis and Neo4j endpoints, then start the API:
+
+```bash
+fleet-orchestrator-api
+```
+
+The mutable API binds to `127.0.0.1:5002` by default. Keep that loopback default unless this is a trusted single-user network; set `ORCH_HOST=0.0.0.0` only when you deliberately want other machines to reach it, and keep `ORCH_DASHBOARD_URL` in sync.
+
+If `claude-code-fleet-notify` is a separate checkout, set `ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify` in `.env` so dispatch and stop-hook paths import the notify identity layer from the installed package.
+
 ## Requirements
 
 - Python 3.10+
