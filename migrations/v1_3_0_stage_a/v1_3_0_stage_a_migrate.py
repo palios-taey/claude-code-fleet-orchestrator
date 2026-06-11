@@ -33,13 +33,14 @@ def _normalize(value: Any) -> Any:
 
 
 def _epoch_priority(created_at: Any) -> int:
+    """Map legacy creation time into the current lower-number-runs-earlier priority convention."""
     if not created_at:
-        return 0
+        return 1
     if isinstance(created_at, str):
         created_at = dt.datetime.fromisoformat(created_at.replace("Z", "+00:00"))
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=dt.timezone.utc)
-    return -int(created_at.timestamp())
+    return max(1, int(created_at.timestamp()))
 
 
 def _normalize_conditions(raw: Any) -> str:
