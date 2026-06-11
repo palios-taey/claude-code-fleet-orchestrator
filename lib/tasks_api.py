@@ -51,6 +51,7 @@ from lib.orch_schema import (
     edit_project_condition,
     ensure_default_project,
     get_agent_tasks,
+    init_schema,
     get_neo4j_driver,
     get_project_user_stop_conditions,
     get_session_stop_status,
@@ -91,6 +92,14 @@ ALLOWED_NOTIFY_TYPES = {
     "command": "command",
     "response_ready": "response_ready",
 }
+
+
+@app.on_event("startup")
+def _init_schema_on_startup() -> None:
+    result = init_schema(config=_cfg())
+    errors = result.get("errors") or []
+    if errors:
+        raise RuntimeError(f"orchestrator schema initialization failed: {errors}")
 
 
 def _cfg() -> OrchConfig:

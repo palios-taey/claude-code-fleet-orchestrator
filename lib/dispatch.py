@@ -58,6 +58,12 @@ from .handoff_validation import mark_superseded_for_task
 
 logger = logging.getLogger(__name__)
 
+# Bounded Redis WATCH retry (grok ws2-state WATCH-livelock note): a hot current_task key
+# must not let an optimistic-lock loop spin forever. ~8 attempts with linear backoff caps
+# the worst case at well under a second, after which we give up rather than livelock.
+_WATCH_MAX_ATTEMPTS = 8
+_WATCH_BACKOFF_S = 0.02
+
 
 class BugLockActive(Exception):
     """Dispatch blocked because the target product is under an active bug lock."""
@@ -149,23 +155,28 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
         return
 
     cfg = OrchConfig()
+    owner = _base_session_name(worker)
     with get_neo4j_session(cfg) as session:
         record = session.run(
             """
             MATCH (t:OrchTask {id: $task_id})
+            SET t._claim_lock = coalesce(t._claim_lock, 0) + 1
+            WITH t
             WHERE coalesce(t.status, 'pending') = 'pending'
               AND NOT EXISTS {
                   MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
                   WHERE dep.status <> 'completed'
               }
             SET t.status = 'in_progress',
-                t.owner = $worker,
+                t.owner = $owner,
+                t.dispatched_to = $worker,
                 t.blocked_on = NULL,
                 t.updated_at = datetime()
             RETURN t.id AS task_id
             """,
             task_id=task_id,
             worker=worker,
+            owner=owner,
         ).single()
 
         if record is not None:
@@ -265,8 +276,14 @@ def _rollback_claim(worker: str, task_id: str, binding_nonce: Optional[float]) -
                 session.run(
                     """
                     MATCH (t:OrchTask {id: $task_id})
-                    WHERE t.status = 'in_progress' AND coalesce(t.owner, '') = $worker
-                    SET t.status = 'pending', t.updated_at = datetime()
+                    WHERE t.status = 'in_progress'
+                      AND (
+                          coalesce(t.dispatched_to, '') = $worker
+                          OR (coalesce(t.dispatched_to, '') = '' AND coalesce(t.owner, '') = $worker)
+                      )
+                    SET t.status = 'pending',
+                        t.dispatched_to = NULL,
+                        t.updated_at = datetime()
                     """,
                     task_id=task_id,
                     worker=worker,
@@ -283,7 +300,7 @@ def _rollback_claim(worker: str, task_id: str, binding_nonce: Optional[float]) -
         return
     try:
         with r.pipeline() as pipe:
-            while True:
+            for _attempt in range(_WATCH_MAX_ATTEMPTS):
                 try:
                     pipe.watch(key)
                     if not _binding_is_ours(pipe.get(key), task_id, binding_nonce):
@@ -294,6 +311,9 @@ def _rollback_claim(worker: str, task_id: str, binding_nonce: Optional[float]) -
                     pipe.execute()
                     break
                 except WatchError:
+                    # Bounded retry + small backoff so a hot current_task key cannot
+                    # livelock this loop (grok ws2-state WATCH-livelock note).
+                    time.sleep(_WATCH_BACKOFF_S * (_attempt + 1))
                     continue
     except Exception as exc:
         logger.warning(
@@ -312,23 +332,28 @@ def _mark_in_progress_best_effort(task_id: str, worker: str) -> bool:
     if not _orch_task_exists(task_id):
         return False
     cfg = OrchConfig()
+    owner = _base_session_name(worker)
     with get_neo4j_session(cfg) as session:
         record = session.run(
             """
             MATCH (t:OrchTask {id: $task_id})
+            SET t._claim_lock = coalesce(t._claim_lock, 0) + 1
+            WITH t
             WHERE coalesce(t.status, 'pending') = 'pending'
               AND NOT EXISTS {
                   MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
                   WHERE dep.status <> 'completed'
               }
             SET t.status = 'in_progress',
-                t.owner = $worker,
+                t.owner = $owner,
+                t.dispatched_to = $worker,
                 t.blocked_on = NULL,
                 t.updated_at = datetime()
             RETURN t.id AS task_id
             """,
             task_id=task_id,
             worker=worker,
+            owner=owner,
         ).single()
     return record is not None
 
@@ -456,6 +481,41 @@ def dispatch(
 _VALID_OUTCOMES = ("done", "error", "interrupted")
 
 
+def _current_task_id(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    try:
+        cur = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(cur, dict):
+        return None
+    task_id = cur.get("task_id")
+    return str(task_id) if task_id else None
+
+
+def _revert_outcome_claim(worker: str, task_id: str) -> None:
+    if not _orch_task_exists(task_id):
+        return
+    cfg = OrchConfig()
+    with get_neo4j_session(cfg) as session:
+        session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            WHERE t.status = 'in_progress'
+              AND (
+                  coalesce(t.dispatched_to, '') = $worker
+                  OR (coalesce(t.dispatched_to, '') = '' AND coalesce(t.owner, '') = $worker)
+              )
+            SET t.status = 'pending',
+                t.dispatched_to = NULL,
+                t.updated_at = datetime()
+            """,
+            task_id=task_id,
+            worker=worker,
+        )
+
+
 def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> None:
     """Worker-side helper: record the task outcome before stopping.
 
@@ -487,7 +547,31 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
     payload = {"outcome": outcome}
     if details:
         payload["details"] = details[:500]
-    r.set(_state_key(worker, "last_outcome"), json.dumps(payload))
+    last_outcome_key = _state_key(worker, "last_outcome")
+    current_task_key = _state_key(worker, "current_task")
+    if outcome == "done":
+        r.set(last_outcome_key, json.dumps(payload))
+        return
+
+    from redis import WatchError
+
+    current_task_id: Optional[str] = None
+    for _attempt in range(_WATCH_MAX_ATTEMPTS):
+        with r.pipeline() as pipe:
+            try:
+                pipe.watch(current_task_key)
+                current_task_id = _current_task_id(pipe.get(current_task_key))
+                pipe.multi()
+                pipe.set(last_outcome_key, json.dumps(payload))
+                pipe.execute()
+                break
+            except WatchError:
+                # Bounded retry + small backoff so a hot current_task key cannot
+                # livelock this loop (grok ws2-state WATCH-livelock note).
+                time.sleep(_WATCH_BACKOFF_S * (_attempt + 1))
+                continue
+    if current_task_id:
+        _revert_outcome_claim(worker, current_task_id)
 
 
 def check_previous_task(worker: str) -> Optional[dict]:
