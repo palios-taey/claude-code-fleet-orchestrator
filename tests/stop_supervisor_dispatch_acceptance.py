@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.orch_schema import (  # noqa: E402
     create_project, create_phase, create_task, update_task_status,
     _raw_stop_decision, init_schema, get_neo4j_driver, _state_key,
+    _PEER_HEARTBEAT_STALE_SEC,
 )
 from lib.config import OrchConfig, get_redis_sync  # noqa: E402
 
@@ -39,14 +41,43 @@ _PEER = f"{_SUP}-codex"
 _FAILURES: list[str] = []
 
 
-def _bind_ct(worker: str, task_id: str) -> None:
-    """Simulate the peer actively working a task (dispatch.bind_current_task)."""
-    _R.set(_state_key(worker, "current_task"), json.dumps({"task_id": task_id}))
+def _set_active(worker: str, task_id: str) -> None:
+    """Peer ALIVE + actively working: current_task bound, NOT idle, FRESH heartbeat.
+    The only state that should license the supervisor to ALLOW_STOP and wait."""
+    _R.set(_state_key(worker, "current_task"),
+           json.dumps({"task_id": task_id, "started_at": time.time()}))
+    _R.delete(_state_key(worker, "idle"))
+    _R.set(_state_key(worker, "last_activity"), str(time.time()))
 
 
-def _clear_ct(worker: str) -> None:
-    """Simulate the peer's Stop hook clearing current_task after outcome=done."""
+def _set_done(worker: str) -> None:
+    """Peer reported clean done: its Stop hook cleared current_task + set idle."""
     _R.delete(_state_key(worker, "current_task"))
+    _R.set(_state_key(worker, "idle"), "1")
+
+
+def _set_stopped_bound(worker: str, task_id: str) -> None:
+    """Peer STOPPED without a clean done (error/interrupt/forgot -- its Stop hook
+    fired): current_task PERSISTS, idle SET. grok V1 / gatekeeper strand case A."""
+    _R.set(_state_key(worker, "current_task"),
+           json.dumps({"task_id": task_id, "started_at": time.time()}))
+    _R.set(_state_key(worker, "idle"), "1")
+
+
+def _set_crashed_bound(worker: str, task_id: str) -> None:
+    """Peer HARD-KILLED (kill -9 / OOM / hook failure -- NO Stop hook ran):
+    current_task PERSISTS, idle NOT set, heartbeat STALE. The residual the idle
+    flag cannot see; the stale heartbeat must catch it. gatekeeper outcome=unknown."""
+    _R.set(_state_key(worker, "current_task"),
+           json.dumps({"task_id": task_id, "started_at": time.time()}))
+    _R.delete(_state_key(worker, "idle"))
+    _R.set(_state_key(worker, "last_activity"),
+           str(time.time() - (_PEER_HEARTBEAT_STALE_SEC + 60)))
+
+
+def _clear_peer(worker: str) -> None:
+    for k in ("current_task", "idle", "last_activity"):
+        _R.delete(_state_key(worker, k))
 
 
 def _check(label: str, cond: bool, extra: str = "") -> None:
@@ -89,30 +120,39 @@ def main() -> int:
         _check("pending peer work BLOCKS (default-on, no flag)", d.get("block") is True and d.get("task_id") == peer, str(d))
         _check("pending -> dispatch_to the peer", d.get("dispatch_to") == _PEER, str(d.get("dispatch_to")))
 
-        # 2. in-flight (in_progress) peer task.
+        # 2. in-flight (in_progress) peer task -- the LIVENESS MATRIX. Only a peer
+        #    that is alive AND working (bound + not idle + fresh heartbeat) licenses
+        #    ALLOW_STOP; every not-working state must BLOCK (grok+gatekeeper PR#39).
         update_task_status(peer, "in_progress", owner=_PEER, config=CFG)
-        #   2a. BUSY-LOOP FIX: peer is ACTIVELY working it (live current_task bound)
-        #       -> ALLOW_STOP. Blocking here is the repeated-Stop-hook busy-loop
-        #       (nothing for the supervisor to do; RESPONSE_READY re-wakes on done).
-        _bind_ct(_PEER, peer)
-        _check("in-flight + peer ACTIVELY working -> ALLOW_STOP (busy-loop fix)",
+        #   2a. BUSY-LOOP FIX: peer ALIVE + actively working -> ALLOW_STOP.
+        _set_active(_PEER, peer)
+        _check("in-flight + peer ALIVE+working -> ALLOW_STOP (busy-loop fix)",
                _decide().get("wake_type") == "ALLOW_STOP", str(_decide()))
-        #   2b. peer reported done / stalled (current_task CLEARED) -> BLOCK to GATE.
-        #       This is the real anti-strand case (the 7h-stop hole) -- still blocks.
-        _clear_ct(_PEER)
+        #   2b. clean done (current_task CLEARED, idle set) -> BLOCK to GATE.
+        _set_done(_PEER)
         d = _decide()
-        _check("in-flight + peer NOT working BLOCKS to GATE (the 7h-stop hole)",
+        _check("in-flight + clean done BLOCKS to GATE (the 7h-stop hole)",
                d.get("block") is True and d.get("task_id") == peer, str(d))
         _check("in-flight gate -> gate_for the peer", d.get("gate_for") == _PEER, str(d.get("gate_for")))
+        #   2c. STRAND case A (grok V1): stopped without clean done -- current_task
+        #       persists but idle SET. Must BLOCK, not ALLOW.
+        _set_stopped_bound(_PEER, peer)
+        _check("in-flight + bound-but-IDLE (stopped, no done) BLOCKS (grok V1)",
+               _decide().get("block") is True, str(_decide()))
+        #   2d. STRAND case B (gatekeeper unknown): hard-kill, NO Stop hook --
+        #       current_task persists, idle NOT set, heartbeat STALE. Must BLOCK.
+        _set_crashed_bound(_PEER, peer)
+        _check("in-flight + bound-but-STALE-heartbeat (hard-kill) BLOCKS (gatekeeper unknown)",
+               _decide().get("block") is True, str(_decide()))
 
-        # 3. dispatched peer task, peer not working -> also BLOCK to GATE
+        # 3. dispatched peer task: same matrix in miniature.
         with drv.session(database=CFG.neo4j_db) as s:
             s.run("MATCH (t:OrchTask {id:$i}) SET t.status='dispatched'", i=peer)
-        _check("dispatched peer work (not actively worked) BLOCKS to GATE", _decide().get("block") is True)
-        #   3b. ...but a dispatched task the peer IS actively working -> ALLOW_STOP
-        _bind_ct(_PEER, peer)
-        _check("dispatched + peer ACTIVELY working -> ALLOW_STOP", _decide().get("wake_type") == "ALLOW_STOP")
-        _clear_ct(_PEER)
+        _set_done(_PEER)
+        _check("dispatched + not working BLOCKS to GATE", _decide().get("block") is True)
+        _set_active(_PEER, peer)
+        _check("dispatched + peer ALIVE+working -> ALLOW_STOP", _decide().get("wake_type") == "ALLOW_STOP")
+        _clear_peer(_PEER)
 
         # 4. peer task terminal (completed) -> nothing in-flight -> ALLOW_STOP
         update_task_status(peer, "completed", owner=_PEER,
@@ -137,7 +177,7 @@ def main() -> int:
         _check("pending DISPATCH takes precedence over in-flight GATE",
                d.get("task_id") == live and d.get("dispatch_to") == _PEER, str(d))
     finally:
-        _clear_ct(_PEER)
+        _clear_peer(_PEER)
         with drv.session(database=CFG.neo4j_db) as s:
             s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
     if _FAILURES:
