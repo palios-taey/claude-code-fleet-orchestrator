@@ -132,6 +132,43 @@ def _assembler_contract() -> None:
     _check("provenance binds rendered packet plus snapshot", bool(packet.get("provenance_hash")) and report["under_budget"] is True and "AGENTS.md Dynamic Context" in rendered, report)
 
 
+def _empty_work_context_contract() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        session_root = tmp / "actual-session-root"
+        session_root.mkdir()
+        memory_root = tmp / "memory"
+        memory_dir = memory_root / assembler._mangle_project_path(str(session_root)) / "memory"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "MEMORY.md").write_text(
+            "---\nname: MEMORY\ndescription: standing context\n---\nCarry the standing session memory.\n",
+            encoding="utf-8",
+        )
+        overall = {"ref_context": {"refs": [{"path": "/tmp/overall.md", "content": "overall ref"}]}}
+        supervisor = {"ref_context": {"refs": [{"path": "/tmp/supervisor.md", "content": "supervisor ref"}]}}
+
+        old_memory_base = assembler.MEMORY_BASE
+        assembler.MEMORY_BASE = memory_root
+        try:
+            with mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
+                 mock.patch.object(assembler, "get_overall_refs", return_value=overall), \
+                 mock.patch.object(assembler, "get_supervisor_refs", return_value=supervisor):
+                context = assembler.select_context(
+                    "conductor-codex",
+                    cli="codex",
+                    session_roots={"conductor-codex": str(session_root)},
+                )
+        finally:
+            assembler.MEMORY_BASE = old_memory_base
+
+    _check("no-current-task still selects MEMORY.md from actual session root",
+           context["memory"] and "standing session memory" in context["memory"][0]["content"], context)
+    _check("no-current-task still includes overall refs",
+           context["overall_refs"] and context["overall_refs"][0]["content"] == "overall ref", context)
+    _check("no-current-task still includes supervisor refs",
+           context["supervisor_refs"] and context["supervisor_refs"][0]["content"] == "supervisor ref", context)
+
+
 def _memory_traversal_contract() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -170,6 +207,7 @@ def _memory_traversal_contract() -> None:
 def main() -> int:
     _endpoint_contract()
     _assembler_contract()
+    _empty_work_context_contract()
     _memory_traversal_contract()
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
