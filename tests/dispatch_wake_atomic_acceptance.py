@@ -1,17 +1,23 @@
-"""Ship-gate e2e — a failed wake delivery must NOT leave a phantom live resolver.
+"""Ship-gate e2e — dispatch is wake-atomic AND rollback is identity-guarded.
 
 dispatch() claims the OrchTask (status=in_progress) and binds Redis current_task BEFORE
-the wake (taey-notify) is delivered. If the wake fails, the task must revert to pending
-(ready) and the binding must clear -- otherwise it lingers as a _LIVE_RESOLVER_STATUSES
-member with nothing working it, and a supervisor blocked_on it stops (GAIA dispatched-wake
-gap). A SUCCESSFUL wake must leave it in_progress (no regression).
+the wake (taey-notify). If the wake fails, the task must revert to pending (ready) and the
+binding clear -- but ONLY this dispatch's binding, never a concurrent same-worker dispatch's
+(grok PR#25 audit V1/V2), and rollback failures must be observable not silent (V4).
 
-Env: ORCH_NEO4J_URI, ORCH_NEO4J_DB, ORCH_REDIS_HOST/PORT, ORCH_DASHBOARD_URL,
-ORCH_NOTIFY_LIB_ROOT (dispatch binds via the fleet-notify identity module).
+Cases:
+  1. failed wake  -> RuntimeError + task reverts to pending + binding cleared      (happy revert)
+  2. successful wake -> in_progress + binding set                                  (no regression)
+  3. worker moved to T2 (overlap): rollback(T1) reverts T1 (safe) but PRESERVES T2 binding (V2)
+  4. T1 re-claimed by a newer nonce: rollback(old) leaves status AND binding alone (V1)
+  5. rollback neo failure is LOGGED, never raised                                   (V4)
+
+Env: ORCH_NEO4J_URI, ORCH_NEO4J_DB, ORCH_REDIS_HOST/PORT, ORCH_DASHBOARD_URL, ORCH_NOTIFY_LIB_ROOT.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import sys
@@ -52,8 +58,17 @@ def main() -> int:
             r = s.run("MATCH (t:OrchTask {id:$i}) RETURN t.status AS st", i=tid).single()
             return r["st"] if r else None
 
-    def current_task(worker: str):
+    def set_status(tid: str, st: str):
+        with drv.session(database=cfg.neo4j_db) as s:
+            s.run("MATCH (t:OrchTask {id:$i}) SET t.status=$st, t.owner=$w", i=tid, st=st, w=_WORKER)
+
+    def get_ct(worker: str):
         return D._redis_connect().get(D._state_key(worker, "current_task"))
+
+    def set_ct(worker: str, task_id: str, started_at: float):
+        D._redis_connect().set(D._state_key(worker, "current_task"),
+                               json.dumps({"task_id": task_id, "description": "x",
+                                           "supervisor": f"{_PFX}-sup", "started_at": started_at}))
 
     def clean():
         with drv.session(database=cfg.neo4j_db) as s:
@@ -70,11 +85,12 @@ def main() -> int:
     try:
         create_project(project_id=_PFX, name=_PFX, config=cfg)
         create_phase(project_id=_PFX, phase_id=f"{_PFX}::ph", name="ph", config=cfg)
+        for n in ("tfail", "tok", "t1", "t2", "tlog"):
+            create_task(phase_id=f"{_PFX}::ph", task_id=f"{_PFX}::{n}", description=n,
+                        owner=_WORKER, wake_owner_if_ready=False, config=cfg)
 
-        # --- FAILURE PATH: wake fails -> task reverts to pending, binding cleared ---
+        # 1. FAILURE PATH (happy revert)
         tfail = f"{_PFX}::tfail"
-        create_task(phase_id=f"{_PFX}::ph", task_id=tfail, description="fail", owner=_WORKER,
-                    wake_owner_if_ready=False, config=cfg)
         os.environ["ORCH_NOTIFY_CLI"] = fail_cli
         raised = False
         try:
@@ -82,29 +98,63 @@ def main() -> int:
         except RuntimeError:
             raised = True
         _check("failed wake raises RuntimeError", raised)
-        _check("failed wake REVERTS task to pending (no phantom live resolver)",
-               task_status(tfail) == "pending", f"status={task_status(tfail)}")
-        _check("failed wake CLEARS current_task binding", current_task(_WORKER) is None,
-               f"current_task={current_task(_WORKER)}")
+        _check("failed wake REVERTS task to pending", task_status(tfail) == "pending", task_status(tfail))
+        _check("failed wake CLEARS our binding", get_ct(_WORKER) is None, get_ct(_WORKER))
 
-        # --- SUCCESS PATH: wake ok -> task in_progress, binding set (no regression) ---
+        # 2. SUCCESS PATH (no regression)
         tok = f"{_PFX}::tok"
-        create_task(phase_id=f"{_PFX}::ph", task_id=tok, description="ok", owner=_WORKER,
-                    wake_owner_if_ready=False, config=cfg)
         os.environ["ORCH_NOTIFY_CLI"] = ok_cli
         D.dispatch(worker=_WORKER, task_id=tok, description="ok", supervisor=f"{_PFX}-sup")
-        _check("successful wake leaves task in_progress", task_status(tok) == "in_progress",
-               f"status={task_status(tok)}")
-        ct = current_task(_WORKER)
-        _check("successful wake sets current_task to the task",
-               bool(ct) and json.loads(ct).get("task_id") == tok, f"current_task={ct}")
+        _check("successful wake -> in_progress", task_status(tok) == "in_progress", task_status(tok))
+        ct = get_ct(_WORKER)
+        _check("successful wake sets current_task", bool(ct) and json.loads(ct)["task_id"] == tok, ct)
+
+        # 3. OVERLAP (V2): worker moved to T2; rollback(T1) reverts T1 but keeps T2's binding
+        t1, t2 = f"{_PFX}::t1", f"{_PFX}::t2"
+        set_status(t1, "in_progress")
+        set_ct(_WORKER, t2, 222.0)          # worker is now bound to T2
+        D._rollback_claim(_WORKER, t1, 111.0)  # T1's failed dispatch (nonce 111 != live 222/T2)
+        _check("overlap: T1 reverted to pending (T1-specific, safe)", task_status(t1) == "pending", task_status(t1))
+        ct = get_ct(_WORKER)
+        _check("overlap: T2 binding PRESERVED (not nuked)",
+               bool(ct) and json.loads(ct)["task_id"] == t2, ct)
+
+        # 4. RE-CLAIM (V1): T1 re-dispatched with a newer nonce; rollback(old nonce) is a no-op
+        set_status(t1, "in_progress")
+        set_ct(_WORKER, t1, 999.0)          # T1 re-bound with a NEW nonce
+        D._rollback_claim(_WORKER, t1, 111.0)  # the OLD dispatch's stale rollback
+        _check("reclaim: T1 stays in_progress (newer claim not clobbered)",
+               task_status(t1) == "in_progress", task_status(t1))
+        ct = get_ct(_WORKER)
+        _check("reclaim: newer T1 binding untouched",
+               bool(ct) and json.loads(ct)["started_at"] == 999.0, ct)
+
+        # 5. OBSERVABILITY (V4): a neo failure during rollback is LOGGED, never raised
+        tlog = f"{_PFX}::tlog"
+        set_status(tlog, "in_progress")
+        set_ct(_WORKER, tlog, 333.0)
+        orig = D.get_neo4j_session
+        D.get_neo4j_session = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("forced neo down"))
+        cap = []
+        h = logging.Handler(); h.emit = lambda rec: cap.append(rec.getMessage())
+        D.logger.addHandler(h); D.logger.setLevel(logging.WARNING)
+        try:
+            D._rollback_claim(_WORKER, tlog, 333.0)  # must NOT raise
+            _check("observability: rollback does not raise on neo failure", True)
+        except Exception as e:
+            _check("observability: rollback does not raise on neo failure", False, repr(e))
+        finally:
+            D.get_neo4j_session = orig
+            D.logger.removeHandler(h)
+        _check("observability: neo revert failure is LOGGED",
+               any("neo revert" in m for m in cap), str(cap))
     finally:
         clean()
         os.environ.pop("ORCH_NOTIFY_CLI", None)
     if _FAILURES:
         print(f"\nFAIL — {len(_FAILURES)}: {_FAILURES}")
         return 1
-    print("\nPASS — failed wake reverts to ready; successful wake claims. Dispatch is wake-atomic.")
+    print("\nPASS — wake-atomic + identity-guarded rollback (V1/V2/V4 closed).")
     return 0
 
 
