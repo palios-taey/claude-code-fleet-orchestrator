@@ -29,6 +29,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lib.config import OrchConfig
 from lib.chat_layer import router as chat_router
+from lib.context_assembler import (
+    CORE_BUDGET_BYTES,
+    VALID_CLIS,
+    assemble as assemble_wake_packet,
+    build_packet as build_wake_packet,
+    select_context as select_wake_context,
+    size_report as wake_size_report,
+)
 from lib.easy_setup import package_version
 from lib.shippability import evaluate_shippability
 from lib.dispatch import bind_current_task, record_outcome
@@ -92,6 +100,7 @@ ALLOWED_NOTIFY_TYPES = {
     "command": "command",
     "response_ready": "response_ready",
 }
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 @app.on_event("startup")
@@ -732,6 +741,56 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
             detail=result.stderr.strip() or "taey-notify failed",
         )
     return {"ok": True}
+
+
+@app.get("/api/sessions/{session_id}/wake-packet")
+def session_wake_packet(
+    session_id: str,
+    cli: str = Query("claude"),
+    task_id: Optional[str] = Query(None),
+    budget_bytes: int = Query(CORE_BUDGET_BYTES, ge=1024, le=128 * 1024),
+) -> Dict[str, Any]:
+    if os.environ.get("ORCH_WAKE_PACKET_ENABLED", "").strip().lower() not in TRUE_ENV_VALUES:
+        return {"ok": True, "enabled": False}
+
+    cli_key = cli.lower().strip()
+    if cli_key not in VALID_CLIS:
+        raise HTTPException(status_code=400, detail=f"cli must be one of {', '.join(sorted(VALID_CLIS))}")
+    if not session_id.strip():
+        raise HTTPException(status_code=400, detail="session_id must be non-empty")
+
+    try:
+        configured_targets = set(_cfg().session_ids)
+        if configured_targets and session_id not in configured_targets:
+            raise HTTPException(status_code=400, detail="session_id must be listed in ORCH_SESSION_IDS")
+        context = select_wake_context(session_id, task_id=task_id, cli=cli_key)
+        packet = build_wake_packet(session_id, context)
+        rendered = assemble_wake_packet(packet, cli_key, budget_bytes=budget_bytes)
+        report = wake_size_report(rendered, packet, budget_bytes=budget_bytes)
+        return {
+            "ok": True,
+            "enabled": True,
+            "session_id": session_id,
+            "cli": cli_key,
+            "packet": rendered,
+            "packet_meta": {
+                "packet_id": packet.get("packet_id", ""),
+                "provenance_hash": packet.get("provenance_hash", ""),
+                "generated_at_commit": packet.get("generated_at_commit", ""),
+                "snapshot": packet.get("snapshot") or {},
+                "size_report": report,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return {
+            "ok": False,
+            "enabled": True,
+            "session_id": session_id,
+            "cli": cli_key,
+            "error": str(exc),
+        }
 
 
 @app.get("/health")
