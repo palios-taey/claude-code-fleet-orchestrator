@@ -1,0 +1,108 @@
+# r5-audit-gate — MECHANICAL enforcement of the R5 adversarial-audit gate.
+#
+# Why this exists: the audit gate used to be a process convention ("don't merge
+# until both auditors ENDORSE"). A convention is not a gate — a merge raced it
+# (orchestrator #55, 2026-06-11). This makes it structural: a PR that touches a
+# risky surface (.github/r5-risky-paths) CANNOT merge until BOTH adversarial
+# auditors post a `success` commit status (audit/grok + audit/gatekeeper) on the
+# PR head SHA. GitHub branch protection requires the `r5-audit-gate` context this
+# workflow sets, so no human discipline is involved.
+#
+# Known limitation (Gatekeeper PR#57, non-blocking): this verifies the status
+# CONTEXT + STATE, not WHO posted it — anyone with statuses:write could forge an
+# auditor success. That is inherent to commit-status gates and bounded by repo
+# write access + branch protection (the fleet is a single trusted account). A
+# future hardening could verify the status creator / require signed verdicts.
+#
+# Auditors post their verdict (on ENDORSE / BLOCK) with:
+#   gh api repos/$REPO/statuses/$SHA -f state=success -f context=audit/grok \
+#     -f description="ENDORSE" -f target_url=<verdict-log-url>
+# (state=failure on BLOCK). The gate re-evaluates on every status event.
+name: r5-audit-gate
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  status: {}
+
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    # Skip self-triggers: this workflow SETS the r5-audit-gate status, which is
+    # itself a status event — without this guard it would loop forever. Only
+    # react to the auditors' statuses (audit/*) and to pull_request events.
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'status' && github.event.context != 'r5-audit-gate')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Evaluate R5 audit gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Resolve the head SHA + base ref for both pull_request and status events.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            BASE_REF="${{ github.event.pull_request.base.ref }}"
+            PR_NUM="${{ github.event.pull_request.number }}"
+          else
+            HEAD_SHA="${{ github.event.sha }}"
+            # find an open PR whose head is this SHA
+            PR_JSON="$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" 2>/dev/null || echo '[]')"
+            PR_NUM="$(echo "$PR_JSON" | jq -r '.[0].number // empty')"
+            BASE_REF="$(echo "$PR_JSON" | jq -r '.[0].base.ref // empty')"
+            if [ -z "$PR_NUM" ]; then
+              echo "status event for $HEAD_SHA maps to no open PR — nothing to gate."
+              exit 0
+            fi
+          fi
+          echo "PR #$PR_NUM head=$HEAD_SHA base=$BASE_REF"
+
+          set_status() {  # state, description
+            gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
+              -f state="$1" -f context="r5-audit-gate" -f description="$2" >/dev/null
+            echo "r5-audit-gate -> $1 ($2)"
+          }
+
+          # Changed files vs base.
+          git fetch -q origin "$BASE_REF"
+          CHANGED="$(git diff --name-only "origin/$BASE_REF...$HEAD_SHA")"
+          echo "changed files:"; echo "$CHANGED" | sed 's/^/  /'
+
+          # Does any changed file match a risky glob?
+          RISKY=0
+          while IFS= read -r pat; do
+            [ -z "$pat" ] && continue
+            case "$pat" in \#*) continue;; esac
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              case "$f" in $pat) RISKY=1; echo "  RISKY: $f matches $pat";; esac
+            done <<< "$CHANGED"
+          done < .github/r5-risky-paths
+
+          if [ "$RISKY" -eq 0 ]; then
+            set_status success "no R5 risky surface touched"
+            exit 0
+          fi
+
+          # Risky: require BOTH auditor statuses = success on HEAD_SHA.
+          STATUSES="$(gh api "repos/$REPO/commits/$HEAD_SHA/statuses" --paginate 2>/dev/null || echo '[]')"
+          grok_state="$(echo "$STATUSES" | jq -r '[.[] | select(.context=="audit/grok")] | .[0].state // "missing"')"
+          gk_state="$(echo "$STATUSES" | jq -r '[.[] | select(.context=="audit/gatekeeper")] | .[0].state // "missing"')"
+          echo "audit/grok=$grok_state audit/gatekeeper=$gk_state"
+
+          if [ "$grok_state" = "success" ] && [ "$gk_state" = "success" ]; then
+            set_status success "R5 ENDORSED: grok + gatekeeper"
+          else
+            set_status failure "R5 required: grok=$grok_state gatekeeper=$gk_state (both must be success)"
+          fi
