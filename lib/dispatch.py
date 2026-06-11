@@ -182,6 +182,43 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
     )
 
 
+def _rollback_claim(worker: str, task_id: str) -> None:
+    """Undo a claim+bind when wake delivery fails, so a failed dispatch leaves
+    READY work (pending) rather than a phantom 'live resolver'.
+
+    dispatch() mutates state (claim -> status=in_progress; bind -> Redis
+    current_task) BEFORE the wake (taey-notify) is delivered. If the wake fails,
+    the task would otherwise stay in_progress -- counted live by
+    _LIVE_RESOLVER_STATUSES -- with nothing actually working it, so a supervisor
+    blocked_on it stops and the work dead-locks. Revert: status back to pending
+    (only if WE left it in_progress for THIS worker, so a concurrent real claim
+    is never clobbered) and clear the current_task binding. Best-effort and never
+    raises -- the caller is already raising the dispatch failure.
+    """
+    try:
+        if _orch_task_exists(task_id):
+            cfg = OrchConfig()
+            with get_neo4j_session(cfg) as session:
+                session.run(
+                    """
+                    MATCH (t:OrchTask {id: $task_id})
+                    WHERE t.status = 'in_progress' AND coalesce(t.owner, '') = $worker
+                    SET t.status = 'pending', t.updated_at = datetime()
+                    """,
+                    task_id=task_id,
+                    worker=worker,
+                )
+    except Exception:
+        pass
+    try:
+        r = _redis_connect()
+        pipe = r.pipeline(transaction=True)
+        pipe.delete(_state_key(worker, "current_task"))
+        pipe.execute()
+    except Exception:
+        pass
+
+
 def _mark_in_progress_best_effort(task_id: str, worker: str) -> bool:
     """Flip an OrchTask to in_progress if it is pending + dependency-ready.
 
@@ -320,6 +357,13 @@ def dispatch(
         check=False,
     )
     if result.returncode != 0:
+        # Wake delivery failed AFTER the claim+bind. Without this rollback the task
+        # lingers as status=in_progress (a "live resolver" per _LIVE_RESOLVER_STATUSES)
+        # with NO wake delivered -> a supervisor blocked_on it would ALLOW_STOP and the
+        # work silently dead-locks (GAIA dispatched-wake-guarantee: live-set membership
+        # is necessary, not sufficient; a live resolver must have an ACTUAL wake). Revert
+        # to ready so next-ready re-surfaces it for redispatch instead.
+        _rollback_claim(worker, task_id)
         raise RuntimeError(result.stderr.strip() or f"{cli} failed")
 
 

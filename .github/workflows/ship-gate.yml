@@ -26,17 +26,29 @@ jobs:
         ports:
           - 7687:7687
           - 7474:7474
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install package (+ httpx for starlette TestClient e2e)
-        run: pip install -e . httpx
-      - name: Stub notify import (test needs Neo4j only, not the fleet-notify sibling)
+      - name: Install package (+ httpx for starlette TestClient e2e, redis for the notify path)
+        run: pip install -e . httpx redis
+      - name: Stub notify import (most tests need Neo4j only; the wake-atomic test needs a real redis_connect)
         run: |
           mkdir -p "$RUNNER_TEMP/notifystub"
-          : > "$RUNNER_TEMP/notifystub/identity.py"
+          cat > "$RUNNER_TEMP/notifystub/identity.py" <<'PYIDENT'
+          import os, redis
+          def redis_connect():
+              return redis.Redis(
+                  host=os.environ.get("ORCH_REDIS_HOST", "127.0.0.1"),
+                  port=int(os.environ.get("ORCH_REDIS_PORT", "6379")),
+                  decode_responses=True,
+              )
+          PYIDENT
           echo "PYTHONPATH=$RUNNER_TEMP/notifystub" >> "$GITHUB_ENV"
       - name: Wait for Neo4j (bolt)
         run: |
@@ -91,3 +103,11 @@ jobs:
           ORCH_REDIS_PORT: "6379"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
         run: python tests/stop_resolver_active_acceptance.py
+      - name: Ship-gate — dispatch is wake-atomic (failed wake reverts, no phantom live resolver)
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+        run: python tests/dispatch_wake_atomic_acceptance.py
