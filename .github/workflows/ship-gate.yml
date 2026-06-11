@@ -50,6 +50,8 @@ jobs:
               )
           PYIDENT
           echo "PYTHONPATH=$RUNNER_TEMP/notifystub" >> "$GITHUB_ENV"
+      - name: Ship-gate — generic operator env contract
+        run: python tests/env_contract_acceptance.py
       - name: Wait for Neo4j (bolt)
         run: |
           python - <<'PY'

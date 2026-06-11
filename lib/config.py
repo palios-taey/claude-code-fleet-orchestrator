@@ -89,7 +89,6 @@ REQUIRED_ENV = (
     "ORCH_REDIS_PORT",      # _int_env (no default) via redis_port
     "ORCH_NEO4J_URI",       # _require via neo4j_uri
     "ORCH_NEO4J_DB",        # _require via neo4j_db
-    "ORCH_DASHBOARD_URL",   # _require via dashboard_url
 )
 # OPTIONAL — _optional_env with a documented default. Absent => the named mode,
 # which is a fully supported operating state, NOT a silent fallback for missing
@@ -108,6 +107,12 @@ OPTIONAL_ENV = (
      "canonical redis namespace; override only to run a second isolated fleet on one redis"),
     ("ORCH_NOTIFY_CLI", "taey-notify",
      "the released CLI name on PATH; override for a vendored/renamed install"),
+    ("ORCH_NOTIFY_LIB_ROOT", "None (use importable fleet-notify)",
+     "required only if fleet-notify is not already importable on sys.path; ensure_notify_importable raises loud if missing then"),
+    ("ORCH_REF_ALLOWED_ROOT", "unset (refs disabled)",
+     "plan/source refs are disabled fail-safe when unset; any ref use fails loud at validation time"),
+    ("ORCH_DASHBOARD_URL", "http://127.0.0.1:5002",
+     "local API/UI base URL used by setup/UI helpers; core engine state does not depend on it"),
     ("ORCH_DATA_DIR", "$XDG_DATA_HOME or ~/.local/share (XDG Base Dir spec)",
      "standard local-tool data location; zero-config by design for a single-user local product"),
 )
@@ -217,7 +222,7 @@ class OrchConfig:
     neo4j_user: Optional[str] = field(default_factory=lambda: _optional_env("ORCH_NEO4J_USER"))
     neo4j_pass: Optional[str] = field(default_factory=lambda: _optional_env("ORCH_NEO4J_PASS"))
     neo4j_db: str = field(default_factory=lambda: _require_env("ORCH_NEO4J_DB"))
-    dashboard_url: str = field(default_factory=lambda: _require_env("ORCH_DASHBOARD_URL"))
+    dashboard_url: str = field(default_factory=lambda: _optional_env("ORCH_DASHBOARD_URL", "http://127.0.0.1:5002") or "http://127.0.0.1:5002")
     redis_sentinels: str = field(default_factory=lambda: _optional_env("ORCH_REDIS_SENTINELS", "") or "")
     redis_sentinel_master: str = field(default_factory=lambda: _optional_env("ORCH_REDIS_SENTINEL_MASTER", "orch-master") or "orch-master")
     notify_lib_root: Optional[str] = field(default_factory=lambda: _optional_env("ORCH_NOTIFY_LIB_ROOT"))
