@@ -394,6 +394,7 @@ def get_project(project_id: str) -> Dict[str, Any]:
     summary = get_project_summary(project_id, config=_cfg())
     if not summary:
         raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    summary.update(_project_row(summary.get("project") or {}))
     return summary
 
 
