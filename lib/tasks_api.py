@@ -40,6 +40,17 @@ from lib.context_assembler import (
 )
 from lib.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from lib.easy_setup import package_version
+from lib.loop_engine import (
+    ArtifactNotObservedError,
+    ArtifactStore,
+    Loop,
+    LoopDeclarationError,
+    LoopPersistenceError,
+    Neo4jCycleStateStore,
+    advance_loop_step,
+    declare_loop,
+    loops_enabled,
+)
 from lib.shippability import evaluate_shippability
 from lib.dispatch import bind_current_task, record_outcome
 from lib.orch_schema import (
@@ -759,6 +770,64 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
         },
     )
     return {"ok": True}
+
+
+@app.post("/api/loops/declare")
+async def loop_declare(req: Request) -> Dict[str, Any]:
+    if not loops_enabled():
+        return {"ok": True, "enabled": False}
+    data = await req.json()
+    raw_loop = data.get("loop") if isinstance(data, dict) and "loop" in data else data
+    try:
+        return declare_loop(raw_loop, persistence=Neo4jCycleStateStore(config=_cfg()))
+    except LoopDeclarationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except LoopPersistenceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.post("/api/loops/{loop_id}/advance")
+async def loop_advance(loop_id: str, req: Request) -> Dict[str, Any]:
+    if not loops_enabled():
+        return {"ok": True, "enabled": False}
+    data = await req.json()
+    step_name = str(data.get("step") or "").strip()
+    if not step_name:
+        raise HTTPException(status_code=400, detail="step is required")
+    cfg = _cfg()
+    store = Neo4jCycleStateStore(config=cfg)
+    raw_loop = store.load(loop_id)
+    if raw_loop is None:
+        raise HTTPException(status_code=404, detail=f"Loop {loop_id} not found")
+    try:
+        return advance_loop_step(
+            raw_loop,
+            step_name,
+            artifact_store=ArtifactStore(config=cfg),
+            persistence=store,
+            wake_target=data.get("wake_target"),
+            wake_message=data.get("wake_message"),
+        )
+    except ArtifactNotObservedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except LoopDeclarationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except LoopPersistenceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/loops/{loop_id}/should-stop")
+def loop_should_stop(loop_id: str) -> Dict[str, Any]:
+    if not loops_enabled():
+        return {"ok": True, "enabled": False}
+    raw_loop = Neo4jCycleStateStore(config=_cfg()).load(loop_id)
+    if raw_loop is None:
+        raise HTTPException(status_code=404, detail=f"Loop {loop_id} not found")
+    try:
+        loop = Loop.declare(raw_loop)
+    except LoopDeclarationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "enabled": True, "loop_id": loop_id, "should_stop": loop.should_stop()}
 
 
 @app.get("/api/sessions/{session_id}/wake-packet")
