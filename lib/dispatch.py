@@ -46,6 +46,7 @@ peer_idle body.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -54,6 +55,8 @@ from typing import Optional
 
 from .config import OrchConfig, ensure_notify_importable, get_neo4j_session
 from .handoff_validation import mark_superseded_for_task
+
+logger = logging.getLogger(__name__)
 
 
 class BugLockActive(Exception):
@@ -96,13 +99,17 @@ def bind_current_task(
     description: str,
     supervisor: Optional[str] = None,
     set_parent: bool = False,
-) -> None:
+) -> float:
     """Write the canonical dispatch/current-task wire for ``worker``.
 
     This is the Redis-side half of the dispatch primitive, factored out so
     non-dispatch task flows (for example self-owned ``taey-task`` work) can
     mirror the exact same state shape that the Stop hook and orch-watch
     already understand.
+
+    Returns the ``started_at`` nonce written into ``current_task``. dispatch()
+    uses it as a claim-token so a later rollback only reverts THIS exact binding
+    (not one a subsequent dispatch for the same worker may have rebound).
     """
     r = _redis_connect()
     current_task = {
@@ -124,6 +131,7 @@ def bind_current_task(
     # working it — flip it to in_progress so next-ready stops re-surfacing it.
     # Best-effort: no-op for ad-hoc tasks / already-claimed / dep-blocked.
     _mark_in_progress_best_effort(task_id, worker)
+    return current_task["started_at"]
 
 
 def _orch_task_exists(task_id: str) -> bool:
@@ -180,6 +188,117 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
         f"ORCH_TASK_NOT_READY task={task_id} status={detail['status']} "
         f"incomplete_deps={detail['incomplete_deps']}"
     )
+
+
+def _binding_is_ours(raw: Optional[str], task_id: str, binding_nonce: Optional[float]) -> bool:
+    """True iff a current_task JSON blob is THIS dispatch's binding (task_id +
+    started_at nonce). A non-matching/absent/garbage blob means a later dispatch
+    rebound the worker (or it was cleared) -- not ours."""
+    if not raw:
+        return False
+    try:
+        cur = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(cur, dict) or cur.get("task_id") != task_id:
+        return False
+    return binding_nonce is None or cur.get("started_at") == binding_nonce
+
+
+def _rollback_claim(worker: str, task_id: str, binding_nonce: Optional[float]) -> None:
+    """Undo a claim+bind when wake delivery fails, so a failed dispatch leaves
+    READY work (pending) rather than a phantom 'live resolver'.
+
+    dispatch() mutates state (claim -> status=in_progress; bind -> Redis
+    current_task) BEFORE the wake (taey-notify) is delivered. If the wake fails,
+    the task would otherwise stay in_progress -- counted live by
+    _LIVE_RESOLVER_STATUSES -- with nothing actually working it, so a supervisor
+    blocked_on it stops and the work dead-locks.
+
+    Identity-guarded (grok PR#25 audit V1/V2): ``binding_nonce`` is the claim
+    token written by bind_current_task. We revert ONLY if the worker's live
+    current_task is still THIS dispatch's binding (same task_id + nonce). If a
+    later same-worker dispatch has rebound current_task, this dispatch was
+    superseded -- we touch neither the task status nor the (newer) binding.
+
+    Observability-first (V4): the rollback never raises (the caller is already
+    raising the dispatch failure) but every internal failure is LOGGED, so a
+    cleanup that leaves the phantom is visible rather than silent.
+    """
+    from redis import WatchError
+
+    key = _state_key(worker, "current_task")
+
+    # 1. Read the live binding and classify it relative to THIS dispatch.
+    try:
+        r = _redis_connect()
+        raw = r.get(key)
+    except Exception as exc:
+        logger.warning(
+            "dispatch rollback: could not read current_task to verify ownership "
+            "worker=%s task=%s -- NOT reverting blindly: %r", worker, task_id, exc)
+        return
+    try:
+        cur = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        cur = None
+    live_task = cur.get("task_id") if isinstance(cur, dict) else None
+    live_nonce = cur.get("started_at") if isinstance(cur, dict) else None
+    is_ours = live_task == task_id and (binding_nonce is None or live_nonce == binding_nonce)
+    is_reclaim = live_task == task_id and not is_ours  # OUR task, but a NEWER dispatch rebound it
+
+    if is_reclaim:
+        # A newer dispatch re-claimed this same task on this worker. It is now
+        # legitimately in_progress under someone else's wake -- reverting would
+        # clobber that live re-claim (grok V1). Leave status AND binding alone.
+        return
+
+    # 2. Revert the orch task to pending. Safe in BOTH remaining cases: it is
+    #    task_id + owner + status='in_progress' guarded, so it only ever touches
+    #    THIS task's failed claim -- never a different task the worker has since
+    #    moved to (grok V2: the worker may be on T2 now; reverting T1 does not
+    #    touch T2), and never another worker's claim.
+    try:
+        if _orch_task_exists(task_id):
+            cfg = OrchConfig()
+            with get_neo4j_session(cfg) as session:
+                session.run(
+                    """
+                    MATCH (t:OrchTask {id: $task_id})
+                    WHERE t.status = 'in_progress' AND coalesce(t.owner, '') = $worker
+                    SET t.status = 'pending', t.updated_at = datetime()
+                    """,
+                    task_id=task_id,
+                    worker=worker,
+                )
+    except Exception as exc:
+        logger.warning(
+            "dispatch rollback: neo revert to pending FAILED worker=%s task=%s "
+            "(task may linger in_progress as a phantom): %r", worker, task_id, exc)
+
+    # 3. Clear the binding ONLY if it is still OURS, atomically. If the worker has
+    #    moved to a different task (T2) the binding is T2's -- never delete it
+    #    (grok V2). WATCH guards against a rebind racing between step 1 and here.
+    if not is_ours:
+        return
+    try:
+        with r.pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(key)
+                    if not _binding_is_ours(pipe.get(key), task_id, binding_nonce):
+                        pipe.unwatch()
+                        break
+                    pipe.multi()
+                    pipe.delete(key)
+                    pipe.execute()
+                    break
+                except WatchError:
+                    continue
+    except Exception as exc:
+        logger.warning(
+            "dispatch rollback: could not clear current_task binding worker=%s "
+            "task=%s: %r", worker, task_id, exc)
 
 
 def _mark_in_progress_best_effort(task_id: str, worker: str) -> bool:
@@ -260,7 +379,7 @@ def dispatch(
     _claim_ready_orch_task(task_id=task_id, worker=worker)
     mark_superseded_for_task(_redis_connect(), from_session := (supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")), task_id)
 
-    bind_current_task(
+    binding_nonce = bind_current_task(
         worker=worker,
         task_id=task_id,
         description=description,
@@ -320,6 +439,17 @@ def dispatch(
         check=False,
     )
     if result.returncode != 0:
+        # Wake delivery failed AFTER the claim+bind. Without this rollback the task
+        # lingers as status=in_progress (a "live resolver" per _LIVE_RESOLVER_STATUSES)
+        # with NO wake delivered -> a supervisor blocked_on it would ALLOW_STOP and the
+        # work silently dead-locks (GAIA dispatched-wake-guarantee: live-set membership
+        # is necessary, not sufficient; a live resolver must have an ACTUAL wake). Revert
+        # to ready so next-ready re-surfaces it for redispatch instead. The binding_nonce
+        # is the claim-token: rollback only reverts THIS dispatch's binding, never a newer
+        # one a concurrent same-worker dispatch may have rebound (grok PR#25 V1/V2).
+        # taey-notify exits non-zero only BEFORE it lpushes the inbox message, so rc!=0
+        # means the wake was not delivered (V3): reverting is correct.
+        _rollback_claim(worker, task_id, binding_nonce)
         raise RuntimeError(result.stderr.strip() or f"{cli} failed")
 
 
