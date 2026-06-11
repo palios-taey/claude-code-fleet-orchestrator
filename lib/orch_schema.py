@@ -949,39 +949,11 @@ def _reason_required_block_reason(active_conditions: list[dict[str, Any]]) -> st
     )
 
 
-def _supervisor_dispatch_block_enabled(session_id: str, config: Optional[OrchConfig] = None) -> bool:
-    """Flag (default OFF) for the supervisor-dispatch stop-block. When enabled for
-    a session, the stop-decision keeps a SUPERVISOR up while a supervised active
-    project has a pending-ready task owned by one of its autonomous peers, so the
-    supervisor dispatches it rather than stopping. Mirrors _stop_inprogress_enabled:
-    env CF_SUPERVISOR_DISPATCH (truthy) + CF_SUPERVISOR_DISPATCH_SESSIONS allowlist,
-    OR redis set {prefix}:supervisor_dispatch_enabled. Stage-gate: off by default,
-    conductor-first rollout after audit."""
-    from .config import get_redis_sync
-
-    cfg = config or OrchConfig()
-    if str(os.environ.get("CF_SUPERVISOR_DISPATCH") or "").strip().lower() in {"1", "true", "yes", "on"}:
-        allowed = {
-            item.strip()
-            for item in str(os.environ.get("CF_SUPERVISOR_DISPATCH_SESSIONS") or "").replace(";", ",").split(",")
-            if item.strip()
-        }
-        if session_id in allowed:
-            return True
-    try:
-        prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
-        redis_client = get_redis_sync(cfg)
-        future = _STOP_INPROGRESS_EXECUTOR.submit(
-            redis_client.sismember,
-            f"{prefix}:supervisor_dispatch_enabled",
-            session_id,
-        )
-        return bool(future.result(timeout=_STOP_INPROGRESS_REDIS_TIMEOUT_S))
-    except FuturesTimeoutError:
-        return False
-    except Exception:
-        return False
-
+# NOTE: supervisor keep-going is DEFAULT-ON with NO flag (removed 2026-06-11). It was
+# briefly flag-gated (_supervisor_dispatch_block_enabled, CF_SUPERVISOR_DISPATCH); that
+# default-OFF flag was itself an override against the engine's whole purpose -- it let a
+# supervisor stop while peer work was pending or in-flight. The keep-going invariant has
+# no off-switch; see _raw_stop_decision.
 
 _AUTONOMOUS_PEER_SUFFIXES = ("-codex", "-gemini", "-grok", "-claude")
 
@@ -1031,6 +1003,47 @@ def _supervisor_dispatch_block_reason(task_id: Optional[str], owner: Optional[st
     )
 
 
+def get_supervisor_inflight_peer_task(supervisor: str, project_id: str,
+                                      config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
+    """Top IN-FLIGHT peer task in ``project_id`` (owned by an autonomous peer of
+    ``supervisor``, status in_progress/dispatched, project live). The supervisor
+    must stay up to GATE it the moment the peer reports done -- a peer finishing
+    un-gated is exactly how the supervisor strands work (the 7-hour-stop hole).
+    Returns enough to build a 'stay up to gate' reason, or None."""
+    cfg = config or OrchConfig()
+    peer_owners = [f"{supervisor}{suf}" for suf in _AUTONOMOUS_PEER_SUFFIXES]
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run(
+            """
+            MATCH (proj:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE t.status IN ['in_progress', 'dispatched']
+              AND t.owner IN $peer_owners
+              AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
+            RETURN t.id AS task_id, t.description AS description, t.owner AS owner,
+                   t.priority AS priority, ph.id AS phase_id, proj.id AS project_id
+            ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, t.created_at ASC
+            LIMIT 1
+            """,
+            project_id=project_id, peer_owners=peer_owners,
+        ).single()
+        return dict(record) if record else None
+
+
+def _supervisor_gate_block_reason(task_id: Optional[str], owner: Optional[str],
+                                  description: Optional[str]) -> str:
+    task_id_value = task_id or "unknown-task"
+    owner_value = owner or "a peer"
+    task_title = (description or "untitled task")[:80]
+    return (
+        "Your peer has supervised in-flight work and you must stay up to GATE it: "
+        f"{task_id_value} — {task_title} is owned by {owner_value} and not yet terminal. "
+        "Do NOT stop. Check whether the peer reported done (record_outcome / its branch + PR); "
+        "if so, verify + gate it (audit -> merge -> close with evidence); if it is still running, "
+        "stay available. A supervisor with in-flight peer work has not finished."
+    )
+
+
 def _raw_stop_decision(session_id: str,
                        config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     cfg = config or OrchConfig()
@@ -1068,33 +1081,56 @@ def _raw_stop_decision(session_id: str,
                 "task_title_short": (str(next_ready.get("description") or "")[:80] or None),
             }
 
-    # Supervisor-dispatch stop-block (flag-default-OFF): the own-ready loop above
-    # only surfaces work owned by the supervisor ITSELF. If all of that is done/gated
-    # but a supervised active project still has a pending-ready task owned by an
-    # autonomous PEER, the supervisor's job is to DISPATCH it -- not stop. Without
-    # this, the supervisor gets ALLOW_STOP and peer-owned ready work dead-locks until
-    # a human re-dispatches (the second stop-engine hole).
-    if _supervisor_dispatch_block_enabled(session_id, config=cfg):
-        for project in projects:
-            status = str(project.get("status") or "").strip().lower()
-            if status not in ("active", "in_progress"):
-                continue
-            peer_task = get_supervisor_dispatchable_peer_task(
-                supervisor, str(project.get("id")), config=cfg)
-            if peer_task:
-                task_id = peer_task.get("task_id")
-                return {
-                    "block": True,
-                    "reason": _supervisor_dispatch_block_reason(
-                        task_id, peer_task.get("owner"), peer_task.get("description")),
-                    "wake_type": "WAKE_WITH_QUEUE",
-                    "task_id": task_id,
-                    "project_id": peer_task.get("project_id"),
-                    "phase_id": peer_task.get("phase_id"),
-                    "task_priority": peer_task.get("priority"),
-                    "task_title_short": (str(peer_task.get("description") or "")[:80] or None),
-                    "dispatch_to": peer_task.get("owner"),
-                }
+    # Supervisor keep-going (DEFAULT-ON, no flag). The own-ready loop above only
+    # surfaces work the supervisor owns ITSELF. A supervisor is ALSO not finished while
+    # a supervised active project has peer-owned work that is either (a) pending-ready
+    # -> the supervisor must DISPATCH it, or (b) in-flight (in_progress/dispatched) ->
+    # the supervisor must STAY UP to gate it the moment the peer reports done. Leaving
+    # either case to ALLOW_STOP is what stranded a supervisor for HOURS while a peer's
+    # work sat un-dispatched or finished-but-un-gated. This is the keep-going invariant;
+    # there is NO off-switch -- the only release is the wrapper convergence valve
+    # (force-allow after N stop-hook attempts), which exists solely to prevent a
+    # permanent wedge on genuinely-stuck state, not to let a supervisor opt out.
+    for project in projects:
+        status = str(project.get("status") or "").strip().lower()
+        if status not in ("active", "in_progress"):
+            continue
+        peer_task = get_supervisor_dispatchable_peer_task(
+            supervisor, str(project.get("id")), config=cfg)
+        if peer_task:
+            task_id = peer_task.get("task_id")
+            return {
+                "block": True,
+                "reason": _supervisor_dispatch_block_reason(
+                    task_id, peer_task.get("owner"), peer_task.get("description")),
+                "wake_type": "WAKE_WITH_QUEUE",
+                "task_id": task_id,
+                "project_id": peer_task.get("project_id"),
+                "phase_id": peer_task.get("phase_id"),
+                "task_priority": peer_task.get("priority"),
+                "task_title_short": (str(peer_task.get("description") or "")[:80] or None),
+                "dispatch_to": peer_task.get("owner"),
+            }
+    for project in projects:
+        status = str(project.get("status") or "").strip().lower()
+        if status not in ("active", "in_progress"):
+            continue
+        inflight = get_supervisor_inflight_peer_task(
+            supervisor, str(project.get("id")), config=cfg)
+        if inflight:
+            task_id = inflight.get("task_id")
+            return {
+                "block": True,
+                "reason": _supervisor_gate_block_reason(
+                    task_id, inflight.get("owner"), inflight.get("description")),
+                "wake_type": "WAKE_WITH_QUEUE",
+                "task_id": task_id,
+                "project_id": inflight.get("project_id"),
+                "phase_id": inflight.get("phase_id"),
+                "task_priority": inflight.get("priority"),
+                "task_title_short": (str(inflight.get("description") or "")[:80] or None),
+                "gate_for": inflight.get("owner"),
+            }
 
     if _stop_inprogress_enabled(session_id, config=cfg):
         current_work = get_session_current_work(session_id, config=cfg)

@@ -1,10 +1,11 @@
-"""Ship-gate e2e — supervisor must not stop while a supervised active project has a
-pending-ready task owned by an autonomous PEER (the second stop-engine hole).
+"""Ship-gate e2e — supervisor keep-going is DEFAULT-ON (no flag) and covers BOTH
+pending peer work (dispatch) AND in-flight peer work (stay up to gate).
 
-_raw_stop_decision's own-ready loop only surfaces work owned by the supervisor itself;
-peer-owned ready work (e.g. conductor-codex) did not block the supervisor's stop, so it
-dead-locked until a human re-dispatched. The new branch (flag-default-OFF) blocks the
-supervisor with a DISPATCH reason. Verified here vs LIVE Neo4j.
+The stop-engine's whole purpose is that a supervisor does not stop while there is fleet
+work. The own-ready loop only surfaces the supervisor's OWN tasks; a supervised active
+project with peer-owned work that is pending (must dispatch) OR in_progress/dispatched
+(must stay up to gate when the peer reports done) must BLOCK the stop. There is no flag
+to turn this off -- the in-flight gap is what stranded a supervisor for hours.
 
 Env: ORCH_NEO4J_URI, ORCH_NEO4J_DB, ORCH_REDIS_HOST/PORT, ORCH_DASHBOARD_URL.
 """
@@ -17,13 +18,13 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.orch_schema import (  # noqa: E402
-    create_project, create_phase, create_task, update_task_status, add_dependency,
+    create_project, create_phase, create_task, update_task_status,
     _raw_stop_decision, init_schema, get_neo4j_driver,
 )
 from lib.config import OrchConfig  # noqa: E402
 
 CFG = OrchConfig()
-_PFX = f"supdisp-ci-{uuid.uuid4().hex[:8]}"
+_PFX = f"supkeep-ci-{uuid.uuid4().hex[:8]}"
 _SUP = f"{_PFX}-sup"
 _PEER = f"{_SUP}-codex"
 _FAILURES: list[str] = []
@@ -35,35 +36,19 @@ def _check(label: str, cond: bool, extra: str = "") -> None:
         _FAILURES.append(label)
 
 
-def _flag(on: bool) -> None:
-    if on:
-        os.environ["CF_SUPERVISOR_DISPATCH"] = "1"
-        os.environ["CF_SUPERVISOR_DISPATCH_SESSIONS"] = _SUP
-    else:
-        os.environ.pop("CF_SUPERVISOR_DISPATCH", None)
-        os.environ.pop("CF_SUPERVISOR_DISPATCH_SESSIONS", None)
-
-
-def _blocks_on(task_id: str) -> bool:
-    d = _raw_stop_decision(_SUP, config=CFG)
-    return d.get("block") is True and d.get("task_id") == task_id
-
-
-def _allows() -> bool:
-    return _raw_stop_decision(_SUP, config=CFG).get("wake_type") == "ALLOW_STOP"
+def _decide():
+    return _raw_stop_decision(_SUP, config=CFG)
 
 
 def main() -> int:
     init_schema(config=CFG)
     drv = get_neo4j_driver(CFG)
 
-    def mkproj(pid: str, status: str = "active"):
-        create_project(project_id=pid, name=pid, supervisor=_SUP, config=CFG)
-        create_phase(project_id=pid, phase_id=f"{pid}::ph", name="ph", config=CFG)
+    def setp(pid, status="active"):
         with drv.session(database=CFG.neo4j_db) as s:
             s.run("MATCH (p:OrchProject {id:$i}) SET p.status=$st", i=pid, st=status)
 
-    def mktask(pid: str, name: str, owner: str):
+    def mktask(pid, name, owner):
         create_task(phase_id=f"{pid}::ph", task_id=f"{pid}::{name}", description=f"{name} work",
                     owner=owner, wake_owner_if_ready=False, config=CFG)
         return f"{pid}::{name}"
@@ -72,61 +57,59 @@ def main() -> int:
         s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
     try:
         P = f"{_PFX}-A"
-        mkproj(P)
-        peer_task = mktask(P, "peerwork", _PEER)  # pending, owned by SUP-codex
+        create_project(project_id=P, name=P, supervisor=_SUP, config=CFG)
+        create_phase(project_id=P, phase_id=f"{P}::ph", name="ph", config=CFG)
+        setp(P)
 
-        # 1. flag OFF -> ALLOW_STOP (default-off safety; no behavior change)
-        _flag(False)
-        _check("flag OFF: supervisor may stop despite pending peer work (default-off)", _allows())
+        # 0. empty active project -> ALLOW_STOP (no false-positive keep-going)
+        _check("empty project -> ALLOW_STOP", _decide().get("wake_type") == "ALLOW_STOP")
 
-        # 2. flag ON -> blocks on the pending peer task, with dispatch_to
-        _flag(True)
-        d = _raw_stop_decision(_SUP, config=CFG)
-        _check("flag ON: blocks on the pending peer task", d.get("block") is True and d.get("task_id") == peer_task, str(d))
-        _check("flag ON: names the peer to dispatch to", d.get("dispatch_to") == _PEER, str(d.get("dispatch_to")))
+        # 1. pending peer task -> BLOCK to DISPATCH (default-on, NO flag set anywhere)
+        peer = mktask(P, "peerwork", _PEER)
+        d = _decide()
+        _check("pending peer work BLOCKS (default-on, no flag)", d.get("block") is True and d.get("task_id") == peer, str(d))
+        _check("pending -> dispatch_to the peer", d.get("dispatch_to") == _PEER, str(d.get("dispatch_to")))
 
-        # 3. peer task in_progress (peer already on it) -> NOT blocked
-        update_task_status(peer_task, "in_progress", owner=_PEER, config=CFG)
-        _check("peer task in_progress -> supervisor may stop (peer is on it)", _allows())
-        update_task_status(peer_task, "pending", owner=_PEER, config=CFG)
+        # 2. THE 7h-stop fix: in-flight (in_progress) peer task -> BLOCK to GATE (stay up)
+        update_task_status(peer, "in_progress", owner=_PEER, config=CFG)
+        d = _decide()
+        _check("in_progress peer work BLOCKS to GATE (the 7h-stop hole)", d.get("block") is True and d.get("task_id") == peer, str(d))
+        _check("in-flight -> gate_for the peer", d.get("gate_for") == _PEER, str(d.get("gate_for")))
 
-        # 4. peer task has an incomplete DEPENDS_ON -> NOT dispatchable -> NOT blocked
-        gate = mktask(P, "gate", _PEER)
-        update_task_status(gate, "in_progress", owner=_PEER, config=CFG)
-        add_dependency(peer_task, gate, config=CFG)
-        _check("peer task dep-gated -> not blocked", _allows())
-        update_task_status(gate, "completed",
-                           completion_evidence={"production_observation": "supdisp acceptance gate"}, config=CFG)
-        _check("peer task dep satisfied -> blocked again", _blocks_on(peer_task))
-
-        # 5. project not active (stopped) -> NOT blocked
+        # 3. dispatched peer task -> also BLOCK to GATE
         with drv.session(database=CFG.neo4j_db) as s:
-            s.run("MATCH (p:OrchProject {id:$i}) SET p.status='stopped'", i=P)
-        _check("stopped project -> peer work does not block", _allows())
-        with drv.session(database=CFG.neo4j_db) as s:
-            s.run("MATCH (p:OrchProject {id:$i}) SET p.status='active'", i=P)
+            s.run("MATCH (t:OrchTask {id:$i}) SET t.status='dispatched'", i=peer)
+        _check("dispatched peer work BLOCKS to GATE", _decide().get("block") is True)
 
-        # 6. task owned by a NON-peer (different base) -> isolation -> NOT blocked
-        update_task_status(peer_task, "in_progress", owner=_PEER, config=CFG)  # park the real peer task
+        # 4. peer task terminal (completed) -> nothing in-flight -> ALLOW_STOP
+        update_task_status(peer, "completed", owner=_PEER,
+                           completion_evidence={"production_observation": "supkeep gate done"}, config=CFG)
+        _check("completed peer work -> ALLOW_STOP (nothing left)", _decide().get("wake_type") == "ALLOW_STOP")
+
+        # 5. isolation: a NON-peer (different base) in-flight task must NOT block
         stranger = mktask(P, "stranger", "someoneelse-codex")
-        _check("non-peer-owned ready task -> not blocked (isolation)", _allows())
-        update_task_status(stranger, "completed",
-                           completion_evidence={"production_observation": "supdisp stranger"}, config=CFG)
-        update_task_status(peer_task, "pending", owner=_PEER, config=CFG)
+        update_task_status(stranger, "in_progress", owner="someoneelse-codex", config=CFG)
+        _check("non-peer in-flight work -> NOT blocked (isolation)", _decide().get("wake_type") == "ALLOW_STOP")
 
-        # 7. supervisor's OWN ready task takes precedence via the existing own-ready path
-        own = mktask(P, "ownwork", _SUP)
-        d = _raw_stop_decision(_SUP, config=CFG)
-        _check("supervisor own ready work still blocks (no regression, own precedence)",
-               d.get("block") is True and d.get("task_id") == own, str(d))
+        # 6. stopped project -> peer work does not keep the supervisor up
+        live = mktask(P, "live", _PEER)  # pending peer work
+        setp(P, "stopped")
+        _check("stopped project -> peer work does not block", _decide().get("wake_type") == "ALLOW_STOP")
+        setp(P, "active")
+
+        # 7. precedence: a pending peer task is surfaced to DISPATCH before an in-flight one is gated
+        other = mktask(P, "other", _PEER)
+        update_task_status(other, "in_progress", owner=_PEER, config=CFG)  # in-flight
+        d = _decide()  # 'live' is pending -> dispatch must take precedence over gating 'other'
+        _check("pending DISPATCH takes precedence over in-flight GATE",
+               d.get("task_id") == live and d.get("dispatch_to") == _PEER, str(d))
     finally:
-        _flag(False)
         with drv.session(database=CFG.neo4j_db) as s:
             s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
     if _FAILURES:
         print(f"\nFAIL — {len(_FAILURES)}: {_FAILURES}")
         return 1
-    print("\nPASS — supervisor keeps up to dispatch peer-owned ready work (flag-gated, isolated, no regression).")
+    print("\nPASS — supervisor keep-going is default-on, covers pending(dispatch)+in-flight(gate), isolated, no off-switch.")
     return 0
 
 
