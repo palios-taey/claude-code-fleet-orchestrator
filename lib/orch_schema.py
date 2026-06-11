@@ -1021,38 +1021,97 @@ def _supervisor_dispatch_block_reason(task_id: Optional[str], owner: Optional[st
     )
 
 
+# A dispatched peer task whose worker shows no 'working' signal is presumed live
+# (its RESPONSE_READY will re-wake the supervisor) only until this dispatch age.
+# Past it, a non-binding peer (codex/grok) that never set last_outcome is treated
+# as a DROPPED/dead dispatch -> the supervisor must re-check (not silently strand).
+# Generous so a normal long codex/grok build never trips it; the failure direction
+# past it is a re-check (bounded), not a strand.
+_PEER_DISPATCH_STALE_SEC = 1800
+
+
+def _peer_reported_terminal_for(worker: str, task_id: Optional[str], r) -> bool:
+    """True if ``worker``'s last_outcome is a terminal outcome (done/error/
+    interrupted) referencing ``task_id`` -- the peer reported this task finished,
+    so it now awaits the supervisor's gate (NOT still-working). codex/grok set
+    last_outcome via record_outcome / their RESPONSE_READY; it is their one
+    reliable queryable done-signal. Fail-closed to False only on an absent/
+    unparseable outcome."""
+    try:
+        raw = r.get(_state_key(worker, "last_outcome"))
+    except Exception:
+        return False
+    if not raw:
+        return False
+    try:
+        lo = json.loads(raw)
+    except Exception:
+        return False
+    if not isinstance(lo, dict):
+        return False
+    if str(lo.get("outcome") or "").strip().lower() not in ("done", "error", "interrupted"):
+        return False
+    return bool(task_id) and task_id in str(lo.get("details") or "")
+
+
+def _dispatch_age_seconds(task_id: str, config: Optional[OrchConfig] = None) -> Optional[float]:
+    """Seconds since ``task_id`` last changed state (its in_progress dispatch age,
+    via OrchTask.updated_at -- a peer working a task does not touch the node).
+    Returns None if unknown/unparseable; the caller treats None as 'cannot confirm
+    fresh' and fails toward BLOCK (re-check), never toward a silent strand."""
+    try:
+        task = get_task(task_id, config=config)
+    except Exception:
+        return None
+    if not task:
+        return None
+    ua = task.get("updated_at")
+    if ua is None:
+        return None
+    try:
+        if hasattr(ua, "to_native"):
+            native = ua.to_native()
+        else:
+            s = str(ua)
+            if "." in s:
+                head, _, tail = s.partition(".")
+                i = 0
+                while i < len(tail) and tail[i].isdigit():
+                    i += 1
+                s = head + "." + tail[:i][:6] + tail[i:]
+            native = dt.datetime.fromisoformat(s)
+        return time.time() - native.timestamp()
+    except Exception:
+        return None
+
+
 def _peer_actively_working_task(workers: List[str], task_id: Optional[str],
                                 config: Optional[OrchConfig] = None) -> bool:
-    """True iff some worker in ``workers`` is ALIVE and actively working
-    ``task_id`` right now: its live ``current_task`` is bound to the task AND it
-    is not idle (its Stop hook has not fired).
+    """True iff some worker in ``workers`` can be presumed ALIVE and working
+    ``task_id`` now, so the supervisor may ALLOW_STOP and let the peer's
+    RESPONSE_READY re-wake it. Two peer classes:
 
-    The ``current_task`` binding ALONE is NOT sufficient. It persists across
-    NON-done terminations -- it is the 'previous dispatch did not finish
-    cleanly' signal: dispatch.record_outcome clears it ONLY on outcome=done. A
-    peer that errored / was interrupted / stopped without a clean done leaves
-    current_task bound but is NOT working, and would send no RESPONSE_READY --
-    so treating bound-alone as 'actively working' and letting the caller
-    ALLOW_STOP strands the task (grok PR#39 V1, the 7-hour-stop reopened for
-    crash/error paths). The idle flag is the event-driven liveness signal: the
-    peer's OWN Stop hook sets it whenever it stops for any reason that runs the
-    hook (done, error, interrupt, graceful crash), and activity clears it. So:
-      - current_task == task AND NOT idle -> peer is alive + mid-flight -> True
-        (caller ALLOW_STOPs; the peer's RESPONSE_READY re-wakes it on done);
-      - current_task != task, OR idle is set -> peer is not working it (finished
-        / errored / stopped / not yet started) -> False (caller must gate or
-        investigate -- the anti-strand path).
+    BINDING peers (claude-clones via dispatch.bind_current_task) expose a live
+    ``current_task`` + idle + last_activity heartbeat. The signal is precise:
+    current_task == task AND idle CLEAR AND heartbeat FRESH. current_task persists
+    across NON-done terminations (record_outcome clears it only on done) and a
+    hard kill clears nothing -- so requiring idle-clear + fresh heartbeat is what
+    stops the PR#39 strand (a stopped/dead peer must NOT look working).
 
-    Two adjacent paths cover what idle cannot: (1) error/interrupt WITH
-    record_outcome reverts the task to 'pending' (dispatch._revert_outcome_claim)
-    so it leaves in_progress entirely and is caught by the pending-dispatch
-    block, not here; (2) a hard kill (kill -9 / OOM) runs no Stop hook, so idle
-    stays clear and a dead peer can briefly look active here -- a pre-existing
-    fleet-wide liveness gap (it stranded the OLD all-in-flight-block code too,
-    via the convergence valve) bounded by the orch-watch stuck detector
-    (notify_supervisor_of_stuck after --stuck-threshold-sec), which re-wakes the
-    supervisor to investigate. That backstop is out of scope for this decision.
-    """
+    NON-BINDING peers (codex/grok CLIs) NEVER bind current_task and their idle
+    oscillates per step with no working-heartbeat, so the binding check can never
+    see them as working -> the supervisor busy-loops on EVERY codex/grok dispatch
+    (the real, general form of the PR#39 busy-loop). Their one reliable queryable
+    signal is last_outcome (set on done/error) + the RESPONSE_READY that re-wakes
+    the supervisor. So for a worker with NO current_task: presume working (ALLOW)
+    UNLESS (a) it reported this task terminal -> awaits gate -> not working, or
+    (b) the dispatch is older than _PEER_DISPATCH_STALE_SEC with no terminal
+    outcome -> a DROPPED/dead dispatch -> re-check. That age bound keeps the
+    dropped-dispatch / hard-kill strand from being silent while a normal long
+    build never trips it.
+
+    All reads fail-closed toward BLOCK (not-working) so an outage / parse failure
+    keeps the supervisor up rather than stranding work."""
     if not task_id:
         return False
     cfg = config or OrchConfig()
@@ -1066,37 +1125,49 @@ def _peer_actively_working_task(workers: List[str], task_id: Optional[str],
             raw = r.get(_state_key(worker, "current_task"))
         except Exception:
             continue
-        if not raw:
+        cur = None
+        if raw:
+            try:
+                cur = json.loads(raw)
+            except Exception:
+                cur = None
+        bound_task = cur.get("task_id") if isinstance(cur, dict) else None
+
+        if bound_task and bound_task != task_id:
+            # BINDING peer is on a DIFFERENT task -> it is not working THIS one.
             continue
-        try:
-            cur = json.loads(raw)
-        except Exception:
-            continue
-        if not (isinstance(cur, dict) and cur.get("task_id") == task_id):
-            continue
-        # current_task is bound to this task -- but is the peer ALIVE and working?
-        # Two liveness gates, both fail-closed to BLOCK on any read error:
-        #  (1) idle flag CLEAR. A set idle flag means the peer's own Stop hook fired
-        #      = it stopped without a clean done (record_outcome clears current_task
-        #      ONLY on done), so it is not working and will send no RESPONSE_READY.
-        #  (2) heartbeat FRESH. last_activity (stamped by the activity hooks on every
-        #      tool call/prompt/notification) within _PEER_HEARTBEAT_STALE_SEC. A
-        #      hard kill (kill -9 / OOM / hook failure) runs no Stop hook, so idle
-        #      never sets -- the stale heartbeat is what catches it.
-        try:
-            if r.get(_state_key(worker, "idle")):
+
+        if bound_task == task_id:
+            # BINDING peer on this task -- precise liveness, both fail-closed to BLOCK:
+            #  (1) idle CLEAR (its Stop hook sets idle on ANY stop incl. non-done);
+            #  (2) heartbeat FRESH (last_activity within _PEER_HEARTBEAT_STALE_SEC;
+            #      catches a hard kill that runs no hook so idle never sets).
+            try:
+                if r.get(_state_key(worker, "idle")):
+                    continue
+                last_activity = r.get(_state_key(worker, "last_activity"))
+            except Exception:
                 continue
-            last_activity = r.get(_state_key(worker, "last_activity"))
-        except Exception:
+            if last_activity is None:
+                continue
+            try:
+                age = time.time() - float(last_activity)
+            except (TypeError, ValueError):
+                continue
+            if age < _PEER_HEARTBEAT_STALE_SEC:
+                return True
             continue
-        if last_activity is None:
+
+        # NON-BINDING peer (current_task absent -- codex/grok). No working-heartbeat
+        # exists, so presume working (ALLOW; RESPONSE_READY re-wakes) UNLESS the peer
+        # reported this task terminal (awaits gate) or the dispatch is stale with no
+        # terminal outcome (dropped/dead -> re-check). Unknown age fails to BLOCK.
+        if _peer_reported_terminal_for(worker, task_id, r):
             continue
-        try:
-            age = time.time() - float(last_activity)
-        except (TypeError, ValueError):
+        d_age = _dispatch_age_seconds(task_id, config=cfg)
+        if d_age is None or d_age >= _PEER_DISPATCH_STALE_SEC:
             continue
-        if age < _PEER_HEARTBEAT_STALE_SEC:
-            return True
+        return True
     return False
 
 

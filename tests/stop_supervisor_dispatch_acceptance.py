@@ -42,18 +42,24 @@ _FAILURES: list[str] = []
 
 
 def _set_active(worker: str, task_id: str) -> None:
-    """Peer ALIVE + actively working: current_task bound, NOT idle, FRESH heartbeat.
-    The only state that should license the supervisor to ALLOW_STOP and wait."""
+    """Peer ALIVE + actively working: current_task bound, NOT idle, FRESH heartbeat,
+    no terminal outcome. The only state that should license ALLOW_STOP for a binding
+    peer."""
     _R.set(_state_key(worker, "current_task"),
            json.dumps({"task_id": task_id, "started_at": time.time()}))
     _R.delete(_state_key(worker, "idle"))
     _R.set(_state_key(worker, "last_activity"), str(time.time()))
+    _R.delete(_state_key(worker, "last_outcome"))
 
 
-def _set_done(worker: str) -> None:
-    """Peer reported clean done: its Stop hook cleared current_task + set idle."""
+def _set_done(worker: str, task_id: str) -> None:
+    """Peer reported clean done -- REALISTIC: record_outcome(done) sets last_outcome
+    AND the Stop hook clears current_task + sets idle. last_outcome is the queryable
+    done-signal the engine reads (esp. for non-binding codex/grok that never bind)."""
     _R.delete(_state_key(worker, "current_task"))
     _R.set(_state_key(worker, "idle"), "1")
+    _R.set(_state_key(worker, "last_outcome"),
+           json.dumps({"outcome": "done", "details": f"DONE [{task_id}]"}))
 
 
 def _set_stopped_bound(worker: str, task_id: str) -> None:
@@ -76,7 +82,7 @@ def _set_crashed_bound(worker: str, task_id: str) -> None:
 
 
 def _clear_peer(worker: str) -> None:
-    for k in ("current_task", "idle", "last_activity"):
+    for k in ("current_task", "idle", "last_activity", "last_outcome"):
         _R.delete(_state_key(worker, k))
 
 
@@ -129,7 +135,7 @@ def main() -> int:
         _check("in-flight + peer ALIVE+working -> ALLOW_STOP (busy-loop fix)",
                _decide().get("wake_type") == "ALLOW_STOP", str(_decide()))
         #   2b. clean done (current_task CLEARED, idle set) -> BLOCK to GATE.
-        _set_done(_PEER)
+        _set_done(_PEER, peer)
         d = _decide()
         _check("in-flight + clean done BLOCKS to GATE (the 7h-stop hole)",
                d.get("block") is True and d.get("task_id") == peer, str(d))
@@ -148,7 +154,7 @@ def main() -> int:
         # 3. dispatched peer task: same matrix in miniature.
         with drv.session(database=CFG.neo4j_db) as s:
             s.run("MATCH (t:OrchTask {id:$i}) SET t.status='dispatched'", i=peer)
-        _set_done(_PEER)
+        _set_done(_PEER, peer)
         _check("dispatched + not working BLOCKS to GATE", _decide().get("block") is True)
         _set_active(_PEER, peer)
         _check("dispatched + peer ALIVE+working -> ALLOW_STOP", _decide().get("wake_type") == "ALLOW_STOP")
