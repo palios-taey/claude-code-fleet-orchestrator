@@ -62,9 +62,18 @@ def main() -> int:
         nr = get_session_next_ready(f"{_PFX}-alice", project_id=_PFX, config=CFG)
         _check("task still surfaces to its owner after toggle (not orphaned)", bool(nr) and nr["task_id"] == T, str(nr))
 
+        # whitespace-only owner is treated as empty -> PRESERVE (grok V4)
+        update_task_status(T, "in_progress", owner="   ", config=CFG)
+        _check("whitespace-only owner PRESERVES owner (not wiped to spaces)", owner_of(T) == f"{_PFX}-alice", owner_of(T))
+        update_task_status(T, "pending", config=CFG)
+
         # explicit owner DOES reassign
         update_task_status(T, "pending", owner=f"{_PFX}-bob", config=CFG)
         _check("explicit owner reassigns to bob", owner_of(T) == f"{_PFX}-bob", owner_of(T))
+
+        # result-given branch (branch 2): status update WITH result, no owner -> preserve (grok V1)
+        update_task_status(T, "in_progress", result="some result text", config=CFG)
+        _check("result-given branch preserves owner without owner arg", owner_of(T) == f"{_PFX}-bob", owner_of(T))
 
         # completed without owner preserves bob
         update_task_status(T, "completed",

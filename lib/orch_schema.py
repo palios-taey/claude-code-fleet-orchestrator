@@ -1823,7 +1823,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                 rec = session.run("""
                     MATCH (t:OrchTask {id: $task_id})
                     SET t.status = $status,
-                        t.owner = CASE WHEN coalesce($owner, '') = '' THEN t.owner ELSE $owner END,
+                        t.owner = CASE WHEN coalesce(trim($owner), '') = '' THEN t.owner ELSE $owner END,
                         t.blocked_on = CASE
                             WHEN $status <> 'in_progress' THEN NULL
                             WHEN $blocked_on = '__KEEP__' THEN t.blocked_on
@@ -1863,7 +1863,8 @@ def update_task_status(task_id: str, status: str, owner: str = "",
             else:
                 rec = session.run("""
                     MATCH (t:OrchTask {id: $task_id})
-                    SET t.status = $status, t.owner = $owner,
+                    SET t.status = $status,
+                        t.owner = CASE WHEN coalesce(trim($owner), '') = '' THEN t.owner ELSE $owner END,
                         t.result = $result,
                         t.blocked_on = CASE
                             WHEN $status <> 'in_progress' THEN NULL
