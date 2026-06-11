@@ -1822,7 +1822,8 @@ def update_task_status(task_id: str, status: str, owner: str = "",
             if result is None:
                 rec = session.run("""
                     MATCH (t:OrchTask {id: $task_id})
-                    SET t.status = $status, t.owner = $owner,
+                    SET t.status = $status,
+                        t.owner = CASE WHEN coalesce($owner, '') = '' THEN t.owner ELSE $owner END,
                         t.blocked_on = CASE
                             WHEN $status <> 'in_progress' THEN NULL
                             WHEN $blocked_on = '__KEEP__' THEN t.blocked_on
