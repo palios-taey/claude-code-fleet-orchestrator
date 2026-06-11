@@ -34,7 +34,17 @@ def _load_dotenv_candidates() -> None:
                     continue
                 key, _, value = line.partition("=")
                 key = key.replace("export ", "").strip()
-                os.environ.setdefault(key, value.strip())
+                value = value.strip()
+                # Standard dotenv semantics: strip one matching pair of
+                # surrounding quotes. Operators quote values to keep the
+                # same .env shell-sourceable (unquoted JSON braces would
+                # brace-expand under `set -a; . .env`); without stripping,
+                # the quotes reach consumers and silently break JSON values
+                # (live finding 2026-06-11: ORCH_SESSION_ROOTS unparseable
+                # -> every wake packet empty despite correct selection code).
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                os.environ.setdefault(key, value)
         break
 
 
