@@ -28,7 +28,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: "README Requirements: a claude-code-fleet-notify checkout (ORCH_NOTIFY_LIB_ROOT option)"
-        run: git clone --depth 1 https://github.com/palios-taey/claude-code-fleet-notify.git "$HOME/fleet-notify"
+        run: |
+          # Pinned, not live main (Chat review 2026-06-11, HORIZON: an unpinned cross-repo
+          # clone is a supply-chain hole — a poisoned notify main would silently enter this
+          # repo's gate). Bump the SHA deliberately when notify releases.
+          git clone https://github.com/palios-taey/claude-code-fleet-notify.git "$HOME/fleet-notify"
+          git -C "$HOME/fleet-notify" checkout --quiet 95d68bc9571b751c2628478b8ff04b380c140c48
 
       - name: "README Configuration: copy .env.example to .env and set the values"
         run: |
