@@ -1,0 +1,132 @@
+"""Ship-gate e2e — flagged plan ingest creates the forced sub-role gate."""
+from __future__ import annotations
+
+import os
+import sys
+import uuid
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from lib.config import OrchConfig, get_neo4j_driver  # noqa: E402
+from lib.orch_schema import init_schema  # noqa: E402
+from lib.plan_loader import load_plan_from_text  # noqa: E402
+
+
+CFG = OrchConfig()
+PFX = f"tmpl-{uuid.uuid4().hex[:8]}"
+FAILURES: list[str] = []
+
+
+def _check(label: str, cond: bool, extra: object = "") -> None:
+    print(("PASS " if cond else "FAIL ") + label + ("" if cond else f" -> {extra}"))
+    if not cond:
+        FAILURES.append(label)
+
+
+def _cleanup() -> None:
+    driver = get_neo4j_driver(CFG)
+    with driver.session(database=CFG.neo4j_db) as session:
+        session.run("MATCH (n) WHERE (n:OrchProject OR n:OrchPhase OR n:OrchTask) "
+                    "AND n.id STARTS WITH $p DETACH DELETE n", p=PFX)
+
+
+def _plan(project_id: str) -> str:
+    return f"""# Project: {project_id} - Template Acceptance [template: forced-subrole-gate]
+> verifies forced gate templating
+
+## Phase: build - Build
+### Task: scout - Scout [owner: worker-a]
+- first work task
+### Task: ship - Ship [owner: worker-b] [depends: scout]
+- final work task
+"""
+
+
+def _tasks(project_id: str) -> dict[str, dict]:
+    driver = get_neo4j_driver(CFG)
+    with driver.session(database=CFG.neo4j_db) as session:
+        rows = session.run("""
+            MATCH (:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+            RETURN t.id AS id,
+                   t.owner AS owner,
+                   ph.id AS phase_id,
+                   collect(dep.id) AS depends_on
+        """, project_id=project_id)
+        return {
+            row["id"]: {
+                "owner": row["owner"],
+                "phase_id": row["phase_id"],
+                "depends_on": sorted([dep for dep in row["depends_on"] if dep]),
+            }
+            for row in rows
+        }
+
+
+def _ingest(project_id: str) -> dict:
+    return load_plan_from_text(
+        _plan(project_id),
+        source_path=f"/tmp/{project_id}.md",
+        source_kind="markdown",
+        ingested_by="template-test",
+        supervisor="conductor",
+        priority=10,
+        config=CFG,
+    )
+
+
+def main() -> int:
+    init_schema(config=CFG)
+    _cleanup()
+    old_enabled = os.environ.get("ORCH_GATE_TEMPLATE_ENABLED")
+    try:
+        off_project = f"{PFX}-off"
+        os.environ.pop("ORCH_GATE_TEMPLATE_ENABLED", None)
+        off = _ingest(off_project)
+        off_tasks = _tasks(off_project)
+        _check("template is default-off", off["tasks_created"] == 2 and not any("gate-" in task_id for task_id in off_tasks), off_tasks)
+
+        on_project = f"{PFX}-on"
+        os.environ["ORCH_GATE_TEMPLATE_ENABLED"] = "1"
+        on = _ingest(on_project)
+        tasks = _tasks(on_project)
+        gate = lambda bare: f"{on_project}::{bare}"
+        work = lambda bare: f"{on_project}::{bare}"
+
+        expected_gate_ids = {
+            gate("gate-gemini-scout"),
+            gate("gate-codex-code"),
+            gate("gate-grok-audit"),
+            gate("gate-conductor-verify"),
+            gate("gate-family"),
+        }
+        _check("templated ingest creates original + five gate tasks", on["tasks_created"] == 7 and expected_gate_ids.issubset(tasks), {"result": on, "tasks": sorted(tasks)})
+        _check("gate tasks are in scoped gate phase", all(tasks[task_id]["phase_id"] == gate("forced-subrole-gate") for task_id in expected_gate_ids), tasks)
+        _check("gate owners are forced sub-roles", {
+            tasks[gate("gate-gemini-scout")]["owner"],
+            tasks[gate("gate-codex-code")]["owner"],
+            tasks[gate("gate-grok-audit")]["owner"],
+            tasks[gate("gate-conductor-verify")]["owner"],
+            tasks[gate("gate-family")]["owner"],
+        } == {"gemini", "codex", "grok", "conductor", "family"}, tasks)
+        _check("codex-code depends on gemini-scout", tasks[gate("gate-codex-code")]["depends_on"] == [gate("gate-gemini-scout")], tasks[gate("gate-codex-code")])
+        _check("work root depends on codex-code", gate("gate-codex-code") in tasks[work("scout")]["depends_on"], tasks[work("scout")])
+        _check("work chain remains intact", work("scout") in tasks[work("ship")]["depends_on"], tasks[work("ship")])
+        _check("grok-audit depends on work leaf", work("ship") in tasks[gate("gate-grok-audit")]["depends_on"], tasks[gate("gate-grok-audit")])
+        _check("conductor/family chain is intact", tasks[gate("gate-conductor-verify")]["depends_on"] == [gate("gate-grok-audit")] and tasks[gate("gate-family")]["depends_on"] == [gate("gate-conductor-verify")], tasks)
+    finally:
+        if old_enabled is None:
+            os.environ.pop("ORCH_GATE_TEMPLATE_ENABLED", None)
+        else:
+            os.environ["ORCH_GATE_TEMPLATE_ENABLED"] = old_enabled
+        _cleanup()
+
+    if FAILURES:
+        print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
+        return 1
+    print("\nPASS - flagged plan ingest creates forced sub-role gate tasks and dependencies.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
