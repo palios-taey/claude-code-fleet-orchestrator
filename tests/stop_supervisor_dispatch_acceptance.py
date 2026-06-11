@@ -63,22 +63,27 @@ def _set_done(worker: str, task_id: str) -> None:
 
 
 def _set_stopped_bound(worker: str, task_id: str) -> None:
-    """Peer STOPPED without a clean done (error/interrupt/forgot -- its Stop hook
-    fired): current_task PERSISTS, idle SET. grok V1 / gatekeeper strand case A."""
+    """Peer STOPPED without a clean done (error/interrupt/forgot). In the heartbeat
+    model a stopped peer's last_activity STOPS refreshing -> goes STALE; no terminal
+    outcome. -> NOT working -> BLOCK (subsumes PR#39 grok-V1). idle is irrelevant now."""
     _R.set(_state_key(worker, "current_task"),
            json.dumps({"task_id": task_id, "started_at": time.time()}))
     _R.set(_state_key(worker, "idle"), "1")
+    _R.set(_state_key(worker, "last_activity"),
+           str(time.time() - (_PEER_HEARTBEAT_STALE_SEC + 60)))
+    _R.delete(_state_key(worker, "last_outcome"))
 
 
 def _set_crashed_bound(worker: str, task_id: str) -> None:
     """Peer HARD-KILLED (kill -9 / OOM / hook failure -- NO Stop hook ran):
-    current_task PERSISTS, idle NOT set, heartbeat STALE. The residual the idle
-    flag cannot see; the stale heartbeat must catch it. gatekeeper outcome=unknown."""
+    current_task PERSISTS, heartbeat STALE, no terminal outcome. -> NOT working ->
+    BLOCK (the stale heartbeat catches it). gatekeeper outcome=unknown."""
     _R.set(_state_key(worker, "current_task"),
            json.dumps({"task_id": task_id, "started_at": time.time()}))
     _R.delete(_state_key(worker, "idle"))
     _R.set(_state_key(worker, "last_activity"),
            str(time.time() - (_PEER_HEARTBEAT_STALE_SEC + 60)))
+    _R.delete(_state_key(worker, "last_outcome"))
 
 
 def _clear_peer(worker: str) -> None:

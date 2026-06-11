@@ -1,16 +1,15 @@
-"""Ship-gate e2e — NON-BINDING peer liveness (the codex/grok busy-loop fix).
+"""Ship-gate e2e — HEARTBEAT-based peer liveness (the codex/grok busy-loop fix).
 
-codex/grok CLIs never bind current_task and have no working-heartbeat, so the
-PR#39 binding check (current_task==T + idle + heartbeat) can NEVER see them as
-working -> the supervisor busy-looped on EVERY codex/grok dispatch. Their one
-reliable queryable signal is last_outcome (set on done/error) + RESPONSE_READY.
-
-_peer_actively_working_task now, for a worker with NO current_task:
-  - presume working (True) -> caller ALLOW_STOPs, RESPONSE_READY re-wakes;
-  - UNLESS it reported the task terminal (done/error/interrupt) -> awaits gate -> False;
-  - UNLESS the dispatch is older than _PEER_DISPATCH_STALE_SEC with no terminal
-    outcome -> dropped/dead -> re-check -> False.
-Binding peers (claude-clones) keep the precise PR#39 path. Production oracle:
+Empirically mapped 2026-06-11 (/tmp/codex_signal_lifecycle.log): while codex/grok work,
+their `last_activity` HEARTBEAT refreshes per tool-call and goes monotonically stale the
+instant they stop; their `idle` is useless (stuck=1) and `current_task` binds only
+inconsistently. So `_peer_actively_working_task` keys on the heartbeat:
+  - last_outcome terminal for this task     -> awaits gate           -> NOT working
+  - current_task bound to a DIFFERENT task  -> on other work         -> NOT working
+  - heartbeat FRESH (< _PEER_HEARTBEAT_STALE_SEC) + not terminal     -> WORKING (ALLOW)
+  - heartbeat STALE/absent                  -> stopped/dropped/dead  -> NOT working
+This subsumes PR#39 (a stopped/dead peer's heartbeat goes stale -> BLOCK) AND fixes the
+CLI peers (heartbeat fresh while working, even though idle is stuck). Production oracle:
 live Neo4j 10.0.0.163:7689 + Redis 127.0.0.1.
 """
 from __future__ import annotations
@@ -24,17 +23,15 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.orch_schema import (  # noqa: E402
-    create_project, create_phase, create_task, update_task_status, init_schema,
-    get_neo4j_driver, _state_key, _peer_actively_working_task,
-    _PEER_DISPATCH_STALE_SEC,
+    _state_key, _peer_actively_working_task, _PEER_HEARTBEAT_STALE_SEC,
 )
 from lib.config import OrchConfig, get_redis_sync  # noqa: E402
 
 CFG = OrchConfig()
 _R = get_redis_sync(CFG)
-_PFX = f"nbliven-ci-{uuid.uuid4().hex[:8]}"
-_SUP = f"{_PFX}-sup"
-_PEER = f"{_SUP}-codex"   # a non-binding CLI peer (codex)
+_PFX = f"hbliven-ci-{uuid.uuid4().hex[:8]}"
+_PEER = f"{_PFX}-sup-codex"   # a CLI peer
+T = f"{_PFX}::codexwork"
 _FAILURES: list[str] = []
 
 
@@ -44,80 +41,71 @@ def _check(label: str, cond: bool, extra: str = "") -> None:
         _FAILURES.append(label)
 
 
-def _no_binding(worker: str) -> None:
-    """A non-binding peer: NO current_task ever (codex/grok reality)."""
+def _reset(worker: str) -> None:
     for k in ("current_task", "idle", "last_activity", "last_outcome"):
         _R.delete(_state_key(worker, k))
 
 
-def _set_outcome(worker: str, outcome: str, task_id: str) -> None:
+def _hb(worker: str, age: float) -> None:
+    _R.set(_state_key(worker, "last_activity"), str(time.time() - age))
+
+
+def _outcome(worker: str, outcome: str, task_id: str) -> None:
     _R.set(_state_key(worker, "last_outcome"),
            json.dumps({"outcome": outcome, "details": f"{outcome.upper()} [{task_id}]"}))
 
 
-def _age_task(drv, task_id: str, seconds_ago: float) -> None:
-    """Backdate updated_at so the dispatch looks stale (dropped/dead)."""
-    with drv.session(database=CFG.neo4j_db) as s:
-        s.run("MATCH (t:OrchTask {id:$i}) SET t.updated_at = datetime() - duration({seconds: $sec})",
-              i=task_id, sec=int(seconds_ago))
+def _working(worker: str) -> bool:
+    return _peer_actively_working_task([worker], T, config=CFG)
 
 
 def main() -> int:
-    init_schema(config=CFG)
-    drv = get_neo4j_driver(CFG)
-    with drv.session(database=CFG.neo4j_db) as s:
-        s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
     try:
-        P = f"{_PFX}-A"
-        create_project(project_id=P, name=P, supervisor=_SUP, config=CFG)
-        create_phase(project_id=P, phase_id=f"{P}::ph", name="ph", config=CFG)
-        T = f"{P}::codexwork"
-        create_task(phase_id=f"{P}::ph", task_id=T, description="codex build", owner=_PEER,
-                    wake_owner_if_ready=False, config=CFG)
-        update_task_status(T, "in_progress", owner=_PEER, config=CFG)  # fresh dispatch
+        _reset(_PEER)
+        # codex reality: idle STUCK=1, current_task ABSENT -- must NOT block by themselves.
+        _R.set(_state_key(_PEER, "idle"), "1")
 
-        # 1. THE FIX: non-binding peer, fresh dispatch, no terminal outcome -> WORKING (True)
-        _no_binding(_PEER)
-        _check("non-binding + fresh + no-outcome -> WORKING (busy-loop fixed)",
-               _peer_actively_working_task([_PEER], T, config=CFG) is True)
+        # 1. THE FIX: fresh heartbeat + no terminal (idle stuck, current_task absent) -> WORKING
+        _hb(_PEER, 5)
+        _check("fresh heartbeat + no terminal (idle stuck=1, ct absent) -> WORKING (busy-loop fix)",
+               _working(_PEER) is True)
 
-        # 2. reported DONE -> awaits gate -> NOT working (False)
-        _set_outcome(_PEER, "done", T)
-        _check("non-binding + last_outcome=done(this task) -> NOT working (gate)",
-               _peer_actively_working_task([_PEER], T, config=CFG) is False)
+        # 2. reported DONE -> awaits gate -> NOT working (even with fresh heartbeat)
+        _outcome(_PEER, "done", T)
+        _check("last_outcome=done(this task) -> NOT working (gate)", _working(_PEER) is False)
 
-        # 3. reported ERROR -> needs investigation -> NOT working (False)
-        _set_outcome(_PEER, "error", T)
-        _check("non-binding + last_outcome=error(this task) -> NOT working (investigate)",
-               _peer_actively_working_task([_PEER], T, config=CFG) is False)
+        # 3. reported ERROR -> investigate -> NOT working
+        _outcome(_PEER, "error", T)
+        _check("last_outcome=error(this task) -> NOT working (investigate)", _working(_PEER) is False)
 
-        # 4. last_outcome is for a DIFFERENT task -> not terminal-for-T -> WORKING (True)
-        _set_outcome(_PEER, "done", f"{P}::someoldtask")
-        _check("non-binding + last_outcome=done(OTHER task) -> WORKING (still on T)",
-               _peer_actively_working_task([_PEER], T, config=CFG) is True)
+        # 4. last_outcome for a DIFFERENT task + fresh heartbeat -> WORKING (still on T)
+        _outcome(_PEER, "done", f"{_PFX}::othertask")
+        _check("last_outcome=done(OTHER task) + fresh hb -> WORKING", _working(_PEER) is True)
 
-        # 5. DROPPED/DEAD dispatch: no terminal outcome but dispatch is stale -> NOT working
-        _no_binding(_PEER)
-        _age_task(drv, T, _PEER_DISPATCH_STALE_SEC + 600)
-        _check("non-binding + stale dispatch + no-outcome -> NOT working (dropped/dead, re-check)",
-               _peer_actively_working_task([_PEER], T, config=CFG) is False)
+        # 5. STALE heartbeat + no terminal -> stopped/dropped/dead -> NOT working
+        _reset(_PEER); _R.set(_state_key(_PEER, "idle"), "1")
+        _hb(_PEER, _PEER_HEARTBEAT_STALE_SEC + 60)
+        _check("stale heartbeat + no terminal -> NOT working (stopped/dropped/dead, subsumes PR#39)",
+               _working(_PEER) is False)
 
-        # 6. BINDING peer regression: current_task bound + fresh heartbeat -> WORKING (True)
-        with drv.session(database=CFG.neo4j_db) as s:
-            s.run("MATCH (t:OrchTask {id:$i}) SET t.updated_at = datetime()", i=T)  # refresh
-        _R.set(_state_key(_PEER, "current_task"), json.dumps({"task_id": T, "started_at": time.time()}))
-        _R.delete(_state_key(_PEER, "idle"))
-        _R.set(_state_key(_PEER, "last_activity"), str(time.time()))
-        _check("BINDING peer bound + fresh heartbeat -> WORKING (PR#39 path intact)",
-               _peer_actively_working_task([_PEER], T, config=CFG) is True)
+        # 6. ABSENT heartbeat -> cannot confirm working -> NOT working (fail-closed)
+        _reset(_PEER)
+        _check("absent heartbeat -> NOT working (fail-closed)", _working(_PEER) is False)
+
+        # 7. current_task bound to a DIFFERENT task + fresh hb -> NOT working THIS one
+        _hb(_PEER, 2)
+        _R.set(_state_key(_PEER, "current_task"), json.dumps({"task_id": f"{_PFX}::other"}))
+        _check("current_task bound to DIFFERENT task -> NOT working THIS one", _working(_PEER) is False)
+
+        # 8. current_task bound to THIS task + fresh hb -> WORKING (bonus binding precision)
+        _R.set(_state_key(_PEER, "current_task"), json.dumps({"task_id": T}))
+        _check("current_task bound to THIS task + fresh hb -> WORKING", _working(_PEER) is True)
     finally:
-        _no_binding(_PEER)
-        with drv.session(database=CFG.neo4j_db) as s:
-            s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
+        _reset(_PEER)
     if _FAILURES:
         print(f"\nFAIL — {len(_FAILURES)}: {_FAILURES}")
         return 1
-    print("\nPASS — non-binding (codex/grok) liveness: presume-working-unless-terminal-or-stale; binding path intact.")
+    print("\nPASS — heartbeat-based liveness: fresh-hb+not-terminal=working; subsumes PR#39 via stale-hb; CLI idle/ct ignored.")
     return 0
 
 
