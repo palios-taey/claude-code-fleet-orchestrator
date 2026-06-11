@@ -91,7 +91,7 @@ def _clean() -> None:
     redis_client = _redis_connect()
     redis_client.delete(_state_key(WORKER, "current_task"))
     redis_client.delete(_state_key(WORKER, "last_outcome"))
-    redis_client.delete(f"taey:orch-watch-stuck:{WORKER}:{PREFIX}::f12")
+    redis_client.delete(_state_key("orch-watch-stuck", f"{WORKER}:{PREFIX}::f12"))
 
 
 def _setup_graph() -> None:

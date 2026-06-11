@@ -127,7 +127,7 @@ def bind_current_task(
 
     pipe = r.pipeline(transaction=True)
     pipe.delete(_state_key(worker, "last_outcome"))
-    pipe.delete(f"taey:orch-watch-stuck:{worker}:{task_id}")
+    pipe.delete(_state_key("orch-watch-stuck", f"{worker}:{task_id}"))
     pipe.set(_state_key(worker, "current_task"), json.dumps(current_task))
     if set_parent and supervisor:
         pipe.set(_state_key(worker, "parent"), supervisor)
@@ -160,7 +160,7 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
         record = session.run(
             """
             MATCH (t:OrchTask {id: $task_id})
-            SET t._claim_lock = coalesce(t._claim_lock, 0) + 1
+            SET t._claim_lock = true
             WITH t
             WHERE coalesce(t.status, 'pending') = 'pending'
               AND NOT EXISTS {
@@ -337,7 +337,7 @@ def _mark_in_progress_best_effort(task_id: str, worker: str) -> bool:
         record = session.run(
             """
             MATCH (t:OrchTask {id: $task_id})
-            SET t._claim_lock = coalesce(t._claim_lock, 0) + 1
+            SET t._claim_lock = true
             WITH t
             WHERE coalesce(t.status, 'pending') = 'pending'
               AND NOT EXISTS {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -11,9 +12,10 @@ from fastapi import APIRouter, HTTPException, Request
 
 from lib.config import OrchConfig, get_redis_async
 
-CHAT_KEY_PREFIX = "taey:chat:"
-OPENQ_KEY_PREFIX = "taey:openq:"
-NEEDS_YOU_KEY_PREFIX = "taey:needs_you:"
+_NOTIFY_KEY_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+CHAT_KEY_PREFIX = f"{_NOTIFY_KEY_PREFIX}:chat:"
+OPENQ_KEY_PREFIX = f"{_NOTIFY_KEY_PREFIX}:openq:"
+NEEDS_YOU_KEY_PREFIX = f"{_NOTIFY_KEY_PREFIX}:needs_you:"
 MEMORY_BASE = Path.home() / ".claude" / "projects"
 MAX_LINEAGE_LEN = 160
 MAX_MESSAGE_LEN = 20000

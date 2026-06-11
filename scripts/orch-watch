@@ -109,25 +109,46 @@ log = logging.getLogger(__name__)
 # Reuse fleet-notify's supervisor resolution rule so this daemon and the
 # Stop hook never disagree about who to address.
 SUFFIX_SUPERVISOR_RULES = ("-codex", "-gemini", "-grok")
+NOTIFY_KEY_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+
+
+def state_key(node_id: str, suffix: str) -> str:
+    return f"{NOTIFY_KEY_PREFIX}:{node_id}:{suffix}"
+
+
+def orch_key(namespace: str, *parts: str) -> str:
+    return ":".join([NOTIFY_KEY_PREFIX, namespace, *[str(part) for part in parts]])
+
+
+def current_task_scan_pattern() -> str:
+    return f"{NOTIFY_KEY_PREFIX}:*:current_task"
+
+
+def node_from_current_task_key(key: str) -> Optional[str]:
+    prefix = f"{NOTIFY_KEY_PREFIX}:"
+    suffix = ":current_task"
+    if not key.startswith(prefix) or not key.endswith(suffix):
+        return None
+    return key[len(prefix):-len(suffix)]
 
 # Redis key patterns the daemon subscribes to. KEYSPACE notifications
 # arrive on channels named __keyspace@<db>__:<key>. We subscribe via
 # PSUBSCRIBE with glob patterns.
 SUBSCRIBE_PATTERNS = (
-    "__keyspace@0__:taey:*:current_task",
-    "__keyspace@0__:taey:*:idle",
-    "__keyspace@0__:taey:*:last_activity",
+    f"__keyspace@0__:{NOTIFY_KEY_PREFIX}:*:current_task",
+    f"__keyspace@0__:{NOTIFY_KEY_PREFIX}:*:idle",
+    f"__keyspace@0__:{NOTIFY_KEY_PREFIX}:*:last_activity",
 )
 
-# Extract <node> from "__keyspace@0__:taey:<node>:<suffix>"
-_KEY_RE = re.compile(r"^__keyspace@\d+__:taey:(.+):([a-z_]+)$")
+# Extract <node> from "__keyspace@0__:<prefix>:<node>:<suffix>"
+_KEY_RE = re.compile(rf"^__keyspace@\d+__:{re.escape(NOTIFY_KEY_PREFIX)}:(.+):([a-z_]+)$")
 
 
 def resolve_supervisor(r, node_id: str) -> Optional[str]:
     """Mirror fleet-notify's _resolve_supervisor: explicit override wins,
     else suffix-strip, else None."""
     try:
-        explicit = r.get(f"taey:{node_id}:parent")
+        explicit = r.get(state_key(node_id, "parent"))
         if explicit:
             return explicit
     except Exception:
@@ -149,7 +170,7 @@ def parse_node_from_channel(channel: str):
 
 def get_current_task(r, node_id: str):
     """Read taey:<node>:current_task as dict or None."""
-    raw = r.get(f"taey:{node_id}:current_task")
+    raw = r.get(state_key(node_id, "current_task"))
     if not raw:
         return None
     try:
@@ -160,7 +181,7 @@ def get_current_task(r, node_id: str):
 
 def get_last_outcome(r, node_id: str):
     """Read taey:<node>:last_outcome as dict or None."""
-    raw = r.get(f"taey:{node_id}:last_outcome")
+    raw = r.get(state_key(node_id, "last_outcome"))
     if not raw:
         return None
     try:
@@ -254,7 +275,7 @@ def _stop_gate_dedup(r, node_id: str, current_task_id: str, decision_key: str,
                      ttl_sec: int = 600) -> bool:
     try:
         return bool(r.set(
-            f"taey:orch-stop-gate:{node_id}:{current_task_id}:{decision_key}",
+            orch_key("orch-stop-gate", node_id, current_task_id, decision_key),
             "1",
             nx=True,
             ex=ttl_sec,
@@ -294,7 +315,7 @@ def _evaluate_user_stop_conditions(r, node_id: str, task_state: dict,
             if next_ready is None:
                 return condition, next_ready
         elif condition == "stop_when_user_explicit_decision_required_and_pending":
-            if r.get(f"taey:{node_id}:awaiting_user_decision"):
+            if r.get(state_key(node_id, "awaiting_user_decision")):
                 return condition, next_ready
         elif condition == "stop_when_blocked_on_external_signal_and_named":
             if ((task_state.get("blocked_on") or "").strip()):
@@ -414,7 +435,7 @@ def notify_supervisor_of_stuck(r, supervisor: str, node_id: str,
     The unblock path already keys correctly; this makes stuck consistent.
     """
     task_id = task.get("task_id", "?")
-    dedup_key = f"taey:orch-watch-stuck:{node_id}:{task_id}"
+    dedup_key = orch_key("orch-watch-stuck", node_id, task_id)
     if r.exists(dedup_key):
         return False
 
@@ -457,7 +478,7 @@ def notify_supervisor_of_unblock(r, supervisor: str, completed_task: dict,
     done-DEL unblocked their owned OrchTask. ``message`` is the body the
     readiness checker returned. Returns True if sent, False if deduped."""
     task_id = completed_task.get("task_id", "?")
-    dedup_key = f"taey:orch-watch-unblock:{supervisor}:{task_id}"
+    dedup_key = orch_key("orch-watch-unblock", supervisor, task_id)
     if r.exists(dedup_key):
         return False
 
@@ -496,14 +517,14 @@ def handle_done_del(r, node_id: str, snapshot: dict,
                   node_id)
         return
 
-    done_marker = r.get(f"taey:{node_id}:last_clear_was_done")
+    done_marker = r.get(state_key(node_id, "last_clear_was_done"))
     if not done_marker:
         log.debug("DEL on %s but no done-marker — treating as force-clear, "
                   "skipping readiness check.", node_id)
         return
     # Consume the marker so we don't double-fire if the same DEL event
     # arrives twice (rare but possible under PSUBSCRIBE+sweep overlap).
-    r.delete(f"taey:{node_id}:last_clear_was_done")
+    r.delete(state_key(node_id, "last_clear_was_done"))
 
     completed_task = snapshot.get("task")
     supervisor = snapshot.get("supervisor") or resolve_supervisor(r, node_id)
@@ -512,7 +533,7 @@ def handle_done_del(r, node_id: str, snapshot: dict,
 
     # Only wake if the supervisor is currently idle. If they're working,
     # they'll see the unblocked task on their next pull (taey-plan next).
-    if not r.get(f"taey:{supervisor}:idle"):
+    if not r.get(state_key(supervisor, "idle")):
         log.debug("Supervisor %s not idle; skip unblock wake.", supervisor)
         return
 
@@ -595,7 +616,7 @@ def investigate(r, node_id: str, event_type: str,
     if not task:
         return
 
-    idle = r.get(f"taey:{node_id}:idle")
+    idle = r.get(state_key(node_id, "idle"))
     if not idle:
         return
 
@@ -613,7 +634,7 @@ def investigate(r, node_id: str, event_type: str,
         # Skip the warning if last_activity is within the last 10s
         # (the CAS clear should have landed by then).
         try:
-            la = float(r.get(f"taey:{node_id}:last_activity") or 0)
+            la = float(r.get(state_key(node_id, "last_activity")) or 0)
         except Exception:
             la = 0
         if _redis_now(r) - la > 10:
@@ -643,7 +664,7 @@ def investigate(r, node_id: str, event_type: str,
     #
     # Equivalent expression: stuck_for = now - max(started_at, last_activity).
     # Compared to Redis-server time so cross-host clock skew is bounded.
-    last_activity_raw = r.get(f"taey:{node_id}:last_activity")
+    last_activity_raw = r.get(state_key(node_id, "last_activity"))
     try:
         last_activity = float(last_activity_raw) if last_activity_raw else 0.0
     except Exception:
@@ -736,10 +757,9 @@ def main():
     # Bootstrap _TASK_SNAPSHOTS so done-DEL events for already-existing
     # current_task keys have content to react to (the daemon may start
     # mid-dispatch).
-    for k in r.scan_iter(match="taey:*:current_task"):
-        parts = k.split(":", 2)
-        if len(parts) == 3:
-            node = parts[1]
+    for k in r.scan_iter(match=current_task_scan_pattern()):
+        node = node_from_current_task_key(k)
+        if node:
             task = get_current_task(r, node)
             if task:
                 _TASK_SNAPSHOTS[node] = {
@@ -783,10 +803,9 @@ def main():
             sweep_count = 0
             try:
                 _process_handoff_timeouts(r)
-                for k in r.scan_iter(match="taey:*:current_task"):
-                    parts = k.split(":", 2)
-                    if len(parts) == 3:
-                        node = parts[1]
+                for k in r.scan_iter(match=current_task_scan_pattern()):
+                    node = node_from_current_task_key(k)
+                    if node:
                         investigate(r, node, "sweep",
                                     args.stuck_threshold_sec,
                                     args.dedup_ttl_sec,
