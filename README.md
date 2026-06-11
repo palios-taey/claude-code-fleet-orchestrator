@@ -91,23 +91,16 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5002/api/projects
 
 (You can still run uvicorn directly — `python3 -m uvicorn lib.tasks_api:app --host "$ORCH_HOST" --port "$ORCH_PORT"` — but `orch serve` is the supported path.)
 
-### Serve the dashboard on your own network
+### Security boundary: localhost by default
 
 By default the dashboard binds `127.0.0.1` — reachable only from the machine it
-runs on. To open it to other devices on your LAN (phone, laptop, another
-workstation), set the bind interface in `.env` and relaunch:
-
-```bash
-# .env
-ORCH_HOST=0.0.0.0          # all interfaces; or a specific LAN IP like 10.0.0.5
-ORCH_PORT=5002
-ORCH_DASHBOARD_URL=http://10.0.0.5:5002   # a reachable address, kept in sync
-```
-
-Then `orch serve` (or `orch enable`) and open `http://<your-lan-ip>:5002/ui/`
-from any device on the network. **There is no authentication** — this is a
-single-user, local product — so only expose it on a network you trust, with no
-inbound port-forward from the internet.
+runs on. That localhost bind is the security boundary for the mutable API: the
+dashboard has no multi-user authentication and must not accept untrusted
+callers. Binding to any non-loopback interface or advertising a LAN URL is an
+explicit, deliberate operator opt-in for a trusted single-user network only.
+Keep the default `ORCH_HOST=127.0.0.1` and
+`ORCH_DASHBOARD_URL=http://127.0.0.1:5002` unless you have deliberately chosen
+that exposure boundary.
 
 ### Two-way chat box
 

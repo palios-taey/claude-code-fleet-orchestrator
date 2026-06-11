@@ -80,8 +80,8 @@ def _ensure_dotenv_loaded() -> None:
 
 def api_host() -> str:
     """Interface the dashboard binds to. Default 127.0.0.1 (this machine only).
-    Set ORCH_HOST=0.0.0.0 to serve every device on the local network, or a
-    specific LAN IP to bind just that interface."""
+    Any non-loopback ORCH_HOST is an explicit operator opt-in for a trusted
+    single-user network; the bind is the mutable API's security boundary."""
     _ensure_dotenv_loaded()
     return (os.environ.get("ORCH_HOST") or "127.0.0.1").strip() or "127.0.0.1"
 
