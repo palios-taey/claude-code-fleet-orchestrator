@@ -48,10 +48,51 @@ print(json.dumps({
     return json.loads(output.strip().splitlines()[-1])
 
 
+def _dotenv_quote_probe() -> dict:
+    """Loader must apply standard dotenv semantics to quoted/exported lines.
+
+    Operators quote values so one .env stays BOTH shell-sourceable and
+    loader-parseable (unquoted JSON braces brace-expand under
+    `set -a; . .env`). Live finding 2026-06-11: surrounding quotes reached
+    consumers, ORCH_SESSION_ROOTS failed JSON parse, every wake packet
+    rendered empty while the selection code was correct.
+    """
+    import tempfile
+    content = (
+        "PLAIN=1\n"
+        "export SINGLE_QUOTED_JSON='{\"conductor\":\"/tmp/x\"}'\n"
+        'DOUBLE_QUOTED="hello world"\n'
+        "INNER_QUOTE=it's-kept\n"
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as fh:
+        fh.write(content)
+        env_file = fh.name
+    env = {"PYTHONPATH": str(ROOT), "ORCH_DOTENV": env_file}
+    for key, value in os.environ.items():
+        if key.startswith("PYTHON") and key != "PYTHONPATH":
+            env[key] = value
+    code = """
+import json, os
+import lib.config  # triggers _load_dotenv_candidates()
+print(json.dumps({k: os.environ.get(k) for k in
+    ("PLAIN", "SINGLE_QUOTED_JSON", "DOUBLE_QUOTED", "INNER_QUOTE")}))
+"""
+    output = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
+    os.unlink(env_file)
+    return json.loads(output.strip().splitlines()[-1])
+
+
 def main() -> int:
     probe = _minimal_config_probe()
     required = set(probe["required"])
     optional = set(probe["optional_names"])
+
+    quotes = _dotenv_quote_probe()
+    _check("plain values pass through", quotes["PLAIN"] == "1", quotes)
+    _check("export-prefixed single-quoted JSON is unwrapped and parseable",
+           json.loads(quotes["SINGLE_QUOTED_JSON"] or "null") == {"conductor": "/tmp/x"}, quotes)
+    _check("double-quoted values are unwrapped", quotes["DOUBLE_QUOTED"] == "hello world", quotes)
+    _check("interior quotes are preserved", quotes["INNER_QUOTE"] == "it's-kept", quotes)
 
     _check(
         "REQUIRED_ENV is only core Redis + Neo4j connectivity",
