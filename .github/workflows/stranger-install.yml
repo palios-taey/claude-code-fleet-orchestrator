@@ -50,14 +50,24 @@ jobs:
             echo "ORCH_NOTIFY_LIB_ROOT=$HOME/fleet-notify"
           } >> "$GITHUB_ENV"
 
-      - name: "README Install: scripts/install"
-        run: scripts/install
-
-      - name: "README Smoke test, VERBATIM"
+      - name: "README Install: scripts/install + source .venv/bin/activate"
         run: |
+          scripts/install
+          source .venv/bin/activate
+
+      - name: "README Smoke test, VERBATIM (new shell -> re-source per README)"
+        run: |
+          source .venv/bin/activate
           python3 -c "import fleet_orchestrator; print(fleet_orchestrator.__version__)"
           orch doctor --explain-scope
           orch-cron --help
           orch-watch --help
           taey-plan --help
           taey-task --help
+
+      - name: "diagnostics on failure (daemon + API logs, so a red run explains itself)"
+        if: failure()
+        run: |
+          echo "=== /tmp/notify-daemon.log ==="; cat /tmp/notify-daemon.log 2>/dev/null || echo "(absent)"
+          echo "=== orchestrator-run logs in /tmp ==="; ls -la /tmp | head -20
+          for f in /tmp/orch*.log /tmp/*api*.log; do [ -f "$f" ] && { echo "=== $f ==="; tail -30 "$f"; }; done

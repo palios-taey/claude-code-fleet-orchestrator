@@ -902,7 +902,17 @@ def ensure_claude_integration(*, dry_run: bool = False) -> Dict[str, Any]:
 
     try:
         _write_pending_hook_transaction(pre_hooks)
-        subprocess.run([str(notify_script("install-hooks.sh")), "--apply"], check=True, cwd=str(resolve_notify_root()))
+        # The notify starter launches its daemon with bare `python3`. On a fresh
+        # machine the daemon's deps (redis) exist ONLY in this repo's venv, so the
+        # daemon dies on import within a second and doctor correctly reports it
+        # not-running (stranger-install gate, first red run 2026-06-11). Prefix
+        # the venv bin so `python3` inside the starter resolves to an interpreter
+        # that can actually run the daemon. No-op when the venv is absent.
+        notify_env = os.environ.copy()
+        venv_bin = venv_python_path().parent
+        if venv_bin.is_dir():
+            notify_env["PATH"] = f"{venv_bin}{os.pathsep}{notify_env.get('PATH', '')}"
+        subprocess.run([str(notify_script("install-hooks.sh")), "--apply"], check=True, cwd=str(resolve_notify_root()), env=notify_env)
         after_notify, _ = load_claude_settings(CLAUDE_SETTINGS_PATH)
         _dedupe_expected_hook_commands(after_notify)
         hook_commands_added = _command_delta(pre_hooks, snapshot_expected_hook_commands(after_notify))
@@ -1038,10 +1048,20 @@ def _doctor_infra() -> CheckResult:
 
 def _doctor_health() -> CheckResult:
     url = f"{api_base().rstrip('/')}/health"
-    try:
-        payload = http_json(url)
-    except Exception as exc:
-        return CheckResult("health", False, f"{url} unreachable: {exc}", "run `orch enable` or start uvicorn on :5002")
+    # Doctor runs seconds after install spawns the API; a freshly started uvicorn
+    # needs a few seconds to bind, so a single instant probe loses the startup race
+    # (stranger-install gate, first red run 2026-06-11: 'Connection refused' on an
+    # API that came up fine moments later). Retry within a bounded window before
+    # declaring failure; a genuinely-down API still fails loudly after ~20s.
+    deadline = time.monotonic() + 20
+    while True:
+        try:
+            payload = http_json(url)
+            break
+        except Exception as exc:
+            if time.monotonic() >= deadline:
+                return CheckResult("health", False, f"{url} unreachable after 20s: {exc}", "run `orch enable` or start uvicorn on :5002")
+            time.sleep(1)
     expected = package_version()
     actual = payload.get("version")
     if not payload.get("ok"):
