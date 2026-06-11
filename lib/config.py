@@ -298,6 +298,11 @@ def get_redis_async(config: Optional[OrchConfig] = None) -> aioredis.Redis:
 
 
 def get_neo4j_driver(config: Optional[OrchConfig] = None):
+    """Return the process-wide Neo4j driver singleton.
+
+    Callers own short-lived sessions via ``with driver.session(...)``; the shared
+    driver is intentionally not closed by schema helpers.
+    """
     global _neo4j_driver, _neo4j_driver_config
     from neo4j import GraphDatabase
 

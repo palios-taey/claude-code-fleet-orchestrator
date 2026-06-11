@@ -80,6 +80,10 @@ class TaskIdCollisionError(ValueError):
     pass
 
 
+class TaskParentNotFoundError(TaskIdCollisionError):
+    pass
+
+
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
@@ -1378,23 +1382,20 @@ def init_schema(config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     driver = get_neo4j_driver(cfg)
     results = {"constraints": [], "indexes": [], "errors": []}
 
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            for stmt in SCHEMA_CONSTRAINTS:
-                try:
-                    session.run(stmt)
-                    results["constraints"].append(stmt.split("FOR")[0].strip())
-                except Exception as e:
-                    results["errors"].append(f"{stmt[:60]}: {e}")
+    with driver.session(database=cfg.neo4j_db) as session:
+        for stmt in SCHEMA_CONSTRAINTS:
+            try:
+                session.run(stmt)
+                results["constraints"].append(stmt.split("FOR")[0].strip())
+            except Exception as e:
+                results["errors"].append(f"{stmt[:60]}: {e}")
 
-            for stmt in SCHEMA_INDEXES:
-                try:
-                    session.run(stmt)
-                    results["indexes"].append(stmt.split("FOR")[0].strip())
-                except Exception as e:
-                    results["errors"].append(f"{stmt[:60]}: {e}")
-    finally:
-        pass  # Driver is singleton; do not close
+        for stmt in SCHEMA_INDEXES:
+            try:
+                session.run(stmt)
+                results["indexes"].append(stmt.split("FOR")[0].strip())
+            except Exception as e:
+                results["errors"].append(f"{stmt[:60]}: {e}")
 
     return results
 
@@ -1428,71 +1429,68 @@ def create_project(project_id: str, name: str, description: str = "",
         "source_surface": "api" if source_kind == "api" else "system",
         "reason": "project created",
     }]
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MERGE (p:OrchProject {id: $id})
-                ON CREATE SET p.created_at = datetime(), p.status = 'active'
-                SET p.name = $name,
-                    p.description = $description,
-                    p.supervisor = $supervisor,
-                    p.priority = $priority,
-                    p.user_stop_conditions = CASE
-                        WHEN $user_stop_conditions IS NULL THEN coalesce(p.user_stop_conditions, '[]')
-                        ELSE $user_stop_conditions
-                    END,
-                    p.refs = CASE
-                        WHEN $refs IS NULL THEN coalesce(p.refs, '[]')
-                        ELSE $refs
-                    END,
-                    p.stop_reason_current = coalesce(p.stop_reason_current, ''),
-                    p.stop_reason_history = coalesce(p.stop_reason_history, '[]'),
-                    p.priority_history = CASE
-                        WHEN p.priority_history IS NULL OR p.priority_history = '' THEN $priority_history
-                        ELSE p.priority_history
-                    END,
-                    p.migration_exempt = coalesce(p.migration_exempt, $migration_exempt),
-                    p.in_progress_heartbeat_at = coalesce(p.in_progress_heartbeat_at, ''),
-                    p.source_path = CASE
-                        WHEN $source_path IS NULL OR $source_path = '' THEN p.source_path
-                        ELSE $source_path
-                    END,
-                    p.source_sha256 = CASE
-                        WHEN $source_sha256 IS NULL OR $source_sha256 = '' THEN p.source_sha256
-                        ELSE $source_sha256
-                    END,
-                    p.source_kind = CASE
-                        WHEN $source_kind IS NULL OR $source_kind = '' THEN p.source_kind
-                        ELSE $source_kind
-                    END,
-                    p.ingested_at = CASE
-                        WHEN $ingested_at IS NULL OR $ingested_at = '' THEN p.ingested_at
-                        ELSE datetime($ingested_at)
-                    END,
-                    p.ingested_by = CASE
-                        WHEN $ingested_by IS NULL OR $ingested_by = '' THEN p.ingested_by
-                        ELSE $ingested_by
-                    END
-                RETURN p.id AS id
-            """,
-                id=project_id,
-                name=name,
-                description=description,
-                supervisor=supervisor_value,
-                priority=priority_value,
-                source_path=source_path,
-                source_sha256=source_sha256,
-                source_kind=source_kind,
-                ingested_at=ingested_at,
-                ingested_by=ingested_by,
-                refs=_encode_refs_or_none(refs),
-                user_stop_conditions=_json_encode(conditions_value),
-                priority_history=_json_encode(priority_history),
-                migration_exempt=bool(migration_exempt),
-            )
-            return result.single()["id"]
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MERGE (p:OrchProject {id: $id})
+            ON CREATE SET p.created_at = datetime(), p.status = 'active'
+            SET p.name = $name,
+                p.description = $description,
+                p.supervisor = $supervisor,
+                p.priority = $priority,
+                p.user_stop_conditions = CASE
+                    WHEN $user_stop_conditions IS NULL THEN coalesce(p.user_stop_conditions, '[]')
+                    ELSE $user_stop_conditions
+                END,
+                p.refs = CASE
+                    WHEN $refs IS NULL THEN coalesce(p.refs, '[]')
+                    ELSE $refs
+                END,
+                p.stop_reason_current = coalesce(p.stop_reason_current, ''),
+                p.stop_reason_history = coalesce(p.stop_reason_history, '[]'),
+                p.priority_history = CASE
+                    WHEN p.priority_history IS NULL OR p.priority_history = '' THEN $priority_history
+                    ELSE p.priority_history
+                END,
+                p.migration_exempt = coalesce(p.migration_exempt, $migration_exempt),
+                p.in_progress_heartbeat_at = coalesce(p.in_progress_heartbeat_at, ''),
+                p.source_path = CASE
+                    WHEN $source_path IS NULL OR $source_path = '' THEN p.source_path
+                    ELSE $source_path
+                END,
+                p.source_sha256 = CASE
+                    WHEN $source_sha256 IS NULL OR $source_sha256 = '' THEN p.source_sha256
+                    ELSE $source_sha256
+                END,
+                p.source_kind = CASE
+                    WHEN $source_kind IS NULL OR $source_kind = '' THEN p.source_kind
+                    ELSE $source_kind
+                END,
+                p.ingested_at = CASE
+                    WHEN $ingested_at IS NULL OR $ingested_at = '' THEN p.ingested_at
+                    ELSE datetime($ingested_at)
+                END,
+                p.ingested_by = CASE
+                    WHEN $ingested_by IS NULL OR $ingested_by = '' THEN p.ingested_by
+                    ELSE $ingested_by
+                END
+            RETURN p.id AS id
+        """,
+            id=project_id,
+            name=name,
+            description=description,
+            supervisor=supervisor_value,
+            priority=priority_value,
+            source_path=source_path,
+            source_sha256=source_sha256,
+            source_kind=source_kind,
+            ingested_at=ingested_at,
+            ingested_by=ingested_by,
+            refs=_encode_refs_or_none(refs),
+            user_stop_conditions=_json_encode(conditions_value),
+            priority_history=_json_encode(priority_history),
+            migration_exempt=bool(migration_exempt),
+        )
+        return result.single()["id"]
 
 
 def create_phase(project_id: str, phase_id: str, name: str,
@@ -1503,33 +1501,30 @@ def create_phase(project_id: str, phase_id: str, name: str,
     """Create an OrchPhase linked to a project."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            # Same ownership guard as create_task (R3 audit CRITICAL: the phase path was unhardened —
-            # /api/projects/{id}/phases passes a caller phase_id straight to this bare MERGE). Refuse if
-            # $phase_id already exists owned by another project / fused / orphan.
-            _guard_creatable(session, label="OrchPhase", node_id=phase_id, target_project_id=project_id)
-            result = session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                MERGE (ph:OrchPhase {id: $phase_id})
-                ON CREATE SET ph.created_at = datetime(), ph.status = 'pending'
-                SET ph.name = $name,
-                    ph.order = $order,
-                    ph.refs = CASE
-                        WHEN $refs IS NULL THEN coalesce(ph.refs, '[]')
-                        ELSE $refs
-                    END,
-                    ph.source_path = CASE
-                        WHEN $source_path IS NULL OR $source_path = '' THEN ph.source_path
-                        ELSE $source_path
-                    END
-                MERGE (p)-[:HAS_PHASE]->(ph)
-                RETURN ph.id AS id
-            """, project_id=project_id, phase_id=phase_id, name=name, order=order,
-                 refs=_encode_refs_or_none(refs), source_path=source_path)
-            return result.single()["id"]
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        # Same ownership guard as create_task (R3 audit CRITICAL: the phase path was unhardened —
+        # /api/projects/{id}/phases passes a caller phase_id straight to this bare MERGE). Refuse if
+        # $phase_id already exists owned by another project / fused / orphan.
+        _guard_creatable(session, label="OrchPhase", node_id=phase_id, target_project_id=project_id)
+        result = session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            MERGE (ph:OrchPhase {id: $phase_id})
+            ON CREATE SET ph.created_at = datetime(), ph.status = 'pending'
+            SET ph.name = $name,
+                ph.order = $order,
+                ph.refs = CASE
+                    WHEN $refs IS NULL THEN coalesce(ph.refs, '[]')
+                    ELSE $refs
+                END,
+                ph.source_path = CASE
+                    WHEN $source_path IS NULL OR $source_path = '' THEN ph.source_path
+                    ELSE $source_path
+                END
+            MERGE (p)-[:HAS_PHASE]->(ph)
+            RETURN ph.id AS id
+        """, project_id=project_id, phase_id=phase_id, name=name, order=order,
+             refs=_encode_refs_or_none(refs), source_path=source_path)
+        return result.single()["id"]
 
 
 # Owner-traversal per node label, for the shared creation guard.
@@ -1576,6 +1571,8 @@ def _resolve_phase_project(session, phase_id: str) -> str:
         pid=phase_id,
     ).single()
     owners = (rec["owners"] if rec else []) or []
+    if not owners:
+        raise TaskParentNotFoundError(f"phase '{phase_id}' not found; cannot create task under a missing phase")
     if len(owners) != 1:
         raise TaskIdCollisionError(
             f"phase '{phase_id}' does not resolve to exactly one project (owners={owners or 'none'}); "
@@ -1605,68 +1602,68 @@ def create_task(
     """Create an OrchTask linked to a phase."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            # Ownership guard via the shared chokepoint (R2/R3/R4 audit — do NOT delete, do NOT make
-            # conditional). Resolve THIS phase's project FAIL-CLOSED (raises on missing/orphan/fused
-            # phase), then refuse if $task_id already exists owned by anyone other than it
-            # (foreign/fused/orphan). Legit ingest never trips this (declared ids are auto-scoped).
-            _target = _resolve_phase_project(session, phase_id)
-            _guard_creatable(session, label="OrchTask", node_id=task_id, target_project_id=_target)
-            result = session.run("""
-                MATCH (ph:OrchPhase {id: $phase_id})
-                MERGE (t:OrchTask {id: $task_id})
-                ON CREATE SET t.created_at = datetime(),
-                              t.status = $initial_status,
-                              t.owner = $owner,
-                              t.forced_continuation_count = 0
-                SET t.description = $description,
-                    t.priority = $priority,
-                    t.owner = $owner,
-                    t.created_by = CASE
-                        WHEN $created_by = '' THEN t.created_by
-                        ELSE $created_by
-                    END,
-                    t.task_type = CASE
-                        WHEN $task_type = '' THEN t.task_type
-                        ELSE $task_type
-                    END,
-                    t.refs = CASE
-                        WHEN $refs IS NULL THEN coalesce(t.refs, '[]')
-                        ELSE $refs
-                    END,
-                    t.source_path = CASE
-                        WHEN $source_path IS NULL OR $source_path = '' THEN t.source_path
-                        ELSE $source_path
-                    END,
-                    t.capability_tags = $capability_tags,
-                    t.file_blast_radius = $file_blast_radius,
-                    t.estimated_tokens = $estimated_tokens,
-                    t.heartbeat_exempt_secs = $heartbeat_exempt_secs
-                MERGE (ph)-[:HAS_TASK]->(t)
-                RETURN t.id AS id
-            """,
-                task_id=task_id,
-                phase_id=phase_id,
-                description=description,
-                priority=priority,
-                owner=owner,
-                created_by=created_by,
-                task_type=task_type,
-                refs=_encode_refs_or_none(refs),
-                source_path=source_path,
-                capability_tags=capability_tags or [],
-                file_blast_radius=file_blast_radius or [],
-                estimated_tokens=estimated_tokens,
-                heartbeat_exempt_secs=heartbeat_exempt_secs,
-                initial_status=initial_status,
-            )
-            created_id = result.single()["id"]
-        if wake_owner_if_ready:
-            _wake_owner_for_zero_dep_task(created_id, cfg)
-        return created_id
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        # Ownership guard via the shared chokepoint (R2/R3/R4 audit — do NOT delete, do NOT make
+        # conditional). Resolve THIS phase's project FAIL-CLOSED (raises on missing/orphan/fused
+        # phase), then refuse if $task_id already exists owned by anyone other than it
+        # (foreign/fused/orphan). Legit ingest never trips this (declared ids are auto-scoped).
+        _target = _resolve_phase_project(session, phase_id)
+        _guard_creatable(session, label="OrchTask", node_id=task_id, target_project_id=_target)
+        result = session.run("""
+            MATCH (ph:OrchPhase {id: $phase_id})
+            MERGE (t:OrchTask {id: $task_id})
+            ON CREATE SET t.created_at = datetime(),
+                          t.status = $initial_status,
+                          t.owner = $owner,
+                          t.forced_continuation_count = 0
+            SET t.description = $description,
+                t.priority = $priority,
+                t.owner = $owner,
+                t.created_by = CASE
+                    WHEN $created_by = '' THEN t.created_by
+                    ELSE $created_by
+                END,
+                t.task_type = CASE
+                    WHEN $task_type = '' THEN t.task_type
+                    ELSE $task_type
+                END,
+                t.refs = CASE
+                    WHEN $refs IS NULL THEN coalesce(t.refs, '[]')
+                    ELSE $refs
+                END,
+                t.source_path = CASE
+                    WHEN $source_path IS NULL OR $source_path = '' THEN t.source_path
+                    ELSE $source_path
+                END,
+                t.capability_tags = $capability_tags,
+                t.file_blast_radius = $file_blast_radius,
+                t.estimated_tokens = $estimated_tokens,
+                t.heartbeat_exempt_secs = $heartbeat_exempt_secs
+            MERGE (ph)-[:HAS_TASK]->(t)
+            RETURN t.id AS id
+        """,
+            task_id=task_id,
+            phase_id=phase_id,
+            description=description,
+            priority=priority,
+            owner=owner,
+            created_by=created_by,
+            task_type=task_type,
+            refs=_encode_refs_or_none(refs),
+            source_path=source_path,
+            capability_tags=capability_tags or [],
+            file_blast_radius=file_blast_radius or [],
+            estimated_tokens=estimated_tokens,
+            heartbeat_exempt_secs=heartbeat_exempt_secs,
+            initial_status=initial_status,
+        )
+        record = result.single()
+        if record is None:
+            raise TaskParentNotFoundError(f"phase '{phase_id}' not found; cannot create task '{task_id}'")
+        created_id = record["id"]
+    if wake_owner_if_ready:
+        _wake_owner_for_zero_dep_task(created_id, cfg)
+    return created_id
 
 
 def set_overall_refs(refs: List[Dict[str, Any]], config: Optional[OrchConfig] = None) -> Dict[str, Any]:
@@ -1745,45 +1742,39 @@ def add_dependency(task_id: str, depends_on_id: str,
     """Create DEPENDS_ON relationship between tasks."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                OPTIONAL MATCH (t:OrchTask {id: $task_id})
-                OPTIONAL MATCH (dep:OrchTask {id: $depends_on_id})
-                FOREACH (_ IN CASE WHEN t IS NOT NULL AND dep IS NOT NULL THEN [1] ELSE [] END |
-                    MERGE (t)-[:DEPENDS_ON]->(dep)
-                )
-                RETURN (t IS NOT NULL) AS t_exists,
-                       (dep IS NOT NULL) AS dep_exists
-            """, task_id=task_id, depends_on_id=depends_on_id)
-            record = result.single()
-            return bool(record and record["t_exists"] and record["dep_exists"])
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            OPTIONAL MATCH (t:OrchTask {id: $task_id})
+            OPTIONAL MATCH (dep:OrchTask {id: $depends_on_id})
+            FOREACH (_ IN CASE WHEN t IS NOT NULL AND dep IS NOT NULL THEN [1] ELSE [] END |
+                MERGE (t)-[:DEPENDS_ON]->(dep)
+            )
+            RETURN (t IS NOT NULL) AS t_exists,
+                   (dep IS NOT NULL) AS dep_exists
+        """, task_id=task_id, depends_on_id=depends_on_id)
+        record = result.single()
+        return bool(record and record["t_exists"] and record["dep_exists"])
 
 
 def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
     """Get tasks that are pending with all dependencies satisfied."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (t:OrchTask {status: 'pending'})
-                WHERE NOT EXISTS {
-                    MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                    WHERE dep.status <> 'completed'
-                }
-                RETURN t.id AS id, t.description AS description,
-                       t.priority AS priority, t.owner AS owner,
-                       t.capability_tags AS capability_tags,
-                       t.file_blast_radius AS file_blast_radius,
-                       t.estimated_tokens AS estimated_tokens
-                ORDER BY coalesce(t.priority, 999999999) ASC
-            """)
-            return [dict(r) for r in result]
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (t:OrchTask {status: 'pending'})
+            WHERE NOT EXISTS {
+                MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+                WHERE dep.status <> 'completed'
+            }
+            RETURN t.id AS id, t.description AS description,
+                   t.priority AS priority, t.owner AS owner,
+                   t.capability_tags AS capability_tags,
+                   t.file_blast_radius AS file_blast_radius,
+                   t.estimated_tokens AS estimated_tokens
+            ORDER BY coalesce(t.priority, 999999999) ASC
+        """)
+        return [dict(r) for r in result]
 
 
 def update_task_status(task_id: str, status: str, owner: str = "",
@@ -1817,111 +1808,108 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     completion_evidence_value = _normalize_completion_evidence(completion_evidence) if status == "completed" else None
     if status != "completed" and completion_evidence is not None:
         raise CompletionEvidenceError("completion evidence is only valid on a completed transition")
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            if result is None:
-                rec = session.run("""
-                    MATCH (t:OrchTask {id: $task_id})
-                    SET t.status = $status,
-                        t.owner = CASE WHEN coalesce(trim($owner), '') = '' THEN t.owner ELSE $owner END,
-                        t.blocked_on = CASE
-                            WHEN $status <> 'in_progress' THEN NULL
-                            WHEN $blocked_on = '__KEEP__' THEN t.blocked_on
-                            WHEN $blocked_on = '' THEN NULL
-                            ELSE $blocked_on
-                        END,
-                        t.forced_continuation_count = CASE
-                            WHEN t.status <> $status THEN 0
-                            WHEN coalesce(t.blocked_on, '') <> coalesce(
-                                CASE
-                                    WHEN $status <> 'in_progress' THEN NULL
-                                    WHEN $blocked_on = '__KEEP__' THEN t.blocked_on
-                                    WHEN $blocked_on = '' THEN NULL
-                                    ELSE $blocked_on
-                                END,
-                                ''
-                            ) THEN 0
-                            ELSE coalesce(t.forced_continuation_count, 0)
-                        END,
-                        t.completion_evidence = CASE
-                            WHEN $status = 'completed' THEN $completion_evidence
-                            ELSE NULL
-                        END,
-                        t.completed_by = CASE
-                            WHEN $status = 'completed' THEN $completed_by
-                            ELSE NULL
-                        END,
-                        t.completed_at = CASE
-                            WHEN $status = 'completed' THEN datetime()
-                            ELSE NULL
-                        END,
-                        t.updated_at = datetime()
-                    RETURN t.id AS id
-                """, task_id=task_id, status=status, owner=owner, blocked_on=blocked_on_value,
-                     completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
-                     completed_by=completed_by or owner or "")
-            else:
-                rec = session.run("""
-                    MATCH (t:OrchTask {id: $task_id})
-                    SET t.status = $status,
-                        t.owner = CASE WHEN coalesce(trim($owner), '') = '' THEN t.owner ELSE $owner END,
-                        t.result = $result,
-                        t.blocked_on = CASE
-                            WHEN $status <> 'in_progress' THEN NULL
-                            WHEN $blocked_on = '__KEEP__' THEN t.blocked_on
-                            WHEN $blocked_on = '' THEN NULL
-                            ELSE $blocked_on
-                        END,
-                        t.forced_continuation_count = CASE
-                            WHEN t.status <> $status THEN 0
-                            WHEN coalesce(t.blocked_on, '') <> coalesce(
-                                CASE
-                                    WHEN $status <> 'in_progress' THEN NULL
-                                    WHEN $blocked_on = '__KEEP__' THEN t.blocked_on
-                                    WHEN $blocked_on = '' THEN NULL
-                                    ELSE $blocked_on
-                                END,
-                                ''
-                            ) THEN 0
-                            ELSE coalesce(t.forced_continuation_count, 0)
-                        END,
-                        t.completion_evidence = CASE
-                            WHEN $status = 'completed' THEN $completion_evidence
-                            ELSE NULL
-                        END,
-                        t.completed_by = CASE
-                            WHEN $status = 'completed' THEN $completed_by
-                            ELSE NULL
-                        END,
-                        t.completed_at = CASE
-                            WHEN $status = 'completed' THEN datetime()
-                            ELSE NULL
-                        END,
-                        t.updated_at = datetime()
-                    RETURN t.id AS id
-                """, task_id=task_id, status=status, owner=owner, result=result,
-                     blocked_on=blocked_on_value,
-                     completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
-                     completed_by=completed_by or owner or "")
-            if rec.single() is None:
-                return False
-            session.run("""
-                MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
-                SET p.in_progress_heartbeat_at = CASE
-                        WHEN $status = 'in_progress' THEN datetime()
-                        WHEN $status IN ['completed', 'failed', 'interrupted'] THEN ''
-                        ELSE p.in_progress_heartbeat_at
+    with driver.session(database=cfg.neo4j_db) as session:
+        if result is None:
+            rec = session.run("""
+                MATCH (t:OrchTask {id: $task_id})
+                SET t.status = $status,
+                    t.owner = CASE WHEN coalesce(trim($owner), '') = '' THEN t.owner ELSE $owner END,
+                    t.blocked_on = CASE
+                        WHEN $status <> 'in_progress' THEN NULL
+                        WHEN $blocked_on = '__KEEP__' THEN t.blocked_on
+                        WHEN $blocked_on = '' THEN NULL
+                        ELSE $blocked_on
                     END,
-                    p.status = CASE
-                        WHEN $status = 'in_progress' THEN 'in_progress'
-                        WHEN $status IN ['completed', 'failed', 'interrupted'] AND p.status = 'in_progress' THEN 'active'
-                        ELSE p.status
+                    t.forced_continuation_count = CASE
+                        WHEN t.status <> $status THEN 0
+                        WHEN coalesce(t.blocked_on, '') <> coalesce(
+                            CASE
+                                WHEN $status <> 'in_progress' THEN NULL
+                                WHEN $blocked_on = '__KEEP__' THEN t.blocked_on
+                                WHEN $blocked_on = '' THEN NULL
+                                ELSE $blocked_on
+                            END,
+                            ''
+                        ) THEN 0
+                        ELSE coalesce(t.forced_continuation_count, 0)
                     END,
-                    p.updated_at = datetime()
-            """, task_id=task_id, status=status)
-            return True
-    finally:
-        pass  # Driver is singleton; do not close
+                    t.completion_evidence = CASE
+                        WHEN $status = 'completed' THEN $completion_evidence
+                        ELSE NULL
+                    END,
+                    t.completed_by = CASE
+                        WHEN $status = 'completed' THEN $completed_by
+                        ELSE NULL
+                    END,
+                    t.completed_at = CASE
+                        WHEN $status = 'completed' THEN datetime()
+                        ELSE NULL
+                    END,
+                    t.updated_at = datetime()
+                RETURN t.id AS id
+            """, task_id=task_id, status=status, owner=owner, blocked_on=blocked_on_value,
+                 completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
+                 completed_by=completed_by or owner or "")
+        else:
+            rec = session.run("""
+                MATCH (t:OrchTask {id: $task_id})
+                SET t.status = $status,
+                    t.owner = CASE WHEN coalesce(trim($owner), '') = '' THEN t.owner ELSE $owner END,
+                    t.result = $result,
+                    t.blocked_on = CASE
+                        WHEN $status <> 'in_progress' THEN NULL
+                        WHEN $blocked_on = '__KEEP__' THEN t.blocked_on
+                        WHEN $blocked_on = '' THEN NULL
+                        ELSE $blocked_on
+                    END,
+                    t.forced_continuation_count = CASE
+                        WHEN t.status <> $status THEN 0
+                        WHEN coalesce(t.blocked_on, '') <> coalesce(
+                            CASE
+                                WHEN $status <> 'in_progress' THEN NULL
+                                WHEN $blocked_on = '__KEEP__' THEN t.blocked_on
+                                WHEN $blocked_on = '' THEN NULL
+                                ELSE $blocked_on
+                            END,
+                            ''
+                        ) THEN 0
+                        ELSE coalesce(t.forced_continuation_count, 0)
+                    END,
+                    t.completion_evidence = CASE
+                        WHEN $status = 'completed' THEN $completion_evidence
+                        ELSE NULL
+                    END,
+                    t.completed_by = CASE
+                        WHEN $status = 'completed' THEN $completed_by
+                        ELSE NULL
+                    END,
+                    t.completed_at = CASE
+                        WHEN $status = 'completed' THEN datetime()
+                        ELSE NULL
+                    END,
+                    t.updated_at = datetime()
+                RETURN t.id AS id
+            """, task_id=task_id, status=status, owner=owner, result=result,
+                 blocked_on=blocked_on_value,
+                 completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
+                 completed_by=completed_by or owner or "")
+        if rec.single() is None:
+            return False
+        session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            SET p.in_progress_heartbeat_at = CASE
+                    WHEN $status = 'in_progress' THEN datetime()
+                    WHEN $status IN ['completed', 'failed', 'interrupted'] THEN ''
+                    ELSE p.in_progress_heartbeat_at
+                END,
+                p.status = CASE
+                    WHEN $status = 'in_progress' THEN 'in_progress'
+                    WHEN $status IN ['completed', 'failed', 'interrupted'] AND p.status = 'in_progress' THEN 'active'
+                    ELSE p.status
+                END,
+                p.updated_at = datetime()
+        """, task_id=task_id, status=status)
+        return True
 
 
 def resolve_task_id(task_id: str, config: Optional[OrchConfig] = None) -> str:
@@ -1951,20 +1939,17 @@ def get_task(task_id: str,
     """Return one OrchTask node as a plain dict."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (t:OrchTask {id: $task_id})
-                RETURN t
-            """, task_id=task_id).single()
-            if not result:
-                return None
-            task = _normalize_map(dict(result["t"]))
-            task["forced_continuation_count"] = int(task.get("forced_continuation_count", 0) or 0)
-            task["completion_evidence"] = _decode_json_field(task.get("completion_evidence"), None)
-            return _attach_ref_runtime(task, source_path=task.get("source_path"))
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (t:OrchTask {id: $task_id})
+            RETURN t
+        """, task_id=task_id).single()
+        if not result:
+            return None
+        task = _normalize_map(dict(result["t"]))
+        task["forced_continuation_count"] = int(task.get("forced_continuation_count", 0) or 0)
+        task["completion_evidence"] = _decode_json_field(task.get("completion_evidence"), None)
+        return _attach_ref_runtime(task, source_path=task.get("source_path"))
 
 
 def check_phase_complete(phase_id: str,
@@ -1972,21 +1957,18 @@ def check_phase_complete(phase_id: str,
     """Check if all tasks in a phase are completed. If so, mark phase completed."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (ph:OrchPhase {id: $phase_id})-[:HAS_TASK]->(t:OrchTask)
-                WITH ph,
-                     count(t) AS total,
-                     sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS done
-                WHERE total > 0 AND total = done AND ph.status <> 'completed'
-                SET ph.status = 'completed', ph.completed_at = datetime()
-                RETURN ph.id AS id
-            """, phase_id=phase_id)
-            rec = result.single()
-            return rec is not None
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (ph:OrchPhase {id: $phase_id})-[:HAS_TASK]->(t:OrchTask)
+            WITH ph,
+                 count(t) AS total,
+                 sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS done
+            WHERE total > 0 AND total = done AND ph.status <> 'completed'
+            SET ph.status = 'completed', ph.completed_at = datetime()
+            RETURN ph.id AS id
+        """, phase_id=phase_id)
+        rec = result.single()
+        return rec is not None
 
 
 def get_task_phase(task_id: str,
@@ -1994,16 +1976,13 @@ def get_task_phase(task_id: str,
     """Get the phase ID for a given task."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
-                RETURN ph.id AS phase_id
-            """, task_id=task_id)
-            rec = result.single()
-            return rec["phase_id"] if rec else None
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            RETURN ph.id AS phase_id
+        """, task_id=task_id)
+        rec = result.single()
+        return rec["phase_id"] if rec else None
 
 
 def assign_task_to_phase(task_id: str, phase_id: str,
@@ -2011,26 +1990,23 @@ def assign_task_to_phase(task_id: str, phase_id: str,
     """Ensure a task belongs to exactly one phase, re-parenting when needed."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            # Guard via the SHARED chokepoint (R4 audit BLOCK-2: the prior bespoke predicate here was
-            # orphan-blind — it permitted owners==[] and re-opened the poisoned-orphan ship-gate bypass on
-            # the re-parent path). Resolve the phase's project fail-closed, then run the SAME _guard_creatable
-            # the create paths use (refuses foreign/fused/orphan; allows the same-project re-parent the
-            # loader does, where the task is already owned by target). One helper, no per-path divergence.
-            _target = _resolve_phase_project(session, phase_id)
-            _guard_creatable(session, label="OrchTask", node_id=task_id, target_project_id=_target)
-            result = session.run("""
-                MATCH (t:OrchTask {id: $task_id})
-                MATCH (ph:OrchPhase {id: $phase_id})
-                OPTIONAL MATCH (:OrchPhase)-[rel:HAS_TASK]->(t)
-                DELETE rel
-                MERGE (ph)-[:HAS_TASK]->(t)
-                RETURN t.id AS task_id
-            """, task_id=task_id, phase_id=phase_id)
-            return result.single() is not None
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        # Guard via the SHARED chokepoint (R4 audit BLOCK-2: the prior bespoke predicate here was
+        # orphan-blind — it permitted owners==[] and re-opened the poisoned-orphan ship-gate bypass on
+        # the re-parent path). Resolve the phase's project fail-closed, then run the SAME _guard_creatable
+        # the create paths use (refuses foreign/fused/orphan; allows the same-project re-parent the
+        # loader does, where the task is already owned by target). One helper, no per-path divergence.
+        _target = _resolve_phase_project(session, phase_id)
+        _guard_creatable(session, label="OrchTask", node_id=task_id, target_project_id=_target)
+        result = session.run("""
+            MATCH (t:OrchTask {id: $task_id})
+            MATCH (ph:OrchPhase {id: $phase_id})
+            OPTIONAL MATCH (:OrchPhase)-[rel:HAS_TASK]->(t)
+            DELETE rel
+            MERGE (ph)-[:HAS_TASK]->(t)
+            RETURN t.id AS task_id
+        """, task_id=task_id, phase_id=phase_id)
+        return result.single() is not None
 
 
 def _normalize_value(value: Any) -> Any:
@@ -2063,121 +2039,118 @@ def get_project_summary(project_id: str,
     """Return a project with its phases, tasks, and per-phase task status counts."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                OPTIONAL MATCH (g:OrchGlobalContext {key: 'overall'})
-                OPTIONAL MATCH (s:OrchSupervisor {session: coalesce(p.supervisor, '')})
-                WITH p, g, s
-                OPTIONAL MATCH (p)-[:HAS_PHASE]->(ph:OrchPhase)
-                OPTIONAL MATCH (ph)-[:HAS_TASK]->(t:OrchTask)
-                WITH p, g, s, ph, t
-                ORDER BY coalesce(t.priority, 999999999) ASC, t.created_at ASC
-                WITH p, g, s, ph,
-                     count(t) AS total_tasks,
-                     sum(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END) AS pending,
-                     sum(CASE WHEN t.status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
-                     sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS completed,
-                     sum(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed,
-                     collect(
-                         CASE
-                             WHEN t IS NULL THEN NULL
-                             ELSE {
-                                 id: t.id,
-                                 description: t.description,
-                                 status: t.status,
-                                 owner: t.owner,
-                                 priority: t.priority,
-                                 blocked_on: t.blocked_on,
-                                 refs: t.refs,
-                                 source_path: t.source_path
-                             }
-                         END
-                     ) AS tasks
-                ORDER BY ph.order ASC, ph.name ASC
-                RETURN p, g, s, collect(
-                    CASE
-                        WHEN ph IS NULL THEN NULL
-                        ELSE {
-                            phase: ph,
-                            task_counts: {
-                                total: total_tasks,
-                                pending: pending,
-                                in_progress: in_progress,
-                                completed: completed,
-                                failed: failed
-                            },
-                            tasks: tasks
-                        }
-                    END
-                ) AS phases
-            """, project_id=project_id)
-            record = result.single()
-            if not record:
-                return None
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            OPTIONAL MATCH (g:OrchGlobalContext {key: 'overall'})
+            OPTIONAL MATCH (s:OrchSupervisor {session: coalesce(p.supervisor, '')})
+            WITH p, g, s
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(ph:OrchPhase)
+            OPTIONAL MATCH (ph)-[:HAS_TASK]->(t:OrchTask)
+            WITH p, g, s, ph, t
+            ORDER BY coalesce(t.priority, 999999999) ASC, t.created_at ASC
+            WITH p, g, s, ph,
+                 count(t) AS total_tasks,
+                 sum(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                 sum(CASE WHEN t.status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
+                 sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                 sum(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                 collect(
+                     CASE
+                         WHEN t IS NULL THEN NULL
+                         ELSE {
+                             id: t.id,
+                             description: t.description,
+                             status: t.status,
+                             owner: t.owner,
+                             priority: t.priority,
+                             blocked_on: t.blocked_on,
+                             refs: t.refs,
+                             source_path: t.source_path
+                         }
+                     END
+                 ) AS tasks
+            ORDER BY ph.order ASC, ph.name ASC
+            RETURN p, g, s, collect(
+                CASE
+                    WHEN ph IS NULL THEN NULL
+                    ELSE {
+                        phase: ph,
+                        task_counts: {
+                            total: total_tasks,
+                            pending: pending,
+                            in_progress: in_progress,
+                            completed: completed,
+                            failed: failed
+                        },
+                        tasks: tasks
+                    }
+                END
+            ) AS phases
+        """, project_id=project_id)
+        record = result.single()
+        if not record:
+            return None
 
-            project = _decode_project_node(dict(record["p"]))
-            overall_tier = _context_record("overall", dict(record["g"]).get("refs") if record["g"] else [])
-            supervisor_tier = _context_record("supervisor", dict(record["s"]).get("refs") if record["s"] else [])
-            phases = []
-            for item in record["phases"]:
-                if item is None:
+        project = _decode_project_node(dict(record["p"]))
+        overall_tier = _context_record("overall", dict(record["g"]).get("refs") if record["g"] else [])
+        supervisor_tier = _context_record("supervisor", dict(record["s"]).get("refs") if record["s"] else [])
+        phases = []
+        for item in record["phases"]:
+            if item is None:
+                continue
+            phase = _normalize_map(dict(item["phase"]))
+            phase = _attach_ref_runtime(phase, source_path=phase.get("source_path") or project.get("source_path"))
+            tasks = []
+            for task in item["tasks"]:
+                if task is None:
                     continue
-                phase = _normalize_map(dict(item["phase"]))
-                phase = _attach_ref_runtime(phase, source_path=phase.get("source_path") or project.get("source_path"))
-                tasks = []
-                for task in item["tasks"]:
-                    if task is None:
-                        continue
-                    task_row = _normalize_map(dict(task))
-                    tasks.append(_attach_ref_runtime(
-                        task_row,
-                        source_path=task_row.get("source_path") or phase.get("source_path") or project.get("source_path"),
-                    ))
-                phases.append({
-                    "phase": phase,
-                    "task_counts": dict(item["task_counts"]),
-                    "tasks": tasks,
-                })
+                task_row = _normalize_map(dict(task))
+                tasks.append(_attach_ref_runtime(
+                    task_row,
+                    source_path=task_row.get("source_path") or phase.get("source_path") or project.get("source_path"),
+                ))
+            phases.append({
+                "phase": phase,
+                "task_counts": dict(item["task_counts"]),
+                "tasks": tasks,
+            })
 
-            project = _attach_ref_runtime(project, source_path=project.get("source_path"))
-            return {
-                "project": project,
-                "phases": phases,
-                "ref_tiers": {
-                    "overall": overall_tier,
-                    "supervisor": supervisor_tier,
-                    "project": {
-                        "level": "project",
-                        "refs": project.get("refs", []),
-                        "ref_context": project.get("ref_context", {"refs": [], "warnings": [], "line_cap": 200}),
-                    },
-                    "phases": [
-                        {
-                            "id": item["phase"].get("id"),
-                            "name": item["phase"].get("name"),
-                            "level": "phase",
-                            "refs": item["phase"].get("refs", []),
-                            "ref_context": item["phase"].get("ref_context", {"refs": [], "warnings": [], "line_cap": 200}),
-                        }
-                        for item in phases
-                    ],
-                    "tasks": [
-                        {
-                            "id": task.get("id"),
-                            "description": task.get("description"),
-                            "level": "task",
-                            "refs": task.get("refs", []),
-                            "ref_context": task.get("ref_context", {"refs": [], "warnings": [], "line_cap": 200}),
-                        }
-                        for item in phases
-                        for task in item.get("tasks", [])
-                    ],
+        project = _attach_ref_runtime(project, source_path=project.get("source_path"))
+        return {
+            "project": project,
+            "phases": phases,
+            "ref_tiers": {
+                "overall": overall_tier,
+                "supervisor": supervisor_tier,
+                "project": {
+                    "level": "project",
+                    "refs": project.get("refs", []),
+                    "ref_context": project.get("ref_context", {"refs": [], "warnings": [], "line_cap": 200}),
                 },
-            }
-    finally:
-        pass  # Driver is singleton; do not close
+                "phases": [
+                    {
+                        "id": item["phase"].get("id"),
+                        "name": item["phase"].get("name"),
+                        "level": "phase",
+                        "refs": item["phase"].get("refs", []),
+                        "ref_context": item["phase"].get("ref_context", {"refs": [], "warnings": [], "line_cap": 200}),
+                    }
+                    for item in phases
+                ],
+                "tasks": [
+                    {
+                        "id": task.get("id"),
+                        "description": task.get("description"),
+                        "level": "task",
+                        "refs": task.get("refs", []),
+                        "ref_context": task.get("ref_context", {"refs": [], "warnings": [], "line_cap": 200}),
+                    }
+                    for item in phases
+                    for task in item.get("tasks", [])
+                ],
+            },
+        }
 
 
 def get_session_current_work(session_id: str,
@@ -2185,57 +2158,54 @@ def get_session_current_work(session_id: str,
     """Return the highest-priority in-progress task for a session with project context."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
-                WHERE t.owner = $session_id AND t.status = 'in_progress'
-                  // Fail-closed, normalized allowlist: an in_progress task in a concluded
-                  // project (stopped/completed/unknown) is NOT live work and must not
-                  // force-grind its owner (hunter token-burn 2026-06-04). trim+lower so
-                  // mixed-case/whitespace status still admits (Cosmos); NULL/'' -> excluded
-                  // fail-closed (Horizon). Family-audit convergence fix.
-                  AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
-                RETURN p.id AS project_id,
-                       p.name AS project_name,
-                       p.source_path AS project_source_path,
-                       p.refs AS project_refs,
-                       ph.id AS phase_id,
-                       ph.name AS phase_name,
-                       ph.source_path AS phase_source_path,
-                       ph.refs AS phase_refs,
-                       t.id AS top_task_id,
-                       t.description AS top_task_desc,
-                       t.source_path AS task_source_path,
-                       t.refs AS task_refs
-                ORDER BY coalesce(p.priority, 999999999) ASC, coalesce(t.priority, 999999999) ASC, ph.order ASC, t.created_at ASC
-                LIMIT 1
-            """, session_id=session_id)
-            record = result.single()
-            if not record:
-                return None
-            result = dict(record)
-            result["project_ref_context"] = _read_ref_context(
-                _normalize_refs(result.get("project_refs")),
-                source_path=result.get("project_source_path"),
-                line_cap=200,
-            )
-            result["phase_ref_context"] = _read_ref_context(
-                _normalize_refs(result.get("phase_refs")),
-                source_path=result.get("phase_source_path") or result.get("project_source_path"),
-                line_cap=200,
-            )
-            result["task_ref_context"] = _read_ref_context(
-                _normalize_refs(result.get("task_refs")),
-                source_path=result.get("task_source_path") or result.get("phase_source_path") or result.get("project_source_path"),
-                line_cap=200,
-            )
-            result["project_refs"] = _normalize_refs(result.get("project_refs"))
-            result["phase_refs"] = _normalize_refs(result.get("phase_refs"))
-            result["task_refs"] = _normalize_refs(result.get("task_refs"))
-            return result
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE t.owner = $session_id AND t.status = 'in_progress'
+              // Fail-closed, normalized allowlist: an in_progress task in a concluded
+              // project (stopped/completed/unknown) is NOT live work and must not
+              // force-grind its owner (hunter token-burn 2026-06-04). trim+lower so
+              // mixed-case/whitespace status still admits (Cosmos); NULL/'' -> excluded
+              // fail-closed (Horizon). Family-audit convergence fix.
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+            RETURN p.id AS project_id,
+                   p.name AS project_name,
+                   p.source_path AS project_source_path,
+                   p.refs AS project_refs,
+                   ph.id AS phase_id,
+                   ph.name AS phase_name,
+                   ph.source_path AS phase_source_path,
+                   ph.refs AS phase_refs,
+                   t.id AS top_task_id,
+                   t.description AS top_task_desc,
+                   t.source_path AS task_source_path,
+                   t.refs AS task_refs
+            ORDER BY coalesce(p.priority, 999999999) ASC, coalesce(t.priority, 999999999) ASC, ph.order ASC, t.created_at ASC
+            LIMIT 1
+        """, session_id=session_id)
+        record = result.single()
+        if not record:
+            return None
+        result = dict(record)
+        result["project_ref_context"] = _read_ref_context(
+            _normalize_refs(result.get("project_refs")),
+            source_path=result.get("project_source_path"),
+            line_cap=200,
+        )
+        result["phase_ref_context"] = _read_ref_context(
+            _normalize_refs(result.get("phase_refs")),
+            source_path=result.get("phase_source_path") or result.get("project_source_path"),
+            line_cap=200,
+        )
+        result["task_ref_context"] = _read_ref_context(
+            _normalize_refs(result.get("task_refs")),
+            source_path=result.get("task_source_path") or result.get("phase_source_path") or result.get("project_source_path"),
+            line_cap=200,
+        )
+        result["project_refs"] = _normalize_refs(result.get("project_refs"))
+        result["phase_refs"] = _normalize_refs(result.get("phase_refs"))
+        result["task_refs"] = _normalize_refs(result.get("task_refs"))
+        return result
 
 
 def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = None,
@@ -2244,61 +2214,58 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
     """Return the top ready task for a session, excluding a specific task if requested."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
-                WHERE t.status = 'pending'
-                  AND coalesce(t.owner, '') = $sess
-                  AND coalesce(t.blocked_on, '') = ''
-                  AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)
-                  AND ($project_id IS NULL OR proj.id = $project_id)
-                  AND NOT EXISTS {
-                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                      WHERE dep.status <> 'completed'
-                  }
-                  // Fail-closed, normalized allowlist (was a stopped/completed denylist;
-                  // denylist is fail-open for any new concluded status). trim+lower so
-                  // mixed-case status admits (Cosmos); NULL/'' excluded fail-closed (Horizon).
-                  AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
-                RETURN t.id AS task_id, t.description AS description,
-                       t.priority AS priority, t.owner AS owner,
-                       t.blocked_on AS blocked_on,
-                       t.refs AS task_refs,
-                       t.source_path AS task_source_path,
-                       ph.id AS phase_id, ph.name AS phase_name,
-                       ph.refs AS phase_refs, ph.source_path AS phase_source_path,
-                       proj.id AS project_id, proj.name AS project_name,
-                       proj.refs AS project_refs, proj.source_path AS project_source_path
-                ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,
-                         toInteger(coalesce(t.priority, 999999999)) ASC,
-                         t.created_at ASC
-                LIMIT 1
-            """, sess=session_id, exclude_task_id=exclude_task_id, project_id=project_id).single()
-            if not result:
-                return None
-            row = dict(result)
-            row["project_ref_context"] = _read_ref_context(
-                _normalize_refs(row.get("project_refs")),
-                source_path=row.get("project_source_path"),
-                line_cap=200,
-            )
-            row["phase_ref_context"] = _read_ref_context(
-                _normalize_refs(row.get("phase_refs")),
-                source_path=row.get("phase_source_path") or row.get("project_source_path"),
-                line_cap=200,
-            )
-            row["task_ref_context"] = _read_ref_context(
-                _normalize_refs(row.get("task_refs")),
-                source_path=row.get("task_source_path") or row.get("phase_source_path") or row.get("project_source_path"),
-                line_cap=200,
-            )
-            row["project_refs"] = _normalize_refs(row.get("project_refs"))
-            row["phase_refs"] = _normalize_refs(row.get("phase_refs"))
-            row["task_refs"] = _normalize_refs(row.get("task_refs"))
-            return row
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE t.status = 'pending'
+              AND coalesce(t.owner, '') = $sess
+              AND coalesce(t.blocked_on, '') = ''
+              AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)
+              AND ($project_id IS NULL OR proj.id = $project_id)
+              AND NOT EXISTS {
+                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+                  WHERE dep.status <> 'completed'
+              }
+              // Fail-closed, normalized allowlist (was a stopped/completed denylist;
+              // denylist is fail-open for any new concluded status). trim+lower so
+              // mixed-case status admits (Cosmos); NULL/'' excluded fail-closed (Horizon).
+              AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
+            RETURN t.id AS task_id, t.description AS description,
+                   t.priority AS priority, t.owner AS owner,
+                   t.blocked_on AS blocked_on,
+                   t.refs AS task_refs,
+                   t.source_path AS task_source_path,
+                   ph.id AS phase_id, ph.name AS phase_name,
+                   ph.refs AS phase_refs, ph.source_path AS phase_source_path,
+                   proj.id AS project_id, proj.name AS project_name,
+                   proj.refs AS project_refs, proj.source_path AS project_source_path
+            ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,
+                     toInteger(coalesce(t.priority, 999999999)) ASC,
+                     t.created_at ASC
+            LIMIT 1
+        """, sess=session_id, exclude_task_id=exclude_task_id, project_id=project_id).single()
+        if not result:
+            return None
+        row = dict(result)
+        row["project_ref_context"] = _read_ref_context(
+            _normalize_refs(row.get("project_refs")),
+            source_path=row.get("project_source_path"),
+            line_cap=200,
+        )
+        row["phase_ref_context"] = _read_ref_context(
+            _normalize_refs(row.get("phase_refs")),
+            source_path=row.get("phase_source_path") or row.get("project_source_path"),
+            line_cap=200,
+        )
+        row["task_ref_context"] = _read_ref_context(
+            _normalize_refs(row.get("task_refs")),
+            source_path=row.get("task_source_path") or row.get("phase_source_path") or row.get("project_source_path"),
+            line_cap=200,
+        )
+        row["project_refs"] = _normalize_refs(row.get("project_refs"))
+        row["phase_refs"] = _normalize_refs(row.get("phase_refs"))
+        row["task_refs"] = _normalize_refs(row.get("task_refs"))
+        return row
 
 
 def get_project_user_stop_conditions(project_id: str,
@@ -2306,20 +2273,17 @@ def get_project_user_stop_conditions(project_id: str,
     """Return the project's configured versioned user-stop conditions."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            record = session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                RETURN p.user_stop_conditions AS user_stop_conditions
-            """, project_id=project_id).single()
-            if not record:
-                return None
-            return _normalize_user_stop_conditions(
-                _decode_json_field(record["user_stop_conditions"], []),
-                created_by="decoded",
-            )
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            RETURN p.user_stop_conditions AS user_stop_conditions
+        """, project_id=project_id).single()
+        if not record:
+            return None
+        return _normalize_user_stop_conditions(
+            _decode_json_field(record["user_stop_conditions"], []),
+            created_by="decoded",
+        )
 
 
 def set_project_user_stop_conditions(project_id: str, user_stop_conditions: List[Any],
@@ -2329,22 +2293,19 @@ def set_project_user_stop_conditions(project_id: str, user_stop_conditions: List
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     normalized = _normalize_user_stop_conditions(user_stop_conditions, created_by)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            record = session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                SET p.user_stop_conditions = $user_stop_conditions,
-                    p.updated_at = datetime()
-                RETURN p.user_stop_conditions AS user_stop_conditions
-            """, project_id=project_id, user_stop_conditions=_json_encode(normalized)).single()
-            if not record:
-                raise ValueError(f"Project {project_id} not found")
-            return _normalize_user_stop_conditions(
-                _decode_json_field(record["user_stop_conditions"], []),
-                created_by="decoded",
-            )
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            SET p.user_stop_conditions = $user_stop_conditions,
+                p.updated_at = datetime()
+            RETURN p.user_stop_conditions AS user_stop_conditions
+        """, project_id=project_id, user_stop_conditions=_json_encode(normalized)).single()
+        if not record:
+            raise ValueError(f"Project {project_id} not found")
+        return _normalize_user_stop_conditions(
+            _decode_json_field(record["user_stop_conditions"], []),
+            created_by="decoded",
+        )
 
 
 def get_task_project(task_id: str,
@@ -2352,24 +2313,21 @@ def get_task_project(task_id: str,
     """Return the project context for a task."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            record = session.run("""
-                MATCH (proj:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
-                RETURN proj.id AS project_id, proj.name AS project_name,
-                       proj.user_stop_conditions AS user_stop_conditions
-            """, task_id=task_id).single()
-            if not record:
-                return None
-            result = dict(record)
-            conditions = _normalize_user_stop_conditions(
-                _decode_json_field(result.get("user_stop_conditions"), []),
-                created_by="decoded",
-            )
-            result["user_stop_conditions"] = [cond["label"] for cond in _active_conditions(conditions)]
-            return result
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run("""
+            MATCH (proj:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            RETURN proj.id AS project_id, proj.name AS project_name,
+                   proj.user_stop_conditions AS user_stop_conditions
+        """, task_id=task_id).single()
+        if not record:
+            return None
+        result = dict(record)
+        conditions = _normalize_user_stop_conditions(
+            _decode_json_field(result.get("user_stop_conditions"), []),
+            created_by="decoded",
+        )
+        result["user_stop_conditions"] = [cond["label"] for cond in _active_conditions(conditions)]
+        return result
 
 
 def ensure_default_project(config: Optional[OrchConfig] = None) -> str:
@@ -2378,59 +2336,53 @@ def ensure_default_project(config: Optional[OrchConfig] = None) -> str:
     driver = get_neo4j_driver(cfg)
     default_supervisor = "system"
     default_priority = _next_project_priority(default_supervisor, cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            session.run("""
-                MERGE (p:OrchProject {id: 'default'})
-                ON CREATE SET p.name = 'Default Project',
-                              p.description = 'Auto-created for ad-hoc tasks',
-                              p.created_at = datetime(), p.status = 'active'
-                SET p.supervisor = coalesce(p.supervisor, $default_supervisor),
-                    p.priority = coalesce(p.priority, $priority),
-                    p.migration_exempt = coalesce(p.migration_exempt, false),
-                    p.user_stop_conditions = coalesce(p.user_stop_conditions, '[]'),
-                    p.stop_reason_current = coalesce(p.stop_reason_current, ''),
-                    p.stop_reason_history = coalesce(p.stop_reason_history, '[]'),
-                    p.priority_history = coalesce(
-                        p.priority_history,
-                        $priority_history
-                    )
-                MERGE (ph:OrchPhase {id: 'default-main'})
-                ON CREATE SET ph.name = 'Main', ph.order = 0, ph.status = 'active'
-                MERGE (p)-[:HAS_PHASE]->(ph)
-            """,
-                default_supervisor=default_supervisor,
-                priority=default_priority,
-                priority_history=_json_encode([{
-                    "priority_before": None,
-                    "priority_after": default_priority,
-                    "set_by": "system",
-                    "set_at": _utc_now_iso(),
-                    "source_surface": "system",
-                    "reason": "default project bootstrap",
-                }]),
-            )
-        return "default-main"
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        session.run("""
+            MERGE (p:OrchProject {id: 'default'})
+            ON CREATE SET p.name = 'Default Project',
+                          p.description = 'Auto-created for ad-hoc tasks',
+                          p.created_at = datetime(), p.status = 'active'
+            SET p.supervisor = coalesce(p.supervisor, $default_supervisor),
+                p.priority = coalesce(p.priority, $priority),
+                p.migration_exempt = coalesce(p.migration_exempt, false),
+                p.user_stop_conditions = coalesce(p.user_stop_conditions, '[]'),
+                p.stop_reason_current = coalesce(p.stop_reason_current, ''),
+                p.stop_reason_history = coalesce(p.stop_reason_history, '[]'),
+                p.priority_history = coalesce(
+                    p.priority_history,
+                    $priority_history
+                )
+            MERGE (ph:OrchPhase {id: 'default-main'})
+            ON CREATE SET ph.name = 'Main', ph.order = 0, ph.status = 'active'
+            MERGE (p)-[:HAS_PHASE]->(ph)
+        """,
+            default_supervisor=default_supervisor,
+            priority=default_priority,
+            priority_history=_json_encode([{
+                "priority_before": None,
+                "priority_after": default_priority,
+                "set_by": "system",
+                "set_at": _utc_now_iso(),
+                "source_surface": "system",
+                "reason": "default project bootstrap",
+            }]),
+        )
+    return "default-main"
 
 
 def get_session_supervised_projects(session_id: str,
                                     config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (p:OrchProject)
-                WHERE coalesce(p.supervisor, '') = $session_id
-                  AND coalesce(p.migration_exempt, false) = false
-                RETURN p
-                ORDER BY coalesce(p.priority, 999999999) ASC, p.created_at ASC
-            """, session_id=session_id)
-            return [_decode_project_node(dict(record["p"])) for record in result]
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject)
+            WHERE coalesce(p.supervisor, '') = $session_id
+              AND coalesce(p.migration_exempt, false) = false
+            RETURN p
+            ORDER BY coalesce(p.priority, 999999999) ASC, p.created_at ASC
+        """, session_id=session_id)
+        return [_decode_project_node(dict(record["p"])) for record in result]
 
 
 def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
@@ -2453,42 +2405,39 @@ def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
     if not owner_value:
         return []
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (p:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
-                WHERE t.status = 'pending'
-                  AND coalesce(t.owner, '') = $owner
-                  AND coalesce(t.blocked_on, '') = ''
-                  AND NOT EXISTS {
-                      MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                      WHERE dep.status <> 'completed'
-                  }
-                RETURN t.id AS id,
-                       t.description AS description,
-                       t.priority AS priority,
-                       t.owner AS owner,
-                       t.forced_continuation_count AS forced_continuation_count,
-                       t.task_type AS task_type,
-                       t.required_credentials AS required_credentials,
-                       t.credentials_available AS credentials_available,
-                       t.permissions_available AS permissions_available,
-                       ph.id AS phase_id,
-                       ph.name AS phase_name
-                ORDER BY coalesce(t.priority, 999999999) ASC, t.created_at ASC
-            """, project_id=project_id, owner=owner_value)
-            ready = []
-            for record in result:
-                task = _normalize_map(dict(record))
-                task["forced_continuation_count"] = int(task.get("forced_continuation_count", 0) or 0)
-                required = task.get("required_credentials")
-                if required:
-                    if not bool(task.get("credentials_available")) and not bool(task.get("permissions_available")):
-                        continue
-                ready.append(task)
-            return ready
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE t.status = 'pending'
+              AND coalesce(t.owner, '') = $owner
+              AND coalesce(t.blocked_on, '') = ''
+              AND NOT EXISTS {
+                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+                  WHERE dep.status <> 'completed'
+              }
+            RETURN t.id AS id,
+                   t.description AS description,
+                   t.priority AS priority,
+                   t.owner AS owner,
+                   t.forced_continuation_count AS forced_continuation_count,
+                   t.task_type AS task_type,
+                   t.required_credentials AS required_credentials,
+                   t.credentials_available AS credentials_available,
+                   t.permissions_available AS permissions_available,
+                   ph.id AS phase_id,
+                   ph.name AS phase_name
+            ORDER BY coalesce(t.priority, 999999999) ASC, t.created_at ASC
+        """, project_id=project_id, owner=owner_value)
+        ready = []
+        for record in result:
+            task = _normalize_map(dict(record))
+            task["forced_continuation_count"] = int(task.get("forced_continuation_count", 0) or 0)
+            required = task.get("required_credentials")
+            if required:
+                if not bool(task.get("credentials_available")) and not bool(task.get("permissions_available")):
+                    continue
+            ready.append(task)
+        return ready
 
 
 def ready_work(project_id: str, session_id: Optional[str] = None,
@@ -2527,23 +2476,20 @@ def set_project_stop_reason(project_id: str, condition_id: str, condition_versio
         "set_at": entry["set_at"],
     }
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            record = session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                SET p.stop_reason_current = $stop_reason_current,
-                    p.stop_reason_history = $stop_reason_history,
-                    p.status = 'stopped',
-                    p.updated_at = datetime()
-                RETURN p.stop_reason_current AS stop_reason_current
-            """,
-                project_id=project_id,
-                stop_reason_current=_json_encode(entry),
-                stop_reason_history=_append_history(list(project.get("stop_reason_history") or []), history_entry),
-            ).single()
-            return _decode_json_field(record["stop_reason_current"], {})
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            SET p.stop_reason_current = $stop_reason_current,
+                p.stop_reason_history = $stop_reason_history,
+                p.status = 'stopped',
+                p.updated_at = datetime()
+            RETURN p.stop_reason_current AS stop_reason_current
+        """,
+            project_id=project_id,
+            stop_reason_current=_json_encode(entry),
+            stop_reason_history=_append_history(list(project.get("stop_reason_history") or []), history_entry),
+        ).single()
+        return _decode_json_field(record["stop_reason_current"], {})
 
 
 def clear_project_stop_reason(project_id: str, cleared_by: str,
@@ -2561,25 +2507,22 @@ def clear_project_stop_reason(project_id: str, cleared_by: str,
         "cleared_at": _utc_now_iso(),
     }
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            record = session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                SET p.stop_reason_current = '',
-                    p.stop_reason_history = $stop_reason_history,
-                    p.status = CASE
-                        WHEN p.status = 'stopped' THEN 'active'
-                        ELSE p.status
-                    END,
-                    p.updated_at = datetime()
-                RETURN p.id AS id
-            """,
-                project_id=project_id,
-                stop_reason_history=_append_history(list(project.get("stop_reason_history") or []), history_entry),
-            ).single()
-            return record is not None
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            SET p.stop_reason_current = '',
+                p.stop_reason_history = $stop_reason_history,
+                p.status = CASE
+                    WHEN p.status = 'stopped' THEN 'active'
+                    ELSE p.status
+                END,
+                p.updated_at = datetime()
+            RETURN p.id AS id
+        """,
+            project_id=project_id,
+            stop_reason_history=_append_history(list(project.get("stop_reason_history") or []), history_entry),
+        ).single()
+        return record is not None
 
 
 def complete_project(project_id: str, *, force: bool = False,
@@ -2587,25 +2530,22 @@ def complete_project(project_id: str, *, force: bool = False,
                      config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            record = session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                WHERE $force OR NOT EXISTS {
-                    MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
-                    WHERE coalesce(t.status, 'pending') <> 'completed'
-                }
-                SET p.status = 'completed',
-                    p.completed_at = datetime(),
-                    p.updated_at = datetime()
-                RETURN p.id AS id
-            """, project_id=project_id, force=bool(force)).single()
-            if not record:
-                _project_record(project_id, cfg)
-                raise ReadyWorkConflictError(f"project {project_id} has incomplete tasks")
-        return {"ok": True, "project_id": project_id, "status": "completed", "force": bool(force), "completed_by": completed_by}
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            WHERE $force OR NOT EXISTS {
+                MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+                WHERE coalesce(t.status, 'pending') <> 'completed'
+            }
+            SET p.status = 'completed',
+                p.completed_at = datetime(),
+                p.updated_at = datetime()
+            RETURN p.id AS id
+        """, project_id=project_id, force=bool(force)).single()
+        if not record:
+            _project_record(project_id, cfg)
+            raise ReadyWorkConflictError(f"project {project_id} has incomplete tasks")
+    return {"ok": True, "project_id": project_id, "status": "completed", "force": bool(force), "completed_by": completed_by}
 
 
 def reset_project(project_id: str, *, reset_by: str = "unknown",
@@ -2613,43 +2553,40 @@ def reset_project(project_id: str, *, reset_by: str = "unknown",
     cfg = config or OrchConfig()
     project = _project_record(project_id, cfg)
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                SET p.status = 'active',
-                    p.completed_at = NULL,
-                    p.in_progress_heartbeat_at = '',
-                    p.stop_reason_current = '',
-                    p.stop_reason_history = '[]',
-                    p.updated_at = datetime()
-            """, project_id=project_id)
-            session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                OPTIONAL MATCH (p)-[:HAS_PHASE]->(ph:OrchPhase)
-                SET ph.status = 'pending',
-                    ph.completed_at = NULL,
-                    ph.updated_at = datetime()
-            """, project_id=project_id)
-            session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
-                SET t.status = 'pending',
-                    t.blocked_on = NULL,
-                    t.result = NULL,
-                    t.forced_continuation_count = 0,
-                    t.updated_at = datetime()
-            """, project_id=project_id)
-        return {
-            "ok": True,
-            "project_id": project_id,
-            "status": "active",
-            "reset_by": reset_by,
-            "cleared_sessions": [],
-            "previous_stop_reason": project.get("stop_reason_current"),
-        }
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            SET p.status = 'active',
+                p.completed_at = NULL,
+                p.in_progress_heartbeat_at = '',
+                p.stop_reason_current = '',
+                p.stop_reason_history = '[]',
+                p.updated_at = datetime()
+        """, project_id=project_id)
+        session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(ph:OrchPhase)
+            SET ph.status = 'pending',
+                ph.completed_at = NULL,
+                ph.updated_at = datetime()
+        """, project_id=project_id)
+        session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            SET t.status = 'pending',
+                t.blocked_on = NULL,
+                t.result = NULL,
+                t.forced_continuation_count = 0,
+                t.updated_at = datetime()
+        """, project_id=project_id)
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "status": "active",
+        "reset_by": reset_by,
+        "cleared_sessions": [],
+        "previous_stop_reason": project.get("stop_reason_current"),
+    }
 
 
 def update_project_priority(project_id: str, new_priority: int, set_by: str,
@@ -2669,25 +2606,22 @@ def update_project_priority(project_id: str, new_priority: int, set_by: str,
         "reason": reason,
     }
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            record = session.run("""
-                MATCH (p:OrchProject {id: $project_id})
-                SET p.priority = $new_priority,
-                    p.priority_history = $priority_history,
-                    p.updated_at = datetime()
-                RETURN p.priority AS priority, p.priority_history AS priority_history
-            """,
-                project_id=project_id,
-                new_priority=int(new_priority),
-                priority_history=_append_history(list(project.get("priority_history") or []), history_entry),
-            ).single()
-            return {
-                "priority": int(record["priority"]),
-                "priority_history": _decode_json_field(record["priority_history"], []),
-            }
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            SET p.priority = $new_priority,
+                p.priority_history = $priority_history,
+                p.updated_at = datetime()
+            RETURN p.priority AS priority, p.priority_history AS priority_history
+        """,
+            project_id=project_id,
+            new_priority=int(new_priority),
+            priority_history=_append_history(list(project.get("priority_history") or []), history_entry),
+        ).single()
+        return {
+            "priority": int(record["priority"]),
+            "priority_history": _decode_json_field(record["priority_history"], []),
+        }
 
 
 def add_project_condition(project_id: str, label: str, created_by: str,
@@ -2733,20 +2667,17 @@ def edit_project_condition(project_id: str, condition_id: str, label: str, edite
 def preflight_supervisor_orphan_check(config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (p:OrchProject)
-                WHERE coalesce(p.status, 'active') = 'active'
-                  AND coalesce(p.migration_exempt, false) = false
-                  AND (p.supervisor IS NULL OR p.supervisor = '' OR p.supervisor = 'unassigned' OR p.supervisor = 'unknown')
-                RETURN p.id AS project_id, p.name AS name, p.status AS status, p.supervisor AS supervisor
-                ORDER BY p.id
-            """)
-            rows = [dict(record) for record in result]
-            return {"ok": len(rows) == 0, "count": len(rows), "rows": rows}
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject)
+            WHERE coalesce(p.status, 'active') = 'active'
+              AND coalesce(p.migration_exempt, false) = false
+              AND (p.supervisor IS NULL OR p.supervisor = '' OR p.supervisor = 'unassigned' OR p.supervisor = 'unknown')
+            RETURN p.id AS project_id, p.name AS name, p.status AS status, p.supervisor AS supervisor
+            ORDER BY p.id
+        """)
+        rows = [dict(record) for record in result]
+        return {"ok": len(rows) == 0, "count": len(rows), "rows": rows}
 
 
 def get_session_stop_status(session_id: str,
@@ -2839,20 +2770,17 @@ def get_agent_tasks(agent_id: str, config: Optional[OrchConfig] = None) -> List[
     """Get tasks owned by an agent."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (t:OrchTask)
-                WHERE t.owner = $agent_id
-                  AND t.status IN ['pending', 'in_progress']
-                RETURN t.id AS id, t.description AS description,
-                       t.status AS status, t.priority AS priority
-                ORDER BY coalesce(t.priority, 999999999) ASC
-                LIMIT 10
-            """, agent_id=agent_id)
-            return [dict(r) for r in result]
-    finally:
-        pass  # Driver is singleton; do not close
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (t:OrchTask)
+            WHERE t.owner = $agent_id
+              AND t.status IN ['pending', 'in_progress']
+            RETURN t.id AS id, t.description AS description,
+                   t.status AS status, t.priority AS priority
+            ORDER BY coalesce(t.priority, 999999999) ASC
+            LIMIT 10
+        """, agent_id=agent_id)
+        return [dict(r) for r in result]
 
 
 def create_question(question_id: str, text: str, context: str = "",
@@ -2861,32 +2789,37 @@ def create_question(question_id: str, text: str, context: str = "",
     """Create an OrchQuestion node linked to a task."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            # Link to task if provided
-            task_clause = ""
-            if task_id:
-                task_clause = """
-                WITH q
-                MATCH (t:OrchTask {id: $task_id})
-                MERGE (q)-[:CONCERNS_TASK]->(t)
-                """
-            
-            result = session.run(f"""
-                MERGE (q:OrchQuestion {{id: $id}})
-                SET q.text = $text,
-                    q.context = $context,
-                    q.task_id = $task_id,
-                    q.asked_by = $asked_by,
-                    q.status = 'open',
-                    q.created_at = datetime()
-                {task_clause}
-                RETURN q.id AS id
-            """, id=question_id, text=text, context=context, 
-                task_id=task_id, asked_by=asked_by)
-            return result.single()["id"]
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        task_clause = ""
+        if task_id:
+            task_record = session.run(
+                "MATCH (t:OrchTask {id: $task_id}) RETURN t.id AS id",
+                task_id=task_id,
+            ).single()
+            if task_record is None:
+                raise TaskParentNotFoundError(f"task '{task_id}' not found; cannot create question '{question_id}'")
+            task_clause = """
+            WITH q
+            MATCH (t:OrchTask {id: $task_id})
+            MERGE (q)-[:CONCERNS_TASK]->(t)
+            """
+
+        result = session.run(f"""
+            MERGE (q:OrchQuestion {{id: $id}})
+            SET q.text = $text,
+                q.context = $context,
+                q.task_id = $task_id,
+                q.asked_by = $asked_by,
+                q.status = 'open',
+                q.created_at = datetime()
+            {task_clause}
+            RETURN q.id AS id
+        """, id=question_id, text=text, context=context,
+            task_id=task_id, asked_by=asked_by)
+        record = result.single()
+        if record is None:
+            raise TaskParentNotFoundError(f"task '{task_id}' not found; cannot create question '{question_id}'")
+        return record["id"]
 
 
 def answer_question(question_id: str, answer: str, answered_by: str,
@@ -2894,34 +2827,28 @@ def answer_question(question_id: str, answer: str, answered_by: str,
     """Provide an answer to an open question."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (q:OrchQuestion {id: $id})
-                SET q.answer = $answer,
-                    q.answered_by = $answered_by,
-                    q.status = 'answered',
-                    q.answered_at = datetime()
-                RETURN q.id AS id
-            """, id=question_id, answer=answer, answered_by=answered_by)
-            return result.single() is not None
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (q:OrchQuestion {id: $id})
+            SET q.answer = $answer,
+                q.answered_by = $answered_by,
+                q.status = 'answered',
+                q.answered_at = datetime()
+            RETURN q.id AS id
+        """, id=question_id, answer=answer, answered_by=answered_by)
+        return result.single() is not None
 
 
 def get_open_questions(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
     """Get all questions with status 'open'."""
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
-    try:
-        with driver.session(database=cfg.neo4j_db) as session:
-            result = session.run("""
-                MATCH (q:OrchQuestion {status: 'open'})
-                RETURN q.id AS id, q.text AS text, q.context AS context,
-                       q.task_id AS task_id, q.asked_by AS asked_by,
-                       q.created_at AS created_at
-                ORDER BY q.created_at ASC
-            """)
-            return [dict(r) for r in result]
-    finally:
-        pass
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (q:OrchQuestion {status: 'open'})
+            RETURN q.id AS id, q.text AS text, q.context AS context,
+                   q.task_id AS task_id, q.asked_by AS asked_by,
+                   q.created_at AS created_at
+            ORDER BY q.created_at ASC
+        """)
+        return [dict(r) for r in result]
