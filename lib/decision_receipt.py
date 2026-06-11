@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from typing import Any, Dict, Optional
 from lib.config import OrchConfig, get_redis_sync
 
 
+logger = logging.getLogger(__name__)
 RECEIPT_STREAM = "orch:streams:decision_receipts"
 RECEIPT_FIELDS = (
     "why_this_context",
@@ -36,7 +38,11 @@ def maybe_emit_receipt(
 ) -> Optional[Dict[str, Any]]:
     if not decision_receipts_enabled():
         return None
-    return emit_receipt(kind, ctx, config=config, redis_client=redis_client)
+    try:
+        return emit_receipt(kind, ctx, config=config, redis_client=redis_client)
+    except Exception:
+        logger.exception("decision receipt emission failed kind=%s", kind)
+        return None
 
 
 def emit_receipt(
@@ -45,16 +51,20 @@ def emit_receipt(
     *,
     config: Optional[OrchConfig] = None,
     redis_client: Any = None,
-) -> Dict[str, Any]:
+) -> Optional[Dict[str, Any]]:
     receipt = build_receipt(kind, ctx)
     payload = _canonical_json(receipt)
-    client = redis_client or get_redis_sync(config)
-    client.xadd(
-        RECEIPT_STREAM,
-        {"type": "decision_receipt", "kind": receipt["kind"], "receipt": payload},
-        maxlen=100_000,
-        approximate=True,
-    )
+    try:
+        client = redis_client or get_redis_sync(config)
+        client.xadd(
+            RECEIPT_STREAM,
+            {"type": "decision_receipt", "kind": receipt["kind"], "receipt": payload},
+            maxlen=100_000,
+            approximate=True,
+        )
+    except Exception:
+        logger.exception("decision receipt sink failed kind=%s", kind)
+        return None
     return receipt
 
 

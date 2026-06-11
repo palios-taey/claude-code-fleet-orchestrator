@@ -32,6 +32,11 @@ class FakeRedis:
         return f"{len(self.events)}-0"
 
 
+class FailingRedis:
+    def xadd(self, *args, **kwargs) -> str:
+        raise RuntimeError("receipt sink down")
+
+
 class FakeAsyncRedis:
     def __init__(self) -> None:
         self.lists: dict[str, list[str]] = {}
@@ -190,12 +195,62 @@ def _dispatch_wake_wiring_contract() -> None:
     _check("dispatch wake receipt records dispatch source", payload["kind"] == "wake", payload)
 
 
+async def _chat_fail_open_async() -> None:
+    async_redis = FakeAsyncRedis()
+    await chat_layer.append_message("conductor", "jesse", "hello", redis_client=async_redis)
+    await chat_layer.escalate("conductor", "need answer", redis_client=async_redis)
+
+
+def _receipt_sink_fail_open_contract() -> None:
+    os.environ["ORCH_DECISION_RECEIPTS_ENABLED"] = "1"
+    try:
+        with mock.patch.object(receipts, "get_redis_sync", return_value=FailingRedis()):
+            direct = receipts.maybe_emit_receipt("wake", {"why_this_context": "sink fails"})
+            _check("maybe_emit_receipt returns None when sink fails", direct is None, direct)
+            try:
+                asyncio.run(_chat_fail_open_async())
+                chat_ok = True
+            except Exception as exc:
+                chat_ok = exc
+            _check("chat append/escalate succeed when receipt sink fails", chat_ok is True, chat_ok)
+
+            with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["conductor-codex"])), \
+                 mock.patch.object(tasks_api.subprocess, "run", return_value=SimpleNamespace(returncode=0, stderr="", stdout="")):
+                response = TestClient(tasks_api.app).post(
+                    "/api/sessions/conductor-codex/notify",
+                    json={"type": "command", "message": "wake up"},
+                )
+            _check("session_notify succeeds when receipt sink fails", response.status_code == 200 and response.json().get("ok") is True, response.text)
+
+            with mock.patch.object(dispatch_module, "_resolve_product_id", return_value=None), \
+                 mock.patch.object(dispatch_module, "_redis_connect", return_value=SimpleNamespace(get=lambda _key: None)), \
+                 mock.patch.object(dispatch_module, "_claim_ready_orch_task"), \
+                 mock.patch.object(dispatch_module, "mark_superseded_for_task"), \
+                 mock.patch.object(dispatch_module, "bind_current_task", return_value=123.0), \
+                 mock.patch.object(dispatch_module, "OrchConfig", return_value=SimpleNamespace(notify_cli_path="notify")), \
+                 mock.patch.object(dispatch_module.subprocess, "run", return_value=SimpleNamespace(returncode=0, stderr="", stdout="")):
+                try:
+                    dispatch_module.dispatch(
+                        worker="worker-codex",
+                        task_id="dynctx::task",
+                        description="dispatch receipt",
+                        supervisor="conductor",
+                    )
+                    dispatch_ok = True
+                except Exception as exc:
+                    dispatch_ok = exc
+            _check("dispatch succeeds when receipt sink fails", dispatch_ok is True, dispatch_ok)
+    finally:
+        os.environ.pop("ORCH_DECISION_RECEIPTS_ENABLED", None)
+
+
 def main() -> int:
     _receipt_core_contract()
     _wake_packet_wiring_contract()
     _chat_wiring_contract()
     _wake_wiring_contract()
     _dispatch_wake_wiring_contract()
+    _receipt_sink_fail_open_contract()
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
         return 1
