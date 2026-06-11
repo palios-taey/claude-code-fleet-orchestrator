@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import importlib
 import os
 import re
 import sys
@@ -13,10 +14,10 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import lib.chat_layer as chat_layer  # noqa: E402
-import lib.decision_receipt as receipts  # noqa: E402
-import lib.dispatch as dispatch_module  # noqa: E402
-import lib.tasks_api as tasks_api  # noqa: E402
+chat_layer = importlib.import_module("fleet_orchestrator.chat_layer")  # noqa: E402
+receipts = importlib.import_module("fleet_orchestrator.decision_receipt")  # noqa: E402
+dispatch_module = importlib.import_module("fleet_orchestrator.dispatch")  # noqa: E402
+tasks_api = importlib.import_module("fleet_orchestrator.tasks_api")  # noqa: E402
 
 
 FAILURES: list[str] = []

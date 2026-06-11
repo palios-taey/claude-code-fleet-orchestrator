@@ -75,7 +75,7 @@ class CompletionEvidenceError(ValueError):
 class TaskIdCollisionError(ValueError):
     """create_task was asked to create/MERGE a task id that is ALREADY owned by a DIFFERENT project.
     Allowing it would adopt + clobber the other project's node and fuse the two plans. Plan ingest
-    auto-scopes declared ids to <project>::<id> (lib/plan_loader) so legit ingest never trips this;
+    auto-scopes declared ids to <project>::<id> (fleet_orchestrator/plan_loader) so legit ingest never trips this;
     this guard is the lower-choke backstop for every other path (R2 audit: do not delete it)."""
     pass
 

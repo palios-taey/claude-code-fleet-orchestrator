@@ -16,10 +16,10 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import lib.dispatch as dispatch_module  # noqa: E402
-import lib.plan_readiness as readiness_module  # noqa: E402
-from lib.config import OrchConfig  # noqa: E402
-from lib.orch_schema import (  # noqa: E402
+dispatch_module = importlib.import_module("fleet_orchestrator.dispatch")  # noqa: E402
+readiness_module = importlib.import_module("fleet_orchestrator.plan_readiness")  # noqa: E402
+from fleet_orchestrator.config import OrchConfig  # noqa: E402
+from fleet_orchestrator.orch_schema import (  # noqa: E402
     add_dependency,
     create_phase,
     create_project,

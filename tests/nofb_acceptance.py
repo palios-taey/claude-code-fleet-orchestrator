@@ -10,13 +10,13 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.config import OrchConfig, get_neo4j_driver  # noqa: E402
-from lib.orch_schema import (  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
+from fleet_orchestrator.orch_schema import (  # noqa: E402
     TaskParentNotFoundError,
     create_question,
     init_schema,
 )
-from lib.tasks_api import app  # noqa: E402
+from fleet_orchestrator.tasks_api import app  # noqa: E402
 
 CFG = OrchConfig()
 PREFIX = f"nofb-ci-{uuid.uuid4().hex[:8]}"

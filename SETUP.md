@@ -4,7 +4,7 @@ This document is the operator setup guide for `claude-code-fleet-orchestrator`.
 
 Observed:
 - the installer and lifecycle commands live in `scripts/install` and `scripts/orch`
-- the setup transaction logic lives in `lib/easy_setup.py`
+- the setup transaction logic lives in `fleet_orchestrator/easy_setup.py`
 - the product is designed for a local, single-user workstation with loopback-only trust boundaries and no built-in auth layer
 - this guide is for the release line that includes the easy-setup entrypoints `scripts/install` and `orch`; `SETUP.md` and those entrypoints ship together
 

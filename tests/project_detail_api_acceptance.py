@@ -9,9 +9,9 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.config import OrchConfig  # noqa: E402
-from lib.orch_schema import create_phase, create_project, create_task, get_neo4j_driver, init_schema  # noqa: E402
-from lib.tasks_api import app  # noqa: E402
+from fleet_orchestrator.config import OrchConfig  # noqa: E402
+from fleet_orchestrator.orch_schema import create_phase, create_project, create_task, get_neo4j_driver, init_schema  # noqa: E402
+from fleet_orchestrator.tasks_api import app  # noqa: E402
 
 CFG = OrchConfig()
 PFX = f"project-detail-ci-{uuid.uuid4().hex[:8]}"

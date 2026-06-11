@@ -21,8 +21,8 @@ import subprocess
 import tempfile
 from typing import Any, Dict, Optional
 
-from lib.accountability_ledger import append as ledger_append
-from lib.paths import repo_root
+from fleet_orchestrator.accountability_ledger import append as ledger_append
+from fleet_orchestrator.paths import repo_root
 
 # No operator-specific default: explicit override wins, else the install root (the repo
 # this orchestrator is running from), so gates target a real repo on any user's machine.

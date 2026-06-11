@@ -14,9 +14,14 @@ setup(
     name="fleet-orchestrator",
     version=load_version(),
     description="Standalone orchestration layer for supervised AI worker sessions",
-    packages=find_packages(include=["lib", "lib.*", "ui", "ui.*", "fleet_orchestrator", "fleet_orchestrator.*"]),
+    packages=find_packages(include=["fleet_orchestrator", "fleet_orchestrator.*", "ui", "ui.*"]),
     package_data={"ui": ["index.html", "static/*.css", "static/*.js"]},
     include_package_data=True,
+    entry_points={
+        "console_scripts": [
+            "fleet-orchestrator-api = fleet_orchestrator.cli:main",
+        ],
+    },
     scripts=[
         "scripts/orch",
         "scripts/install",

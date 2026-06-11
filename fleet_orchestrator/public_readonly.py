@@ -9,9 +9,9 @@ from typing import Any, Dict, Iterable, List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
-from lib.config import OrchConfig
-from lib.easy_setup import package_version
-from lib.orch_schema import (
+from fleet_orchestrator.config import OrchConfig
+from fleet_orchestrator.easy_setup import package_version
+from fleet_orchestrator.orch_schema import (
     get_neo4j_driver,
     get_project_summary,
     get_ready_tasks,
@@ -20,7 +20,7 @@ from lib.orch_schema import (
     get_session_supervised_projects,
     list_sessions,
 )
-from lib.paths import data_dir, repo_root
+from fleet_orchestrator.paths import data_dir, repo_root
 
 _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
 _PUBLIC_INDEX = _UI_ROOT / "public_index.html"

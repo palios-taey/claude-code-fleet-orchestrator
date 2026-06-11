@@ -22,16 +22,16 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import lib.config as config_module  # noqa: E402
-from lib.config import OrchConfig, OrchConfigError  # noqa: E402
-from lib.dispatch import (  # noqa: E402
+import fleet_orchestrator.config as config_module  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, OrchConfigError  # noqa: E402
+from fleet_orchestrator.dispatch import (  # noqa: E402
     _claim_ready_orch_task,
     _redis_connect,
     _state_key,
     bind_current_task,
     record_outcome,
 )
-from lib.orch_schema import (  # noqa: E402
+from fleet_orchestrator.orch_schema import (  # noqa: E402
     create_phase,
     create_project,
     create_task,
@@ -170,7 +170,7 @@ def _exercise_f13_and_f12() -> None:
 
 
 def _exercise_f15() -> None:
-    from lib.tasks_api import _init_schema_on_startup, app
+    from fleet_orchestrator.tasks_api import _init_schema_on_startup, app
 
     registered = any(fn.__name__ == "_init_schema_on_startup" for fn in app.router.on_startup)
     _check("F15 startup schema initializer registered", registered)

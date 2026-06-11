@@ -10,7 +10,7 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from lib.loop_engine import (  # noqa: E402
+from fleet_orchestrator.loop_engine import (  # noqa: E402
     ArtifactNotObservedError,
     ArtifactStore,
     Loop,

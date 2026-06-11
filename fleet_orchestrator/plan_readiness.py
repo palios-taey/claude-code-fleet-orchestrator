@@ -1,6 +1,6 @@
 """Default readiness checker for orch-watch's done-DEL signal.
 
-Wires ``orch-watch --readiness-checker lib.plan_readiness:check_readiness``
+Wires ``orch-watch --readiness-checker fleet_orchestrator.plan_readiness:check_readiness``
 so that when a worker's Stop hook clears ``current_task`` on outcome=done,
 the watchloop queries the OrchTask graph to see if any of the supervisor's
 owned tasks just became ready (their last pending dependency was the task
@@ -51,13 +51,13 @@ from typing import Any, Dict, Optional
 # Support being loaded as a sibling module by importlib.util.spec_from_file_location
 # (the path orch-watch's --readiness-checker uses) AND as part of the lib
 # package (the path tasks_api uses). Add the orchestrator root to sys.path
-# so absolute `from lib.config import ...` works in both contexts.
+# so absolute `from fleet_orchestrator.config import ...` works in both contexts.
 _PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
 
-from lib.config import OrchConfig, get_neo4j_session  # noqa: E402
-from lib.orch_schema import (  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, get_neo4j_session  # noqa: E402
+from fleet_orchestrator.orch_schema import (  # noqa: E402
     _READY_DEPENDENCIES_SATISFIED_CYPHER,
     get_session_next_ready,
 )
@@ -199,13 +199,13 @@ def check_readiness(supervisor: str, completed_task: dict) -> Optional[str]:
     # Filter the list to just tasks where THIS process owns the wake.
     #
     # IMPORTANT: use the LOCAL fleet Redis (where orch-watch's dedup keys
-    # live), not lib.config's orch-layer Redis (which on multi-machine
+    # live), not fleet_orchestrator.config's orch-layer Redis (which on multi-machine
     # deployments points at a Spark cluster Redis that may be unreachable
     # from the orchestrator host). Same Redis the rest of the orchestrator
-    # stack uses (orch-watch / lib/dispatch / fleet-notify daemon).
+    # stack uses (orch-watch / fleet_orchestrator/dispatch / fleet-notify daemon).
     redis_client = None
     try:
-        from lib.config import ensure_notify_importable  # noqa: E402
+        from fleet_orchestrator.config import ensure_notify_importable  # noqa: E402
 
         ensure_notify_importable()
         from identity import redis_connect  # type: ignore

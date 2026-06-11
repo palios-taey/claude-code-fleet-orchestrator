@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import importlib
 import importlib.util
 import importlib.machinery
 import subprocess
@@ -27,8 +28,8 @@ os.environ.setdefault("ORCH_DASHBOARD_URL", "http://127.0.0.1:5002")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from lib import easy_setup  # noqa: E402
-from lib.easy_setup import (  # noqa: E402
+easy_setup = importlib.import_module("fleet_orchestrator.easy_setup")  # noqa: E402
+from fleet_orchestrator.easy_setup import (  # noqa: E402
     MANAGED_DENIES,
     apply_claude_permission_guard,
     atomic_write_json,
@@ -40,10 +41,10 @@ from lib.easy_setup import (  # noqa: E402
     restore_claude_settings_backup,
     snapshot_claude_settings,
 )
-from lib.tasks_api import app  # noqa: E402
+from fleet_orchestrator.tasks_api import app  # noqa: E402
 
 FAILURES: list[str] = []
-EXPECTED_RELEASE = "1.5.1"
+EXPECTED_RELEASE = "1.6.0"
 
 
 def _assert(label: str, condition: bool, detail: object) -> None:
@@ -90,7 +91,7 @@ def main() -> int:
         )
 
         before_text = settings_path.read_text(encoding="utf-8")
-        with mock.patch("lib.easy_setup.os.replace", side_effect=RuntimeError("replace failed")):
+        with mock.patch("fleet_orchestrator.easy_setup.os.replace", side_effect=RuntimeError("replace failed")):
             try:
                 atomic_write_text(settings_path, "mutated\n")
             except RuntimeError:
@@ -101,7 +102,7 @@ def main() -> int:
         state_path = tmp / "state.json"
         atomic_write_json(state_path, {"a": 1})
         original_state = state_path.read_text(encoding="utf-8")
-        with mock.patch("lib.easy_setup.os.replace", side_effect=RuntimeError("replace failed")):
+        with mock.patch("fleet_orchestrator.easy_setup.os.replace", side_effect=RuntimeError("replace failed")):
             try:
                 atomic_write_json(state_path, {"a": 2})
             except RuntimeError:
@@ -138,7 +139,7 @@ def main() -> int:
             "permissions": {"deny": []},
         }
         hooks_path.write_text(json.dumps(hooks_doc, indent=2) + "\n", encoding="utf-8")
-        with mock.patch("lib.easy_setup.resolve_notify_root", return_value=Path("/notify")):
+        with mock.patch("fleet_orchestrator.easy_setup.resolve_notify_root", return_value=Path("/notify")):
             hook_guard = apply_claude_permission_guard(hooks_path, apply=True, hook_commands_added={"Stop": ["python3 /notify/hooks/stop_idle.py"]})
         hook_doc = json.loads(hooks_path.read_text(encoding="utf-8"))
         stop_commands = []
@@ -175,7 +176,7 @@ def main() -> int:
         pending_path.write_text(json.dumps(pending_doc, indent=2) + "\n", encoding="utf-8")
         with mock.patch.object(easy_setup, "STATE_DIR", tmp / "pending-state"), \
              mock.patch.object(easy_setup, "SETUP_STATE_PATH", tmp / "pending-state" / "easy_setup_state.json"), \
-             mock.patch("lib.easy_setup.resolve_notify_root", return_value=Path("/notify")):
+             mock.patch("fleet_orchestrator.easy_setup.resolve_notify_root", return_value=Path("/notify")):
             easy_setup.save_setup_state(
                 {
                     "pending_hook_transaction": {
@@ -203,7 +204,7 @@ def main() -> int:
         pending_lazy_path.write_text(json.dumps(pending_lazy_doc, indent=2) + "\n", encoding="utf-8")
         with mock.patch.object(easy_setup, "STATE_DIR", tmp / "pending-lazy-state"), \
              mock.patch.object(easy_setup, "SETUP_STATE_PATH", tmp / "pending-lazy-state" / "easy_setup_state.json"), \
-             mock.patch("lib.easy_setup.resolve_notify_root", side_effect=RuntimeError("should not resolve notify root")):
+             mock.patch("fleet_orchestrator.easy_setup.resolve_notify_root", side_effect=RuntimeError("should not resolve notify root")):
             easy_setup.save_setup_state(
                 {
                     "pending_hook_transaction": {
@@ -235,10 +236,10 @@ def main() -> int:
             unmanaged_after,
         )
 
-        with mock.patch("lib.easy_setup.detect_local_infra_ports", return_value={"redis": True, "neo4j": False}), \
-             mock.patch("lib.easy_setup.set_compose_managed") as set_compose_managed, \
-             mock.patch("lib.easy_setup.require_command") as require_command, \
-             mock.patch("lib.easy_setup.resolve_notify_root") as resolve_notify_root, \
+        with mock.patch("fleet_orchestrator.easy_setup.detect_local_infra_ports", return_value={"redis": True, "neo4j": False}), \
+             mock.patch("fleet_orchestrator.easy_setup.set_compose_managed") as set_compose_managed, \
+             mock.patch("fleet_orchestrator.easy_setup.require_command") as require_command, \
+             mock.patch("fleet_orchestrator.easy_setup.resolve_notify_root") as resolve_notify_root, \
              mock.patch("subprocess.run") as subrun:
             require_command.side_effect = lambda name: f"/usr/bin/{name}"
             resolve_notify_root.return_value = Path("/tmp/notify-root")
@@ -285,19 +286,19 @@ def main() -> int:
             },
         )
 
-        with mock.patch("lib.easy_setup.ensure_claude_integration", return_value={"guard": {"changed": False}}), \
-             mock.patch("lib.easy_setup.managed_python", return_value="/tmp/fake-venv-python"), \
-             mock.patch("lib.easy_setup._spawn_background", side_effect=[1234, 5678]), \
-             mock.patch("lib.easy_setup.write_pid_record"), \
-             mock.patch("lib.easy_setup.port_open", return_value=False), \
-             mock.patch("lib.easy_setup.read_pid_record", return_value=None):
+        with mock.patch("fleet_orchestrator.easy_setup.ensure_claude_integration", return_value={"guard": {"changed": False}}), \
+             mock.patch("fleet_orchestrator.easy_setup.managed_python", return_value="/tmp/fake-venv-python"), \
+             mock.patch("fleet_orchestrator.easy_setup._spawn_background", side_effect=[1234, 5678]), \
+             mock.patch("fleet_orchestrator.easy_setup.write_pid_record"), \
+             mock.patch("fleet_orchestrator.easy_setup.port_open", return_value=False), \
+             mock.patch("fleet_orchestrator.easy_setup.read_pid_record", return_value=None):
             messages = easy_setup.enable_services()
         _assert("venv-interpreter", any("started pid=1234" in line for line in messages) and any("started pid=5678" in line for line in messages), messages)
 
         fake_cfg = mock.Mock(redis_host="10.1.2.3", redis_port=6399, neo4j_uri="bolt://10.9.9.9:7777", neo4j_db="neo4j")
-        with mock.patch("lib.easy_setup._load_config_module") as loader, \
-             mock.patch("lib.easy_setup._redis_ping") as redis_ping, \
-             mock.patch("lib.easy_setup._neo4j_probe") as neo4j_probe:
+        with mock.patch("fleet_orchestrator.easy_setup._load_config_module") as loader, \
+             mock.patch("fleet_orchestrator.easy_setup._redis_ping") as redis_ping, \
+             mock.patch("fleet_orchestrator.easy_setup._neo4j_probe") as neo4j_probe:
             OrchConfig = mock.Mock(return_value=fake_cfg)
             loader.return_value = (OrchConfig, mock.Mock(), mock.Mock())
             result = easy_setup._doctor_infra()
@@ -307,7 +308,7 @@ def main() -> int:
             result,
         )
 
-        with mock.patch("lib.tasks_api.get_ready_tasks", return_value=[]):
+        with mock.patch("fleet_orchestrator.tasks_api.get_ready_tasks", return_value=[]):
             client = TestClient(app)
             health = client.get("/health")
             payload = health.json()

@@ -14,11 +14,11 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.orch_schema import (  # noqa: E402
+from fleet_orchestrator.orch_schema import (  # noqa: E402
     create_project, create_phase, create_task, update_task_status,
     get_session_next_ready, init_schema, get_neo4j_driver,
 )
-from lib.config import OrchConfig  # noqa: E402
+from fleet_orchestrator.config import OrchConfig  # noqa: E402
 
 CFG = OrchConfig()
 _PFX = f"ownerpres-ci-{uuid.uuid4().hex[:8]}"

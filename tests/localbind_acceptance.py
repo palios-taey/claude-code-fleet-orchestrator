@@ -56,7 +56,7 @@ def main() -> int:
 
     saved = os.environ.pop("ORCH_HOST", None)
     try:
-        from lib.easy_setup import api_host  # noqa: E402
+        from fleet_orchestrator.easy_setup import api_host  # noqa: E402
 
         _check("easy_setup api_host defaults to loopback", api_host() == "127.0.0.1")
     finally:

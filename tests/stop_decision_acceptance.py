@@ -30,8 +30,8 @@ os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 os.environ.pop("CF_STOP_INPROGRESS", None)
 os.environ.pop("CF_STOP_INPROGRESS_SESSIONS", None)
 
-from lib.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
-from lib.orch_schema import create_phase, create_project, create_task, get_session_next_ready, get_session_stop_decision, update_task_status, _stop_inprogress_enabled  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
+from fleet_orchestrator.orch_schema import create_phase, create_project, create_task, get_session_next_ready, get_session_stop_decision, update_task_status, _stop_inprogress_enabled  # noqa: E402
 
 CFG = OrchConfig()
 
@@ -89,15 +89,15 @@ def main() -> int:
         off = get_session_stop_decision("worker-codex", config=CFG)
         print("PASS conductor-only-enforce" if off.get("block") is False and off.get("wake_type") == "ALLOW_STOP" else f"FAIL conductor-only-enforce {off}")
 
-        with mock.patch("lib.orch_schema.flags_for_session", side_effect=RuntimeError("flag-boom")):
+        with mock.patch("fleet_orchestrator.orch_schema.flags_for_session", side_effect=RuntimeError("flag-boom")):
             flag_fail_open = get_session_stop_decision("worker-codex", config=CFG)
         print("PASS flags-for-session-fail-open" if flag_fail_open.get("wake_type") == off.get("wake_type") and flag_fail_open.get("block") == off.get("block") else f"FAIL flags-for-session-fail-open {flag_fail_open}")
 
-        with mock.patch("lib.orch_schema.validate_stop_handoff", side_effect=TimeoutError("boom")):
+        with mock.patch("fleet_orchestrator.orch_schema.validate_stop_handoff", side_effect=TimeoutError("boom")):
             fail_open = get_session_stop_decision("conductor-codex", config=CFG)
         print("PASS redis-down-fail-open" if fail_open.get("block") is False and fail_open.get("hv_fail_open") else f"FAIL redis-down-fail-open {fail_open}")
 
-        with mock.patch("lib.orch_schema._raw_stop_decision", side_effect=RuntimeError("neo4j-boom")):
+        with mock.patch("fleet_orchestrator.orch_schema._raw_stop_decision", side_effect=RuntimeError("neo4j-boom")):
             raw_fail_open = get_session_stop_decision("conductor-codex", config=CFG)
         print("PASS raw-stop-fail-open" if raw_fail_open.get("block") is False and raw_fail_open.get("keystone_fail_open") else f"FAIL raw-stop-fail-open {raw_fail_open}")
 
@@ -110,7 +110,7 @@ def main() -> int:
                 time.sleep(0.5)
                 return True
 
-        with mock.patch("lib.config.get_redis_sync", return_value=HangingRedis()):
+        with mock.patch("fleet_orchestrator.config.get_redis_sync", return_value=HangingRedis()):
             timeout_flag = _stop_inprogress_enabled("conductor-codex", config=CFG)
         print("PASS stop-inprogress-redis-timeout-fail-open" if timeout_flag is False else f"FAIL stop-inprogress-redis-timeout-fail-open {timeout_flag}")
 
@@ -166,8 +166,8 @@ def main() -> int:
             else f"FAIL in-progress-blocked-on-allows {blocked_on_allow}"
         )
 
-        with mock.patch("lib.orch_schema._raw_stop_decision", return_value={"block": True, "wake_type": "WAKE_WITH_QUEUE", "task_id": "base-task", "reason": "base"}):
-            with mock.patch("lib.orch_schema.validate_stop_handoff", return_value={"state": "dead", "record": {"dispatcher_task_id": "hv-task"}}):
+        with mock.patch("fleet_orchestrator.orch_schema._raw_stop_decision", return_value={"block": True, "wake_type": "WAKE_WITH_QUEUE", "task_id": "base-task", "reason": "base"}):
+            with mock.patch("fleet_orchestrator.orch_schema.validate_stop_handoff", return_value={"state": "dead", "record": {"dispatcher_task_id": "hv-task"}}):
                 base_block_wins = get_session_stop_decision("conductor-codex", config=CFG)
         print(
             "PASS handoff-dead-does-not-override-base-block"
@@ -205,8 +205,8 @@ def main() -> int:
                 time.sleep(0.5)
                 return True
 
-        with mock.patch("lib.config.get_redis_sync", return_value=HangingMarkerRedis()):
-            with mock.patch("lib.orch_schema._raw_stop_decision", return_value={"block": True, "wake_type": "WAKE_WITH_QUEUE", "task_id": "task-marker", "reason": "marker"}):
+        with mock.patch("fleet_orchestrator.config.get_redis_sync", return_value=HangingMarkerRedis()):
+            with mock.patch("fleet_orchestrator.orch_schema._raw_stop_decision", return_value={"block": True, "wake_type": "WAKE_WITH_QUEUE", "task_id": "task-marker", "reason": "marker"}):
                 marker_fail_open = get_session_stop_decision("conductor-codex", stop_hook_active=True, config=CFG)
         print(
             "PASS convergence-marker-fail-open"

@@ -19,8 +19,8 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from lib.config import OrchConfig
-from lib.orch_schema import get_project_summary
+from fleet_orchestrator.config import OrchConfig
+from fleet_orchestrator.orch_schema import get_project_summary
 
 DEFAULT_SHIP_GATES = "prodtest,audit"  # reference operator's standard (example, not mandated)
 _ID_SEP = "::"  # task ids are project-scoped <project>::<bare>; gate-match on the bare name

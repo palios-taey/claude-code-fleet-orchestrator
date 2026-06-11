@@ -35,7 +35,7 @@ def _minimal_config_probe() -> dict:
             env[key] = value
     code = """
 import json
-from lib.config import OrchConfig, REQUIRED_ENV, OPTIONAL_ENV
+from fleet_orchestrator.config import OrchConfig, REQUIRED_ENV, OPTIONAL_ENV
 cfg = OrchConfig()
 print(json.dumps({
     "required": list(REQUIRED_ENV),
@@ -73,7 +73,7 @@ def _dotenv_quote_probe() -> dict:
             env[key] = value
     code = """
 import json, os
-import lib.config  # triggers _load_dotenv_candidates()
+import fleet_orchestrator.config  # triggers _load_dotenv_candidates()
 print(json.dumps({k: os.environ.get(k) for k in
     ("PLAIN", "SINGLE_QUOTED_JSON", "DOUBLE_QUOTED", "INNER_QUOTE")}))
 """

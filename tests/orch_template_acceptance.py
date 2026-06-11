@@ -7,9 +7,9 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.config import OrchConfig, get_neo4j_driver  # noqa: E402
-from lib.orch_schema import init_schema  # noqa: E402
-from lib.plan_loader import load_plan_from_text  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
+from fleet_orchestrator.orch_schema import init_schema  # noqa: E402
+from fleet_orchestrator.plan_loader import load_plan_from_text  # noqa: E402
 
 
 CFG = OrchConfig()

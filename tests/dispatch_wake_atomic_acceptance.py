@@ -23,6 +23,7 @@ import stat
 import sys
 import tempfile
 import uuid
+import importlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -46,9 +47,9 @@ def _stub(tmp: str, name: str, rc: int) -> str:
 
 
 def main() -> int:
-    from lib.config import OrchConfig
-    from lib.orch_schema import create_project, create_phase, create_task, get_neo4j_driver
-    from lib import dispatch as D
+    from fleet_orchestrator.config import OrchConfig
+    from fleet_orchestrator.orch_schema import create_project, create_phase, create_task, get_neo4j_driver
+    D = importlib.import_module("fleet_orchestrator.dispatch")
 
     cfg = OrchConfig()
     drv = get_neo4j_driver(cfg)

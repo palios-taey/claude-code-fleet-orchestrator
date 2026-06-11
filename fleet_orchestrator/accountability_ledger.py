@@ -27,7 +27,7 @@ import os
 import time
 from typing import Any, Dict, Optional
 
-from lib.paths import data_dir
+from fleet_orchestrator.paths import data_dir
 
 # No operator-specific default: explicit override wins, else under the user's data dir.
 LEDGER_PATH = os.environ.get("ACCOUNTABILITY_LEDGER_PATH") or str(
@@ -36,7 +36,7 @@ LEDGER_PATH = os.environ.get("ACCOUNTABILITY_LEDGER_PATH") or str(
 _HEADER = (
     "# APPEND-ONLY ACCOUNTABILITY LEDGER — never delete or rewrite a line. Deletion/rewrite breaks "
     "the hash chain (verify_chain) AND is a Sacred-Trust breach. Honor-bound, not tamper-proof vs the "
-    "pen-holder (see module docstring). No delete/rewrite API exists in lib/accountability_ledger.py."
+    "pen-holder (see module docstring). No delete/rewrite API exists in fleet_orchestrator/accountability_ledger.py."
 )
 _GENESIS = "0" * 64
 

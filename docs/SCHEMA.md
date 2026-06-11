@@ -81,7 +81,7 @@ Current behavior does not create per-fire nodes — the cardinality (8/day per l
 
 ## Dispatch tracking (Phase A primitive, v0.1.0+)
 
-For one-shot tasks dispatched to workers via `lib/dispatch.py:dispatch()`, the Redis state is the source of truth (no Neo4j needed for the dispatch loop itself):
+For one-shot tasks dispatched to workers via `fleet_orchestrator/dispatch.py:dispatch()`, the Redis state is the source of truth (no Neo4j needed for the dispatch loop itself):
 
 | Redis key | Type | Lifecycle |
 |---|---|---|

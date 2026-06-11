@@ -53,7 +53,7 @@ def ensure_runtime_dirs() -> None:
 
 
 def _load_config_module():
-    from lib.config import OrchConfig, get_neo4j_driver, get_redis_sync
+    from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync
 
     return OrchConfig, get_neo4j_driver, get_redis_sync
 
@@ -73,7 +73,7 @@ def _ensure_dotenv_loaded() -> None:
     # Make .env values (ORCH_HOST/ORCH_PORT/ORCH_CHAT_ENABLED) visible to this
     # process before we read them. Idempotent: the loader uses setdefault and
     # never overrides an already-set variable.
-    from lib.config import _load_dotenv_candidates
+    from fleet_orchestrator.config import _load_dotenv_candidates
 
     _load_dotenv_candidates()
 
@@ -942,7 +942,7 @@ def enable_services() -> List[str]:
         messages.append(f"api: external listener detected on port {port}")
     else:
         pid = _spawn_background(
-            [python_exec, "-m", "uvicorn", "lib.tasks_api:app", "--host", host, "--port", str(port)],
+            [python_exec, "-m", "uvicorn", "fleet_orchestrator.tasks_api:app", "--host", host, "--port", str(port)],
             API_LOG_PATH,
             env=env,
         )
@@ -964,7 +964,7 @@ def enable_services() -> List[str]:
                 "--redis-port",
                 os.environ.get("ORCH_REDIS_PORT", "6379"),
                 "--readiness-checker",
-                "lib.plan_readiness:check_readiness",
+                "fleet_orchestrator.plan_readiness:check_readiness",
             ],
             WATCH_LOG_PATH,
             env=env,

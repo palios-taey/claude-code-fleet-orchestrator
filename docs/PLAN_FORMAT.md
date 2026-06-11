@@ -28,7 +28,7 @@ The execution tracker indexes markdown plans into `OrchProject`, `OrchPhase`, an
 
 ## Ref semantics
 
-Observed in `lib/orch_schema.py`:
+Observed in `fleet_orchestrator/orch_schema.py`:
 
 - refs are stored as structured metadata and resolved later into `ref_context`
 - the orchestrator reads ref file slices fresh at API/runtime read time rather than copying file contents into Neo4j

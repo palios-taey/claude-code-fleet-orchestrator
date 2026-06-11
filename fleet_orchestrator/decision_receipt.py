@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from lib.config import OrchConfig, get_redis_sync
+from fleet_orchestrator.config import OrchConfig, get_redis_sync
 
 
 logger = logging.getLogger(__name__)
@@ -144,4 +144,4 @@ def _canonical_json(value: Any) -> str:
 
 
 # TODO(dynctx-wiring::w2-build): emit STOP-event receipts after the peer-liveness
-# stop-engine work lands. This branch intentionally avoids lib/orch_schema.py.
+# stop-engine work lands. This branch intentionally avoids fleet_orchestrator/orch_schema.py.

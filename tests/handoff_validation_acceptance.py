@@ -28,8 +28,8 @@ if "ORCH_DOTENV" not in os.environ:
 os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
-from lib.config import OrchConfig, get_redis_sync  # noqa: E402
-from lib.handoff_validation import actionability_for_nudge, process_expired_handoffs, validate_stop_handoff  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
+from fleet_orchestrator.handoff_validation import actionability_for_nudge, process_expired_handoffs, validate_stop_handoff  # noqa: E402
 
 CFG = OrchConfig()
 
@@ -341,7 +341,7 @@ def main() -> int:
             else f"FAIL capped-backoff-exponent delay={delay} record={capped_record}"
         )
 
-        module_text = (ROOT / "lib" / "handoff_validation.py").read_text(encoding="utf-8")
+        module_text = (ROOT / "fleet_orchestrator" / "handoff_validation.py").read_text(encoding="utf-8")
         print(
             "PASS import-guard-zero-neo4j"
             if "neo4j" not in module_text and "DEPENDS_ON" not in module_text
