@@ -48,7 +48,7 @@ def _set_active(worker: str, task_id: str) -> None:
     _R.set(_state_key(worker, "current_task"),
            json.dumps({"task_id": task_id, "started_at": time.time()}))
     _R.delete(_state_key(worker, "idle"))
-    _R.set(_state_key(worker, "last_activity"), str(time.time()))
+    _R.set(_state_key(worker, "last_tool_activity"), str(time.time()))
     _R.delete(_state_key(worker, "last_outcome"))
 
 
@@ -64,12 +64,12 @@ def _set_done(worker: str, task_id: str) -> None:
 
 def _set_stopped_bound(worker: str, task_id: str) -> None:
     """Peer STOPPED without a clean done (error/interrupt/forgot). In the heartbeat
-    model a stopped peer's last_activity STOPS refreshing -> goes STALE; no terminal
+    model a stopped peer's last_tool_activity STOPS refreshing -> goes STALE; no terminal
     outcome. -> NOT working -> BLOCK (subsumes PR#39 grok-V1). idle is irrelevant now."""
     _R.set(_state_key(worker, "current_task"),
            json.dumps({"task_id": task_id, "started_at": time.time()}))
     _R.set(_state_key(worker, "idle"), "1")
-    _R.set(_state_key(worker, "last_activity"),
+    _R.set(_state_key(worker, "last_tool_activity"),
            str(time.time() - (_PEER_HEARTBEAT_STALE_SEC + 60)))
     _R.delete(_state_key(worker, "last_outcome"))
 
@@ -81,13 +81,13 @@ def _set_crashed_bound(worker: str, task_id: str) -> None:
     _R.set(_state_key(worker, "current_task"),
            json.dumps({"task_id": task_id, "started_at": time.time()}))
     _R.delete(_state_key(worker, "idle"))
-    _R.set(_state_key(worker, "last_activity"),
+    _R.set(_state_key(worker, "last_tool_activity"),
            str(time.time() - (_PEER_HEARTBEAT_STALE_SEC + 60)))
     _R.delete(_state_key(worker, "last_outcome"))
 
 
 def _clear_peer(worker: str) -> None:
-    for k in ("current_task", "idle", "last_activity", "last_outcome"):
+    for k in ("current_task", "idle", "last_activity", "last_tool_activity", "last_outcome"):
         _R.delete(_state_key(worker, k))
 
 

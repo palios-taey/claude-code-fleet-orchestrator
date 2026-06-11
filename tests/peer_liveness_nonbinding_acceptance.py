@@ -1,9 +1,9 @@
-"""Ship-gate e2e — HEARTBEAT-based peer liveness (the codex/grok busy-loop fix).
+"""Ship-gate e2e — tool-heartbeat-based peer liveness (the codex/grok busy-loop fix).
 
 Empirically mapped 2026-06-11 (/tmp/codex_signal_lifecycle.log): while codex/grok work,
-their `last_activity` HEARTBEAT refreshes per tool-call and goes monotonically stale the
-instant they stop; their `idle` is useless (stuck=1) and `current_task` binds only
-inconsistently. So `_peer_actively_working_task` keys on the heartbeat:
+their `last_tool_activity` HEARTBEAT refreshes per tool-call and goes monotonically stale
+the instant they stop; their `idle` is useless (stuck=1) and `current_task` binds only
+inconsistently. So `_peer_actively_working_task` keys on the tool-only heartbeat:
   - last_outcome terminal for this task     -> awaits gate           -> NOT working
   - current_task bound to a DIFFERENT task  -> on other work         -> NOT working
   - heartbeat FRESH (< _PEER_HEARTBEAT_STALE_SEC) + not terminal     -> WORKING (ALLOW)
@@ -42,12 +42,12 @@ def _check(label: str, cond: bool, extra: str = "") -> None:
 
 
 def _reset(worker: str) -> None:
-    for k in ("current_task", "idle", "last_activity", "last_outcome"):
+    for k in ("current_task", "idle", "last_activity", "last_tool_activity", "last_outcome"):
         _R.delete(_state_key(worker, k))
 
 
 def _hb(worker: str, age: float) -> None:
-    _R.set(_state_key(worker, "last_activity"), str(time.time() - age))
+    _R.set(_state_key(worker, "last_tool_activity"), str(time.time() - age))
 
 
 def _outcome(worker: str, outcome: str, task_id: str) -> None:
@@ -70,34 +70,41 @@ def main() -> int:
         _check("fresh heartbeat + no terminal (idle stuck=1, ct absent) -> WORKING (busy-loop fix)",
                _working(_PEER) is True)
 
-        # 2. reported DONE -> awaits gate -> NOT working (even with fresh heartbeat)
+        # 2. prompt-only last_activity is NOT a working signal.
+        _reset(_PEER); _R.set(_state_key(_PEER, "idle"), "1")
+        _R.set(_state_key(_PEER, "last_activity"), str(time.time()))
+        _check("fresh prompt-only last_activity -> NOT working (daemon wake false-window)",
+               _working(_PEER) is False)
+
+        # 3. reported DONE -> awaits gate -> NOT working (even with fresh heartbeat)
+        _hb(_PEER, 5)
         _outcome(_PEER, "done", T)
         _check("last_outcome=done(this task) -> NOT working (gate)", _working(_PEER) is False)
 
-        # 3. reported ERROR -> investigate -> NOT working
+        # 4. reported ERROR -> investigate -> NOT working
         _outcome(_PEER, "error", T)
         _check("last_outcome=error(this task) -> NOT working (investigate)", _working(_PEER) is False)
 
-        # 4. last_outcome for a DIFFERENT task + fresh heartbeat -> WORKING (still on T)
+        # 5. last_outcome for a DIFFERENT task + fresh heartbeat -> WORKING (still on T)
         _outcome(_PEER, "done", f"{_PFX}::othertask")
         _check("last_outcome=done(OTHER task) + fresh hb -> WORKING", _working(_PEER) is True)
 
-        # 5. STALE heartbeat + no terminal -> stopped/dropped/dead -> NOT working
+        # 6. STALE heartbeat + no terminal -> stopped/dropped/dead -> NOT working
         _reset(_PEER); _R.set(_state_key(_PEER, "idle"), "1")
         _hb(_PEER, _PEER_HEARTBEAT_STALE_SEC + 60)
         _check("stale heartbeat + no terminal -> NOT working (stopped/dropped/dead, subsumes PR#39)",
                _working(_PEER) is False)
 
-        # 6. ABSENT heartbeat -> cannot confirm working -> NOT working (fail-closed)
+        # 7. ABSENT heartbeat -> cannot confirm working -> NOT working (fail-closed)
         _reset(_PEER)
         _check("absent heartbeat -> NOT working (fail-closed)", _working(_PEER) is False)
 
-        # 7. current_task bound to a DIFFERENT task + fresh hb -> NOT working THIS one
+        # 8. current_task bound to a DIFFERENT task + fresh hb -> NOT working THIS one
         _hb(_PEER, 2)
         _R.set(_state_key(_PEER, "current_task"), json.dumps({"task_id": f"{_PFX}::other"}))
         _check("current_task bound to DIFFERENT task -> NOT working THIS one", _working(_PEER) is False)
 
-        # 8. current_task bound to THIS task + fresh hb -> WORKING (bonus binding precision)
+        # 9. current_task bound to THIS task + fresh hb -> WORKING (bonus binding precision)
         _R.set(_state_key(_PEER, "current_task"), json.dumps({"task_id": T}))
         _check("current_task bound to THIS task + fresh hb -> WORKING", _working(_PEER) is True)
     finally:
@@ -105,7 +112,7 @@ def main() -> int:
     if _FAILURES:
         print(f"\nFAIL — {len(_FAILURES)}: {_FAILURES}")
         return 1
-    print("\nPASS — heartbeat-based liveness: fresh-hb+not-terminal=working; subsumes PR#39 via stale-hb; CLI idle/ct ignored.")
+    print("\nPASS — tool-heartbeat liveness: fresh tool-hb+not-terminal=working; prompt-only activity ignored; stale-hb subsumes PR#39.")
     return 0
 
 
