@@ -1,0 +1,63 @@
+# Stranger-install gate: GitHub's own runner (a fresh VM = a clean room) follows the
+# README literally, as a first-time user would. No tests authored by the maintainer —
+# the README IS the test. Green = a stranger can install and smoke-test this today.
+# Red = they can't. The job log is public and cannot be edited after the fact.
+name: stranger-install
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  readme-as-a-stranger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+      neo4j:
+        image: neo4j:5
+        ports: ["7687:7687"]
+        env:
+          NEO4J_AUTH: none
+    steps:
+      - name: checkout this repo (the stranger's clone)
+        uses: actions/checkout@v4
+
+      - name: "README Requirements: a claude-code-fleet-notify checkout (ORCH_NOTIFY_LIB_ROOT option)"
+        run: git clone --depth 1 https://github.com/palios-taey/claude-code-fleet-notify.git "$HOME/fleet-notify"
+
+      - name: "README Configuration: copy .env.example to .env and set the values"
+        run: |
+          cp .env.example .env
+          # the four documented required variables + the documented notify-lib pointer
+          {
+            echo "ORCH_REDIS_HOST=127.0.0.1"
+            echo "ORCH_REDIS_PORT=6379"
+            echo "ORCH_NEO4J_URI=bolt://127.0.0.1:7687"
+            echo "ORCH_NEO4J_DB=neo4j"
+            echo "ORCH_NOTIFY_LIB_ROOT=$HOME/fleet-notify"
+          } >> .env
+          # a stranger also exports them for shell tools, per .env.example comments
+          {
+            echo "ORCH_REDIS_HOST=127.0.0.1"
+            echo "ORCH_REDIS_PORT=6379"
+            echo "ORCH_NEO4J_URI=bolt://127.0.0.1:7687"
+            echo "ORCH_NEO4J_DB=neo4j"
+            echo "ORCH_NOTIFY_LIB_ROOT=$HOME/fleet-notify"
+          } >> "$GITHUB_ENV"
+
+      - name: "README Install: scripts/install"
+        run: scripts/install
+
+      - name: "README Smoke test, VERBATIM"
+        run: |
+          python3 -c "import fleet_orchestrator; print(fleet_orchestrator.__version__)"
+          orch doctor --explain-scope
+          orch-cron --help
+          orch-watch --help
+          taey-plan --help
+          taey-task --help
