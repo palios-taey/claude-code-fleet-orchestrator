@@ -81,6 +81,7 @@ from fleet_orchestrator.orch_schema import (
     get_project_summary,
     get_ready_tasks,
     get_session_current_work,
+    get_session_liveness,
     list_dashboard_sessions,
     resolve_task_id,
     get_task as load_task_record,
@@ -620,10 +621,12 @@ def sessions() -> Dict[str, Any]:
 @app.get("/api/sessions/{session_id}/current")
 def session_current(session_id: str) -> Dict[str, Any]:
     """What this session is currently executing — top in_progress task with project/phase context."""
-    work = get_session_current_work(session_id, config=_cfg())
+    cfg = _cfg()
+    activity = get_session_liveness(session_id, config=cfg)
+    work = get_session_current_work(session_id, config=cfg)
     if not work:
-        return {"session": session_id, "current": None}
-    return {"session": session_id, "current": work}
+        return {"session": session_id, "current": None, "activity": activity}
+    return {"session": session_id, "current": work, "activity": activity}
 
 
 @app.get("/api/sessions/{session_id}/next-ready")

@@ -90,6 +90,11 @@ function renderStatusBadge(status) {
   return `<span class="status-badge ${escapeHtml(safeStatus)}">${escapeHtml(safeStatus)}</span>`;
 }
 
+function renderActivityBadge(activity) {
+  const stateName = activity?.state === "active" ? "active" : "idle";
+  return `<span class="status-badge ${stateName}">${stateName}</span>`;
+}
+
 function basename(path) {
   const parts = String(path || "").split(/[\\/]/);
   return parts[parts.length - 1] || "ref";
@@ -234,6 +239,7 @@ function renderSessionCards() {
   for (const sessionId of SESSIONS) {
     const session = state.sessionCards.get(sessionId) || {};
     const current = session.current?.current;
+    const activity = session.current?.activity;
     const nextReady = session.next?.next;
     const activeClass = sessionId === state.selectedSessionId ? "active" : "";
     const chat = state.chatByLineage.get(sessionId) || {};
@@ -244,6 +250,7 @@ function renderSessionCards() {
     card.innerHTML = `
       <div class="status-row">
         <h3 class="session-name">${escapeHtml(sessionId)}</h3>
+        ${renderActivityBadge(activity)}
         ${needsYou ? '<span class="status-badge blocked">needs you</span>' : ""}
       </div>
       <div class="session-line">
@@ -378,6 +385,7 @@ function renderSessionSummary() {
   state.refDrilldowns.clear();
   const session = state.sessionCards.get(state.selectedSessionId) || {};
   const current = session.current?.current;
+  const activity = session.current?.activity;
   const nextReady = session.next?.next;
 
   elements.projectDetail.classList.remove("empty-state");
@@ -388,6 +396,7 @@ function renderSessionSummary() {
           <p class="eyebrow">session ${escapeHtml(state.selectedSessionId)}</p>
           <h2>${escapeHtml(state.selectedSessionId)}</h2>
         </div>
+        ${renderActivityBadge(activity)}
       </div>
       <div class="summary-grid">
         <div class="summary-card">
