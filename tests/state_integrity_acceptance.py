@@ -136,7 +136,12 @@ def _exercise_f11() -> None:
     _check("F11 sibling in_progress keeps project in_progress", project.get("status") == "in_progress", project)
     _check("F11 heartbeat remains while sibling is active", bool(project.get("heartbeat")), project)
 
-    update_task_status(t2, "failed", config=CFG)
+    update_task_status(
+        t2,
+        "failed",
+        completion_evidence={"reason": "state integrity f11 failed sibling fixture"},
+        config=CFG,
+    )
     project = _project_row()
     _check("F11 final terminal sibling demotes project to active", project.get("status") == "active", project)
     _check("F11 heartbeat clears only after no in_progress siblings remain", project.get("heartbeat") == "", project)

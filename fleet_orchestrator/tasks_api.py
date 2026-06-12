@@ -305,6 +305,34 @@ async def create(req: Request) -> Dict[str, Any]:
     return {"ok": True, "task_id": task_id, "from": sender, "owner": owner, "task_type": task_type}
 
 
+_TERMINAL_STATUSES = {"completed", "failed", "interrupted"}
+_REQUEST_TERMINAL_EVIDENCE_KEYS = ("reason", "error", "production_observation")
+
+
+def _terminal_evidence_from_request(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    evidence = data.get("evidence")
+    if evidence is not None:
+        return evidence
+    lifted = {
+        key: data[key]
+        for key in _REQUEST_TERMINAL_EVIDENCE_KEYS
+        if key in data
+    }
+    return lifted or None
+
+
+def _outcome_details(result: str, evidence: Optional[Dict[str, Any]]) -> Optional[str]:
+    if result:
+        return result
+    if not isinstance(evidence, dict):
+        return None
+    for key in _REQUEST_TERMINAL_EVIDENCE_KEYS:
+        value = evidence.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 @app.patch("/api/task/{task_id}")
 async def update(task_id: str, req: Request) -> Dict[str, Any]:
     data = await req.json()
@@ -320,7 +348,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         if owner is None:
             owner = task_before.get("owner", "")
         blocked_on = data["blocked_on"] if "blocked_on" in data else None
-        completion_evidence = data.get("evidence")
+        completion_evidence = _terminal_evidence_from_request(data)
 
         update_task_status(
             task_id,
@@ -343,11 +371,11 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
                     set_parent=True,
                 )
             elif status == "completed":
-                record_outcome(sender, "done", result or None)
+                record_outcome(sender, "done", _outcome_details(result, completion_evidence))
             elif status == "failed":
-                record_outcome(sender, "error", result or None)
+                record_outcome(sender, "error", _outcome_details(result, completion_evidence))
             elif status == "interrupted":
-                record_outcome(sender, "interrupted", result or None)
+                record_outcome(sender, "interrupted", _outcome_details(result, completion_evidence))
 
         # Transitive completion: if task finished, check if its parent phase is now done.
         phase_completed = False
@@ -362,7 +390,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             "status": status,
             "owner": owner,
             "blocked_on": blocked_on if blocked_on is not None else task_before.get("blocked_on"),
-            "completion_evidence": completion_evidence if status == "completed" else task_before.get("completion_evidence"),
+            "completion_evidence": completion_evidence if status in _TERMINAL_STATUSES else task_before.get("completion_evidence"),
             "phase_completed": phase_completed,
         }
     except CompletionEvidenceError as e:

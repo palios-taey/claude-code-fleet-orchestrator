@@ -121,7 +121,12 @@ def _exercise_plan_readiness_alignment() -> None:
     next_ready = get_session_next_ready(SUPERVISOR, project_id=PREFIX, config=CFG)
     _check("F18 blocked dependent does not wake", wake is None, wake)
     _check("F18 blocked dependent is not next-ready", next_ready is None, next_ready)
-    update_task_status(downstream, "failed", config=CFG)
+    update_task_status(
+        downstream,
+        "failed",
+        completion_evidence={"reason": "plan readiness failed downstream fixture"},
+        config=CFG,
+    )
 
 
 def _exercise_prefix_isolation() -> None:
