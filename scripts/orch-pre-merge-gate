@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+REQUIRED_CHECKS = ("r5-audit-gate", "ship-gate-acceptance")
+
+
+def _gh_api(path: str) -> Any:
+    result = subprocess.run(
+        ["gh", "api", path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"gh api {path!r} failed: {result.stderr.strip() or result.stdout.strip()}")
+    try:
+        return json.loads(result.stdout or "null")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"gh api {path!r} returned invalid JSON: {exc}") from exc
+
+
+def _repo_from_gh() -> str:
+    payload = _gh_api("repos/:owner/:repo")
+    repo = payload.get("full_name") if isinstance(payload, dict) else None
+    if not repo:
+        raise RuntimeError("could not infer repository; pass --repo OWNER/REPO")
+    return repo
+
+
+def _resolve_head_sha(repo: str, args: argparse.Namespace) -> str:
+    if args.sha:
+        return args.sha.strip()
+    if args.pr is None:
+        raise RuntimeError("pass either --sha or --pr")
+    payload = _gh_api(f"repos/{repo}/pulls/{args.pr}")
+    sha = (((payload or {}).get("head") or {}).get("sha") or "").strip()
+    if not sha:
+        raise RuntimeError(f"could not resolve head SHA for PR #{args.pr}")
+    return sha
+
+
+def _required_checks(args: argparse.Namespace) -> Tuple[str, ...]:
+    values = args.required_check
+    if not values:
+        raw = os.environ.get("ORCH_PRE_MERGE_REQUIRED_CHECKS", "")
+        values = [part.strip() for part in raw.split(",") if part.strip()] if raw else list(REQUIRED_CHECKS)
+    checks = tuple(dict.fromkeys(v.strip() for v in values if v.strip()))
+    if not checks:
+        raise RuntimeError("at least one required check must be configured")
+    return checks
+
+
+def _latest_named(items: Iterable[Dict[str, Any]], field: str, name: str) -> Optional[Dict[str, Any]]:
+    matches = [item for item in items if item.get(field) == name]
+    if not matches:
+        return None
+    return sorted(
+        matches,
+        key=lambda item: item.get("completed_at") or item.get("started_at") or item.get("created_at") or "",
+        reverse=True,
+    )[0]
+
+
+def _check_run_state(repo: str, sha: str, check: str) -> Tuple[bool, str]:
+    payload = _gh_api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100")
+    runs = payload.get("check_runs") if isinstance(payload, dict) else None
+    if not isinstance(runs, list):
+        raise RuntimeError("GitHub check-runs response did not include a check_runs list")
+    run = _latest_named(runs, "name", check)
+    if not run:
+        return False, "missing check-run"
+    status = run.get("status")
+    conclusion = run.get("conclusion")
+    return status == "completed" and conclusion == "success", f"check-run status={status} conclusion={conclusion}"
+
+
+def _status_state(repo: str, sha: str, check: str) -> Tuple[bool, str]:
+    payload = _gh_api(f"repos/{repo}/commits/{sha}/statuses?per_page=100")
+    statuses = payload if isinstance(payload, list) else payload.get("statuses") if isinstance(payload, dict) else None
+    if not isinstance(statuses, list):
+        raise RuntimeError("GitHub statuses response did not include a list")
+    status = _latest_named(statuses, "context", check)
+    if not status:
+        return False, "missing commit status"
+    state = status.get("state")
+    return state == "success", f"commit-status state={state}"
+
+
+def _verify_ci(repo: str, sha: str, checks: Iterable[str]) -> List[str]:
+    failures: List[str] = []
+    for check in checks:
+        ok, detail = _check_run_state(repo, sha, check)
+        if ok:
+            continue
+        status_ok, status_detail = _status_state(repo, sha, check)
+        if status_ok:
+            continue
+        failures.append(f"{check}: {detail}; {status_detail}")
+    return failures
+
+
+def _sha_matches(evidence_sha: str, head_sha: str) -> bool:
+    evidence = evidence_sha.strip().lower()
+    head = head_sha.strip().lower()
+    if len(evidence) < 7 or len(head) < 7:
+        return False
+    return head.startswith(evidence) or evidence.startswith(head)
+
+
+def _verify_gate_task(task_id: str, head_sha: str) -> List[str]:
+    from fleet_orchestrator.config import OrchConfig
+    from fleet_orchestrator.orch_schema import get_task
+
+    task = get_task(task_id, config=OrchConfig())
+    if not task:
+        return [f"gate task {task_id!r} was not found"]
+    failures: List[str] = []
+    if task.get("status") != "completed":
+        failures.append(f"gate task {task_id!r} status is {task.get('status')!r}, not 'completed'")
+    evidence = task.get("completion_evidence")
+    if not isinstance(evidence, dict):
+        failures.append(f"gate task {task_id!r} has no completion_evidence object")
+        return failures
+    evidence_sha = evidence.get("commit_sha")
+    if not isinstance(evidence_sha, str) or not _sha_matches(evidence_sha, head_sha):
+        failures.append(
+            f"gate task {task_id!r} completion_evidence.commit_sha={evidence_sha!r} "
+            f"does not match head SHA {head_sha}"
+        )
+    if not any(isinstance(evidence.get(k), str) and evidence[k].strip() for k in ("gate_run_id", "production_observation")):
+        failures.append(
+            f"gate task {task_id!r} must include completion_evidence.gate_run_id "
+            "or completion_evidence.production_observation"
+        )
+    return failures
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Refuse a fleet CONTROL merge unless GitHub checks and the orchestrator gate task are closed."
+    )
+    parser.add_argument("--repo", help="GitHub repository as OWNER/REPO; defaults to gh's current repo")
+    parser.add_argument("--pr", type=int, help="Pull request number whose head SHA will be checked")
+    parser.add_argument("--sha", help="Head SHA to check directly")
+    parser.add_argument("--gate-task", required=True, help="Closed OrchTask id containing committed gate evidence")
+    parser.add_argument(
+        "--required-check",
+        action="append",
+        help="Required GitHub check/status context. Repeatable; defaults to r5-audit-gate + ship-gate-acceptance.",
+    )
+    args = parser.parse_args()
+
+    try:
+        repo = args.repo or _repo_from_gh()
+        sha = _resolve_head_sha(repo, args)
+        checks = _required_checks(args)
+        failures = _verify_ci(repo, sha, checks)
+        failures.extend(_verify_gate_task(args.gate_task, sha))
+    except Exception as exc:
+        print(f"PRE-MERGE GATE FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if failures:
+        print("PRE-MERGE GATE FAIL", file=sys.stderr)
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+
+    print(
+        f"PRE-MERGE GATE PASS repo={repo} sha={sha} gate_task={args.gate_task} "
+        f"checks={','.join(checks)}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -62,6 +62,20 @@ have evidence records that pass — the same shape as depends-gating, but for th
 ship transition. Declared per plan, enforced by the engine. No bypass, no
 approval override exists to route around it.
 
+## Local pre-merge CONTROL gate
+
+Private repositories cannot rely on GitHub branch protection unless the account
+has the required plan. Before merging locally, run the same refusal gate:
+
+```bash
+scripts/orch-pre-merge-gate --repo OWNER/REPO --pr <number> --gate-task <audit-or-control-task-id>
+```
+
+The helper resolves the PR head SHA, verifies `r5-audit-gate` and
+`ship-gate-acceptance` are green on that SHA through `gh api`, then refuses unless
+the supplied OrchTask is `completed` with `completion_evidence.commit_sha`
+matching the head SHA and either `gate_run_id` or `production_observation`.
+
 ## Applies to everything — including this gate itself
 
 This feature (the gate, the harnesses, the enforcement) is itself code in the
