@@ -788,6 +788,54 @@ def _resolve_supervisor_session(session_id: str, config: Optional[OrchConfig] = 
     return session_id
 
 
+def _configured_dashboard_supervisors(config: Optional[OrchConfig] = None) -> set[str]:
+    cfg = config or OrchConfig()
+    supervisors: set[str] = set()
+    for raw_session in cfg.session_ids or []:
+        session_id = str(raw_session or "").strip()
+        if not session_id:
+            continue
+        try:
+            supervisor = _resolve_supervisor_session(session_id, config=cfg)
+        except Exception:
+            supervisor = _normalize_owner_session(session_id)
+        supervisor = _normalize_owner_session(str(supervisor or "").strip())
+        if supervisor and supervisor.lower() not in {"unassigned", "unknown", "none", "null"}:
+            supervisors.add(supervisor)
+    return supervisors
+
+
+def list_dashboard_sessions(config: Optional[OrchConfig] = None) -> list:
+    """Canonical supervisor sessions to surface as dashboard cards.
+
+    The internal UI is fail-closed: data may prove a configured supervisor is active,
+    but data alone may not mint visible sessions. ``ORCH_SESSION_IDS`` is the configured
+    universe; peer names in it are resolved to their parent supervisor via Redis when
+    available, then by suffix normalization.
+    """
+    cfg = config or OrchConfig()
+    allowlist = _configured_dashboard_supervisors(cfg)
+    if not allowlist:
+        return []
+    found: set[str] = set(allowlist)
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        for record in session.run(
+            "MATCH (p:OrchProject) WHERE coalesce(p.supervisor, '') <> '' "
+            "RETURN DISTINCT p.supervisor AS s"
+        ):
+            supervisor = _normalize_owner_session(str(record["s"]).strip())
+            if supervisor in allowlist:
+                found.add(supervisor)
+        for record in session.run(
+            "MATCH (s:OrchSupervisor) WHERE coalesce(s.session, '') <> '' RETURN s.session AS s"
+        ):
+            supervisor = _normalize_owner_session(str(record["s"]).strip())
+            if supervisor in allowlist:
+                found.add(supervisor)
+    return sorted(found)
+
+
 def list_sessions(config: Optional[OrchConfig] = None) -> list:
     """Sessions to surface (dashboard cards, etc.), derived from DATA — never hardcoded.
 

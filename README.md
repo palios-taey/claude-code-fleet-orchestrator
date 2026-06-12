@@ -181,7 +181,7 @@ Observed in [`ui/static/app.js`](ui/static/app.js) and [`ui/index.html`](ui/inde
 - The browser exposes four notify types: `standard`, `escalation`, `command`, and `response_ready`.
 - The pause checkbox freezes UI auto-refresh only. It does not pause sessions or the stop-discipline engine.
 
-`ORCH_SESSION_IDS` does not populate the session cards. It only constrains browser notify targets on the API side. Changing the visible session strip currently requires editing `ui/static/app.js`.
+`GET /api/sessions` fails closed to canonical supervisors derived from `ORCH_SESSION_IDS`. Peer entries such as `conductor-codex` are surfaced as their supervisor (`conductor`) and unconfigured data-only sessions are not shown as cards.
 
 ## Plan ingest example
 
