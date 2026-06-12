@@ -285,6 +285,36 @@ def main() -> int:
                 "state_exists": dry_run_state.exists(),
             },
         )
+        notify_no_deps_root = tmp / "notify-no-deps"
+        notify_no_deps_root.mkdir()
+        (notify_no_deps_root / "identity.py").write_text("# ok\n", encoding="utf-8")
+        no_config_import = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import builtins, os\n"
+                    "real_import = builtins.__import__\n"
+                    "def guarded_import(name, *args, **kwargs):\n"
+                    "    if name == 'fleet_orchestrator.config':\n"
+                    "        raise AssertionError('config imported before install deps')\n"
+                    "    return real_import(name, *args, **kwargs)\n"
+                    "builtins.__import__ = guarded_import\n"
+                    "from fleet_orchestrator.easy_setup import resolve_notify_root\n"
+                    "print(resolve_notify_root())\n"
+                ),
+            ],
+            cwd=str(ROOT),
+            env={**os.environ, "PYTHONPATH": str(ROOT), "ORCH_NOTIFY_LIB_ROOT": str(notify_no_deps_root)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        _assert(
+            "install-notify-resolution-does-not-import-config",
+            no_config_import.returncode == 0 and str(notify_no_deps_root) in no_config_import.stdout,
+            {"returncode": no_config_import.returncode, "stdout": no_config_import.stdout, "stderr": no_config_import.stderr},
+        )
 
         with mock.patch("fleet_orchestrator.easy_setup.ensure_claude_integration", return_value={"guard": {"changed": False}}), \
              mock.patch("fleet_orchestrator.easy_setup.managed_python", return_value="/tmp/fake-venv-python"), \

@@ -69,6 +69,7 @@ jobs:
           orch-watch --help
           taey-plan --help
           taey-task --help
+          taey-dispatch --help
 
       - name: "diagnostics on failure (daemon + API logs, so a red run explains itself)"
         if: failure()
