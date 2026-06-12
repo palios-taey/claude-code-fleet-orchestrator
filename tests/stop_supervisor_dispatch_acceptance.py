@@ -14,12 +14,14 @@ blocking during that window is a busy-loop with nothing to do (the repeated-Stop
 symptom). There is no flag to turn keep-going off; the actively-working carve-out is the
 difference between "wait for the right moment" and "spin uselessly."
 
-Env: ORCH_NEO4J_URI, ORCH_NEO4J_DB, ORCH_REDIS_HOST/PORT, ORCH_DASHBOARD_URL.
+Env: ORCH_NEO4J_URI, ORCH_NEO4J_DB, ORCH_REDIS_HOST/PORT, ORCH_DASHBOARD_URL,
+     ORCH_TEST_NAMESPACE (required; must include test/ci/acceptance).
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -33,9 +35,27 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
 )
 from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
 
+
+def _require_test_namespace() -> str:
+    raw = (os.environ.get("ORCH_TEST_NAMESPACE") or "").strip()
+    if not raw:
+        raise SystemExit(
+            "ORCH_TEST_NAMESPACE is required so this acceptance cannot run against production Neo4j without an isolated namespace"
+        )
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{5,80}", raw):
+        raise SystemExit("ORCH_TEST_NAMESPACE must be 6-80 chars of letters/digits/._:-")
+    lowered = raw.lower()
+    if not any(marker in lowered for marker in ("test", "ci", "acceptance")):
+        raise SystemExit("ORCH_TEST_NAMESPACE must include test, ci, or acceptance")
+    if lowered in {"prod", "production", "neo4j", "default"}:
+        raise SystemExit("ORCH_TEST_NAMESPACE must not name a production/default namespace")
+    return raw
+
+
+_NAMESPACE = _require_test_namespace()
 CFG = OrchConfig()
 _R = get_redis_sync(CFG)
-_PFX = f"supkeep-ci-{uuid.uuid4().hex[:8]}"
+_PFX = f"{_NAMESPACE}-supkeep-{uuid.uuid4().hex[:8]}"
 _SUP = f"{_PFX}-sup"
 _PEER = f"{_SUP}-codex"
 _FAILURES: list[str] = []
@@ -101,9 +121,16 @@ def _decide():
     return _raw_stop_decision(_SUP, config=CFG)
 
 
+def _cleanup(drv) -> None:
+    _clear_peer(_PEER)
+    with drv.session(database=CFG.neo4j_db) as s:
+        s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
+
+
 def main() -> int:
-    init_schema(config=CFG)
     drv = get_neo4j_driver(CFG)
+    _cleanup(drv)
+    init_schema(config=CFG)
 
     def setp(pid, status="active"):
         with drv.session(database=CFG.neo4j_db) as s:
@@ -114,8 +141,6 @@ def main() -> int:
                     owner=owner, wake_owner_if_ready=False, config=CFG)
         return f"{pid}::{name}"
 
-    with drv.session(database=CFG.neo4j_db) as s:
-        s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
     try:
         P = f"{_PFX}-A"
         create_project(project_id=P, name=P, supervisor=_SUP, config=CFG)
@@ -188,9 +213,7 @@ def main() -> int:
         _check("pending DISPATCH takes precedence over in-flight GATE",
                d.get("task_id") == live and d.get("dispatch_to") == _PEER, str(d))
     finally:
-        _clear_peer(_PEER)
-        with drv.session(database=CFG.neo4j_db) as s:
-            s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
+        _cleanup(drv)
     if _FAILURES:
         print(f"\nFAIL — {len(_FAILURES)}: {_FAILURES}")
         return 1

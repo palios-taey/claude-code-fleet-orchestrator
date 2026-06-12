@@ -123,6 +123,7 @@ jobs:
           ORCH_REDIS_HOST: 127.0.0.1
           ORCH_REDIS_PORT: "6379"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+          ORCH_TEST_NAMESPACE: ship-gate-ci
         run: python tests/stop_supervisor_dispatch_acceptance.py
       - name: non-binding peer liveness (codex/grok busy-loop fix)
         env:
