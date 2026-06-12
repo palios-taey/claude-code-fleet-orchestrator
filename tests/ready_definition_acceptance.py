@@ -73,7 +73,7 @@ def _setup() -> None:
         (ACTIVE_PROJECT, "dep_done", OWNER, 20),
         (ACTIVE_PROJECT, "dep_open", OWNER, 30),
         (ACTIVE_PROJECT, "blocked", OWNER, 5),
-        (ACTIVE_PROJECT, "other_owner", OTHER_OWNER, 1),
+        (ACTIVE_PROJECT, "other_owner", OTHER_OWNER, 2),
         (ACTIVE_PROJECT, "completed_dep", OWNER, 99),
         (ACTIVE_PROJECT, "open_dep", OWNER, 100),
         (STOPPED_PROJECT, "stopped_ready", OWNER, 1),
