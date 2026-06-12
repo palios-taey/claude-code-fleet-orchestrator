@@ -1259,6 +1259,38 @@ def _peer_actively_working_task(workers: List[str], task_id: Optional[str],
     return False
 
 
+def get_session_liveness(session_id: str, config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    cfg = config or OrchConfig()
+    from .config import get_redis_sync
+
+    payload: Dict[str, Any] = {
+        "state": "idle",
+        "active": False,
+        "last_tool_activity": None,
+        "age_seconds": None,
+        "threshold_seconds": _PEER_HEARTBEAT_STALE_SEC,
+    }
+    try:
+        raw = get_redis_sync(cfg).get(_state_key(session_id, "last_tool_activity"))
+    except Exception:
+        return payload
+    if raw is None:
+        return payload
+    try:
+        last_tool_activity = float(raw)
+    except (TypeError, ValueError):
+        return payload
+    age_seconds = max(0.0, time.time() - last_tool_activity)
+    active = age_seconds < _PEER_HEARTBEAT_STALE_SEC
+    payload.update({
+        "state": "active" if active else "idle",
+        "active": active,
+        "last_tool_activity": last_tool_activity,
+        "age_seconds": age_seconds,
+    })
+    return payload
+
+
 def get_supervisor_inflight_peer_task(supervisor: str, project_id: str,
                                       config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
     """Top in-flight peer task in ``project_id`` that NEEDS THE SUPERVISOR TO
