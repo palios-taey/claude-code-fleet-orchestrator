@@ -3,8 +3,8 @@
 Proves, against a real Neo4j, that the product runs on ANY user's machine:
   1. DE-UMBILICAL PATHS: with a foreign HOME and no ORCH_* path overrides, the ledger and gate-repo
      defaults follow that HOME / the install root — never the baked '/home/mira/...' literal.
-  2. DYNAMIC SESSIONS: list_sessions() / GET /api/sessions derive from data (OrchProject.supervisor),
-     and honor the ORCH_DASHBOARD_SESSIONS pin — no hardcoded operator fleet.
+  2. DYNAMIC SESSIONS: list_dashboard_sessions() / GET /api/sessions fail closed to the configured
+     canonical supervisor allowlist, so data fixtures and peers do not leak as dashboard cards.
   3. LOOPBACK DEFAULT: the product launcher binds 127.0.0.1 by default (ORCH_HOST override).
 
 Env: ORCH_NEO4J_URI (default bolt://localhost:7687), ORCH_NEO4J_DB (default neo4j).
@@ -16,11 +16,12 @@ import os
 import subprocess
 import sys
 import uuid
+from dataclasses import replace
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO)
 
-from fleet_orchestrator.orch_schema import create_project, init_schema, get_neo4j_driver, list_sessions  # noqa: E402
+from fleet_orchestrator.orch_schema import create_project, init_schema, get_neo4j_driver, list_dashboard_sessions  # noqa: E402
 from fleet_orchestrator.config import OrchConfig  # noqa: E402
 
 CFG = OrchConfig()
@@ -72,20 +73,19 @@ def main() -> int:
         _check("data_dir follows foreign HOME", paths["data_dir"].startswith(home + "/"))
         _check("gate repo default is NOT the baked /home/mira literal", paths["repo"] != _OLD_REPO)
 
-        # --- 2. DYNAMIC SESSIONS: data-derived + env pin, no hardcoded fleet ---
+        # --- 2. DYNAMIC SESSIONS: fail-closed canonical supervisor allowlist ---
         sup_a, sup_b = f"{_PFX}-alpha", f"{_PFX}-beta"
+        peer_a = f"{sup_a}-codex"
         create_project(project_id=f"{_PFX}-pa", name="pa", supervisor=sup_a, config=CFG)
         create_project(project_id=f"{_PFX}-pb", name="pb", supervisor=sup_b, config=CFG)
-        derived = list_sessions(config=CFG)
-        _check("list_sessions includes data supervisor A", sup_a in derived)
-        _check("list_sessions includes data supervisor B", sup_b in derived)
-        pin = f"{_PFX}-pinned"
-        os.environ["ORCH_DASHBOARD_SESSIONS"] = pin
-        try:
-            _check("ORCH_DASHBOARD_SESSIONS pin appears", pin in list_sessions(config=CFG))
-        finally:
-            os.environ.pop("ORCH_DASHBOARD_SESSIONS", None)
-        _check("pin gone once env unset", pin not in list_sessions(config=CFG))
+        create_project(project_id=f"{_PFX}-peer", name="peer", supervisor=peer_a, config=CFG)
+        create_project(project_id=f"{_PFX}-orphan", name="orphan", supervisor=f"{_PFX}-fixture", config=CFG)
+        _check("dashboard sessions empty without configured allowlist", list_dashboard_sessions(config=replace(CFG, session_ids=[])) == [])
+        derived = list_dashboard_sessions(config=replace(CFG, session_ids=[peer_a]))
+        _check("dashboard sessions include canonical configured supervisor", derived == [sup_a])
+        _check("dashboard sessions exclude configured peer spelling", peer_a not in derived)
+        _check("dashboard sessions exclude unconfigured data supervisor", sup_b not in derived)
+        _check("dashboard sessions exclude unconfigured fixture", f"{_PFX}-fixture" not in derived)
 
         # --- 3. LOOPBACK DEFAULT ---
         saved = os.environ.pop("ORCH_HOST", None)
