@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     create_project, create_phase, create_task, update_task_status,
     _raw_stop_decision, init_schema, get_neo4j_driver, _state_key,
-    _PEER_HEARTBEAT_STALE_SEC,
+    _PEER_HEARTBEAT_STALE_SEC, set_project_user_stop_conditions,
 )
 from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
 
@@ -164,6 +164,15 @@ def main() -> int:
         _set_active(_PEER, peer)
         _check("in-flight + peer ALIVE+working -> ALLOW_STOP (busy-loop fix)",
                _decide().get("wake_type") == "ALLOW_STOP", str(_decide()))
+        set_project_user_stop_conditions(
+            P,
+            [{"label": "human-review", "active": True}],
+            created_by=_SUP,
+            config=CFG,
+        )
+        _check("in-flight + peer ALIVE+working + unmet stop condition -> ALLOW_STOP (issue #66)",
+               _decide().get("wake_type") == "ALLOW_STOP", str(_decide()))
+        set_project_user_stop_conditions(P, [], created_by=_SUP, config=CFG)
         #   2b. clean done (current_task CLEARED, idle set) -> BLOCK to GATE.
         _set_done(_PEER, peer)
         d = _decide()
