@@ -27,6 +27,7 @@ setup(
         "scripts/install",
         "scripts/orch-cron",
         "scripts/orch-watch",
+        "scripts/taey-dispatch",
         "scripts/taey-plan",
         "scripts/taey-task",
     ],

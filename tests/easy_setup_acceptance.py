@@ -307,6 +307,11 @@ def main() -> int:
             result.ok and redis_ping.call_args.args[0] is fake_cfg and neo4j_probe.call_args.args[0] is fake_cfg,
             result,
         )
+        with mock.patch("fleet_orchestrator.easy_setup.resolve_notify_root", return_value=tmp / "notify-root"):
+            (tmp / "notify-root").mkdir()
+            (tmp / "notify-root" / "identity.py").write_text("# ok\n", encoding="utf-8")
+            notify_root_check = easy_setup._doctor_notify_root()
+        _assert("doctor-checks-notify-root-resolution", notify_root_check.ok, notify_root_check)
 
         with mock.patch("fleet_orchestrator.tasks_api.get_ready_tasks", return_value=[]):
             client = TestClient(app)

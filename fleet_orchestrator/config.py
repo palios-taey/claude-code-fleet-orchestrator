@@ -68,6 +68,40 @@ def _optional_env(name: str, default: Optional[str] = None) -> Optional[str]:
     return value if value else default
 
 
+def _notify_root_candidates() -> list[Path]:
+    root = Path(__file__).resolve().parent.parent
+    return [
+        root.parent / "claude-code-fleet-notify",
+        root.parent.parent / "claude-code-fleet-notify",
+        Path.home() / "claude-code-fleet-notify",
+    ]
+
+
+def resolve_notify_lib_root() -> Path:
+    explicit = _optional_env("ORCH_NOTIFY_LIB_ROOT")
+    if explicit:
+        path = Path(explicit).expanduser().resolve()
+        if path.is_dir():
+            return path
+        raise OrchConfigError(f"ORCH_NOTIFY_LIB_ROOT={explicit!r} must point to a directory")
+    for candidate in _notify_root_candidates():
+        if candidate.is_dir():
+            return candidate.resolve()
+    try:
+        import identity  # type: ignore
+    except ImportError:
+        pass
+    else:
+        path = Path(identity.__file__).resolve().parent
+        if path.is_dir():
+            return path
+    raise OrchConfigError(
+        "fleet-notify is not importable and ORCH_NOTIFY_LIB_ROOT is unset. "
+        "Set ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify "
+        "or place claude-code-fleet-notify as a sibling checkout of this repo."
+    )
+
+
 def _int_env(name: str, default: Optional[int] = None) -> int:
     raw = _optional_env(name)
     if raw is None:
@@ -200,21 +234,14 @@ def ensure_notify_importable() -> None:
         import identity  # noqa: F401
         return
     except ImportError as first_error:
-        notify_root = _optional_env("ORCH_NOTIFY_LIB_ROOT")
-        if notify_root is None:
-            raise OrchConfigError(
-                "ORCH_NOTIFY_LIB_ROOT must be set when fleet-notify is not already importable"
-            ) from first_error
-        notify_path = Path(notify_root)
-        if not notify_path.is_dir():
-            raise OrchConfigError("ORCH_NOTIFY_LIB_ROOT must point to a directory")
+        notify_path = resolve_notify_lib_root()
         if str(notify_path) not in sys.path:
             sys.path.insert(0, str(notify_path))
         try:
             import identity  # noqa: F401
         except ImportError as second_error:
             raise OrchConfigError(
-                "ORCH_NOTIFY_LIB_ROOT does not contain an importable fleet-notify installation"
+                f"ORCH_NOTIFY_LIB_ROOT={str(notify_path)!r} does not contain an importable fleet-notify installation"
             ) from second_error
 
 
