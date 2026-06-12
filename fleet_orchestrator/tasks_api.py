@@ -94,7 +94,13 @@ from fleet_orchestrator.orch_schema import (
     update_task_status,
     validate_source_path_for_refs,
 )
-from fleet_orchestrator.plan_loader import load_plan_from_text, plan_declares_refs, PlanIdError, scope_declared_id
+from fleet_orchestrator.plan_loader import (
+    PlanIdError,
+    PlanTerminalStatusError,
+    load_plan_from_text,
+    plan_declares_refs,
+    scope_declared_id,
+)
 from fleet_orchestrator.orch_schema import TaskIdCollisionError, TaskParentNotFoundError
 
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
@@ -266,6 +272,7 @@ async def create(req: Request) -> Dict[str, Any]:
     capability_tags = data.get("capability_tags", [])
     file_blast_radius = data.get("file_blast_radius", [])
     estimated_tokens = int(data.get("estimated_tokens", 50_000))
+    initial_status = data.get("initial_status", data.get("status", "pending"))
 
     cfg = _cfg()
     requested_phase_id = data.get("phase_id")
@@ -283,8 +290,11 @@ async def create(req: Request) -> Dict[str, Any]:
             capability_tags=capability_tags,
             file_blast_radius=file_blast_radius,
             estimated_tokens=estimated_tokens,
+            initial_status=initial_status,
             config=cfg,
         )
+    except CompletionEvidenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except TaskParentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except TaskIdCollisionError as exc:
@@ -293,6 +303,34 @@ async def create(req: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail=str(exc))
 
     return {"ok": True, "task_id": task_id, "from": sender, "owner": owner, "task_type": task_type}
+
+
+_TERMINAL_STATUSES = {"completed", "failed", "interrupted"}
+_REQUEST_TERMINAL_EVIDENCE_KEYS = ("reason", "error", "production_observation")
+
+
+def _terminal_evidence_from_request(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    evidence = data.get("evidence")
+    if evidence is not None:
+        return evidence
+    lifted = {
+        key: data[key]
+        for key in _REQUEST_TERMINAL_EVIDENCE_KEYS
+        if key in data
+    }
+    return lifted or None
+
+
+def _outcome_details(result: str, evidence: Optional[Dict[str, Any]]) -> Optional[str]:
+    if result:
+        return result
+    if not isinstance(evidence, dict):
+        return None
+    for key in _REQUEST_TERMINAL_EVIDENCE_KEYS:
+        value = evidence.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 @app.patch("/api/task/{task_id}")
@@ -310,7 +348,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         if owner is None:
             owner = task_before.get("owner", "")
         blocked_on = data["blocked_on"] if "blocked_on" in data else None
-        completion_evidence = data.get("evidence")
+        completion_evidence = _terminal_evidence_from_request(data)
 
         update_task_status(
             task_id,
@@ -333,11 +371,11 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
                     set_parent=True,
                 )
             elif status == "completed":
-                record_outcome(sender, "done", result or None)
+                record_outcome(sender, "done", _outcome_details(result, completion_evidence))
             elif status == "failed":
-                record_outcome(sender, "error", result or None)
+                record_outcome(sender, "error", _outcome_details(result, completion_evidence))
             elif status == "interrupted":
-                record_outcome(sender, "interrupted", result or None)
+                record_outcome(sender, "interrupted", _outcome_details(result, completion_evidence))
 
         # Transitive completion: if task finished, check if its parent phase is now done.
         phase_completed = False
@@ -352,7 +390,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             "status": status,
             "owner": owner,
             "blocked_on": blocked_on if blocked_on is not None else task_before.get("blocked_on"),
-            "completion_evidence": completion_evidence if status == "completed" else task_before.get("completion_evidence"),
+            "completion_evidence": completion_evidence if status in _TERMINAL_STATUSES else task_before.get("completion_evidence"),
             "phase_completed": phase_completed,
         }
     except CompletionEvidenceError as e:
@@ -508,9 +546,9 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
             status_code=400,
             detail=f"priority must be >= 0 (got {ingest_priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
         )
-    refs_present = plan_declares_refs(md_text)
-    source_path = _validated_source_path(data.get("source_path", ""), refs_present=refs_present)
     try:
+        refs_present = plan_declares_refs(md_text)
+        source_path = _validated_source_path(data.get("source_path", ""), refs_present=refs_present)
         return load_plan_from_text(
             md=md_text,
             source_path=source_path or "",
@@ -520,7 +558,7 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
             priority=ingest_priority,
             migration_exempt=bool(data.get("migration_exempt", False)),
         )
-    except PlanIdError as exc:                 # invalid/injected declared id — nothing written
+    except (PlanIdError, PlanTerminalStatusError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except TaskIdCollisionError as exc:        # id owned by another project — refuse adoption
         raise HTTPException(status_code=409, detail=str(exc))

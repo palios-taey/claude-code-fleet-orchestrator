@@ -87,9 +87,11 @@ class TaskParentNotFoundError(TaskIdCollisionError):
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
+_NON_SUCCESS_TERMINAL_EVIDENCE_KEYS = ("reason", "error", "production_observation")
 # Closed set of legal task statuses. Validated BEFORE any completed-specific logic so a
 # non-canonical spelling can never slip past the evidence gate (GAIA ws0 audit #2).
 _VALID_TASK_STATUSES = frozenset({"pending", "in_progress", "completed", "failed", "interrupted"})
+_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "interrupted"})
 
 
 def _utc_now_iso() -> str:
@@ -155,6 +157,59 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
             "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
         )
     return normalized
+
+
+def _normalize_non_success_terminal_evidence(
+    status: str,
+    evidence: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, str]]:
+    if evidence is None:
+        raise CompletionEvidenceError(
+            f"{status} status requires evidence with at least one of: reason, error, production_observation"
+        )
+    if not isinstance(evidence, dict):
+        raise CompletionEvidenceError("terminal evidence must be a JSON object")
+    normalized: Dict[str, str] = {}
+    for key in _NON_SUCCESS_TERMINAL_EVIDENCE_KEYS:
+        value = evidence.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise CompletionEvidenceError(
+                f"terminal evidence {key!r} must be a string, got {type(value).__name__}"
+            )
+        text = value.strip()
+        if not text:
+            continue
+        if key == "production_observation" and not _evidence_value_well_formed(key, text):
+            raise CompletionEvidenceError(
+                f"terminal evidence {key!r}={text!r} is not well-formed "
+                "(production_observation>=8 chars)"
+            )
+        normalized[key] = text
+    if not normalized:
+        raise CompletionEvidenceError(
+            f"{status} status requires evidence with at least one of: reason, error, production_observation"
+        )
+    return normalized
+
+
+def _validate_terminal_status_write(status: str, evidence: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    if status not in _VALID_TASK_STATUSES:
+        raise CompletionEvidenceError(
+            f"invalid status {status!r}; must be one of {sorted(_VALID_TASK_STATUSES)}"
+        )
+    if status == "completed" and evidence is None:
+        raise CompletionEvidenceError(
+            "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
+        )
+    if status == "completed":
+        return _normalize_completion_evidence(evidence)
+    if status in ("failed", "interrupted"):
+        return _normalize_non_success_terminal_evidence(status, evidence)
+    if evidence is not None:
+        raise CompletionEvidenceError("terminal evidence is only valid on a terminal transition")
+    return None
 
 
 def _normalize_owner_session(owner: str) -> str:
@@ -1812,6 +1867,12 @@ def create_task(
     config: Optional[OrchConfig] = None,
 ) -> str:
     """Create an OrchTask linked to a phase."""
+    if initial_status in _VALID_TASK_STATUSES:
+        _validate_terminal_status_write(initial_status, None)
+    if str(initial_status or "").strip().lower() in _TERMINAL_TASK_STATUSES:
+        raise CompletionEvidenceError(
+            "terminal initial status is not accepted; create the task pending and complete it through the evidence-gated task API"
+        )
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
@@ -1996,27 +2057,8 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     blocked_on_value = "__KEEP__" if blocked_on is None else blocked_on
-    # Status must be one of the closed legal set BEFORE any completed-specific logic. Without this,
-    # a non-canonical spelling ({"status":"Completed"} / {"status":"done"}) would slip past the
-    # `== "completed"` evidence check and persist a junk status with no evidence (GAIA ws0 audit #2).
-    if status not in _VALID_TASK_STATUSES:
-        raise CompletionEvidenceError(
-            f"invalid status {status!r}; must be one of {sorted(_VALID_TASK_STATUSES)}"
-        )
-    # Evidence is ALWAYS required to mark a task completed — this is the keystone of the whole
-    # product (ws0-done-evidence): "done" is not a self-report, it is a commit SHA / gate run /
-    # production observation. Every task-completion writer routes through this single function (the
-    # API PATCH and the migration acceptance scripts), and no raw Cypher writes a task to
-    # 'completed' outside it (other raw status writes exist — e.g. dispatch.py sets 'in_progress' —
-    # but the only 'completed' SETs elsewhere are phase/project status), so enforcing the
-    # completed-evidence rule here is the root-cause shape, not a bolted-on guard. No flag, no bypass.
-    if status == "completed" and completion_evidence is None:
-        raise CompletionEvidenceError(
-            "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
-        )
-    completion_evidence_value = _normalize_completion_evidence(completion_evidence) if status == "completed" else None
-    if status != "completed" and completion_evidence is not None:
-        raise CompletionEvidenceError("completion evidence is only valid on a completed transition")
+    completion_evidence_value = _validate_terminal_status_write(status, completion_evidence)
+    terminal_status = status in _TERMINAL_TASK_STATUSES
     with driver.session(database=cfg.neo4j_db) as session:
         if result is None:
             rec = session.run("""
@@ -2043,7 +2085,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                         ELSE coalesce(t.forced_continuation_count, 0)
                     END,
                     t.completion_evidence = CASE
-                        WHEN $status = 'completed' THEN $completion_evidence
+                        WHEN $terminal_status THEN $completion_evidence
                         ELSE NULL
                     END,
                     t.completed_by = CASE
@@ -2058,6 +2100,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                 RETURN t.id AS id
             """, task_id=task_id, status=status, owner=owner, blocked_on=blocked_on_value,
                  completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
+                 terminal_status=terminal_status,
                  completed_by=completed_by or owner or "")
         else:
             rec = session.run("""
@@ -2085,7 +2128,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                         ELSE coalesce(t.forced_continuation_count, 0)
                     END,
                     t.completion_evidence = CASE
-                        WHEN $status = 'completed' THEN $completion_evidence
+                        WHEN $terminal_status THEN $completion_evidence
                         ELSE NULL
                     END,
                     t.completed_by = CASE
@@ -2101,6 +2144,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
             """, task_id=task_id, status=status, owner=owner, result=result,
                  blocked_on=blocked_on_value,
                  completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
+                 terminal_status=terminal_status,
                  completed_by=completed_by or owner or "")
         if rec.single() is None:
             return False

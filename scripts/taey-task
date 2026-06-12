@@ -12,6 +12,7 @@ Usage:
     taey-task list                    # Show pending tasks
     taey-task status <task-id>        # Check a task's status
     taey-task update <task-id> completed --evidence '{"commit_sha":"abc123","production_observation":"verified live"}'
+    taey-task update <task-id> failed --evidence '{"reason":"blocked by missing dependency"}'
 """
 import argparse
 import json
@@ -134,11 +135,12 @@ def cmd_status(args):
 def cmd_update(args):
     """Update a task's status via PATCH /api/task/{id}."""
     sender = detect_from_node()
-    if args.status == "completed" and args.evidence is None:
-        print("ERROR: completed status requires --evidence JSON", file=sys.stderr)
+    terminal_statuses = {"completed", "failed", "interrupted"}
+    if args.status in terminal_statuses and args.evidence is None:
+        print(f"ERROR: {args.status} status requires --evidence JSON", file=sys.stderr)
         sys.exit(1)
-    if args.status != "completed" and args.evidence is not None:
-        print("ERROR: --evidence is only valid with completed status", file=sys.stderr)
+    if args.status not in terminal_statuses and args.evidence is not None:
+        print("ERROR: --evidence is only valid with terminal statuses", file=sys.stderr)
         sys.exit(1)
     data = {
         "status": args.status,
