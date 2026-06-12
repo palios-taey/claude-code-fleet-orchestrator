@@ -35,6 +35,10 @@ class PlanIdError(ValueError):
     pass
 
 
+class PlanTerminalStatusError(ValueError):
+    pass
+
+
 def validate_project_id(project_id: str) -> str:
     """A project id must be plain (it becomes the namespace prefix + appears in URLs)."""
     if not project_id or TASK_ID_SEP in project_id or not _ID_OK.match(project_id):
@@ -339,6 +343,11 @@ def _parse_plan(md: str) -> Dict[str, Any]:
             if meta.get("_meta_error"):
                 warnings.append(f"line {line_no}: {meta['_meta_error']}")
                 continue
+            if "status" in meta:
+                raise PlanTerminalStatusError(
+                    f"line {line_no}: task status metadata is not accepted during plan ingest; "
+                    "create tasks as pending and complete them through the evidence-gated task API"
+                )
             current_task = {
                 "id": task_match["id"],
                 "description": task_match["name"],

@@ -94,7 +94,13 @@ from fleet_orchestrator.orch_schema import (
     update_task_status,
     validate_source_path_for_refs,
 )
-from fleet_orchestrator.plan_loader import load_plan_from_text, plan_declares_refs, PlanIdError, scope_declared_id
+from fleet_orchestrator.plan_loader import (
+    PlanIdError,
+    PlanTerminalStatusError,
+    load_plan_from_text,
+    plan_declares_refs,
+    scope_declared_id,
+)
 from fleet_orchestrator.orch_schema import TaskIdCollisionError, TaskParentNotFoundError
 
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
@@ -266,6 +272,7 @@ async def create(req: Request) -> Dict[str, Any]:
     capability_tags = data.get("capability_tags", [])
     file_blast_radius = data.get("file_blast_radius", [])
     estimated_tokens = int(data.get("estimated_tokens", 50_000))
+    initial_status = data.get("initial_status", data.get("status", "pending"))
 
     cfg = _cfg()
     requested_phase_id = data.get("phase_id")
@@ -283,8 +290,11 @@ async def create(req: Request) -> Dict[str, Any]:
             capability_tags=capability_tags,
             file_blast_radius=file_blast_radius,
             estimated_tokens=estimated_tokens,
+            initial_status=initial_status,
             config=cfg,
         )
+    except CompletionEvidenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except TaskParentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except TaskIdCollisionError as exc:
@@ -508,9 +518,9 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
             status_code=400,
             detail=f"priority must be >= 0 (got {ingest_priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
         )
-    refs_present = plan_declares_refs(md_text)
-    source_path = _validated_source_path(data.get("source_path", ""), refs_present=refs_present)
     try:
+        refs_present = plan_declares_refs(md_text)
+        source_path = _validated_source_path(data.get("source_path", ""), refs_present=refs_present)
         return load_plan_from_text(
             md=md_text,
             source_path=source_path or "",
@@ -520,7 +530,7 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
             priority=ingest_priority,
             migration_exempt=bool(data.get("migration_exempt", False)),
         )
-    except PlanIdError as exc:                 # invalid/injected declared id — nothing written
+    except (PlanIdError, PlanTerminalStatusError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except TaskIdCollisionError as exc:        # id owned by another project — refuse adoption
         raise HTTPException(status_code=409, detail=str(exc))

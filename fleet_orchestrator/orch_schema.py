@@ -90,6 +90,7 @@ _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observatio
 # Closed set of legal task statuses. Validated BEFORE any completed-specific logic so a
 # non-canonical spelling can never slip past the evidence gate (GAIA ws0 audit #2).
 _VALID_TASK_STATUSES = frozenset({"pending", "in_progress", "completed", "failed", "interrupted"})
+_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "interrupted"})
 
 
 def _utc_now_iso() -> str:
@@ -154,6 +155,21 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         raise CompletionEvidenceError(
             "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
         )
+    return normalized
+
+
+def _validate_terminal_status_write(status: str, evidence: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    if status not in _VALID_TASK_STATUSES:
+        raise CompletionEvidenceError(
+            f"invalid status {status!r}; must be one of {sorted(_VALID_TASK_STATUSES)}"
+        )
+    if status == "completed" and evidence is None:
+        raise CompletionEvidenceError(
+            "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
+        )
+    normalized = _normalize_completion_evidence(evidence) if status == "completed" else None
+    if status != "completed" and evidence is not None:
+        raise CompletionEvidenceError("completion evidence is only valid on a completed transition")
     return normalized
 
 
@@ -1812,6 +1828,12 @@ def create_task(
     config: Optional[OrchConfig] = None,
 ) -> str:
     """Create an OrchTask linked to a phase."""
+    if initial_status in _VALID_TASK_STATUSES:
+        _validate_terminal_status_write(initial_status, None)
+    if str(initial_status or "").strip().lower() in _TERMINAL_TASK_STATUSES:
+        raise CompletionEvidenceError(
+            "terminal initial status is not accepted; create the task pending and complete it through the evidence-gated task API"
+        )
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
@@ -1996,27 +2018,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     blocked_on_value = "__KEEP__" if blocked_on is None else blocked_on
-    # Status must be one of the closed legal set BEFORE any completed-specific logic. Without this,
-    # a non-canonical spelling ({"status":"Completed"} / {"status":"done"}) would slip past the
-    # `== "completed"` evidence check and persist a junk status with no evidence (GAIA ws0 audit #2).
-    if status not in _VALID_TASK_STATUSES:
-        raise CompletionEvidenceError(
-            f"invalid status {status!r}; must be one of {sorted(_VALID_TASK_STATUSES)}"
-        )
-    # Evidence is ALWAYS required to mark a task completed — this is the keystone of the whole
-    # product (ws0-done-evidence): "done" is not a self-report, it is a commit SHA / gate run /
-    # production observation. Every task-completion writer routes through this single function (the
-    # API PATCH and the migration acceptance scripts), and no raw Cypher writes a task to
-    # 'completed' outside it (other raw status writes exist — e.g. dispatch.py sets 'in_progress' —
-    # but the only 'completed' SETs elsewhere are phase/project status), so enforcing the
-    # completed-evidence rule here is the root-cause shape, not a bolted-on guard. No flag, no bypass.
-    if status == "completed" and completion_evidence is None:
-        raise CompletionEvidenceError(
-            "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
-        )
-    completion_evidence_value = _normalize_completion_evidence(completion_evidence) if status == "completed" else None
-    if status != "completed" and completion_evidence is not None:
-        raise CompletionEvidenceError("completion evidence is only valid on a completed transition")
+    completion_evidence_value = _validate_terminal_status_write(status, completion_evidence)
     with driver.session(database=cfg.neo4j_db) as session:
         if result is None:
             rec = session.run("""
