@@ -1335,6 +1335,40 @@ def get_supervisor_inflight_peer_task(supervisor: str, project_id: str,
     return None
 
 
+def has_active_inflight_peer_task(supervisor: str, project_id: str,
+                                  config: Optional[OrchConfig] = None) -> bool:
+    """True when a live supervised project has peer-owned in-flight work that
+    the peer is actively working now.
+
+    This is the positive counterpart to ``get_supervisor_inflight_peer_task``:
+    that helper returns only work requiring supervisor action; this one returns
+    the legitimate wait state where the supervisor has nothing to do until the
+    peer's RESPONSE_READY/peer_idle re-wakes it.
+    """
+    cfg = config or OrchConfig()
+    peer_owners = [f"{supervisor}{suf}" for suf in _AUTONOMOUS_PEER_SUFFIXES]
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        rows = [dict(record) for record in session.run(
+            """
+            MATCH (proj:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE t.status IN ['in_progress', 'dispatched']
+              AND (t.owner IN $peer_owners OR t.dispatched_to IN $peer_owners)
+              AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
+            RETURN t.id AS task_id, t.owner AS owner, t.dispatched_to AS dispatched_to
+            ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, t.created_at ASC
+            LIMIT 25
+            """,
+            project_id=project_id, peer_owners=peer_owners,
+        )]
+    for row in rows:
+        workers = [w for w in (row.get("owner"), row.get("dispatched_to"))
+                   if w in peer_owners]
+        if _peer_actively_working_task(workers, row.get("task_id"), config=cfg):
+            return True
+    return False
+
+
 def _supervisor_gate_block_reason(task_id: Optional[str], owner: Optional[str],
                                   description: Optional[str]) -> str:
     task_id_value = task_id or "unknown-task"
@@ -1512,6 +1546,13 @@ def _raw_stop_decision(session_id: str,
             "blocked_on_rejected": blocked_on,
             "non_convergable": True,
         }
+
+    for project in projects:
+        status = str(project.get("status") or "").strip().lower()
+        if status not in ("active", "in_progress"):
+            continue
+        if has_active_inflight_peer_task(supervisor, str(project.get("id")), config=cfg):
+            return {"block": False, "reason": None, "wake_type": WAKE_ALLOW_STOP, "task_id": None}
 
     reason_required: Optional[Dict[str, Any]] = None
     for project in projects:
