@@ -17,7 +17,11 @@ OPTION_RE = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
 SUBCOMMAND_RE = re.compile(r"\{([a-z0-9][a-z0-9_-]*(?:,[a-z0-9][a-z0-9_-]*)*)\}\s+\.\.\.")
 INLINE_CODE_RE = re.compile(r"`([^`]*\btaey-[^`]*)`")
 BACKTICK_CALL_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)\(\)`")
+BACKTICK_FILE_RE = re.compile(r"`([^`]+\.(?:py|md|sh|json|ya?ml|toml))`")
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+REFERENCE_LINK_USE_RE = re.compile(r"(?<!!)\[[^\]]+\]\[([^\]]+)\]")
+REFERENCE_LINK_DEF_RE = re.compile(r"^\s*\[([^\]]+)\]:\s*(\S+)")
+HTML_HREF_RE = re.compile(r"""<a\s+[^>]*href=["']([^"']+)["']""", re.IGNORECASE)
 ENV_RE = re.compile(r"\bORCH_[A-Z0-9_]+\b")
 REPO_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_./-])"
@@ -27,6 +31,7 @@ REPO_PATH_RE = re.compile(
     r"|requirements\.txt"
     r"|setup\.py"
     r"|(?:docs|tests|scripts|fleet_orchestrator|ui|\.github)/[A-Za-z0-9_./:-]+"
+    r"|[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+\.(?:py|md|sh|json|ya?ml|toml)"
     r")"
 )
 PY_MODULE_RE = re.compile(r"\bfleet_orchestrator(?:\.[A-Za-z_][A-Za-z0-9_]*)+(?::[A-Za-z_][A-Za-z0-9_]*)?\b")
@@ -75,6 +80,9 @@ SAFE_EXTERNAL_CALL_NAMES = {
     "print",
     "set",
     "str",
+}
+SAFE_ILLUSTRATIVE_FILES = {
+    "MEMORY.md",
 }
 
 
@@ -256,6 +264,14 @@ def documented_invocations(root: Path, doc_paths: list[Path] | None = None) -> l
                 tokens = _tokens_from_command_text(match.group(1))
                 if len(tokens) > 1 and tokens[0].startswith("taey-"):
                     invocations.append((_display_path(root, path), lineno, tokens, line.strip()))
+            seen_commands = {item[0][0] for item in [(tokens,) for _path, _lineno, tokens, _raw in invocations if _path == _display_path(root, path) and _lineno == lineno and tokens]}
+            for match in COMMAND_RE.finditer(line):
+                command = match.group(1)
+                if command in seen_commands:
+                    continue
+                tokens = _tokens_from_command_text(line[match.start():])
+                if tokens:
+                    invocations.append((_display_path(root, path), lineno, tokens, line.strip()))
     return invocations
 
 
@@ -279,6 +295,8 @@ def validate_invocation(
     errors: list[str] = []
     command = tokens[0]
     if (command,) not in help_by_path:
+        if command in DEFAULT_PATH_CLIS:
+            return []
         return [f"unknown documented CLI `{command}`"]
 
     active_path = (command,)
@@ -338,7 +356,9 @@ def _is_external_or_placeholder(value: str) -> bool:
         lowered.startswith(("http://", "https://", "mailto:", "file:"))
         or lowered.startswith("#")
         or "<" in value
+        or ">" in value
         or "{" in value
+        or value.startswith("~")
         or value.startswith("/path/")
         or value.startswith("/abs/")
         or value.startswith("OWNER/")
@@ -369,11 +389,39 @@ def _resolve_markdown_link(doc_file: Path, raw: str) -> Path | None:
     return (doc_file.parent / candidate).resolve(strict=False)
 
 
+def _reference_definitions(root: Path, doc_paths: list[Path] | None = None) -> dict[Path, dict[str, str]]:
+    definitions: dict[Path, dict[str, str]] = {}
+    for path in _markdown_files(root, doc_paths):
+        refs: dict[str, str] = {}
+        for line in _read_text(path).splitlines():
+            match = REFERENCE_LINK_DEF_RE.match(line)
+            if match:
+                refs[match.group(1).strip().casefold()] = match.group(2).strip()
+        definitions[path] = refs
+    return definitions
+
+
 def _is_repo_local_reference(raw: str) -> bool:
     value, _symbol = _path_and_symbol(raw)
     if _is_external_or_placeholder(value):
         return False
     return value in DOC_CURRENCY_ROOT_FILES or any(value.startswith(prefix) for prefix in DOC_CURRENCY_LOCAL_PREFIXES)
+
+
+def _repo_file_reference_exists(root: Path, actual_doc: Path, raw: str) -> bool:
+    value, _symbol = _path_and_symbol(raw)
+    if _is_external_or_placeholder(value):
+        return True
+    if value in SAFE_ILLUSTRATIVE_FILES:
+        return True
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return True
+    if "/" in value:
+        if value.startswith("../") or value.startswith("./"):
+            return (actual_doc.parent / candidate).resolve(strict=False).exists()
+        return (root / candidate).resolve(strict=False).exists()
+    return any(path.name == value for path in root.rglob(value))
 
 
 def _iter_doc_lines(root: Path, doc_paths: list[Path] | None = None) -> list[tuple[Path, Path, int, str]]:
@@ -485,6 +533,7 @@ def check_doc_currency(root: Path, doc_paths: list[Path] | None = None) -> list[
     errors: list[str] = []
     source_text = _source_text_for_currency(root)
     function_symbols = _repo_function_symbols(root)
+    reference_defs = _reference_definitions(root, doc_paths)
     setup_commands = _setup_declared_commands(root)
     script_commands = {path.name for path in (root / "scripts").iterdir() if path.is_file()} if (root / "scripts").is_dir() else set()
     repo_commands = setup_commands | script_commands
@@ -511,6 +560,25 @@ def check_doc_currency(root: Path, doc_paths: list[Path] | None = None) -> list[
             if resolved is not None and not resolved.exists():
                 errors.append(f"{display}:{lineno}: markdown link target does not exist: `{raw}`")
 
+        ref_def = REFERENCE_LINK_DEF_RE.match(line)
+        if ref_def:
+            raw = ref_def.group(2)
+            if not _is_external_or_placeholder(_clean_doc_path(raw)):
+                resolved = _resolve_markdown_link(actual_doc, raw)
+                if resolved is not None and not resolved.exists():
+                    errors.append(f"{display}:{lineno}: reference-style link target does not exist: `{raw}`")
+        for ref_match in REFERENCE_LINK_USE_RE.finditer(line):
+            label = ref_match.group(1).strip().casefold()
+            if label not in reference_defs.get(actual_doc, {}):
+                errors.append(f"{display}:{lineno}: reference-style link label is undefined: `{ref_match.group(1)}`")
+        for href_match in HTML_HREF_RE.finditer(line):
+            raw = href_match.group(1)
+            if _is_external_or_placeholder(_clean_doc_path(raw)):
+                continue
+            resolved = _resolve_markdown_link(actual_doc, raw)
+            if resolved is not None and not resolved.exists():
+                errors.append(f"{display}:{lineno}: HTML link target does not exist: `{raw}`")
+
         for env in sorted(set(ENV_RE.findall(line))):
             if env not in source_text:
                 errors.append(f"{display}:{lineno}: documented env var is not referenced by repo code/config: `{env}`")
@@ -521,8 +589,14 @@ def check_doc_currency(root: Path, doc_paths: list[Path] | None = None) -> list[
             if command in repo_commands:
                 if command in script_commands and not (root / "scripts" / command).is_file():
                     errors.append(f"{display}:{lineno}: documented script command is missing: `{tokens[0]}`")
-                if command in setup_commands and command not in repo_commands:
-                    errors.append(f"{display}:{lineno}: documented setup entrypoint is missing: `{command}`")
+            if command in setup_commands and command not in repo_commands:
+                errors.append(f"{display}:{lineno}: documented setup entrypoint is missing: `{command}`")
+
+        for raw in sorted(set(BACKTICK_FILE_RE.findall(line))):
+            if _is_repo_local_reference(raw):
+                continue
+            if not _repo_file_reference_exists(root, actual_doc, raw):
+                errors.append(f"{display}:{lineno}: documented repo-shaped file does not exist: `{raw}`")
 
         for ref in PY_MODULE_RE.findall(line):
             if ref.endswith(".py"):
