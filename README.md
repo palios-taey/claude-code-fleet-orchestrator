@@ -104,9 +104,21 @@ orch doctor --explain-scope
 orch-cron --help
 orch-watch --help
 taey-plan --help
+taey-question --help
 taey-task --help
 taey-dispatch --help
 ```
+
+## Human Review Gates
+
+Use `taey-question` when a downstream task must wait for a recorded human-review gate:
+
+```bash
+taey-question create-gate <phase-id> <gate-task-id> "Which artifact should ship?" --reviewer jesse
+taey-question answer <question-id> "Ship artifact B" --from conductor-codex
+```
+
+The gate creates a durable task-linked `OrchQuestion`, surfaces it as a dashboard `needs_you` item, and sends a reviewer notification. This is accident-prevention for a single-user product: normal agent paths (`update_task_status`, `PATCH /api/task/{id}`, and `taey-task update`) cannot complete `human-review` gate tasks; the dashboard uses a dedicated `/api/ui/questions/{question_id}/answer` path that records the verdict and completes the gate.
 
 ## Out-of-band dispatch liveness
 

@@ -203,6 +203,15 @@ jobs:
           ORCH_REDIS_PORT: "6379"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
         run: python tests/question_no_injection_acceptance.py
+      - name: Ship-gate — human-review gates require the UI completion path
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+          ORCH_TEST_NAMESPACE: ship-gate-ci
+        run: python tests/human_review_gate_acceptance.py
       - name: Ship-gate — canonical ready dependency predicate preserves behavior (F18)
         env:
           ORCH_NEO4J_URI: bolt://localhost:7687

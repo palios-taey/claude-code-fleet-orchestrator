@@ -29,6 +29,7 @@ setup(
         "scripts/orch-watch",
         "scripts/taey-dispatch",
         "scripts/taey-plan",
+        "scripts/taey-question",
         "scripts/taey-task",
     ],
     install_requires=[

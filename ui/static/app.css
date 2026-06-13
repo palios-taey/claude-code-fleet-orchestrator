@@ -296,6 +296,47 @@ code {
   padding-left: 18px;
 }
 
+.question-answer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.question-answer textarea {
+  min-height: 42px;
+  resize: vertical;
+}
+
+.question-answer textarea,
+.question-answer button {
+  font: inherit;
+}
+
+.question-answer textarea {
+  width: 100%;
+  border: 1px solid rgba(31, 26, 20, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.86);
+  padding: 9px 10px;
+  color: var(--text);
+}
+
+.question-answer button {
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: white;
+  font-weight: 700;
+  padding: 9px 12px;
+  cursor: pointer;
+}
+
+.question-answer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .phase-card {
   padding: 16px;
   display: grid;

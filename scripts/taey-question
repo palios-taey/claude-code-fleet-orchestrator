@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+
+DASHBOARD_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002").rstrip("/")
+
+
+def detect_from_node() -> str:
+    explicit = os.environ.get("TAEY_NODE_ID")
+    if explicit:
+        return explicit
+    try:
+        result = subprocess.run(["tmux", "display-message", "-p", "#S"], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return socket.gethostname()
+
+
+def parse_refs(raw: str | None) -> list[dict] | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"ERROR: --refs must be JSON: {exc}")
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise SystemExit("ERROR: --refs must be a JSON array of objects")
+    return value
+
+
+def api_call(method: str, endpoint: str, payload: dict) -> dict:
+    request = urllib.request.Request(
+        f"{DASHBOARD_URL}{endpoint}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8")[:500]
+        raise SystemExit(f"ERROR: HTTP {exc.code}: {body}")
+    if not isinstance(result, dict) or not result.get("ok"):
+        raise SystemExit(f"ERROR: {result}")
+    return result
+
+
+def cmd_create_gate(args: argparse.Namespace) -> int:
+    payload = {
+        "phase_id": args.phase_id,
+        "task_id": args.task_id,
+        "question_id": args.question_id,
+        "prompt": args.prompt,
+        "reviewer": args.reviewer,
+        "from": args.sender or detect_from_node(),
+        "priority": args.priority,
+        "notify": not args.no_notify,
+    }
+    refs = parse_refs(args.refs)
+    if refs is not None:
+        payload["refs"] = refs
+    result = api_call("POST", "/api/human-review-gates", payload)
+    print(f"OK: human-review gate task={result['task_id']} question={result['question_id']} reviewer={result['reviewer']}")
+    return 0
+
+
+def cmd_answer(args: argparse.Namespace) -> int:
+    result = api_call(
+        "POST",
+        f"/api/questions/{args.question_id}/answer",
+        {"answer": args.answer, "from": args.sender or detect_from_node()},
+    )
+    verified = str(bool(result.get("verified"))).lower()
+    gate_completed = str(bool(result.get("gate_completed"))).lower()
+    print(f"OK: recorded answer {result['question_id']} by {result.get('answered_by', '?')} verified={verified} gate_completed={gate_completed}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="taey-question")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    gate = sub.add_parser("create-gate", help="Create a human-review gate task and surfaced question")
+    gate.add_argument("phase_id")
+    gate.add_argument("task_id")
+    gate.add_argument("prompt")
+    gate.add_argument("--question-id", default="")
+    gate.add_argument("--reviewer", default="jesse")
+    gate.add_argument("--from", dest="sender", default="")
+    gate.add_argument("--priority", type=int, default=50)
+    gate.add_argument("--refs", help="JSON array of ref objects to attach to the gate")
+    gate.add_argument("--no-notify", action="store_true", help="Do not send taey-notify to the reviewer")
+    gate.set_defaults(func=cmd_create_gate)
+
+    answer = sub.add_parser("answer", help="Record a proposed answer; dashboard UI completion closes human-review gates")
+    answer.add_argument("question_id")
+    answer.add_argument("answer")
+    answer.add_argument("--from", dest="sender", default="")
+    answer.set_defaults(func=cmd_answer)
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

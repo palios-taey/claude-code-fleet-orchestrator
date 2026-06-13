@@ -2223,6 +2223,17 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     completion_evidence_value = _validate_terminal_status_write(status, completion_evidence)
     terminal_status = status in _TERMINAL_TASK_STATUSES
     with driver.session(database=cfg.neo4j_db) as session:
+        if status == "completed":
+            existing = session.run("""
+                MATCH (t:OrchTask {id: $task_id})
+                RETURN t.task_type AS task_type
+            """, task_id=task_id).single()
+            if existing is None:
+                return False
+            if existing.get("task_type") == "human-review":
+                raise CompletionEvidenceError(
+                    "human-review gate tasks must be completed through the dashboard UI review endpoint"
+                )
         if result is None:
             rec = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
@@ -3212,8 +3223,124 @@ def get_agent_tasks(agent_id: str, config: Optional[OrchConfig] = None) -> List[
         return [dict(r) for r in result]
 
 
+def _chat_lineage(value: str) -> str:
+    lineage = str(value or "").strip()
+    if not lineage:
+        raise ValueError("lineage must be non-empty")
+    if len(lineage) > 160:
+        raise ValueError("lineage must be <= 160 characters")
+    if not all(ch.isalnum() or ch in "._-" for ch in lineage) or ".." in lineage:
+        raise ValueError("lineage contains unsupported characters")
+    return lineage
+
+
+def _chat_key(kind: str, lineage: str) -> str:
+    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+    return f"{prefix}:{kind}:{_chat_lineage(lineage)}"
+
+
+def _surface_question_to_chat(question: Dict[str, Any], *,
+                              config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    from .config import get_redis_sync
+
+    lineage = _chat_lineage(str(question.get("lineage") or question.get("reviewer") or question.get("asked_by") or "conductor"))
+    reason = str(question.get("text") or "").strip()
+    if not reason:
+        raise ValueError("question text must be non-empty")
+    record = {
+        "id": str(question["id"]),
+        "lineage": lineage,
+        "session": str(question.get("reviewer") or lineage).strip() or lineage,
+        "reason": reason,
+        "status": "open",
+        "ts": _utc_now_iso(),
+        "source": "orch_question",
+        "task_id": str(question.get("task_id") or ""),
+        "gate_task_id": str(question.get("gate_task_id") or question.get("task_id") or ""),
+        "question_id": str(question["id"]),
+    }
+    encoded = _json_encode(record)
+    message = {
+        "id": uuid.uuid4().hex,
+        "lineage": lineage,
+        "sender": record["session"],
+        "role": "system",
+        "type": "escalation",
+        "text": reason,
+        "metadata": {"open_question_id": record["id"], "needs_you": True, "source": "orch_question"},
+        "ts": record["ts"],
+    }
+    r = get_redis_sync(config)
+    r.rpush(_chat_key("openq", lineage), encoded)
+    r.set(_chat_key("needs_you", lineage), encoded)
+    r.rpush(_chat_key("chat", lineage), _json_encode(message))
+    return record
+
+
+def _resolve_chat_question(question_id: str, *,
+                           config: Optional[OrchConfig] = None,
+                           lineage: str = "") -> None:
+    from .config import get_redis_sync
+
+    if not lineage:
+        return
+    line = _chat_lineage(lineage)
+    r = get_redis_sync(config)
+    key = _chat_key("openq", line)
+    remaining: List[str] = []
+    for raw in r.lrange(key, 0, -1):
+        try:
+            record = json.loads(raw)
+        except Exception:
+            remaining.append(raw)
+            continue
+        if not isinstance(record, dict) or str(record.get("id") or record.get("question_id") or "") != question_id:
+            remaining.append(raw)
+    pipe = r.pipeline()
+    pipe.delete(key)
+    if remaining:
+        pipe.rpush(key, *remaining)
+    needs_key = _chat_key("needs_you", line)
+    needs_raw = r.get(needs_key)
+    if needs_raw:
+        try:
+            needs = json.loads(needs_raw)
+        except Exception:
+            needs = {}
+        if isinstance(needs, dict) and str(needs.get("id") or needs.get("question_id") or "") == question_id:
+            pipe.delete(needs_key)
+    pipe.execute()
+
+
+def _notify_human_review_gate(reviewer: str, prompt: str, *, requested_by: str,
+                              task_id: str, question_id: str,
+                              config: Optional[OrchConfig] = None) -> None:
+    if not reviewer:
+        return
+    cfg = config or OrchConfig()
+    body = (
+        f"HUMAN REVIEW NEEDED [{task_id}]\n"
+        f"question_id: {question_id}\n"
+        f"{prompt}"
+    )
+    result = subprocess.run(
+        [cfg.notify_cli_path, reviewer, body, "--from", requested_by or "orch-human-review",
+         "--type", "escalation", "--priority", "high"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"{cfg.notify_cli_path} failed")
+
+
 def create_question(question_id: str, text: str, context: str = "",
                     task_id: str = "", asked_by: str = "",
+                    reviewer: str = "", lineage: str = "",
+                    question_type: str = "question",
+                    gate_task_id: str = "",
+                    refs: Optional[List[Dict[str, Any]]] = None,
+                    surface: bool = False,
                     config: Optional[OrchConfig] = None) -> str:
     """Create an OrchQuestion node linked to a task."""
     cfg = config or OrchConfig()
@@ -3225,7 +3352,9 @@ def create_question(question_id: str, text: str, context: str = "",
         _BASE_Q = (
             "MERGE (q:OrchQuestion {id: $id}) "
             "SET q.text = $text, q.context = $context, q.task_id = $task_id, "
-            "q.asked_by = $asked_by, q.status = 'open', q.created_at = datetime() "
+            "q.asked_by = $asked_by, q.reviewer = $reviewer, q.lineage = $lineage, "
+            "q.question_type = $question_type, q.gate_task_id = $gate_task_id, "
+            "q.refs = $refs, q.status = 'open', q.created_at = datetime() "
         )
         _LINK_TASK = (
             "WITH q MATCH (t:OrchTask {id: $task_id}) "
@@ -3244,28 +3373,219 @@ def create_question(question_id: str, text: str, context: str = "",
 
         result = session.run(
             query, id=question_id, text=text, context=context,
-            task_id=task_id, asked_by=asked_by)
+            task_id=task_id, asked_by=asked_by, reviewer=reviewer,
+            lineage=lineage, question_type=question_type,
+            gate_task_id=gate_task_id, refs=_encode_refs_or_none(refs))
         record = result.single()
         if record is None:
             raise TaskParentNotFoundError(f"task '{task_id}' not found; cannot create question '{question_id}'")
+        if surface:
+            _surface_question_to_chat({
+                "id": question_id,
+                "text": text,
+                "task_id": task_id,
+                "gate_task_id": gate_task_id,
+                "asked_by": asked_by,
+                "reviewer": reviewer,
+                "lineage": lineage,
+            }, config=cfg)
         return record["id"]
 
 
 def answer_question(question_id: str, answer: str, answered_by: str,
-                    config: Optional[OrchConfig] = None) -> bool:
+                    config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     """Provide an answer to an open question."""
+    if not str(answer or "").strip():
+        raise ValueError("answer must be non-empty")
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
+        found = session.run("""
+            MATCH (q:OrchQuestion {id: $id})
+            RETURN q.id AS id, q.question_type AS question_type,
+                   q.gate_task_id AS gate_task_id, q.lineage AS lineage,
+                   q.reviewer AS reviewer, properties(q) AS props
+        """, id=question_id).single()
+        if found is None:
+            return {"ok": False, "question_id": question_id, "gate_completed": False, "verified": False}
+        record = dict(found)
+        is_human_review_gate = record.get("question_type") == "human_review_gate"
+        if is_human_review_gate:
+            props = record.get("props") if isinstance(record.get("props"), dict) else {}
+            unverified = _decode_json_field(props.get("unverified_answers"), [])
+            if not isinstance(unverified, list):
+                unverified = []
+            unverified.append({
+                "answer": str(answer).strip(),
+                "answered_by": answered_by,
+                "received_at": _utc_now_iso(),
+                "verified": False,
+                "source": "unauthenticated_api",
+            })
+            session.run("""
+                MATCH (q:OrchQuestion {id: $id})
+                SET q.unverified_answer = $answer,
+                    q.unverified_answered_by = $answered_by,
+                    q.unverified_answered_at = datetime(),
+                    q.unverified_answers = $unverified_answers,
+                    q.status = 'open'
+            """,
+                id=question_id,
+                answer=str(answer).strip(),
+                answered_by=answered_by,
+                unverified_answers=_json_encode(unverified),
+            )
+            return {
+                "ok": True,
+                "question_id": question_id,
+                "answered_by": answered_by,
+                "verified": False,
+                "gate_completed": False,
+                "question_type": record.get("question_type"),
+                "gate_task_id": record.get("gate_task_id") or "",
+            }
         result = session.run("""
             MATCH (q:OrchQuestion {id: $id})
             SET q.answer = $answer,
                 q.answered_by = $answered_by,
                 q.status = 'answered',
                 q.answered_at = datetime()
-            RETURN q.id AS id
+            RETURN q.id AS id, q.question_type AS question_type,
+                   q.gate_task_id AS gate_task_id, q.lineage AS lineage,
+                   q.reviewer AS reviewer
         """, id=question_id, answer=answer, answered_by=answered_by)
-        return result.single() is not None
+        record = result.single()
+    if record is None:
+        return {"ok": False, "question_id": question_id, "gate_completed": False, "verified": False}
+    lineage = str(record.get("lineage") or record.get("reviewer") or "")
+    _resolve_chat_question(question_id, config=cfg, lineage=lineage)
+    return {
+        "ok": True,
+        "question_id": question_id,
+        "answered_by": answered_by,
+        "verified": False,
+        "gate_completed": False,
+        "question_type": record.get("question_type"),
+        "gate_task_id": record.get("gate_task_id") or "",
+    }
+
+
+def complete_human_review_gate(question_id: str, answer: str, answered_by: str,
+                               config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    """Single-user UI path for completing a human-review gate.
+
+    Normal agent/CLI task-completion paths cannot accidentally complete a
+    human-review task; the dashboard's dedicated review action can.
+    """
+    answer_text = str(answer or "").strip()
+    reviewer = str(answered_by or "").strip() or "dashboard-ui"
+    if not answer_text:
+        raise ValueError("answer must be non-empty")
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    evidence = _normalize_completion_evidence({
+        "production_observation": f"human-review verdict recorded via dashboard UI by {reviewer}",
+    })
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            MATCH (q:OrchQuestion {id: $question_id})-[:CONCERNS_TASK]->(t:OrchTask {id: q.gate_task_id})
+            WHERE q.question_type = 'human_review_gate'
+              AND t.task_type = 'human-review'
+            SET q.answer = $answer,
+                q.answered_by = $answered_by,
+                q.answered_at = datetime(),
+                q.status = 'answered',
+                q.verified = true,
+                q.answer_source = 'dashboard_ui',
+                t.status = 'completed',
+                t.completion_evidence = $completion_evidence,
+                t.completed_by = $answered_by,
+                t.completed_at = datetime(),
+                t.blocked_on = NULL,
+                t.updated_at = datetime()
+            RETURN q.id AS question_id, q.lineage AS lineage, q.reviewer AS reviewer,
+                   t.id AS gate_task_id, t.status AS task_status
+        """,
+            question_id=question_id,
+            answer=answer_text,
+            answered_by=reviewer,
+            completion_evidence=_json_encode(evidence),
+        ).single()
+        if row is None:
+            return {"ok": False, "question_id": question_id, "gate_completed": False, "verified": False}
+        gate_task_id = row["gate_task_id"]
+        session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            WITH p
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(sibling:OrchTask)
+            WHERE sibling.id <> $task_id AND sibling.status = 'in_progress'
+            WITH p, count(sibling) AS in_progress_siblings
+            SET p.in_progress_heartbeat_at = CASE
+                    WHEN in_progress_siblings = 0 THEN ''
+                    ELSE p.in_progress_heartbeat_at
+                END,
+                p.status = CASE
+                    WHEN p.status = 'in_progress' AND in_progress_siblings = 0 THEN 'active'
+                    ELSE p.status
+                END,
+                p.updated_at = datetime()
+        """, task_id=gate_task_id)
+    lineage = str(row.get("lineage") or row.get("reviewer") or "")
+    _resolve_chat_question(question_id, config=cfg, lineage=lineage)
+    return {
+        "ok": True,
+        "question_id": question_id,
+        "answered_by": reviewer,
+        "verified": True,
+        "gate_completed": True,
+        "question_type": "human_review_gate",
+        "gate_task_id": row["gate_task_id"],
+    }
+
+
+def create_human_review_gate(
+    *,
+    phase_id: str,
+    task_id: str,
+    question_id: str,
+    prompt: str,
+    reviewer: str,
+    requested_by: str,
+    refs: Optional[List[Dict[str, Any]]] = None,
+    priority: int = 50,
+    notify: bool = True,
+    config: Optional[OrchConfig] = None,
+) -> Dict[str, Any]:
+    task = create_task(
+        phase_id=phase_id,
+        task_id=task_id,
+        description=prompt,
+        priority=priority,
+        owner=requested_by,
+        created_by=requested_by,
+        task_type="human-review",
+        refs=refs,
+        wake_owner_if_ready=False,
+        config=config,
+    )
+    question = create_question(
+        question_id=question_id,
+        text=prompt,
+        context=_json_encode({"refs": _normalize_refs(refs)}),
+        task_id=task,
+        asked_by=requested_by,
+        reviewer=reviewer,
+        lineage=reviewer,
+        question_type="human_review_gate",
+        gate_task_id=task,
+        refs=refs,
+        surface=True,
+        config=config,
+    )
+    if notify:
+        _notify_human_review_gate(reviewer, prompt, requested_by=requested_by,
+                                  task_id=task, question_id=question, config=config)
+    return {"task_id": task, "question_id": question, "reviewer": reviewer}
 
 
 def get_open_questions(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
@@ -3277,7 +3597,8 @@ def get_open_questions(config: Optional[OrchConfig] = None) -> List[Dict[str, An
             MATCH (q:OrchQuestion {status: 'open'})
             RETURN q.id AS id, q.text AS text, q.context AS context,
                    q.task_id AS task_id, q.asked_by AS asked_by,
-                   q.created_at AS created_at
+                   q.reviewer AS reviewer, q.question_type AS question_type,
+                   q.gate_task_id AS gate_task_id, q.created_at AS created_at
             ORDER BY q.created_at ASC
         """)
         return [dict(r) for r in result]
