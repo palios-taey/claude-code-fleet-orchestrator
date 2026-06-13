@@ -2172,6 +2172,44 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
         return [dict(r) for r in result]
 
 
+def _clear_matching_current_task(owner: str, task_id: str, config: Optional[OrchConfig] = None) -> bool:
+    if not owner or not task_id:
+        return False
+    from .config import get_redis_sync
+    from redis import RedisError, WatchError
+
+    try:
+        r = get_redis_sync(config)
+        key = _state_key(owner, "current_task")
+        for attempt in range(5):
+            with r.pipeline() as pipe:
+                try:
+                    pipe.watch(key)
+                    raw = pipe.get(key)
+                    if not raw:
+                        pipe.unwatch()
+                        return False
+                    try:
+                        current = json.loads(raw)
+                    except Exception:
+                        pipe.unwatch()
+                        return False
+                    if not isinstance(current, dict) or str(current.get("task_id") or "") != task_id:
+                        pipe.unwatch()
+                        return False
+                    pipe.multi()
+                    pipe.delete(key)
+                    pipe.execute()
+                    return True
+                except WatchError:
+                    time.sleep(0.01 * (attempt + 1))
+                    continue
+        return False
+    except RedisError as exc:
+        _LOG.warning("best-effort current_task clear failed owner=%s task=%s: %s", owner, task_id, exc)
+        return False
+
+
 def update_task_status(task_id: str, status: str, owner: str = "",
                        result: Optional[str] = None,
                        blocked_on: Optional[str] = None,
@@ -2188,6 +2226,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
         if result is None:
             rec = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
+                WITH t, t.owner AS previous_owner
                 SET t.status = $status,
                     t.owner = CASE WHEN coalesce(trim($owner), '') = '' THEN t.owner ELSE $owner END,
                     t.blocked_on = CASE
@@ -2222,7 +2261,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                         ELSE NULL
                     END,
                     t.updated_at = datetime()
-                RETURN t.id AS id
+                RETURN t.id AS id, t.owner AS owner, previous_owner AS previous_owner
             """, task_id=task_id, status=status, owner=owner, blocked_on=blocked_on_value,
                  completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
                  terminal_status=terminal_status,
@@ -2230,6 +2269,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
         else:
             rec = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
+                WITH t, t.owner AS previous_owner
                 SET t.status = $status,
                     t.owner = CASE WHEN coalesce(trim($owner), '') = '' THEN t.owner ELSE $owner END,
                     t.result = $result,
@@ -2265,13 +2305,14 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                         ELSE NULL
                     END,
                     t.updated_at = datetime()
-                RETURN t.id AS id
+                RETURN t.id AS id, t.owner AS owner, previous_owner AS previous_owner
             """, task_id=task_id, status=status, owner=owner, result=result,
                  blocked_on=blocked_on_value,
                  completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
                  terminal_status=terminal_status,
                  completed_by=completed_by or owner or "")
-        if rec.single() is None:
+        task_row = rec.single()
+        if task_row is None:
             return False
         session.run("""
             MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
@@ -2293,6 +2334,9 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                 END,
                 p.updated_at = datetime()
         """, task_id=task_id, status=status)
+        if terminal_status:
+            for session_id in {str(task_row.get("previous_owner") or ""), str(task_row.get("owner") or "")}:
+                _clear_matching_current_task(session_id, task_id, config=cfg)
         return True
 
 
