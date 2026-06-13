@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, ensure_notify_importable, get_neo4j_driver
 from .handoff_validation import flags_for_session, validate_stop_handoff
+from .out_of_band import out_of_band_task_active
 
 
 SCHEMA_CONSTRAINTS = [
@@ -1211,6 +1212,9 @@ def _peer_actively_working_task(workers: List[str], task_id: Optional[str],
         return False
     cfg = config or OrchConfig()
     from .config import get_redis_sync
+
+    if out_of_band_task_active(task_id, workers=workers, config=cfg):
+        return True
 
     r = get_redis_sync(cfg)
     now = time.time()

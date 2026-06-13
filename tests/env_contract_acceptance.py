@@ -48,6 +48,31 @@ print(json.dumps({
     return json.loads(output.strip().splitlines()[-1])
 
 
+def _notify_autoresolve_probe() -> dict:
+    env = {
+        "PYTHONPATH": str(ROOT),
+        "ORCH_REDIS_HOST": "127.0.0.1",
+        "ORCH_REDIS_PORT": "6379",
+        "ORCH_NEO4J_URI": "bolt://127.0.0.1:7687",
+        "ORCH_NEO4J_DB": "neo4j",
+    }
+    for key, value in os.environ.items():
+        if key.startswith("PYTHON") and key != "PYTHONPATH":
+            env[key] = value
+    code = """
+import json, tempfile
+from pathlib import Path
+from unittest import mock
+from fleet_orchestrator import config
+root = Path(tempfile.mkdtemp()) / "claude-code-fleet-notify"
+root.mkdir()
+with mock.patch.object(config, "_notify_root_candidates", return_value=[root]):
+    print(json.dumps({"resolved": str(config.resolve_notify_lib_root())}))
+"""
+    output = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
+    return json.loads(output.strip().splitlines()[-1])
+
+
 def _dotenv_quote_probe() -> dict:
     """Loader must apply standard dotenv semantics to quoted/exported lines.
 
@@ -104,6 +129,8 @@ def main() -> int:
     _check("ORCH_REF_ALLOWED_ROOT is optional", "ORCH_REF_ALLOWED_ROOT" in optional and "ORCH_REF_ALLOWED_ROOT" not in required, probe)
     _check("minimal generic config defaults dashboard URL", probe["dashboard_url"] == "http://127.0.0.1:5002", probe)
     _check("minimal generic config leaves notify root unset", probe["notify_lib_root"] is None, probe)
+    notify = _notify_autoresolve_probe()
+    _check("notify root auto-resolves sibling checkout", notify["resolved"].endswith("claude-code-fleet-notify"), notify)
 
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")

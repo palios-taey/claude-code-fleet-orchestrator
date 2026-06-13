@@ -83,7 +83,8 @@ Observed settings behavior:
 
 Layout note:
 - the default auto-discovery path expects `claude-code-fleet-orchestrator` and `claude-code-fleet-notify` as sibling checkouts
-- if notify is not in that sibling layout, set `ORCH_NOTIFY_LIB_ROOT` to the notify repo root
+- if notify is not in that sibling layout, set `ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify`
+- runtime config, dispatch, and doctor use the same notify-root resolver; an invalid explicit `ORCH_NOTIFY_LIB_ROOT` fails loudly instead of falling back to another checkout
 
 ## Bring Your Own Infra
 
@@ -120,6 +121,7 @@ Observed doctor coverage:
 - Redis reachability with a real `PING`
 - Neo4j reachability with a real query
 - env validation
+- notify-root resolution, including sibling checkout auto-discovery or the exact `ORCH_NOTIFY_LIB_ROOT` remediation
 - `/health` identity and version
 - Claude deny entries present exactly once
 - expected hook paths installed exactly once

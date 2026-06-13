@@ -32,14 +32,14 @@ fleet-orchestrator-api
 
 The mutable API binds to `127.0.0.1:5002` by default. Keep that loopback default unless this is a trusted single-user network; set `ORCH_HOST=0.0.0.0` only when you deliberately want other machines to reach it, and keep `ORCH_DASHBOARD_URL` in sync.
 
-If `claude-code-fleet-notify` is a separate checkout, set `ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify` in `.env` so dispatch and stop-hook paths import the notify identity layer from the installed package.
+If `claude-code-fleet-notify` is a sibling checkout, dispatch and stop-hook paths auto-resolve it. If it lives elsewhere, set `ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify` in `.env`; config errors name that exact value when auto-resolution cannot find notify.
 
 ## Requirements
 
 - Python 3.10+
 - Redis
 - Neo4j
-- a working `claude-code-fleet-notify` installation, or `ORCH_NOTIFY_LIB_ROOT` pointing at one
+- a working `claude-code-fleet-notify` installation, either importable, in a sibling checkout, or pointed to by `ORCH_NOTIFY_LIB_ROOT`
 
 ## Configuration
 
@@ -58,7 +58,7 @@ Optional variables:
 - `ORCH_REDIS_SENTINELS` — comma-separated Redis Sentinel `host:port` pairs.
 - `ORCH_REDIS_SENTINEL_MASTER` — Sentinel master name; defaults to `orch-master`.
 - `ORCH_NEO4J_USER` / `ORCH_NEO4J_PASS` — Neo4j credentials when auth is enabled.
-- `ORCH_NOTIFY_LIB_ROOT` — path to a local `claude-code-fleet-notify` checkout; required only when `identity` is not already importable.
+- `ORCH_NOTIFY_LIB_ROOT` — path to a local `claude-code-fleet-notify` checkout; required only when notify is neither importable nor in the default sibling checkout layout.
 - `ORCH_NOTIFY_CLI` — override the notify CLI binary; defaults to `taey-notify`.
 - `ORCH_REF_ALLOWED_ROOT` — trusted root, comma-separated roots, or a JSON list of roots under which plan source files must live before `[ref:...]` slices are enabled. Refs are disabled fail-safe when unset.
 - `ORCH_SESSION_IDS` — optional allowlist for the browser notify form target validation. When set, `POST /api/sessions/{target}/notify` rejects targets not listed here.
@@ -72,8 +72,9 @@ scripts/install
 source .venv/bin/activate
 ```
 
-`scripts/install` expects `claude-code-fleet-notify` either as a sibling checkout
-or via `ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify`.
+`scripts/install` and the runtime config auto-resolve `claude-code-fleet-notify`
+from a sibling checkout. If notify is elsewhere, set
+`ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify`.
 Without that notify layer, hook wiring and daemon startup cannot be installed.
 
 The install creates a virtualenv at `.venv` and puts every CLI (`orch`,
@@ -104,7 +105,20 @@ orch-cron --help
 orch-watch --help
 taey-plan --help
 taey-task --help
+taey-dispatch --help
 ```
+
+## Out-of-band dispatch liveness
+
+Use `taey-dispatch` when a task is driven by a harness, subprocess, or other runner that is not the peer session itself. The registration heartbeat is task-scoped and separate from the peer session `current_task`; while it is fresh, the stop engine treats the peer-owned in-progress task as actively running. When it goes stale or is missing, the existing supervisor gate/wake path applies.
+
+```bash
+taey-dispatch out-of-band register task-123 --supervisor conductor --owner conductor-codex --runner conductor-harness --ttl 300
+taey-dispatch out-of-band heartbeat task-123
+taey-dispatch out-of-band complete task-123 --status completed --supervisor conductor --evidence '{"commit_sha":"...","gate":"production probe","production_observation":"..."}'
+```
+
+Harnesses should refresh the heartbeat before half the TTL elapses and call `complete` only with terminal evidence.
 
 ## Run the API / Dashboard
 

@@ -595,12 +595,12 @@ def preflight_restore_diff(path: Path = CLAUDE_SETTINGS_PATH) -> str:
 
 
 def resolve_notify_root() -> Path:
-    explicit = os.environ.get("ORCH_NOTIFY_LIB_ROOT")
+    explicit = os.environ.get("ORCH_NOTIFY_LIB_ROOT") or _dotenv_lookup("ORCH_NOTIFY_LIB_ROOT")
     if explicit:
         path = Path(explicit).expanduser().resolve()
         if path.is_dir():
             return path
-        raise RuntimeError("ORCH_NOTIFY_LIB_ROOT does not point to a directory")
+        raise RuntimeError(f"ORCH_NOTIFY_LIB_ROOT={explicit!r} must point to a directory")
     for candidate in (
         REPO_ROOT.parent / "claude-code-fleet-notify",
         REPO_ROOT.parent.parent / "claude-code-fleet-notify",
@@ -611,11 +611,36 @@ def resolve_notify_root() -> Path:
     try:
         import identity  # type: ignore
     except ImportError as exc:
-        raise RuntimeError("ORCH_NOTIFY_LIB_ROOT must be set when fleet-notify is not importable") from exc
+        raise RuntimeError(
+            "fleet-notify is not importable and ORCH_NOTIFY_LIB_ROOT is unset. "
+            "Set ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify "
+            "or place claude-code-fleet-notify as a sibling checkout of this repo."
+        ) from exc
     path = Path(identity.__file__).resolve().parent
     if path.is_dir():
         return path
     raise RuntimeError("unable to resolve fleet-notify root")
+
+
+def _dotenv_lookup(name: str) -> Optional[str]:
+    for env_path in (Path.cwd() / ".env", REPO_ROOT / ".env"):
+        if not env_path.is_file():
+            continue
+        with env_path.open(encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.replace("export ", "").strip()
+                if key != name:
+                    continue
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                return value or None
+        break
+    return None
 
 
 def notify_script(name: str) -> Path:
@@ -1009,6 +1034,16 @@ def _doctor_env_validation() -> CheckResult:
     return CheckResult("env", True, "config values parse")
 
 
+def _doctor_notify_root() -> CheckResult:
+    try:
+        root = resolve_notify_root()
+        if not (root / "identity.py").is_file():
+            return CheckResult("notify-root", False, f"{root} lacks identity.py", "set ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify")
+        return CheckResult("notify-root", True, f"resolved {root}")
+    except Exception as exc:
+        return CheckResult("notify-root", False, str(exc), "set ORCH_NOTIFY_LIB_ROOT or place claude-code-fleet-notify as a sibling checkout")
+
+
 def _redis_ping(cfg: Any) -> None:
     _, _, get_redis_sync = _load_config_module()
     client = get_redis_sync(cfg)
@@ -1208,6 +1243,7 @@ def run_doctor() -> List[CheckResult]:
         ("docker", _doctor_docker),
         ("infra", _doctor_infra),
         ("env", _doctor_env_validation),
+        ("notify-root", _doctor_notify_root),
         ("health", _doctor_health),
         ("claude-settings", _doctor_claude_settings),
         ("claude-hooks", _doctor_claude_hooks),
