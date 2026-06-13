@@ -94,6 +94,49 @@ def main() -> None:
             os.environ["PATH"] = old_path
         assert any("does not expose option `--blocked-on`" in item for item in path_errors), path_errors
 
+        package = root / "fleet_orchestrator"
+        package.mkdir()
+        (package / "__init__.py").write_text("__version__ = '0.test'\n", encoding="utf-8")
+        (package / "demo.py").write_text("app = object()\nORCH_KNOWN_ENV = 'set'\n", encoding="utf-8")
+        (scripts / "good-tool").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        (root / "tests").mkdir()
+        (root / "tests" / "good_acceptance.py").write_text("print('ok')\n", encoding="utf-8")
+        (docs / "PLAN_FORMAT.md").write_text("# Plan\n", encoding="utf-8")
+        (docs / "currency-good.md").write_text(
+            "\n".join(
+                [
+                    "[Plan](PLAN_FORMAT.md)",
+                    "`scripts/good-tool`",
+                    "`tests/good_acceptance.py`",
+                    "`fleet_orchestrator.demo:app`",
+                    "`ORCH_KNOWN_ENV`",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        assert not gate.check_doc_currency(root, [docs / "currency-good.md"])
+
+        (docs / "currency-bad.md").write_text(
+            "\n".join(
+                [
+                    "[Missing](MISSING.md)",
+                    "`scripts/missing-tool`",
+                    "`tests/missing_acceptance.py`",
+                    "`fleet_orchestrator.demo:missing_symbol`",
+                    "`fleet_orchestrator.missing:app`",
+                    "`ORCH_DOCS_ONLY`",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        currency_errors = gate.check_doc_currency(root, [docs / "currency-bad.md"])
+        assert any("markdown link target does not exist" in item and "MISSING.md" in item for item in currency_errors), currency_errors
+        assert any("documented repo path does not exist" in item and "scripts/missing-tool" in item for item in currency_errors), currency_errors
+        assert any("documented repo path does not exist" in item and "tests/missing_acceptance.py" in item for item in currency_errors), currency_errors
+        assert any("documented Python entrypoint does not exist" in item and "fleet_orchestrator.demo:missing_symbol" in item for item in currency_errors), currency_errors
+        assert any("documented Python entrypoint does not exist" in item and "fleet_orchestrator.missing:app" in item for item in currency_errors), currency_errors
+        assert any("documented env var is not referenced by repo code/config" in item and "ORCH_DOCS_ONLY" in item for item in currency_errors), currency_errors
+
     print("doc_cli_drift_acceptance: PASS")
 
 

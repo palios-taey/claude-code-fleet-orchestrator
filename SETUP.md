@@ -38,7 +38,7 @@ Observed:
 - `README.md` sets the project Python floor at 3.10+
 - `scripts/install` runs `python3 -m venv`, so the host Python must include `venv`
 - `scripts/install` can skip Docker entirely when `--skip-compose` is passed or when local infra is already reachable on the expected ports
-- notify hook installation is delegated to the notify repo's `scripts/install-hooks.sh`
+- notify hook installation is delegated to the sibling notify repo's `claude-code-fleet-notify/scripts/install-hooks.sh`
 
 Operator note:
 - on Debian or Ubuntu, a missing `venv` module usually means you need the `python3-venv` system package

@@ -191,7 +191,7 @@ exercise the cycle manually; it does not create an autonomous always-running sup
    for that wake.
 4. **Stop-discipline** — a session must not stop while ready work exists. The only legitimate wait is
    `blocked_on`; a stop must cite a `user_stop_condition`.
-5. **Watcher** — run `orch-watch --redis-host 127.0.0.1 --readiness-checker fleet_orchestrator/plan_readiness.py:check_readiness`
+5. **Watcher** — run `orch-watch --redis-host 127.0.0.1 --readiness-checker fleet_orchestrator.plan_readiness:check_readiness`
    so a supervisor is paged the moment a worker's completion unblocks its work, or a task goes stuck.
 
 **Expect:** completing a task flips the next dependent task to ready (watch `taey-plan next` or the
