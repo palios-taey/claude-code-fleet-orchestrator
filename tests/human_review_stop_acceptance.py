@@ -62,6 +62,15 @@ PROJECT = f"{PFX}-project"
 PHASE = f"{PROJECT}::phase"
 GATE = f"{PROJECT}::human-review"
 QUESTION = f"{PFX}-question"
+BARE_SUP = f"{PFX}-bare-sup"
+BARE_PROJECT = f"{PFX}-bare-project"
+BARE_PHASE = f"{BARE_PROJECT}::phase"
+BARE_TASK = f"{BARE_PROJECT}::human-review-label-only"
+ANSWERED_SUP = f"{PFX}-answered-sup"
+ANSWERED_PROJECT = f"{PFX}-answered-project"
+ANSWERED_PHASE = f"{ANSWERED_PROJECT}::phase"
+ANSWERED_GATE = f"{ANSWERED_PROJECT}::human-review-answered"
+ANSWERED_QUESTION = f"{PFX}-answered-question"
 PEER_PROJECT = f"{PFX}-peer-project"
 PEER_PHASE = f"{PEER_PROJECT}::phase"
 PEER_TASK = f"{PEER_PROJECT}::peer-work"
@@ -139,6 +148,46 @@ def main() -> int:
         _check("human-review gate is not next ready work", get_session_next_ready(SUP, project_id=PROJECT, config=CFG) is None, get_session_next_ready(SUP, project_id=PROJECT, config=CFG))
         _check("human-review gate is not ready_work", ready_work(PROJECT, session_id=SUP, config=CFG) == [], ready_work(PROJECT, session_id=SUP, config=CFG))
         _check("project ready tasks exclude human-review", get_project_ready_tasks(PROJECT, owner=SUP, config=CFG) == [], get_project_ready_tasks(PROJECT, owner=SUP, config=CFG))
+
+        create_project(project_id=BARE_PROJECT, name=BARE_PROJECT, supervisor=BARE_SUP, priority=1, config=CFG)
+        create_phase(project_id=BARE_PROJECT, phase_id=BARE_PHASE, name="phase", config=CFG)
+        create_task(
+            phase_id=BARE_PHASE,
+            task_id=BARE_TASK,
+            description="human-review label without surfaced question",
+            owner=BARE_SUP,
+            task_type="human-review",
+            wake_owner_if_ready=False,
+            config=CFG,
+        )
+        update_task_status(BARE_TASK, "in_progress", owner=BARE_SUP, config=CFG)
+        bare_decision = _raw_stop_decision(BARE_SUP, config=CFG)
+        _check("bare-label human-review without question blocks", bare_decision.get("block") is True and bare_decision.get("task_id") == BARE_TASK, bare_decision)
+
+        create_project(project_id=ANSWERED_PROJECT, name=ANSWERED_PROJECT, supervisor=ANSWERED_SUP, priority=1, config=CFG)
+        create_phase(project_id=ANSWERED_PROJECT, phase_id=ANSWERED_PHASE, name="phase", config=CFG)
+        create_human_review_gate(
+            phase_id=ANSWERED_PHASE,
+            task_id=ANSWERED_GATE,
+            question_id=ANSWERED_QUESTION,
+            prompt="Answered but task is still non-terminal.",
+            reviewer=REVIEWER,
+            requested_by=ANSWERED_SUP,
+            notify=False,
+            config=CFG,
+        )
+        with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+            session.run(
+                """
+                MATCH (q:OrchQuestion {id: $question_id})-[:CONCERNS_TASK]->(t:OrchTask {id: $task_id})
+                SET q.status = 'answered',
+                    t.status = 'in_progress'
+                """,
+                question_id=ANSWERED_QUESTION,
+                task_id=ANSWERED_GATE,
+            )
+        answered_decision = _raw_stop_decision(ANSWERED_SUP, config=CFG)
+        _check("answered human-review question with non-terminal task blocks", answered_decision.get("block") is True and answered_decision.get("task_id") == ANSWERED_GATE, answered_decision)
 
         watch = _load_orch_watch()
         _check(

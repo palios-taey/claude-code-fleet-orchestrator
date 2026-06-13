@@ -973,6 +973,37 @@ def get_project_awaiting_human_review_gates(project_id: str,
         return [dict(row) for row in result]
 
 
+def get_project_non_surfaced_human_review_tasks(project_id: str,
+                                                config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE t.task_type = $task_type
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+              AND NOT EXISTS {
+                  MATCH (q:OrchQuestion)-[:CONCERNS_TASK]->(t)
+                  WHERE q.question_type = $question_type
+                    AND q.status = 'open'
+                    AND q.gate_task_id = t.id
+              }
+            RETURN t.id AS task_id,
+                   t.description AS description,
+                   t.status AS status,
+                   t.priority AS priority,
+                   ph.id AS phase_id,
+                   p.id AS project_id
+            ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, t.created_at ASC
+        """,
+            project_id=project_id,
+            task_type=HUMAN_REVIEW_TASK_TYPE,
+            question_type=HUMAN_REVIEW_QUESTION_TYPE,
+            terminal_statuses=list(_TERMINAL_TASK_STATUSES),
+        )
+        return [dict(row) for row in result]
+
+
 def project_has_non_human_nonterminal_work(project_id: str,
                                            config: Optional[OrchConfig] = None) -> bool:
     cfg = config or OrchConfig()
@@ -981,12 +1012,21 @@ def project_has_non_human_nonterminal_work(project_id: str,
         record = session.run("""
             MATCH (p:OrchProject {id: $project_id})-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
-              AND coalesce(t.task_type, '') <> $task_type
+              AND NOT (
+                  coalesce(t.task_type, '') = $task_type
+                  AND EXISTS {
+                      MATCH (q:OrchQuestion)-[:CONCERNS_TASK]->(t)
+                      WHERE q.question_type = $question_type
+                        AND q.status = 'open'
+                        AND q.gate_task_id = t.id
+                  }
+              )
             RETURN t.id AS task_id
             LIMIT 1
         """,
             project_id=project_id,
             task_type=HUMAN_REVIEW_TASK_TYPE,
+            question_type=HUMAN_REVIEW_QUESTION_TYPE,
             terminal_statuses=list(_TERMINAL_TASK_STATUSES),
         ).single()
         return record is not None
@@ -1183,7 +1223,15 @@ def get_supervisor_dispatchable_peer_task(supervisor: str, project_id: str,
             MATCH (proj:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status = 'pending'
               AND t.owner IN $peer_owners
-              AND coalesce(t.task_type, '') <> $human_review_task_type
+              AND NOT (
+                  coalesce(t.task_type, '') = $human_review_task_type
+                  AND EXISTS {
+                      MATCH (q:OrchQuestion)-[:CONCERNS_TASK]->(t)
+                      WHERE q.question_type = $human_review_question_type
+                        AND q.status = 'open'
+                        AND q.gate_task_id = t.id
+                  }
+              )
               AND coalesce(t.blocked_on, '') = ''
               AND NOT EXISTS {
                   MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
@@ -1197,6 +1245,7 @@ def get_supervisor_dispatchable_peer_task(supervisor: str, project_id: str,
             """,
             project_id=project_id, peer_owners=peer_owners,
             human_review_task_type=HUMAN_REVIEW_TASK_TYPE,
+            human_review_question_type=HUMAN_REVIEW_QUESTION_TYPE,
         ).single()
         return dict(record) if record else None
 
@@ -1410,7 +1459,15 @@ def get_supervisor_inflight_peer_task(supervisor: str, project_id: str,
             MATCH (proj:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status IN ['in_progress', 'dispatched']
               AND (t.owner IN $peer_owners OR t.dispatched_to IN $peer_owners)
-              AND coalesce(t.task_type, '') <> $human_review_task_type
+              AND NOT (
+                  coalesce(t.task_type, '') = $human_review_task_type
+                  AND EXISTS {
+                      MATCH (q:OrchQuestion)-[:CONCERNS_TASK]->(t)
+                      WHERE q.question_type = $human_review_question_type
+                        AND q.status = 'open'
+                        AND q.gate_task_id = t.id
+                  }
+              )
               AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
             RETURN t.id AS task_id, t.description AS description, t.owner AS owner,
                    t.dispatched_to AS dispatched_to,
@@ -1420,6 +1477,7 @@ def get_supervisor_inflight_peer_task(supervisor: str, project_id: str,
             """,
             project_id=project_id, peer_owners=peer_owners,
             human_review_task_type=HUMAN_REVIEW_TASK_TYPE,
+            human_review_question_type=HUMAN_REVIEW_QUESTION_TYPE,
         )]
     for row in rows:
         workers = [w for w in (row.get("owner"), row.get("dispatched_to"))
@@ -1450,7 +1508,15 @@ def has_active_inflight_peer_task(supervisor: str, project_id: str,
             MATCH (proj:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status IN ['in_progress', 'dispatched']
               AND (t.owner IN $peer_owners OR t.dispatched_to IN $peer_owners)
-              AND coalesce(t.task_type, '') <> $human_review_task_type
+              AND NOT (
+                  coalesce(t.task_type, '') = $human_review_task_type
+                  AND EXISTS {
+                      MATCH (q:OrchQuestion)-[:CONCERNS_TASK]->(t)
+                      WHERE q.question_type = $human_review_question_type
+                        AND q.status = 'open'
+                        AND q.gate_task_id = t.id
+                  }
+              )
               AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
             RETURN t.id AS task_id, t.owner AS owner, t.dispatched_to AS dispatched_to
             ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, t.created_at ASC
@@ -1458,6 +1524,7 @@ def has_active_inflight_peer_task(supervisor: str, project_id: str,
             """,
             project_id=project_id, peer_owners=peer_owners,
             human_review_task_type=HUMAN_REVIEW_TASK_TYPE,
+            human_review_question_type=HUMAN_REVIEW_QUESTION_TYPE,
         )]
     for row in rows:
         workers = [w for w in (row.get("owner"), row.get("dispatched_to"))
@@ -1493,6 +1560,16 @@ def _awaiting_human_review_stop_reason(gates: List[Dict[str, Any]]) -> str:
     return (
         "Awaiting human review surfaced on the dashboard: "
         f"{task_id} / {question_id} for {reviewer}. No autonomous session work remains."
+    )
+
+
+def _non_surfaced_human_review_block_reason(task: Dict[str, Any]) -> str:
+    task_id = task.get("task_id") or "unknown-task"
+    task_title = (str(task.get("description") or "human-review task")[:80] or "human-review task")
+    return (
+        "Human-review task is not surfaced as an open dashboard human_review_gate: "
+        f"{task_id} — {task_title}. Treat it as normal unresolved work; do not stop "
+        "until it is either surfaced for human review or completed through the proper gate."
     )
 
 
@@ -1678,6 +1755,24 @@ def _raw_stop_decision(session_id: str,
             continue
         if has_active_inflight_peer_task(supervisor, str(project.get("id")), config=cfg):
             return {"block": False, "reason": None, "wake_type": WAKE_ALLOW_STOP, "task_id": None}
+
+    for project in projects:
+        status = str(project.get("status") or "").strip().lower()
+        if status not in ("active", "in_progress"):
+            continue
+        non_surfaced = get_project_non_surfaced_human_review_tasks(str(project.get("id")), config=cfg)
+        if non_surfaced:
+            task = non_surfaced[0]
+            return {
+                "block": True,
+                "reason": _non_surfaced_human_review_block_reason(task),
+                "wake_type": "WAKE_WITH_QUEUE",
+                "task_id": task.get("task_id"),
+                "project_id": task.get("project_id"),
+                "phase_id": task.get("phase_id"),
+                "task_priority": task.get("priority"),
+                "task_title_short": (str(task.get("description") or "")[:80] or None),
+            }
 
     awaiting_human_gates: List[Dict[str, Any]] = []
     for project in projects:
@@ -2744,7 +2839,15 @@ def get_session_current_work(session_id: str,
             MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE (t.owner = $session_id OR t.dispatched_to = $session_id)
               AND t.status = 'in_progress'
-              AND coalesce(t.task_type, '') <> $human_review_task_type
+              AND NOT (
+                  coalesce(t.task_type, '') = $human_review_task_type
+                  AND EXISTS {
+                      MATCH (q:OrchQuestion)-[:CONCERNS_TASK]->(t)
+                      WHERE q.question_type = $human_review_question_type
+                        AND q.status = 'open'
+                        AND q.gate_task_id = t.id
+                  }
+              )
               AND (
                   p.id <> 'default'
                   OR ($observed_task_id IS NOT NULL AND t.id = $observed_task_id)
@@ -2774,6 +2877,7 @@ def get_session_current_work(session_id: str,
             session_id=session_id,
             observed_task_id=observed_task_id,
             human_review_task_type=HUMAN_REVIEW_TASK_TYPE,
+            human_review_question_type=HUMAN_REVIEW_QUESTION_TYPE,
         )
         record = result.single()
         if not record:
@@ -2811,7 +2915,15 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
             MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status = 'pending'
               AND coalesce(t.owner, '') = $sess
-              AND coalesce(t.task_type, '') <> $human_review_task_type
+              AND NOT (
+                  coalesce(t.task_type, '') = $human_review_task_type
+                  AND EXISTS {{
+                      MATCH (q:OrchQuestion)-[:CONCERNS_TASK]->(t)
+                      WHERE q.question_type = $human_review_question_type
+                        AND q.status = 'open'
+                        AND q.gate_task_id = t.id
+                  }}
+              )
               AND coalesce(t.blocked_on, '') = ''
               AND ($exclude_task_id IS NULL OR t.id <> $exclude_task_id)
               AND ($project_id IS NULL OR proj.id = $project_id)
@@ -2838,6 +2950,7 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
             exclude_task_id=exclude_task_id,
             project_id=project_id,
             human_review_task_type=HUMAN_REVIEW_TASK_TYPE,
+            human_review_question_type=HUMAN_REVIEW_QUESTION_TYPE,
         ).single()
         if not result:
             return None
@@ -3005,7 +3118,15 @@ def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
             MATCH (p:OrchProject {{id: $project_id}})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status = 'pending'
               AND coalesce(t.owner, '') = $owner
-              AND coalesce(t.task_type, '') <> $human_review_task_type
+              AND NOT (
+                  coalesce(t.task_type, '') = $human_review_task_type
+                  AND EXISTS {{
+                      MATCH (q:OrchQuestion)-[:CONCERNS_TASK]->(t)
+                      WHERE q.question_type = $human_review_question_type
+                        AND q.status = 'open'
+                        AND q.gate_task_id = t.id
+                  }}
+              )
               AND coalesce(t.blocked_on, '') = ''
               AND {_READY_DEPENDENCIES_SATISFIED_CYPHER}
             RETURN t.id AS id,
@@ -3024,6 +3145,7 @@ def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
             project_id=project_id,
             owner=owner_value,
             human_review_task_type=HUMAN_REVIEW_TASK_TYPE,
+            human_review_question_type=HUMAN_REVIEW_QUESTION_TYPE,
         )
         ready = []
         for record in result:
