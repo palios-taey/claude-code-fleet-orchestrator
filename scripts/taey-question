@@ -104,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--no-notify", action="store_true", help="Do not send taey-notify to the reviewer")
     gate.set_defaults(func=cmd_create_gate)
 
-    answer = sub.add_parser("answer", help="Record a durable answer; human-review gates require verified human completion")
+    answer = sub.add_parser("answer", help="Record a proposed answer; dashboard UI completion closes human-review gates")
     answer.add_argument("question_id")
     answer.add_argument("answer")
     answer.add_argument("--from", dest="sender", default="")

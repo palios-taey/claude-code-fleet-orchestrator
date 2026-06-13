@@ -1,9 +1,9 @@
-"""Ship-gate e2e — human-review gate surfaces and rejects forged completion.
+"""Ship-gate e2e — human-review gate surfaces and requires the UI path.
 
 The durable Neo4j question and dashboard needs-you surface must be one gate:
 creating a human-review gate writes both. A peer/loopback caller may record an
-unverified answer, but it must not forge the human reviewer or auto-complete
-the gate task.
+unverified answer, but normal agent completion paths must not complete the gate
+task; the dashboard UI path records the verdict and releases dependents.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
+    CompletionEvidenceError,
     add_dependency,
     create_phase,
     create_project,
@@ -26,6 +27,7 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
     get_session_next_ready,
     init_schema,
     get_task,
+    update_task_status,
 )
 from fleet_orchestrator.tasks_api import app  # noqa: E402
 
@@ -79,6 +81,7 @@ def _question_row() -> dict:
             WITH q, t, properties(q) AS props
             RETURN props.status AS status, props.answered_by AS answered_by, props.answer AS answer,
                    props.question_type AS question_type, props.gate_task_id AS gate_task_id,
+                   props.verified AS verified,
                    props.unverified_answer AS unverified_answer,
                    props.unverified_answered_by AS unverified_answered_by,
                    t.id AS task_id
@@ -121,6 +124,33 @@ def main() -> int:
         before = get_session_next_ready(SUP, project_id=PROJECT, config=CFG)
         _check("downstream blocked before human answer", not before or before.get("task_id") != DOWNSTREAM, before)
 
+        evidence = {"production_observation": "agent normal completion attempt"}
+        try:
+            update_task_status(
+                GATE,
+                "completed",
+                owner=SUP,
+                completion_evidence=evidence,
+                completed_by=SUP,
+                config=CFG,
+            )
+            direct_rejected = False
+        except CompletionEvidenceError as exc:
+            direct_rejected = "dashboard UI review endpoint" in str(exc)
+        _check("direct update_task_status rejects human-review completion", direct_rejected, get_task(GATE, config=CFG))
+        _check("direct update_task_status leaves gate open", get_task(GATE, config=CFG).get("status") != "completed", get_task(GATE, config=CFG))
+
+        patch_response = client.patch(
+            f"/api/task/{GATE}",
+            json={
+                "status": "completed",
+                "from": SUP,
+                "evidence": evidence,
+            },
+        )
+        _check("PATCH /api/task (taey-task update path) rejects human-review completion", patch_response.status_code == 400, patch_response.text)
+        _check("PATCH / taey-task path leaves gate open", get_task(GATE, config=CFG).get("status") != "completed", get_task(GATE, config=CFG))
+
         answer_response = client.post(
             f"/api/questions/{QUESTION}/answer",
             json={"answer": "Ship artifact B", "from": REVIEWER},
@@ -136,14 +166,30 @@ def main() -> int:
         _check("dashboard needs_you remains for real human", QUESTION in (r.get(_redis_key("needs_you")) or ""), r.get(_redis_key("needs_you")))
         _check("dashboard open question remains for real human", any(QUESTION in item for item in r.lrange(_redis_key("openq"), 0, -1)), r.lrange(_redis_key("openq"), 0, -1))
         after = get_session_next_ready(SUP, project_id=PROJECT, config=CFG)
-        _check("downstream remains blocked after forged verdict", not after or after.get("task_id") != DOWNSTREAM, after)
+        _check("downstream remains blocked after normal answer endpoint", not after or after.get("task_id") != DOWNSTREAM, after)
+
+        ui_response = client.post(
+            f"/api/ui/questions/{QUESTION}/answer",
+            json={"answer": "Ship artifact B", "answered_by": REVIEWER},
+            headers={"origin": "http://testserver"},
+        )
+        _check("UI review endpoint records verified answer", ui_response.status_code == 200 and ui_response.json().get("verified") is True, ui_response.text)
+        _check("UI review endpoint completes gate", ui_response.json().get("gate_completed") is True, ui_response.json())
+        final_question = _question_row()
+        _check("UI answer closes durable question as verified", final_question.get("status") == "answered" and final_question.get("verified") is True, final_question)
+        final_gate = get_task(GATE, config=CFG)
+        _check("UI answer completes human-review gate task", final_gate.get("status") == "completed", final_gate)
+        final_ready = get_session_next_ready(SUP, project_id=PROJECT, config=CFG)
+        _check("downstream releases after UI verdict", final_ready and final_ready.get("task_id") == DOWNSTREAM, final_ready)
+        _check("dashboard needs_you clears after UI verdict", not r.get(_redis_key("needs_you")), r.get(_redis_key("needs_you")))
+        _check("dashboard open question clears after UI verdict", not any(QUESTION in item for item in r.lrange(_redis_key("openq"), 0, -1)), r.lrange(_redis_key("openq"), 0, -1))
     finally:
         _cleanup()
 
     if FAILURES:
         print(f"\nFAIL — {len(FAILURES)}: {FAILURES}")
         return 1
-    print("\nPASS — human-review gate surfaces and unauthenticated answers cannot forge completion.")
+    print("\nPASS — human-review gate surfaces, agent paths cannot complete it, and the UI path can.")
     return 0
 
 

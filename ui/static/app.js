@@ -7,6 +7,7 @@ const SESSION_PROJECTS_ENDPOINT = (sessionId) => `/api/sessions/${encodeURICompo
 const SESSION_NOTIFY_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/notify`;
 const CHAT_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}`;
 const CHAT_PROMOTE_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}/promote`;
+const UI_QUESTION_ANSWER_ENDPOINT = (questionId) => `/api/ui/questions/${encodeURIComponent(questionId)}/answer`;
 const POLL_INTERVAL_MS = 5000;
 // Populated at runtime from GET /api/sessions (data-derived; no hardcoded operator fleet).
 let SESSIONS = [];
@@ -283,7 +284,20 @@ function renderOpenQuestions(openQuestions) {
   return `
     <section class="stop-conditions">
       <h3>Open questions</h3>
-      <ul>${openQuestions.map((item) => `<li>${escapeHtml(item.reason || item.text || "")}</li>`).join("")}</ul>
+      <ul>${openQuestions.map((item) => {
+        const questionId = item.question_id || item.id || "";
+        return `
+          <li>
+            <p>${escapeHtml(item.reason || item.text || "")}</p>
+            ${questionId ? `
+              <div class="question-answer" data-question-id="${escapeHtml(questionId)}">
+                <textarea rows="2" placeholder="Verdict"></textarea>
+                <button type="button" data-answer-question="${escapeHtml(questionId)}">Record verdict</button>
+              </div>
+            ` : ""}
+          </li>
+        `;
+      }).join("")}</ul>
     </section>
   `;
 }
@@ -651,6 +665,38 @@ elements.chatHistory.addEventListener("click", async (event) => {
     });
     setChatStatus("Promoted to MEMORY", "success", 5000);
   } catch (error) {
+    setChatStatus(error.message, "error", 8000);
+  }
+});
+
+elements.chatOpenQuestions.addEventListener("click", async (event) => {
+  const target = event.target.closest("[data-answer-question]");
+  if (!target) {
+    return;
+  }
+  const questionId = target.dataset.answerQuestion;
+  const container = target.closest("[data-question-id]");
+  const answer = container?.querySelector("textarea")?.value.trim() || "";
+  if (!questionId || !answer) {
+    setChatStatus("Verdict required", "error", 5000);
+    return;
+  }
+  target.disabled = true;
+  setChatStatus("Recording verdict...", "pending", 0);
+  try {
+    await fetchJson(UI_QUESTION_ANSWER_ENDPOINT(questionId), {
+      method: "POST",
+      body: JSON.stringify({ answer, answered_by: "jesse" }),
+    });
+    await Promise.all([loadChat(), loadSessions(), loadSessionProjects()]);
+    ensureSelectedProject();
+    renderSessionCards();
+    renderProjectList();
+    renderChatPanel();
+    await loadSelectedProject();
+    setChatStatus("Verdict recorded", "success", 5000);
+  } catch (error) {
+    target.disabled = false;
     setChatStatus(error.message, "error", 8000);
   }
 });

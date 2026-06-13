@@ -115,10 +115,10 @@ Use `taey-question` when a downstream task must wait for a recorded human-review
 
 ```bash
 taey-question create-gate <phase-id> <gate-task-id> "Which artifact should ship?" --reviewer jesse
-taey-question answer <question-id> "Ship artifact B" --from jesse
+taey-question answer <question-id> "Ship artifact B" --from conductor-codex
 ```
 
-The gate creates a durable task-linked `OrchQuestion`, surfaces it as a dashboard `needs_you` item, and sends a reviewer notification. The unauthenticated loopback API can record proposed answers, but it does **not** auto-complete human-review gates; the gate task must remain blocked until completion comes from a human-origin-authenticated path.
+The gate creates a durable task-linked `OrchQuestion`, surfaces it as a dashboard `needs_you` item, and sends a reviewer notification. This is accident-prevention for a single-user product: normal agent paths (`update_task_status`, `PATCH /api/task/{id}`, and `taey-task update`) cannot complete `human-review` gate tasks; the dashboard uses a dedicated `/api/ui/questions/{question_id}/answer` path that records the verdict and completes the gate.
 
 ## Out-of-band dispatch liveness
 

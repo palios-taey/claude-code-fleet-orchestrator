@@ -2185,6 +2185,17 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     completion_evidence_value = _validate_terminal_status_write(status, completion_evidence)
     terminal_status = status in _TERMINAL_TASK_STATUSES
     with driver.session(database=cfg.neo4j_db) as session:
+        if status == "completed":
+            existing = session.run("""
+                MATCH (t:OrchTask {id: $task_id})
+                RETURN t.task_type AS task_type
+            """, task_id=task_id).single()
+            if existing is None:
+                return False
+            if existing.get("task_type") == "human-review":
+                raise CompletionEvidenceError(
+                    "human-review gate tasks must be completed through the dashboard UI review endpoint"
+                )
         if result is None:
             rec = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
@@ -3406,6 +3417,79 @@ def answer_question(question_id: str, answer: str, answered_by: str,
         "gate_completed": False,
         "question_type": record.get("question_type"),
         "gate_task_id": record.get("gate_task_id") or "",
+    }
+
+
+def complete_human_review_gate(question_id: str, answer: str, answered_by: str,
+                               config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    """Single-user UI path for completing a human-review gate.
+
+    Normal agent/CLI task-completion paths cannot accidentally complete a
+    human-review task; the dashboard's dedicated review action can.
+    """
+    answer_text = str(answer or "").strip()
+    reviewer = str(answered_by or "").strip() or "dashboard-ui"
+    if not answer_text:
+        raise ValueError("answer must be non-empty")
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    evidence = _normalize_completion_evidence({
+        "production_observation": f"human-review verdict recorded via dashboard UI by {reviewer}",
+    })
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            MATCH (q:OrchQuestion {id: $question_id})-[:CONCERNS_TASK]->(t:OrchTask {id: q.gate_task_id})
+            WHERE q.question_type = 'human_review_gate'
+              AND t.task_type = 'human-review'
+            SET q.answer = $answer,
+                q.answered_by = $answered_by,
+                q.answered_at = datetime(),
+                q.status = 'answered',
+                q.verified = true,
+                q.answer_source = 'dashboard_ui',
+                t.status = 'completed',
+                t.completion_evidence = $completion_evidence,
+                t.completed_by = $answered_by,
+                t.completed_at = datetime(),
+                t.blocked_on = NULL,
+                t.updated_at = datetime()
+            RETURN q.id AS question_id, q.lineage AS lineage, q.reviewer AS reviewer,
+                   t.id AS gate_task_id, t.status AS task_status
+        """,
+            question_id=question_id,
+            answer=answer_text,
+            answered_by=reviewer,
+            completion_evidence=_json_encode(evidence),
+        ).single()
+        if row is None:
+            return {"ok": False, "question_id": question_id, "gate_completed": False, "verified": False}
+        gate_task_id = row["gate_task_id"]
+        session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            WITH p
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(sibling:OrchTask)
+            WHERE sibling.id <> $task_id AND sibling.status = 'in_progress'
+            WITH p, count(sibling) AS in_progress_siblings
+            SET p.in_progress_heartbeat_at = CASE
+                    WHEN in_progress_siblings = 0 THEN ''
+                    ELSE p.in_progress_heartbeat_at
+                END,
+                p.status = CASE
+                    WHEN p.status = 'in_progress' AND in_progress_siblings = 0 THEN 'active'
+                    ELSE p.status
+                END,
+                p.updated_at = datetime()
+        """, task_id=gate_task_id)
+    lineage = str(row.get("lineage") or row.get("reviewer") or "")
+    _resolve_chat_question(question_id, config=cfg, lineage=lineage)
+    return {
+        "ok": True,
+        "question_id": question_id,
+        "answered_by": reviewer,
+        "verified": True,
+        "gate_completed": True,
+        "question_type": "human_review_gate",
+        "gate_task_id": row["gate_task_id"],
     }
 
 

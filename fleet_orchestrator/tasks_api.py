@@ -67,6 +67,7 @@ from fleet_orchestrator.orch_schema import (
     clear_project_stop_reason,
     clear_session_pause,
     complete_project,
+    complete_human_review_gate,
     create_human_review_gate,
     create_phase,
     create_project,
@@ -336,6 +337,14 @@ def _outcome_details(result: str, evidence: Optional[Dict[str, Any]]) -> Optiona
     return None
 
 
+def _origin_allowed_for_ui(req: Request) -> bool:
+    origin = req.headers.get("origin") or ""
+    if not origin:
+        return True
+    host = req.headers.get("host") or ""
+    return bool(host and origin.rstrip("/").endswith(f"://{host}"))
+
+
 @app.patch("/api/task/{task_id}")
 async def update(task_id: str, req: Request) -> Dict[str, Any]:
     data = await req.json()
@@ -458,6 +467,28 @@ async def answer_question_endpoint(question_id: str, req: Request) -> Dict[str, 
         result = answer_question(question_id, answer, answered_by, config=_cfg())
         if not result.get("ok"):
             raise HTTPException(status_code=404, detail=f"Question {question_id} not found")
+        return result
+    except HTTPException:
+        raise
+    except (CompletionEvidenceError, ValueError) as exc:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+
+@app.post("/api/ui/questions/{question_id}/answer")
+async def ui_answer_human_review_gate_endpoint(question_id: str, req: Request) -> Dict[str, Any]:
+    if not _origin_allowed_for_ui(req):
+        raise HTTPException(status_code=403, detail="origin does not match dashboard host")
+    data = await req.json()
+    answer = str(data.get("answer") or data.get("verdict") or "").strip()
+    answered_by = str(data.get("answered_by") or data.get("from") or "jesse").strip()
+    if not answer:
+        raise HTTPException(status_code=422, detail="answer is required")
+    try:
+        result = complete_human_review_gate(question_id, answer, answered_by, config=_cfg())
+        if not result.get("ok"):
+            raise HTTPException(status_code=404, detail=f"Human-review gate question {question_id} not found")
         return result
     except HTTPException:
         raise
