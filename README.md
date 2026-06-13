@@ -8,7 +8,7 @@ Motivating scenario: you have `conductor`, `conductor-codex`, and `conductor-gem
 
 ![Fleet dashboard showing session cards, current work, projects, and task details](docs/dashboard.png)
 
-Local `:5005` read-only dashboard view with real fleet state.
+Screenshot: local `:5005` read-only dashboard view with real fleet state. The operator API/dashboard runs on `:5002`; `:5005` is a separate read-only dashboard surface served by `scripts/orch-public`, useful when you want a scrubbed view without mutable routes.
 
 Status: v1.6.0, active single-user local tool, Apache-2.0 licensed. It is mature enough to run its own ship gates, but it still expects a technical operator comfortable with local Redis, Neo4j, and Claude Code hook wiring.
 
@@ -212,7 +212,7 @@ Remove orchestrator-managed Claude settings and services:
 orch uninstall
 ```
 
-The dashboard is served at `/ui/`. The API root redirects there. Useful read endpoints:
+The operator API and dashboard run on `:5002`; the dashboard is served at `/ui/`, and the API root redirects there. Useful read endpoints:
 
 - `GET /health`
 - `GET /api/projects`
@@ -224,6 +224,14 @@ The dashboard is served at `/ui/`. The API root redirects there. Useful read end
 - `GET /api/sessions/{session_id}/wake-packet`
 
 Mutable endpoints create and update projects, phases, tasks, questions, stop conditions, loop state, and notifications. Treat `:5002` as a local operator API, not a public service.
+
+There is also a distinct read-only dashboard app:
+
+```bash
+scripts/orch-public --port 5005
+```
+
+That serves `fleet_orchestrator.public_readonly:app` on `127.0.0.1:5005`. It has no mutable routes and uses explicit public-session/project filters such as `ORCH_PUBLIC_SHOW_SESSIONS`, `ORCH_PUBLIC_HIDE_SESSIONS`, and `ORCH_PUBLIC_HIDE_PROJECT_IDS`. The screenshot above is this `:5005` read-only view; a project title inside it may reflect live fleet project data rather than the package version.
 
 ## Refs And Wake Packets
 
