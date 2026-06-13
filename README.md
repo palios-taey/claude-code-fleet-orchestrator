@@ -2,33 +2,38 @@
 
 `claude-code-fleet-orchestrator` is a local-first, single-user orchestration layer for a fleet of Claude Code or CLI agent sessions running on one operator's machine. It is not a hosted service, not a multi-tenant team server, and not a SaaS control plane. The default posture is private: the mutable API and dashboard bind to `127.0.0.1` unless the operator explicitly sets `ORCH_HOST` to another interface.
 
-The system gives one person a durable "score" for coordinating multiple coding agents without babysitting every handoff. State lives in Neo4j and Redis. A FastAPI service on `:5002`, a browser dashboard, command-line tools, and Claude Code hooks connect each session's lifecycle to that state.
+The system gives one person a durable "score" for coordinating multiple coding agents without babysitting every handoff. State lives in Neo4j and Redis because projects, phases, tasks, dependencies, human-review gates, refs, and provenance are graph-shaped; the product asks "what is ready, blocked, supervised, or gated?" more often than it asks for flat rows. A FastAPI service on `:5002`, a browser dashboard, command-line tools, and Claude Code hooks connect each session's lifecycle to that state.
+
+Motivating scenario: you have `conductor`, `conductor-codex`, and `conductor-gemini` sessions open on one Linux workstation. Codex is implementing, Gemini is measuring, and the conductor is supervising. Without a shared score, work gets lost after `/clear`, a worker can stop while a dependent task is ready, and "done" becomes a chat claim. This repo makes those handoffs explicit local state.
+
+Status: v1.6.0, active single-user local tool, Apache-2.0 licensed. It is mature enough to run its own ship gates, but it still expects a technical operator comfortable with local Redis, Neo4j, and Claude Code hook wiring.
 
 ## Mental Model
 
 You run several Claude Code or CLI sessions as a fleet. The orchestrator keeps the shared project score: projects contain phases, phases contain tasks, and each task has an owner, status, priority, dependencies, optional refs, and completion evidence.
 
-**Stop-discipline engine.** A session cannot silently stop while it still has ready work. The Stop hook asks the orchestrator for a stop decision; if work remains, the hook blocks the stop and feeds back the next action. Human-review gates are a first-class stop state: when work is waiting on a person, the session can stop cleanly instead of looping.
+**Stop-discipline engine.** The hook path is designed so a session does not silently stop while it still has ready work. The Stop hook asks the orchestrator for a stop decision; if work remains and hooks are installed, the hook blocks the stop and feeds back the next action. Human-review gates are a first-class stop state: when work is waiting on a person, the session can stop cleanly instead of looping.
 
 **Dynamic context injection.** Plans and tasks can attach reference docs at overall, supervisor, project, phase, and task tiers. When `ORCH_WAKE_PACKET_ENABLED=1`, `GET /api/sessions/{session_id}/wake-packet` assembles a task-scoped packet with refs, ranked memory, rules, provenance, and a size report. This pairs with `/clear`: clear accumulated chat context, then re-inject the clean slice for the current task. Empty refs mean none were attached; that is valid.
 
-**Evidence-gated completion.** Terminal task updates require evidence. For normal task completion, provide a JSON object with real artifacts such as `commit_sha`, `gate`, and `production_observation`; the API rejects evidence-less terminal claims. Human-review gate tasks must be completed through the question/UI path, not by ordinary task status updates.
+**Evidence-gated completion.** Terminal task updates are designed to require evidence. For normal task completion, provide a JSON object with real artifacts such as `commit_sha`, `gate`, and `production_observation`; the API rejects evidence-less terminal claims. Human-review gate tasks must be completed through the question/UI path, not by ordinary task status updates.
 
 ## Five-Minute Quickstart
 
 Prerequisites:
 
+- Linux or a Linux-like environment with a POSIX shell
 - Python 3.10+ with `venv`
-- Redis
-- Neo4j
 - Git
-- Optional for the bundled local infrastructure path: Docker Compose
-- Optional for Claude Code hook wiring: a sibling checkout of `claude-code-fleet-notify`
+- Docker Compose for the bundled Redis + Neo4j path
+- Claude Code
+- `claude-code-fleet-notify` as a sibling checkout, required for Claude Code hooks and the stop-discipline loop
 
-Clone and install the package:
+Use one canonical first-run path: install into a local `.venv`, start the bundled loopback Redis/Neo4j, then run the API/dashboard with `orch serve`. After that smoke test is green, wire Claude Code hooks through `claude-code-fleet-notify` to enable stop discipline.
 
 ```bash
 git clone https://github.com/palios-taey/claude-code-fleet-orchestrator.git
+git clone https://github.com/palios-taey/claude-code-fleet-notify.git
 cd claude-code-fleet-orchestrator
 python3 -m venv .venv
 . .venv/bin/activate
@@ -37,52 +42,54 @@ python -m pip install -e .
 cp .env.example .env
 ```
 
-Start local Redis and Neo4j. The bundled compose file binds both services to loopback:
+The bundled compose file sets `NEO4J_AUTH=none`, so the default `.env.example` does not need `ORCH_NEO4J_USER` or `ORCH_NEO4J_PASS`. It binds Redis and Neo4j to loopback:
 
 ```bash
 docker compose up -d
 ```
 
-If you already run Redis or Neo4j elsewhere, edit `.env` instead. These are the required connection variables:
+If Docker is unavailable and you already run Redis and Neo4j yourself, edit `.env` first and use `scripts/install --skip-compose`. External Neo4j commonly has auth enabled; set the credentials explicitly in that case:
 
 ```bash
 ORCH_REDIS_HOST=127.0.0.1
 ORCH_REDIS_PORT=6379
 ORCH_NEO4J_URI=bolt://127.0.0.1:7687
 ORCH_NEO4J_DB=neo4j
+ORCH_NEO4J_USER=neo4j
+ORCH_NEO4J_PASS=<your-password>
 ```
 
-Start the API and dashboard:
+Verify the install:
 
 ```bash
-fleet-orchestrator-api
+orch serve
 ```
 
-In another shell:
+In another terminal:
 
 ```bash
 . .venv/bin/activate
 curl -s http://127.0.0.1:5002/health
+```
+
+Open the dashboard:
+
+```bash
 open http://127.0.0.1:5002/ui/
 ```
 
 If `open` is not available on your OS, paste `http://127.0.0.1:5002/ui/` into a browser on the same machine.
 
-Wire Claude Code hooks after the API smoke test. Keep `claude-code-fleet-orchestrator` and `claude-code-fleet-notify` as sibling checkouts, or set `ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify` in `.env`.
-
-Preview the hook/settings changes first:
+Wire Claude Code hooks after the API/dashboard smoke test. This step is required for the Stop hook behavior described above; without it, the API and dashboard work, but sessions will not consult the orchestrator when they stop.
 
 ```bash
 scripts/install --dry-run
-```
-
-Then apply them:
-
-```bash
 scripts/install --skip-compose
 ```
 
-`--skip-compose` tells the installer to use the Redis and Neo4j you already started. The installer creates `.venv` if needed, installs the package, wires managed Claude Code hooks, starts notify daemons, starts orchestrator services, and runs `orch doctor`.
+`--skip-compose` reuses the Redis and Neo4j you already started with Docker Compose. The installer reconciles `.venv`, applies managed Claude Code hook settings through `claude-code-fleet-notify`, starts notify daemons, starts `orch-watch`, and runs `orch doctor`.
+
+For automation, the package also exposes `fleet-orchestrator-api`, which starts the same FastAPI app as `orch serve`. Prefer `orch serve` in the quickstart because it prints the dashboard URL and uses the same operator lifecycle surface as `orch enable`, `orch disable`, and `orch doctor`.
 
 ## Configuration
 
@@ -92,7 +99,7 @@ Required:
 
 - `ORCH_REDIS_HOST` and `ORCH_REDIS_PORT`: Redis used by notifications, liveness, locks, and daemon state.
 - `ORCH_NEO4J_URI` and `ORCH_NEO4J_DB`: Neo4j used for projects, phases, tasks, refs, gates, and evidence.
-- `ORCH_NEO4J_USER` / `ORCH_NEO4J_PASS`: optional credentials when your Neo4j instance requires auth.
+- `ORCH_NEO4J_USER` / `ORCH_NEO4J_PASS`: leave unset for this repo's bundled compose path (`NEO4J_AUTH=none`); set both for an external Neo4j instance that enforces auth.
 
 Network posture:
 
@@ -106,13 +113,17 @@ By default the dashboard binds `127.0.0.1`, reachable only from the machine it r
 Fleet and context:
 
 - `ORCH_SESSION_IDS`: optional comma-separated session allowlist for the dashboard notify form and wake-packet endpoint.
-- `ORCH_NOTIFY_LIB_ROOT`: path to `claude-code-fleet-notify` if it is not importable and not a sibling checkout.
+- `ORCH_NOTIFY_LIB_ROOT`: path to `claude-code-fleet-notify` if it is not importable and not a sibling checkout. Required for managed Claude Code hook wiring and stop discipline.
 - `ORCH_NOTIFY_CLI`: notify CLI name. Default is `taey-notify`.
 - `ORCH_REF_ALLOWED_ROOT`: one or more trusted roots for plan/source refs. Refs are disabled fail-safe when unset.
 - `ORCH_SESSION_ROOTS`: JSON or comma-separated `session=/repo/root` map used by the context assembler to find each session's `MEMORY.md` and repo rules.
 - `ORCH_WAKE_PACKET_ENABLED`: set to `1` to enable the wake-packet API.
 - `ORCH_RULES_ROOT`: optional rules directory used by the context assembler.
 - `ORCH_SHIP_GATES`: comma-separated task-id suffixes that must be complete before a project can be marked shippable.
+
+## What "taey" Means
+
+The `taey-*` commands are the agent-facing CLI tools installed by this package. "Taey" is the project codename used for the local fleet protocol: `taey-plan` works with projects and plans, `taey-task` works with task state, `taey-question` works with human-review gates, and `taey-dispatch` works with out-of-band runner liveness. `orch` is the operator lifecycle command for serving, enabling, disabling, and doctoring the local service.
 
 ## How An AI Agent Uses This
 
@@ -212,7 +223,7 @@ Mutable endpoints create and update projects, phases, tasks, questions, stop con
 
 ## Refs And Wake Packets
 
-Refs are structured pointers attached to the plan. They are not copied into Neo4j as permanent file contents. At runtime, the assembler reads allowed refs fresh and wraps untrusted content in nonce envelopes so file text cannot forge packet sections.
+Refs are structured pointers attached to the plan. They are not copied into Neo4j as permanent file contents. At runtime, the assembler reads allowed refs fresh and wraps untrusted content in nonce envelopes designed to keep file text from being interpreted as packet structure.
 
 Enable refs by setting `ORCH_REF_ALLOWED_ROOT` to trusted roots. Without it, ref use fails closed.
 
@@ -228,6 +239,8 @@ The response includes `packet` plus `packet_meta` with a provenance hash, size r
 ## Scope
 
 This is for one operator coordinating their own local fleet on their own machine.
+
+Supported OS scope: Linux is the tested target. macOS may work for the API path, but the installer, process management, shell scripts, and Claude Code hook wiring are written for a Unix-like environment and are not documented as Windows-native.
 
 It is not:
 
