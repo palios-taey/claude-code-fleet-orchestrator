@@ -16,6 +16,7 @@ COMMAND_RE = re.compile(r"\b(taey-[a-z0-9-]+)\b")
 OPTION_RE = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
 SUBCOMMAND_RE = re.compile(r"\{([a-z0-9][a-z0-9_-]*(?:,[a-z0-9][a-z0-9_-]*)*)\}\s+\.\.\.")
 INLINE_CODE_RE = re.compile(r"`([^`]*\btaey-[^`]*)`")
+BACKTICK_CALL_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)\(\)`")
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 ENV_RE = re.compile(r"\bORCH_[A-Z0-9_]+\b")
 REPO_PATH_RE = re.compile(
@@ -65,6 +66,16 @@ EXTERNAL_DELEGATED_PREFIXES = (
     "claude-code-fleet-notify/",
     "notifications/",
 )
+SAFE_EXTERNAL_CALL_NAMES = {
+    "dict",
+    "getattr",
+    "len",
+    "list",
+    "open",
+    "print",
+    "set",
+    "str",
+}
 
 
 @dataclass
@@ -417,6 +428,22 @@ def _top_level_names(module_file: Path) -> set[str]:
     return names
 
 
+def _repo_function_symbols(root: Path) -> set[str]:
+    names: set[str] = set()
+    for path in root.rglob("*.py"):
+        rel = path.relative_to(root)
+        if any(part in {".git", ".venv", "__pycache__", "build"} for part in rel.parts):
+            continue
+        try:
+            tree = ast.parse(_read_text(path))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names.add(node.name)
+    return names
+
+
 def _module_file_for(root: Path, module: str) -> Path | None:
     rel = Path(*module.split("."))
     package = root / rel / "__init__.py"
@@ -457,6 +484,7 @@ def _file_symbol_exists(path: Path, symbol: str | None) -> bool:
 def check_doc_currency(root: Path, doc_paths: list[Path] | None = None) -> list[str]:
     errors: list[str] = []
     source_text = _source_text_for_currency(root)
+    function_symbols = _repo_function_symbols(root)
     setup_commands = _setup_declared_commands(root)
     script_commands = {path.name for path in (root / "scripts").iterdir() if path.is_file()} if (root / "scripts").is_dir() else set()
     repo_commands = setup_commands | script_commands
@@ -501,6 +529,12 @@ def check_doc_currency(root: Path, doc_paths: list[Path] | None = None) -> list[
                 continue
             if not _module_reference_exists(root, ref):
                 errors.append(f"{display}:{lineno}: documented Python entrypoint does not exist: `{ref}`")
+
+        for call_name in sorted(set(BACKTICK_CALL_RE.findall(line))):
+            if call_name in SAFE_EXTERNAL_CALL_NAMES:
+                continue
+            if call_name not in function_symbols:
+                errors.append(f"{display}:{lineno}: documented function call does not exist: `{call_name}()`")
     return errors
 
 

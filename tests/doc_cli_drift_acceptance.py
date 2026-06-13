@@ -98,6 +98,7 @@ def main() -> None:
         package.mkdir()
         (package / "__init__.py").write_text("__version__ = '0.test'\n", encoding="utf-8")
         (package / "demo.py").write_text("app = object()\nORCH_KNOWN_ENV = 'set'\n", encoding="utf-8")
+        (package / "dispatch.py").write_text("def bind_current_task():\n    pass\n", encoding="utf-8")
         (scripts / "good-tool").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
         (root / "tests").mkdir()
         (root / "tests" / "good_acceptance.py").write_text("print('ok')\n", encoding="utf-8")
@@ -110,6 +111,7 @@ def main() -> None:
                     "`tests/good_acceptance.py`",
                     "`fleet_orchestrator.demo:app`",
                     "`ORCH_KNOWN_ENV`",
+                    "`bind_current_task()`",
                 ]
             ),
             encoding="utf-8",
@@ -125,6 +127,7 @@ def main() -> None:
                     "`fleet_orchestrator.demo:missing_symbol`",
                     "`fleet_orchestrator.missing:app`",
                     "`ORCH_DOCS_ONLY`",
+                    "`_bind_orch_task_if_ready()`",
                 ]
             ),
             encoding="utf-8",
@@ -136,6 +139,7 @@ def main() -> None:
         assert any("documented Python entrypoint does not exist" in item and "fleet_orchestrator.demo:missing_symbol" in item for item in currency_errors), currency_errors
         assert any("documented Python entrypoint does not exist" in item and "fleet_orchestrator.missing:app" in item for item in currency_errors), currency_errors
         assert any("documented env var is not referenced by repo code/config" in item and "ORCH_DOCS_ONLY" in item for item in currency_errors), currency_errors
+        assert any("documented function call does not exist" in item and "_bind_orch_task_if_ready()" in item for item in currency_errors), currency_errors
 
     print("doc_cli_drift_acceptance: PASS")
 
