@@ -89,7 +89,7 @@ python3 tests/localbind_acceptance.py
 python3 tests/task_completion_evidence_acceptance.py
 python3 tests/human_review_gate_acceptance.py
 python3 tests/wake_packet_acceptance.py
-python3 tests/public_readonly_acceptance.py
+python3 tests/standalone_sessions_acceptance.py
 ```
 
 For docs-only changes, still run `python3 scripts/verify-doc-cli-drift.py` and `git diff --check`. For network posture changes, run `python3 tests/localbind_acceptance.py`. For task-state changes, run the relevant evidence, readiness, stop, or human-review acceptance test.
