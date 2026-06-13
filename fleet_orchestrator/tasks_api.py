@@ -62,10 +62,12 @@ from fleet_orchestrator.orch_schema import (
     ReadyWorkConflictError,
     add_project_condition,
     assign_task_to_phase,
+    answer_question,
     check_phase_complete,
     clear_project_stop_reason,
     clear_session_pause,
     complete_project,
+    create_human_review_gate,
     create_phase,
     create_project,
     create_task,
@@ -406,6 +408,63 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             status_code=500,
             content={"ok": False, "error": str(e)},
         )
+
+
+@app.post("/api/human-review-gates")
+async def create_human_review_gate_endpoint(req: Request) -> Dict[str, Any]:
+    data = await req.json()
+    try:
+        phase_id = str(data.get("phase_id") or "").strip()
+        task_id = str(data.get("task_id") or "").strip()
+        question_id = str(data.get("question_id") or f"question-{uuid.uuid4().hex[:8]}").strip()
+        prompt = str(data.get("prompt") or data.get("question") or "").strip()
+        reviewer = str(data.get("reviewer") or data.get("human") or "jesse").strip()
+        requested_by = str(data.get("from") or data.get("requested_by") or "orch-human-review").strip()
+        if not phase_id:
+            raise HTTPException(status_code=422, detail="phase_id is required")
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if not prompt:
+            raise HTTPException(status_code=422, detail="prompt is required")
+        result = create_human_review_gate(
+            phase_id=phase_id,
+            task_id=task_id,
+            question_id=question_id,
+            prompt=prompt,
+            reviewer=reviewer,
+            requested_by=requested_by,
+            refs=data.get("refs") if isinstance(data.get("refs"), list) else None,
+            priority=int(data.get("priority", 50)),
+            notify=bool(data.get("notify", True)),
+            config=_cfg(),
+        )
+        return {"ok": True, **result}
+    except HTTPException:
+        raise
+    except (TaskParentNotFoundError, TaskIdCollisionError, CompletionEvidenceError, ValueError) as exc:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+
+@app.post("/api/questions/{question_id}/answer")
+async def answer_question_endpoint(question_id: str, req: Request) -> Dict[str, Any]:
+    data = await req.json()
+    answer = str(data.get("answer") or data.get("verdict") or "").strip()
+    answered_by = str(data.get("answered_by") or data.get("from") or "jesse").strip()
+    if not answer:
+        raise HTTPException(status_code=422, detail="answer is required")
+    try:
+        ok = answer_question(question_id, answer, answered_by, config=_cfg())
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"Question {question_id} not found")
+        return {"ok": True, "question_id": question_id, "answered_by": answered_by}
+    except HTTPException:
+        raise
+    except (CompletionEvidenceError, ValueError) as exc:
+        return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
 
 @app.get("/api/projects")

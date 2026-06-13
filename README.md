@@ -104,9 +104,21 @@ orch doctor --explain-scope
 orch-cron --help
 orch-watch --help
 taey-plan --help
+taey-question --help
 taey-task --help
 taey-dispatch --help
 ```
+
+## Human Review Gates
+
+Use `taey-question` when a downstream task must wait for a recorded human verdict:
+
+```bash
+taey-question create-gate <phase-id> <gate-task-id> "Which artifact should ship?" --reviewer jesse
+taey-question answer <question-id> "Ship artifact B" --from jesse
+```
+
+The gate creates a durable task-linked `OrchQuestion`, surfaces it as a dashboard `needs_you` item, sends a reviewer notification, and answering auto-completes the gate task with the human verdict as evidence.
 
 ## Out-of-band dispatch liveness
 
