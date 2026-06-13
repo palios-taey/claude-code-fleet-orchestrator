@@ -2585,12 +2585,17 @@ def get_session_current_work(session_id: str,
                              config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
     """Return the highest-priority in-progress task for a session with project context."""
     cfg = config or OrchConfig()
+    observed_task_id = _safe_observed_stop_task_id(session_id, cfg)
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         result = session.run("""
             MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE (t.owner = $session_id OR t.dispatched_to = $session_id)
               AND t.status = 'in_progress'
+              AND (
+                  p.id <> 'default'
+                  OR ($observed_task_id IS NOT NULL AND t.id = $observed_task_id)
+              )
               // Fail-closed, normalized allowlist: an in_progress task in a concluded
               // project (stopped/completed/unknown) is NOT live work and must not
               // force-grind its owner (hunter token-burn 2026-06-04). trim+lower so
@@ -2609,9 +2614,10 @@ def get_session_current_work(session_id: str,
                    t.description AS top_task_desc,
                    t.source_path AS task_source_path,
                    t.refs AS task_refs
-            ORDER BY coalesce(p.priority, 999999999) ASC, coalesce(t.priority, 999999999) ASC, ph.order ASC, t.created_at ASC
+            ORDER BY CASE WHEN $observed_task_id IS NOT NULL AND t.id = $observed_task_id THEN 0 ELSE 1 END ASC,
+                     coalesce(p.priority, 999999999) ASC, coalesce(t.priority, 999999999) ASC, ph.order ASC, t.created_at ASC
             LIMIT 1
-        """, session_id=session_id)
+        """, session_id=session_id, observed_task_id=observed_task_id)
         record = result.single()
         if not record:
             return None
