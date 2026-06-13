@@ -233,9 +233,11 @@ scripts/orch-public --port 5005
 
 That serves `fleet_orchestrator.public_readonly:app` on `127.0.0.1:5005`. It has no mutable routes and uses explicit public-session/project filters such as `ORCH_PUBLIC_SHOW_SESSIONS`, `ORCH_PUBLIC_HIDE_SESSIONS`, and `ORCH_PUBLIC_HIDE_PROJECT_IDS`. The screenshot above is this `:5005` read-only view; a project title inside it may reflect live fleet project data rather than the package version.
 
+**Note on dashboards:** the embedded screenshot is the read-only dashboard on `:5005`, which renders plan/session/task state only and is safe to share. The mutable operator dashboard on `:5002` additionally surfaces live operator content — including inter-session chat — and must never be screenshotted, exposed, or bound to a non-loopback interface. Treat `:5002` as private operator-only; `:5005` is the shareable surface.
+
 ## Refs And Wake Packets
 
-Refs are structured pointers attached to the plan. They are not copied into Neo4j as permanent file contents. At runtime, the assembler reads allowed refs fresh and wraps untrusted content in nonce envelopes designed to keep file text from being interpreted as packet structure.
+Refs are structured pointers attached to the plan. They are not copied into Neo4j as permanent file contents. At runtime, the assembler reads allowed refs fresh and wraps untrusted content in nonce envelopes designed to keep file text from being interpreted as packet structure. See [Dynamic Context And Tiered Refs](docs/DYNAMIC_CONTEXT_REFS.md) for the five tiers, clear-then-reinject workflow, and empty-context framing.
 
 Enable refs by setting `ORCH_REF_ALLOWED_ROOT` to trusted roots. Without it, ref use fails closed.
 
