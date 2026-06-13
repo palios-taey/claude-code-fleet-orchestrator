@@ -338,6 +338,11 @@ def _handle_user_stop_gate(r, node_id: str, task: dict) -> bool:
         log.warning("Stop gate skipped for %s: task %s not found in OrchTask graph",
                     node_id, task_id)
         return False
+    from fleet_orchestrator.orch_schema import is_awaiting_human_review_gate
+    if is_awaiting_human_review_gate(task_state):
+        log.info("Suppressed stop-gate wake: session=%s task=%s awaiting human review",
+                 node_id, task_id)
+        return True
     if task_state.get("status") != "in_progress":
         return False
     if ((task_state.get("blocked_on") or "").strip()):
