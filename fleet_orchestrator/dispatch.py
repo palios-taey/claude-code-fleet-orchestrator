@@ -163,8 +163,11 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
             """
             MATCH (t:OrchTask {id: $task_id})
             SET t._claim_lock = true
-            WITH t
-            WHERE coalesce(t.status, 'pending') = 'pending'
+            WITH t, coalesce(t.status, 'pending') AS prior_status
+            WHERE (
+                  prior_status = 'pending'
+                  OR (prior_status = 'completed' AND coalesce(t.recurring, false) = true)
+              )
               AND NOT EXISTS {
                   MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
                   WHERE dep.status <> 'completed'
@@ -173,6 +176,14 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
                 t.owner = $owner,
                 t.dispatched_to = $worker,
                 t.blocked_on = NULL,
+                t.reclaim_count = CASE
+                    WHEN prior_status = 'completed' THEN coalesce(t.reclaim_count, 0) + 1
+                    ELSE coalesce(t.reclaim_count, 0)
+                END,
+                t.last_reclaimed_at = CASE
+                    WHEN prior_status = 'completed' THEN datetime()
+                    ELSE t.last_reclaimed_at
+                END,
                 t.updated_at = datetime()
             RETURN t.id AS task_id
             """,
