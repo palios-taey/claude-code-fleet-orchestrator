@@ -53,7 +53,7 @@ jobs:
           echo "PYTHONPATH=$RUNNER_TEMP/notifystub" >> "$GITHUB_ENV"
       - name: Ship-gate — generic operator env contract
         run: python tests/env_contract_acceptance.py
-      - name: Ship-gate — documented taey CLI invocations match live help
+      - name: Ship-gate — documented CLI and repo references match live code
         run: |
           python scripts/verify-doc-cli-drift.py
           python tests/doc_cli_drift_acceptance.py
