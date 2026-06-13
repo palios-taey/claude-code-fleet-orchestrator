@@ -2176,34 +2176,38 @@ def _clear_matching_current_task(owner: str, task_id: str, config: Optional[Orch
     if not owner or not task_id:
         return False
     from .config import get_redis_sync
-    from redis import WatchError
+    from redis import RedisError, WatchError
 
-    r = get_redis_sync(config)
-    key = _state_key(owner, "current_task")
-    for attempt in range(5):
-        with r.pipeline() as pipe:
-            try:
-                pipe.watch(key)
-                raw = pipe.get(key)
-                if not raw:
-                    pipe.unwatch()
-                    return False
+    try:
+        r = get_redis_sync(config)
+        key = _state_key(owner, "current_task")
+        for attempt in range(5):
+            with r.pipeline() as pipe:
                 try:
-                    current = json.loads(raw)
-                except Exception:
-                    pipe.unwatch()
-                    return False
-                if not isinstance(current, dict) or str(current.get("task_id") or "") != task_id:
-                    pipe.unwatch()
-                    return False
-                pipe.multi()
-                pipe.delete(key)
-                pipe.execute()
-                return True
-            except WatchError:
-                time.sleep(0.01 * (attempt + 1))
-                continue
-    return False
+                    pipe.watch(key)
+                    raw = pipe.get(key)
+                    if not raw:
+                        pipe.unwatch()
+                        return False
+                    try:
+                        current = json.loads(raw)
+                    except Exception:
+                        pipe.unwatch()
+                        return False
+                    if not isinstance(current, dict) or str(current.get("task_id") or "") != task_id:
+                        pipe.unwatch()
+                        return False
+                    pipe.multi()
+                    pipe.delete(key)
+                    pipe.execute()
+                    return True
+                except WatchError:
+                    time.sleep(0.01 * (attempt + 1))
+                    continue
+        return False
+    except RedisError as exc:
+        _LOG.warning("best-effort current_task clear failed owner=%s task=%s: %s", owner, task_id, exc)
+        return False
 
 
 def update_task_status(task_id: str, status: str, owner: str = "",

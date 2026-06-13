@@ -12,6 +12,9 @@ import os
 import re
 import sys
 import uuid
+from unittest import mock
+
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,6 +25,7 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
     create_project,
     create_task,
     get_neo4j_driver,
+    get_task,
     init_schema,
     update_task_status,
 )
@@ -48,6 +52,7 @@ PHASE = f"{PROJECT}::phase"
 MATCHING = f"{PROJECT}::matching"
 OTHER = f"{PROJECT}::other"
 INTERRUPTED = f"{PROJECT}::interrupted"
+REDIS_DOWN = f"{PROJECT}::redis-down"
 FAILURES: list[str] = []
 
 
@@ -96,7 +101,7 @@ def main() -> int:
         init_schema(config=CFG)
         create_project(project_id=PROJECT, name=PROJECT, supervisor=SUP, priority=1, config=CFG)
         create_phase(project_id=PROJECT, phase_id=PHASE, name="phase", config=CFG)
-        for task_id in (MATCHING, OTHER, INTERRUPTED):
+        for task_id in (MATCHING, OTHER, INTERRUPTED, REDIS_DOWN):
             create_task(phase_id=PHASE, task_id=task_id, description=task_id, owner=OWNER, wake_owner_if_ready=False, config=CFG)
             update_task_status(task_id, "in_progress", owner=OWNER, config=CFG)
 
@@ -143,6 +148,17 @@ def main() -> int:
         _check("terminal owner reassign preserves new owner's nonmatching current_task",
                _new_owner_current_task_id() == "unrelated",
                _new_owner_current_task_id())
+
+        with mock.patch("fleet_orchestrator.config.get_redis_sync", side_effect=RedisConnectionError("forced redis down")):
+            redis_down_result = update_task_status(
+                REDIS_DOWN,
+                "completed",
+                completion_evidence={"production_observation": "terminal clear acceptance redis down"},
+                config=CFG,
+            )
+        redis_down_task = get_task(REDIS_DOWN, config=CFG)
+        _check("terminal write returns true when best-effort Redis clear fails", redis_down_result is True, redis_down_result)
+        _check("terminal write commits Neo4j status when Redis clear fails", redis_down_task.get("status") == "completed", redis_down_task)
     finally:
         _cleanup()
 
