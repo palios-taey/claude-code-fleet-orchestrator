@@ -1,0 +1,5 @@
+# Direct runtime dependencies derived from fleet_orchestrator imports.
+fastapi==0.136.3
+neo4j==6.2.0
+redis==8.0.0
+uvicorn==0.49.0

@@ -3,11 +3,22 @@ from pathlib import Path
 from setuptools import find_packages, setup
 
 
+ROOT = Path(__file__).resolve().parent
+
+
 def load_version() -> str:
     namespace = {}
-    version_path = Path(__file__).resolve().parent / "fleet_orchestrator" / "version.py"
+    version_path = ROOT / "fleet_orchestrator" / "version.py"
     exec(version_path.read_text(encoding="utf-8"), namespace)
     return namespace["__version__"]
+
+
+def load_requirements() -> list[str]:
+    return [
+        line.strip()
+        for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
 
 
 setup(
@@ -32,10 +43,5 @@ setup(
         "scripts/taey-question",
         "scripts/taey-task",
     ],
-    install_requires=[
-        "fastapi",
-        "neo4j",
-        "redis",
-        "uvicorn",
-    ],
+    install_requires=load_requirements(),
 )
