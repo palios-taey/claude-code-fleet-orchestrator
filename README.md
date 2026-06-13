@@ -6,6 +6,10 @@ The system gives one person a durable "score" for coordinating multiple coding a
 
 Motivating scenario: you have `conductor`, `conductor-codex`, and `conductor-gemini` sessions open on one Linux workstation. Codex is implementing, Gemini is measuring, and the conductor is supervising. Without a shared score, work gets lost after `/clear`, a worker can stop while a dependent task is ready, and "done" becomes a chat claim. This repo makes those handoffs explicit local state.
 
+![Fleet dashboard showing session cards, current work, projects, and task details](docs/dashboard.png)
+
+Local `:5005` read-only dashboard view with real fleet state.
+
 Status: v1.6.0, active single-user local tool, Apache-2.0 licensed. It is mature enough to run its own ship gates, but it still expects a technical operator comfortable with local Redis, Neo4j, and Claude Code hook wiring.
 
 ## Mental Model
