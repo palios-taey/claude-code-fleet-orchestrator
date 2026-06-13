@@ -236,6 +236,8 @@ jobs:
           ORCH_REDIS_PORT: "6379"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
         run: python tests/wake_packet_acceptance.py
+      - name: Ship-gate — lane-state estimator is passive and Redis-backed
+        run: python tests/lane_state_acceptance.py
       - name: Ship-gate — project detail API preserves top-level identity fields
         env:
           ORCH_NEO4J_URI: bolt://localhost:7687
