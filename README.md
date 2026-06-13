@@ -1,21 +1,43 @@
 # claude-code-fleet-orchestrator
 
-`claude-code-fleet-orchestrator` coordinates supervised worker sessions over Redis, Neo4j, and a notify transport. It provides:
+`claude-code-fleet-orchestrator` is a local-first, single-user orchestration layer for a fleet of Claude Code or CLI agent sessions running on one operator's machine. It is not a hosted service, not a multi-tenant team server, and not a SaaS control plane. The default posture is private: the mutable API and dashboard bind to `127.0.0.1` unless the operator explicitly sets `ORCH_HOST` to another interface.
 
-- a dispatch primitive that records active work for a worker session
-- an event-driven watch daemon that escalates stuck or newly-unblocked work
-- a FastAPI surface for tasks, projects, and plan ingestion
-- CLI tools for plan and task operations
+The system gives one person a durable "score" for coordinating multiple coding agents without babysitting every handoff. State lives in Neo4j and Redis because projects, phases, tasks, dependencies, human-review gates, refs, and provenance are graph-shaped; the product asks "what is ready, blocked, supervised, or gated?" more often than it asks for flat rows. A FastAPI service on `:5002`, a browser dashboard, command-line tools, and Claude Code hooks connect each session's lifecycle to that state.
 
-**New here?** [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) is the guided setup and first supervised-loop exercise
-(install → define a plan → manually dispatch one loop → release gate), with "what you should see" at every step.
+Motivating scenario: you have `conductor`, `conductor-codex`, and `conductor-gemini` sessions open on one Linux workstation. Codex is implementing, Gemini is measuring, and the conductor is supervising. Without a shared score, work gets lost after `/clear`, a worker can stop while a dependent task is ready, and "done" becomes a chat claim. This repo makes those handoffs explicit local state.
 
-## AI-native quickstart
+![Fleet dashboard showing session cards, current work, projects, and task details](docs/dashboard.png)
 
-Point Claude Code, Codex, or another coding agent at a clean checkout and have it run this sequence end to end:
+Screenshot: local `:5005` read-only dashboard view with real fleet state. The operator API/dashboard runs on `:5002`; `:5005` is a separate read-only dashboard surface served by `scripts/orch-public`, useful when you want a scrubbed view without mutable routes.
+
+Status: v1.6.0, active single-user local tool, Apache-2.0 licensed. It is mature enough to run its own ship gates, but it still expects a technical operator comfortable with local Redis, Neo4j, and Claude Code hook wiring.
+
+## Mental Model
+
+You run several Claude Code or CLI sessions as a fleet. The orchestrator keeps the shared project score: projects contain phases, phases contain tasks, and each task has an owner, status, priority, dependencies, optional refs, and completion evidence.
+
+**Stop-discipline engine.** The hook path is designed so a session does not silently stop while it still has ready work. The Stop hook asks the orchestrator for a stop decision; if work remains and hooks are installed, the hook blocks the stop and feeds back the next action. Human-review gates are a first-class stop state: when work is waiting on a person, the session can stop cleanly instead of looping.
+
+**Dynamic context injection.** Plans and tasks can attach reference docs at overall, supervisor, project, phase, and task tiers. When `ORCH_WAKE_PACKET_ENABLED=1`, `GET /api/sessions/{session_id}/wake-packet` assembles a task-scoped packet with refs, ranked memory, rules, provenance, and a size report. This pairs with `/clear`: clear accumulated chat context, then re-inject the clean slice for the current task. Empty refs mean none were attached; that is valid.
+
+**Evidence-gated completion.** Terminal task updates are designed to require evidence. For normal task completion, provide a JSON object with real artifacts such as `commit_sha`, `gate`, and `production_observation`; the API rejects evidence-less terminal claims. Human-review gate tasks must be completed through the question/UI path, not by ordinary task status updates.
+
+## Five-Minute Quickstart
+
+Prerequisites:
+
+- Linux or a Linux-like environment with a POSIX shell
+- Python 3.10+ with `venv`
+- Git
+- Docker Compose for the bundled Redis + Neo4j path
+- Claude Code
+- `claude-code-fleet-notify` as a sibling checkout, required for Claude Code hooks and the stop-discipline loop
+
+Use one canonical first-run path: install into a local `.venv`, start the bundled loopback Redis/Neo4j, then run the API/dashboard with `orch serve`. After that smoke test is green, wire Claude Code hooks through `claude-code-fleet-notify` to enable stop discipline.
 
 ```bash
 git clone https://github.com/palios-taey/claude-code-fleet-orchestrator.git
+git clone https://github.com/palios-taey/claude-code-fleet-notify.git
 cd claude-code-fleet-orchestrator
 python3 -m venv .venv
 . .venv/bin/activate
@@ -24,322 +46,244 @@ python -m pip install -e .
 cp .env.example .env
 ```
 
-Edit `.env` for your Redis and Neo4j endpoints, then start the API:
+The bundled compose file sets `NEO4J_AUTH=none`, so the default `.env.example` does not need `ORCH_NEO4J_USER` or `ORCH_NEO4J_PASS`. It binds Redis and Neo4j to loopback:
 
 ```bash
-fleet-orchestrator-api
+docker compose up -d
 ```
 
-The mutable API binds to `127.0.0.1:5002` by default. Keep that loopback default unless this is a trusted single-user network; set `ORCH_HOST=0.0.0.0` only when you deliberately want other machines to reach it, and keep `ORCH_DASHBOARD_URL` in sync.
+If Docker is unavailable and you already run Redis and Neo4j yourself, edit `.env` first and use `scripts/install --skip-compose`. External Neo4j commonly has auth enabled; set the credentials explicitly in that case:
 
-If `claude-code-fleet-notify` is a sibling checkout, dispatch and stop-hook paths auto-resolve it. If it lives elsewhere, set `ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify` in `.env`; config errors name that exact value when auto-resolution cannot find notify.
+```bash
+ORCH_REDIS_HOST=127.0.0.1
+ORCH_REDIS_PORT=6379
+ORCH_NEO4J_URI=bolt://127.0.0.1:7687
+ORCH_NEO4J_DB=neo4j
+ORCH_NEO4J_USER=neo4j
+ORCH_NEO4J_PASS=<your-password>
+```
 
-## Requirements
+Verify the install:
 
-- Python 3.10+
-- Redis
-- Neo4j
-- a working `claude-code-fleet-notify` installation, either importable, in a sibling checkout, or pointed to by `ORCH_NOTIFY_LIB_ROOT`
+```bash
+orch serve
+```
+
+In another terminal:
+
+```bash
+. .venv/bin/activate
+curl -s http://127.0.0.1:5002/health
+```
+
+Open the dashboard:
+
+```bash
+open http://127.0.0.1:5002/ui/
+```
+
+If `open` is not available on your OS, paste `http://127.0.0.1:5002/ui/` into a browser on the same machine.
+
+Wire Claude Code hooks after the API/dashboard smoke test. This step is required for the Stop hook behavior described above; without it, the API and dashboard work, but sessions will not consult the orchestrator when they stop.
+
+```bash
+scripts/install --dry-run
+scripts/install --skip-compose
+```
+
+`--skip-compose` reuses the Redis and Neo4j you already started with Docker Compose. The installer reconciles `.venv`, applies managed Claude Code hook settings through `claude-code-fleet-notify`, starts notify daemons, starts `orch-watch`, and runs `orch doctor`.
+
+For automation, the package also exposes `fleet-orchestrator-api`, which starts the same FastAPI app as `orch serve`. Prefer `orch serve` in the quickstart because it prints the dashboard URL and uses the same operator lifecycle surface as `orch enable`, `orch disable`, and `orch doctor`.
 
 ## Configuration
 
-Copy [.env.example](.env.example) to `.env` and set the values for your environment.
+Copy [.env.example](.env.example) to `.env`. The loader reads `ORCH_DOTENV` first if set, then `.env` in the current directory, then `.env` at the repo root.
 
-Required variables:
+Required:
 
-- `ORCH_REDIS_HOST` — Redis host for the orchestrator API and watcher.
-- `ORCH_REDIS_PORT` — Redis port for the orchestrator API and watcher.
-- `ORCH_NEO4J_URI` — Neo4j Bolt URI, for example `bolt://127.0.0.1:7687`.
-- `ORCH_NEO4J_DB` — Neo4j database name.
+- `ORCH_REDIS_HOST` and `ORCH_REDIS_PORT`: Redis used by notifications, liveness, locks, and daemon state.
+- `ORCH_NEO4J_URI` and `ORCH_NEO4J_DB`: Neo4j used for projects, phases, tasks, refs, gates, and evidence.
+- `ORCH_NEO4J_USER` / `ORCH_NEO4J_PASS`: leave unset for this repo's bundled compose path (`NEO4J_AUTH=none`); set both for an external Neo4j instance that enforces auth.
 
-Optional variables:
+Network posture:
 
-- `ORCH_DASHBOARD_URL` — base URL for the API and browser UI; defaults to `http://127.0.0.1:5002`.
-- `ORCH_REDIS_SENTINELS` — comma-separated Redis Sentinel `host:port` pairs.
-- `ORCH_REDIS_SENTINEL_MASTER` — Sentinel master name; defaults to `orch-master`.
-- `ORCH_NEO4J_USER` / `ORCH_NEO4J_PASS` — Neo4j credentials when auth is enabled.
-- `ORCH_NOTIFY_LIB_ROOT` — path to a local `claude-code-fleet-notify` checkout; required only when notify is neither importable nor in the default sibling checkout layout.
-- `ORCH_NOTIFY_CLI` — override the notify CLI binary; defaults to `taey-notify`.
-- `ORCH_REF_ALLOWED_ROOT` — trusted root, comma-separated roots, or a JSON list of roots under which plan source files must live before `[ref:...]` slices are enabled. Refs are disabled fail-safe when unset.
-- `ORCH_SESSION_IDS` — optional allowlist for the browser notify form target validation. When set, `POST /api/sessions/{target}/notify` rejects targets not listed here.
-- `ORCH_PRODUCT_OWNER_MAP` — optional session-to-product map used by `fleet_orchestrator.dispatch` bug-lock enforcement. Accepts JSON or comma-separated `session=product` pairs. `PRODUCT_OWNER_MAP` is also accepted as a fallback alias.
-- `ORCH_DOTENV` — explicit `.env` file path to load before config validation.
+- `ORCH_HOST`: dashboard/API bind host. Default is `127.0.0.1`. Set `ORCH_HOST=0.0.0.0` only as an explicit trusted single-user LAN opt-in.
+- `ORCH_PORT`: dashboard/API port. Default is `5002`.
+- `ORCH_DASHBOARD_URL`: base URL used by CLIs and hooks. Default is `http://127.0.0.1:5002`.
+- `ORCH_AUTH_TOKEN`: optional mutable-endpoint token. When set, `POST`, `PUT`, `PATCH`, and `DELETE` requests require either `Authorization: Bearer <token>` or `X-API-Key: <token>`. Read endpoints remain open. When unset, the default loopback bind is the security boundary.
 
-## Install
+By default the dashboard binds `127.0.0.1`, reachable only from the machine it runs on. That localhost bind is the security boundary for the mutable API: the dashboard is not a multi-user service and must not accept untrusted callers. Binding to any non-loopback interface is an explicit, deliberate operator opt-in for a trusted single-user network only.
 
-```bash
-scripts/install
-source .venv/bin/activate
-```
+Fleet and context:
 
-`scripts/install` and the runtime config auto-resolve `claude-code-fleet-notify`
-from a sibling checkout. If notify is elsewhere, set
-`ORCH_NOTIFY_LIB_ROOT=/absolute/path/to/claude-code-fleet-notify`.
-Without that notify layer, hook wiring and daemon startup cannot be installed.
+- `ORCH_SESSION_IDS`: optional comma-separated session allowlist for the dashboard notify form and wake-packet endpoint.
+- `ORCH_NOTIFY_LIB_ROOT`: path to `claude-code-fleet-notify` if it is not importable and not a sibling checkout. Required for managed Claude Code hook wiring and stop discipline.
+- `ORCH_NOTIFY_CLI`: notify CLI name. Default is `taey-notify`.
+- `ORCH_REF_ALLOWED_ROOT`: one or more trusted roots for plan/source refs. Refs are disabled fail-safe when unset.
+- `ORCH_SESSION_ROOTS`: JSON or comma-separated `session=/repo/root` map used by the context assembler to find each session's `MEMORY.md` and repo rules.
+- `ORCH_WAKE_PACKET_ENABLED`: set to `1` to enable the wake-packet API.
+- `ORCH_RULES_ROOT`: optional rules directory used by the context assembler.
+- `ORCH_SHIP_GATES`: comma-separated task-id suffixes that must be complete before a project can be marked shippable.
 
-The install creates a virtualenv at `.venv` and puts every CLI (`orch`,
-`orch-cron`, `orch-watch`, `taey-plan`, `taey-task`) inside it — the
-`source` line puts them on your PATH for the current shell. Re-run it in
-any new shell, or add it to your shell profile.
+## What "taey" Means
 
-## Service prerequisites
+The `taey-*` commands are the agent-facing CLI tools installed by this package. "Taey" is the project codename used for the local fleet protocol: `taey-plan` works with projects and plans, `taey-task` works with task state, `taey-question` works with human-review gates, and `taey-dispatch` works with out-of-band runner liveness. `orch` is the operator lifecycle command for serving, enabling, disabling, and doctoring the local service.
 
-Start Redis and Neo4j before launching the API. The API startup runs the Neo4j
-schema initializer (`init_schema`) and fails if constraints or indexes cannot be
-created, so a missing or unreachable Neo4j instance is a startup error, not a
-deferred runtime surprise.
+## How An AI Agent Uses This
 
-Local example:
+An agent reads the project score through the CLI, does the work in its normal repo, and writes status back with evidence.
 
 ```bash
-redis-server
-neo4j console
+taey-plan list
+taey-plan show <project-id>
+taey-plan current <session-id>
+taey-plan next <session-id>
 ```
 
-## Smoke test
+A supervisor ingests markdown plans:
+
+```bash
+taey-plan ingest /absolute/path/to/plan.md --supervisor conductor
+```
+
+The plan format is documented in [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md). Task headers can declare priority, owner, dependencies, and refs. Example:
+
+```md
+# Project: demo - Demo
+
+## Phase: build - Build [order: 1]
+
+### Task: demo::build-1 - Verify install [priority: 50] [owner: conductor-codex]
+Run the smoke test and record evidence.
+```
+
+An agent checks and updates tasks:
+
+```bash
+taey-task status demo::build-1
+taey-task update demo::build-1 completed --evidence '{"commit_sha":"abc123","gate":"curl /health","production_observation":"HTTP 200 ok true"}'
+```
+
+A human-review gate records a question that must be answered by a person:
+
+```bash
+taey-question create-gate demo::build demo::human-review "Ship this artifact?" --reviewer jesse
+taey-question answer <question-id> "Ship it" --from conductor
+```
+
+For harness-driven work where the runner is not the agent session itself:
+
+```bash
+taey-dispatch out-of-band register demo::build-1 --supervisor conductor --owner conductor-codex --runner acceptance-harness --ttl 300
+taey-dispatch out-of-band heartbeat demo::build-1
+taey-dispatch out-of-band complete demo::build-1 --status completed --supervisor conductor --evidence '{"commit_sha":"abc123","gate":"production probe","production_observation":"verified live"}'
+```
+
+The hooks close the loop:
+
+- `PreToolUse` / `PostToolUse` activity hooks keep liveness fresh.
+- The Stop hook asks the orchestrator whether the session may stop.
+- `orch-watch` listens for Redis state transitions and wakes supervisors when a stopped or idle session has actionable work.
+
+## API And Dashboard
+
+Run the API in the foreground:
+
+```bash
+orch serve
+```
+
+Run managed background services:
+
+```bash
+orch enable
+orch doctor --explain-scope
+```
+
+Stop managed services:
+
+```bash
+orch disable
+```
+
+Remove orchestrator-managed Claude settings and services:
+
+```bash
+orch uninstall
+```
+
+The operator API and dashboard run on `:5002`; the dashboard is served at `/ui/`, and the API root redirects there. Useful read endpoints:
+
+- `GET /health`
+- `GET /api/projects`
+- `GET /api/projects/{project_id}`
+- `GET /api/sessions`
+- `GET /api/sessions/{session_id}/current`
+- `GET /api/sessions/{session_id}/next-ready`
+- `GET /api/sessions/{session_id}/stop-decision`
+- `GET /api/sessions/{session_id}/wake-packet`
+
+Mutable endpoints create and update projects, phases, tasks, questions, stop conditions, loop state, and notifications. Treat `:5002` as a local operator API, not a public service.
+
+There is also a distinct read-only dashboard app:
+
+```bash
+scripts/orch-public --port 5005
+```
+
+That serves `fleet_orchestrator.public_readonly:app` on `127.0.0.1:5005`. It has no mutable routes and uses explicit public-session/project filters such as `ORCH_PUBLIC_SHOW_SESSIONS`, `ORCH_PUBLIC_HIDE_SESSIONS`, and `ORCH_PUBLIC_HIDE_PROJECT_IDS`. The screenshot above is this `:5005` read-only view; a project title inside it may reflect live fleet project data rather than the package version.
+
+## Refs And Wake Packets
+
+Refs are structured pointers attached to the plan. They are not copied into Neo4j as permanent file contents. At runtime, the assembler reads allowed refs fresh and wraps untrusted content in nonce envelopes designed to keep file text from being interpreted as packet structure.
+
+Enable refs by setting `ORCH_REF_ALLOWED_ROOT` to trusted roots. Without it, ref use fails closed.
+
+Enable wake packets:
+
+```bash
+export ORCH_WAKE_PACKET_ENABLED=1
+curl -s "http://127.0.0.1:5002/api/sessions/conductor-codex/wake-packet?cli=codex"
+```
+
+The response includes `packet` plus `packet_meta` with a provenance hash, size report, snapshot fingerprints, and the generating commit.
+
+## Scope
+
+This is for one operator coordinating their own local fleet on their own machine.
+
+Supported OS scope: Linux is the tested target. macOS may work for the API path, but the installer, process management, shell scripts, and Claude Code hook wiring are written for a Unix-like environment and are not documented as Windows-native.
+
+It is not:
+
+- a multi-tenant system
+- a hosted control plane
+- an internet-facing dashboard
+- a replacement for per-repo CI, code review, or production verification
+- a general scheduler for arbitrary teams
+
+Routing policy is intentionally limited. The current system coordinates explicit owners, supervisors, dependencies, gates, and stop discipline. Automatic model/worker routing is future work.
+
+## Verification
+
+Useful local checks:
 
 ```bash
 python3 -c "import fleet_orchestrator; print(fleet_orchestrator.__version__)"
+orch --help
 orch doctor --explain-scope
-orch-cron --help
-orch-watch --help
 taey-plan --help
-taey-question --help
 taey-task --help
+taey-question --help
 taey-dispatch --help
+curl -s http://127.0.0.1:5002/health
 ```
 
-## Human Review Gates
+The ship gate runs acceptance scripts under [tests/](tests/), including stop decisions, human-review gates, ref safety, wake packets, public read-only behavior, and task completion evidence.
 
-Use `taey-question` when a downstream task must wait for a recorded human-review gate:
+## More Docs
 
-```bash
-taey-question create-gate <phase-id> <gate-task-id> "Which artifact should ship?" --reviewer jesse
-taey-question answer <question-id> "Ship artifact B" --from conductor-codex
-```
-
-The gate creates a durable task-linked `OrchQuestion`, surfaces it as a dashboard `needs_you` item, and sends a reviewer notification. This is accident-prevention for a single-user product: normal agent paths (`update_task_status`, `PATCH /api/task/{id}`, and `taey-task update`) cannot complete `human-review` gate tasks; the dashboard uses a dedicated `/api/ui/questions/{question_id}/answer` path that records the verdict and completes the gate.
-
-## Out-of-band dispatch liveness
-
-Use `taey-dispatch` when a task is driven by a harness, subprocess, or other runner that is not the peer session itself. The registration heartbeat is task-scoped and separate from the peer session `current_task`; while it is fresh, the stop engine treats the peer-owned in-progress task as actively running. When it goes stale or is missing, the existing supervisor gate/wake path applies.
-
-```bash
-taey-dispatch out-of-band register task-123 --supervisor conductor --owner conductor-codex --runner conductor-harness --ttl 300
-taey-dispatch out-of-band heartbeat task-123
-taey-dispatch out-of-band complete task-123 --status completed --supervisor conductor --evidence '{"commit_sha":"...","gate":"production probe","production_observation":"..."}'
-```
-
-Harnesses should refresh the heartbeat before half the TTL elapses and call `complete` only with terminal evidence.
-
-## Run the API / Dashboard
-
-The simplest way to bring up the dashboard is:
-
-```bash
-orch serve        # foreground, Ctrl-C to stop
-# or, for a persistent background service:
-orch enable
-```
-
-Both read `ORCH_HOST` / `ORCH_PORT` from your `.env`, so you configure once and
-launch with one command. To verify:
-
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5002/api/projects
-```
-
-(You can still run uvicorn directly — `python3 -m uvicorn fleet_orchestrator.tasks_api:app --host "$ORCH_HOST" --port "$ORCH_PORT"` — but `orch serve` is the supported path.)
-
-### Security boundary: localhost by default
-
-By default the dashboard binds `127.0.0.1` — reachable only from the machine it
-runs on. That localhost bind is the security boundary for the mutable API: the
-dashboard has no multi-user authentication and must not accept untrusted
-callers. Binding to any non-loopback interface or advertising a LAN URL is an
-explicit, deliberate operator opt-in for a trusted single-user network only.
-Keep the default `ORCH_HOST=127.0.0.1` and
-`ORCH_DASHBOARD_URL=http://127.0.0.1:5002` unless you have deliberately chosen
-that exposure boundary.
-
-### Two-way chat box
-
-The dashboard includes a floating chat bar to message a session and read the
-scrollable reply/escalation history. It is **off by default** because chat
-messages become context an AI session reads (an injection vector). Enable it
-only on a trusted/contained network:
-
-```bash
-# .env
-ORCH_CHAT_ENABLED=1
-```
-
-### Web UI / Dashboard URL
-
-The API root redirects to the browser UI, and the static dashboard is served at
-`${ORCH_DASHBOARD_URL}/ui/`. With the default `.env.example`, that is
-`http://127.0.0.1:5002/ui/`.
-
-### Public read-only dashboard (v1.6.0+)
-
-A separate, **read-only-by-construction** app (`fleet_orchestrator/public_readonly.py`, launched via `scripts/orch-public`, default `127.0.0.1:5005`) serves the same session-first view safely for public exposure behind a single tunnel route. It defines **only GET routes** — no create/update/notify endpoint exists in the app, so a write request is a 404/405 because the route is absent, not guarded. It applies a **fail-closed session allowlist** (`ORCH_PUBLIC_SHOW_SESSIONS`, default approved sessions only; everything unassigned/denied is hidden), an **outbound field allowlist** that scrubs operator filesystem paths and hosts from free-text and drops source paths / internal-ops fields, serves **ref pointers only** (never file contents), sanitizes `/health`, and disables the interactive API docs. Never point a tunnel at the live mutable `:5002` API — use `:5005`.
-
-Observed in [`ui/static/app.js`](ui/static/app.js) and [`ui/index.html`](ui/index.html):
-
-- The UI is session-first and auto-refreshes every `5000` ms.
-- The session strip is currently hardcoded to these sessions:
-  - `conductor`
-  - `weaver`
-  - `tutor`
-  - `infra`
-  - `taeys-hands`
-  - `treasurer`
-  - `hunter`
-  - `taey-ed`
-  - `x-claude`
-- Each session card shows the current in-progress task and the next ready task from:
-  - `GET /api/sessions/{session}/current`
-  - `GET /api/sessions/{session}/next-ready`
-- The projects panel is filtered by the selected session and populated from the supervisor-scoped `GET /api/sessions/{session}/projects` listing.
-- Project cards show phase count, task total, and pending / in-progress / completed / failed counts.
-- Project detail shows phases plus a task table with task id, status, owner, priority, and blocked-on.
-- The footer form sends typed messages to the selected session through `POST /api/sessions/{session}/notify`.
-- The browser exposes four notify types: `standard`, `escalation`, `command`, and `response_ready`.
-- The pause checkbox freezes UI auto-refresh only. It does not pause sessions or the stop-discipline engine.
-
-`GET /api/sessions` fails closed to canonical supervisors derived from `ORCH_SESSION_IDS`. Peer entries such as `conductor-codex` are surfaced as their supervisor (`conductor`) and unconfigured data-only sessions are not shown as cards.
-
-## Plan ingest example
-
-```bash
-cat > /tmp/sample-plan.md <<'EOF'
-# Project: sample-project - Sample Project
-> Minimal plan used for smoke testing.
-
-## Phase: sample-phase - Phase One [order: 1]
-
-### Task: sample-task - Verify install [priority: 50] [owner: worker-a]
-- Confirm the orchestrator CLI entry points resolve.
-EOF
-
-taey-plan ingest /tmp/sample-plan.md
-```
-
-## Plan refs
-
-Plans can attach repeatable file refs on project, phase, or task headers:
-
-```md
-### Task: sample-task - Verify install [priority: 50] [ref: docs/PLAN_FORMAT.md:1-40]
-```
-
-Observed in [`fleet_orchestrator/orch_schema.py`](fleet_orchestrator/orch_schema.py):
-
-- refs are stored as structured metadata, not copied into Neo4j as file contents
-- file slices are read fresh when the orchestrator builds runtime `ref_context` payloads
-- refs require `source_path` on ingest when refs are present
-- refs are disabled unless `ORCH_REF_ALLOWED_ROOT` is configured
-- relative refs are sandboxed under both the plan file's directory and one of the configured allowed roots
-- absolute paths, `~` paths, control characters, `..` escapes, and symlink escapes are rejected
-- oversized or unreadable files degrade to warnings instead of crashing the request path
-
-## Core loop — how a supervisor uses it
-
-The orchestrator supports one supervised loop per supervisor session (a Claude Code / CLI instance).
-The walkthrough exercises the loop manually; it is not a self-running autonomous loop after install.
-
-1. **Plan** — author a markdown plan (`# Project` / `## Phase` / `### Task` with
-   `[priority]`, `[owner]`, `[depends]`, `[ref]`) and `taey-plan ingest <file>`.
-   The markdown is the source of truth; re-ingest after edits (idempotent).
-2. **Pull ready work** — `taey-plan next [session]` returns the top ready task you
-   own. A task is *ready* only when its `[depends]` predecessors are `completed`
-   (engine-enforced via `DEPENDS_ON` edges) — a phase can't start until its
-   prerequisites close.
-3. **Dispatch** — hand work to a peer worker with `fleet_orchestrator.dispatch.dispatch(...)`. It
-   claims the task (`in_progress`), writes the worker's `current_task`, and the
-   notify daemon injects the prompt when the worker is idle.
-4. **Wake** — when a worker stops, its Stop hook notifies the supervisor; the
-   daemon injects the message when the supervisor is idle. The supervisor wakes
-   with the result — no human relay.
-5. **Stop-discipline** — a session must not stop while ready work exists;
-   `blocked_on` is the only valid wait, and a stop cites a `user_stop_condition`.
-6. **Ship** — a project is shippable only when its ship-gate tasks pass (below).
-
-The dashboard (`orch serve` → `/ui/`) shows every session's current + next task,
-the project plans with clickable drill-down refs, and a two-way chat per session.
-
-## Dynamic context + automation features
-
-See [docs/CAPABILITIES.md](docs/CAPABILITIES.md) for the live status,
-flags, and observation command for tasks, plans, stop-engine, dispatch, chat,
-refs, wake packets, decision receipts, gate templates, loops, notify, daemon,
-handoff, and trace.
-
-Important current caveat: the wake-packet endpoint is live and
-provenance-bound, but a 2026-06-11 live finding shows some packets can select
-no refs/memory/rules even mid-plan. That is tracked as H4; until it lands,
-verify packet content instead of assuming non-empty context.
-
-## Run the watcher
-
-```bash
-orch-watch \
-  --redis-host 127.0.0.1 \
-  --readiness-checker fleet_orchestrator/plan_readiness.py:check_readiness
-```
-
-## `taey-task`
-
-`taey-task` is the ad hoc task CLI. It talks to the dashboard API and is separate from markdown plan ingestion.
-
-Observed in [`scripts/taey-task`](scripts/taey-task):
-
-- `taey-task create "<description>"` — create a new task through `POST /api/task/create`
-- `taey-task list` — list ranked ready tasks from `GET /api/tasks/ranked`
-- `taey-task status <task-id>` — inspect a task through `GET /api/tasks/{task_id}`
-- `taey-task update <task-id> <status>` — patch task state through `PATCH /api/task/{task_id}`
-
-Additional observed flags:
-
-- `create --priority <int>`
-- `create --from <sender>`
-- `create --type standard|micro`
-- `update --blocked-on <value>`
-- `update --clear-blocked-on`
-
-Use `taey-plan` when the work belongs in a markdown-backed project/phase/task plan. Use `taey-task` for direct task creation and state updates through the API.
-
-## Companion products
-
-The orchestrator is the core. A few small, separately released products compose with it. Start minimal: orchestrator + notify + `orch doctor` green. Add the others only when you hit the specific problem they solve.
-
-### Required
-
-- **[claude-code-fleet-notify](https://github.com/palios-taey/claude-code-fleet-notify)** — the hook, daemon, Redis inbox, and CLI layer the orchestrator depends on. `scripts/install` wires its hooks for you when notify is installed as a sibling checkout or when `ORCH_NOTIFY_LIB_ROOT` points at it.
-
-### Recommended (manual install)
-
-- **[claude-code-api-watchdog](https://github.com/palios-taey/claude-code-api-watchdog)** — surfaces Claude Code API stalls and failures instead of leaving a wedged session silent.
-- **[mcp-reconnect](https://github.com/palios-taey/mcp-reconnect)** — keeps MCP connections alive across disconnects.
-
-### Optional
-
-- **[restart-safe-agents](https://github.com/palios-taey/restart-safe-agents)** — patterns for agents that survive restart without losing in-flight work.
-- **[claude-code-fleet-cockpit-template](https://github.com/palios-taey/claude-code-fleet-cockpit-template)** — the start-here template for the shared fleet operating spine: routing, recaps, action logs, prompting standards, 6SIGMA workflow, per-CLI orientation, and cron registry for teams running the released claude-code-fleet products.
-
-### Planned, not yet released
-
-- A one-command suite installer is still planned but not yet published. Today, `scripts/install` wires the required notify integration only; the optional companions above still need manual installs.
-
-## Documentation
-
-- [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) — guided end-to-end setup + first loop (start here)
-- [docs/SCHEMA.md](docs/SCHEMA.md) — Neo4j/Redis data model
-- [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md) — markdown plan spec (project/phase/task/refs)
-- [docs/SHIPPABILITY.md](docs/SHIPPABILITY.md) — the ship-gate definition + enforcement
-- [SUPPORT.md](SUPPORT.md)
-- [SECURITY.md](SECURITY.md)
-
-## License
-
-Apache-2.0
+- [SETUP.md](SETUP.md): operator install flow and lifecycle details.
+- [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md): guided first supervised loop.
+- [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md): markdown plan format.
+- [SECURITY.md](SECURITY.md): security posture and reporting.
