@@ -168,6 +168,12 @@ def _parse_meta(meta_blob: str) -> Dict[str, Any]:
     return meta
 
 
+def _bool_meta(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in TRUE_ENV_VALUES
+
+
 def _append_body_line(task: Optional[Dict[str, Any]], line: str) -> None:
     if task is None:
         return
@@ -205,11 +211,13 @@ def _set_task_metadata(task: Dict[str, Any], cfg: OrchConfig) -> None:
             MATCH (t:OrchTask {id: $task_id})
             SET t.owner = $owner,
                 t.capability_tags = $tags,
+                t.recurring = $recurring,
                 t.updated_at = datetime()
         """,
             task_id=task["id"],
             owner=task.get("owner", ""),
             tags=task.get("tags", []),
+            recurring=bool(task.get("recurring", False)),
         )
 
 
@@ -356,6 +364,9 @@ def _parse_plan(md: str) -> Dict[str, Any]:
                 "tags": meta.get("tags", []),
                 "depends": meta.get("depends", []),
                 "refs": meta.get("refs", []),
+                "recurring": _bool_meta(meta.get("recurring")) or "recurring" in {
+                    str(tag).strip().lower() for tag in meta.get("tags", [])
+                },
                 "body": [],
             }
             for bad_ref in meta.get("_ref_errors", []):
