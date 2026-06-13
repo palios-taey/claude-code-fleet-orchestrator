@@ -82,7 +82,9 @@ def cmd_answer(args: argparse.Namespace) -> int:
         f"/api/questions/{args.question_id}/answer",
         {"answer": args.answer, "from": args.sender or detect_from_node()},
     )
-    print(f"OK: answered {result['question_id']} by {result['answered_by']}")
+    verified = str(bool(result.get("verified"))).lower()
+    gate_completed = str(bool(result.get("gate_completed"))).lower()
+    print(f"OK: recorded answer {result['question_id']} by {result.get('answered_by', '?')} verified={verified} gate_completed={gate_completed}")
     return 0
 
 
@@ -102,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--no-notify", action="store_true", help="Do not send taey-notify to the reviewer")
     gate.set_defaults(func=cmd_create_gate)
 
-    answer = sub.add_parser("answer", help="Answer a durable question and auto-close its human-review gate")
+    answer = sub.add_parser("answer", help="Record a durable answer; human-review gates require verified human completion")
     answer.add_argument("question_id")
     answer.add_argument("answer")
     answer.add_argument("--from", dest="sender", default="")

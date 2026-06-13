@@ -451,14 +451,14 @@ async def create_human_review_gate_endpoint(req: Request) -> Dict[str, Any]:
 async def answer_question_endpoint(question_id: str, req: Request) -> Dict[str, Any]:
     data = await req.json()
     answer = str(data.get("answer") or data.get("verdict") or "").strip()
-    answered_by = str(data.get("answered_by") or data.get("from") or "jesse").strip()
+    answered_by = str(data.get("answered_by") or data.get("from") or "unauthenticated-api").strip()
     if not answer:
         raise HTTPException(status_code=422, detail="answer is required")
     try:
-        ok = answer_question(question_id, answer, answered_by, config=_cfg())
-        if not ok:
+        result = answer_question(question_id, answer, answered_by, config=_cfg())
+        if not result.get("ok"):
             raise HTTPException(status_code=404, detail=f"Question {question_id} not found")
-        return {"ok": True, "question_id": question_id, "answered_by": answered_by}
+        return result
     except HTTPException:
         raise
     except (CompletionEvidenceError, ValueError) as exc:

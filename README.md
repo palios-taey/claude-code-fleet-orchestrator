@@ -111,14 +111,14 @@ taey-dispatch --help
 
 ## Human Review Gates
 
-Use `taey-question` when a downstream task must wait for a recorded human verdict:
+Use `taey-question` when a downstream task must wait for a recorded human-review gate:
 
 ```bash
 taey-question create-gate <phase-id> <gate-task-id> "Which artifact should ship?" --reviewer jesse
 taey-question answer <question-id> "Ship artifact B" --from jesse
 ```
 
-The gate creates a durable task-linked `OrchQuestion`, surfaces it as a dashboard `needs_you` item, sends a reviewer notification, and answering auto-completes the gate task with the human verdict as evidence.
+The gate creates a durable task-linked `OrchQuestion`, surfaces it as a dashboard `needs_you` item, and sends a reviewer notification. The unauthenticated loopback API can record proposed answers, but it does **not** auto-complete human-review gates; the gate task must remain blocked until completion comes from a human-origin-authenticated path.
 
 ## Out-of-band dispatch liveness
 

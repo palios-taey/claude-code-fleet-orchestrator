@@ -1,9 +1,9 @@
-"""Ship-gate e2e — human-review gate surfaces, captures, and auto-closes.
+"""Ship-gate e2e — human-review gate surfaces and rejects forged completion.
 
 The durable Neo4j question and dashboard needs-you surface must be one gate:
-creating a human-review gate writes both, answering records answered_by and
-closes the gate task with the human verdict as evidence so downstream depends
-release without supervisor hand-bridging.
+creating a human-review gate writes both. A peer/loopback caller may record an
+unverified answer, but it must not forge the human reviewer or auto-complete
+the gate task.
 """
 from __future__ import annotations
 
@@ -76,8 +76,11 @@ def _question_row() -> dict:
         row = session.run(
             """
             MATCH (q:OrchQuestion {id: $id})-[:CONCERNS_TASK]->(t:OrchTask {id: $task})
-            RETURN q.status AS status, q.answered_by AS answered_by, q.answer AS answer,
-                   q.question_type AS question_type, q.gate_task_id AS gate_task_id,
+            WITH q, t, properties(q) AS props
+            RETURN props.status AS status, props.answered_by AS answered_by, props.answer AS answer,
+                   props.question_type AS question_type, props.gate_task_id AS gate_task_id,
+                   props.unverified_answer AS unverified_answer,
+                   props.unverified_answered_by AS unverified_answered_by,
                    t.id AS task_id
             """,
             id=QUESTION,
@@ -122,24 +125,25 @@ def main() -> int:
             f"/api/questions/{QUESTION}/answer",
             json={"answer": "Ship artifact B", "from": REVIEWER},
         )
-        _check("answer endpoint returns ok", answer_response.status_code == 200 and answer_response.json().get("ok"), answer_response.text)
+        _check("peer answer endpoint records but does not verify", answer_response.status_code == 200 and answer_response.json().get("ok"), answer_response.text)
+        _check("peer answer cannot auto-complete human gate", answer_response.json().get("gate_completed") is False and answer_response.json().get("verified") is False, answer_response.json())
         qrow = _question_row()
-        _check("answer records durable answered_by", qrow.get("status") == "answered" and qrow.get("answered_by") == REVIEWER, qrow)
+        _check("peer answer is stored as unverified and question stays open", qrow.get("status") == "open" and qrow.get("unverified_answered_by") == REVIEWER, qrow)
         gate = get_task(GATE, config=CFG)
         evidence = gate.get("completion_evidence") or {}
-        _check("answer auto-completes gate task", gate.get("status") == "completed", gate)
-        _check("gate evidence carries human verdict", "Ship artifact B" in str(evidence.get("production_observation") or ""), evidence)
-        _check("dashboard needs_you cleared on answer", r.get(_redis_key("needs_you")) is None, r.get(_redis_key("needs_you")))
-        _check("dashboard open question removed on answer", not r.lrange(_redis_key("openq"), 0, -1), r.lrange(_redis_key("openq"), 0, -1))
+        _check("peer answer leaves gate task blocked", gate.get("status") != "completed", gate)
+        _check("peer answer writes no completion evidence", not evidence, evidence)
+        _check("dashboard needs_you remains for real human", QUESTION in (r.get(_redis_key("needs_you")) or ""), r.get(_redis_key("needs_you")))
+        _check("dashboard open question remains for real human", any(QUESTION in item for item in r.lrange(_redis_key("openq"), 0, -1)), r.lrange(_redis_key("openq"), 0, -1))
         after = get_session_next_ready(SUP, project_id=PROJECT, config=CFG)
-        _check("downstream releases after human verdict", bool(after) and after.get("task_id") == DOWNSTREAM, after)
+        _check("downstream remains blocked after forged verdict", not after or after.get("task_id") != DOWNSTREAM, after)
     finally:
         _cleanup()
 
     if FAILURES:
         print(f"\nFAIL — {len(FAILURES)}: {FAILURES}")
         return 1
-    print("\nPASS — human-review gate surfaces, records verdict, auto-closes, and releases downstream.")
+    print("\nPASS — human-review gate surfaces and unauthenticated answers cannot forge completion.")
     return 0
 
 

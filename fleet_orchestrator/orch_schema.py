@@ -3332,13 +3332,57 @@ def create_question(question_id: str, text: str, context: str = "",
 
 
 def answer_question(question_id: str, answer: str, answered_by: str,
-                    config: Optional[OrchConfig] = None) -> bool:
+                    config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     """Provide an answer to an open question."""
     if not str(answer or "").strip():
         raise ValueError("answer must be non-empty")
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
+        found = session.run("""
+            MATCH (q:OrchQuestion {id: $id})
+            RETURN q.id AS id, q.question_type AS question_type,
+                   q.gate_task_id AS gate_task_id, q.lineage AS lineage,
+                   q.reviewer AS reviewer, properties(q) AS props
+        """, id=question_id).single()
+        if found is None:
+            return {"ok": False, "question_id": question_id, "gate_completed": False, "verified": False}
+        record = dict(found)
+        is_human_review_gate = record.get("question_type") == "human_review_gate"
+        if is_human_review_gate:
+            props = record.get("props") if isinstance(record.get("props"), dict) else {}
+            unverified = _decode_json_field(props.get("unverified_answers"), [])
+            if not isinstance(unverified, list):
+                unverified = []
+            unverified.append({
+                "answer": str(answer).strip(),
+                "answered_by": answered_by,
+                "received_at": _utc_now_iso(),
+                "verified": False,
+                "source": "unauthenticated_api",
+            })
+            session.run("""
+                MATCH (q:OrchQuestion {id: $id})
+                SET q.unverified_answer = $answer,
+                    q.unverified_answered_by = $answered_by,
+                    q.unverified_answered_at = datetime(),
+                    q.unverified_answers = $unverified_answers,
+                    q.status = 'open'
+            """,
+                id=question_id,
+                answer=str(answer).strip(),
+                answered_by=answered_by,
+                unverified_answers=_json_encode(unverified),
+            )
+            return {
+                "ok": True,
+                "question_id": question_id,
+                "answered_by": answered_by,
+                "verified": False,
+                "gate_completed": False,
+                "question_type": record.get("question_type"),
+                "gate_task_id": record.get("gate_task_id") or "",
+            }
         result = session.run("""
             MATCH (q:OrchQuestion {id: $id})
             SET q.answer = $answer,
@@ -3351,22 +3395,18 @@ def answer_question(question_id: str, answer: str, answered_by: str,
         """, id=question_id, answer=answer, answered_by=answered_by)
         record = result.single()
     if record is None:
-        return False
+        return {"ok": False, "question_id": question_id, "gate_completed": False, "verified": False}
     lineage = str(record.get("lineage") or record.get("reviewer") or "")
     _resolve_chat_question(question_id, config=cfg, lineage=lineage)
-    if record.get("question_type") == "human_review_gate":
-        gate_task_id = str(record.get("gate_task_id") or "")
-        if gate_task_id:
-            verdict = str(answer or "").strip()
-            update_task_status(
-                gate_task_id,
-                "completed",
-                result=verdict,
-                completion_evidence={"production_observation": f"human verdict by {answered_by}: {verdict[:400]}"},
-                completed_by=answered_by,
-                config=cfg,
-            )
-    return True
+    return {
+        "ok": True,
+        "question_id": question_id,
+        "answered_by": answered_by,
+        "verified": False,
+        "gate_completed": False,
+        "question_type": record.get("question_type"),
+        "gate_task_id": record.get("gate_task_id") or "",
+    }
 
 
 def create_human_review_gate(
