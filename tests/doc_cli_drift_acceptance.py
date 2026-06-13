@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import stat
 import sys
 import tempfile
@@ -38,6 +39,12 @@ parser.parse_args()
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+def _prepend_path(path: Path) -> str:
+    old_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{path}{os.pathsep}{old_path}"
+    return old_path
+
+
 def main() -> None:
     gate = _load_gate()
     with tempfile.TemporaryDirectory(prefix="orch-doc-cli-drift-") as tmp:
@@ -65,6 +72,27 @@ def main() -> None:
         assert any("unknown documented CLI `taey-missing`" in item for item in errors), errors
         assert any("does not expose subcommand `launch`" in item for item in errors), errors
         assert any("does not expose option `--missing`" in item for item in errors), errors
+
+        path_bin = root / "bin"
+        path_bin.mkdir()
+        _write_demo_cli(path_bin / "taey-installed")
+        old_path = _prepend_path(path_bin)
+        try:
+            external_docs = root / "external-docs"
+            external_docs.mkdir()
+            (external_docs / "SUPERVISOR_ONBOARDING.md").write_text(
+                "Original bug: `taey-installed run --blocked-on live-task`.\n",
+                encoding="utf-8",
+            )
+            path_errors = gate.check_repo(
+                root,
+                doc_paths=[external_docs],
+                include_path=True,
+                path_cli_names=["taey-installed"],
+            )
+        finally:
+            os.environ["PATH"] = old_path
+        assert any("does not expose option `--blocked-on`" in item for item in path_errors), path_errors
 
     print("doc_cli_drift_acceptance: PASS")
 
