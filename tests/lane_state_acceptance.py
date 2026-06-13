@@ -22,6 +22,7 @@ from fleet_orchestrator.lane_state import (  # noqa: E402
     calibration_stream_key,
     discover_chat_lanes,
     estimate_lane,
+    estimate_lanes,
     record_calibration,
     record_exit_code,
     state_key,
@@ -93,6 +94,30 @@ def main() -> int:
     stale = estimate_lane(worker, redis_client=redis_client, now=now)
     _check("stale heartbeats reduce confidence", stale.confidence <= 0.25, stale.to_dict())
     _check("stale estimate increases unknown TTL mass", stale.ttl_distribution["unknown"] > fresh.ttl_distribution["unknown"], stale.ttl_distribution)
+
+    victim = "victim-codex"
+    healthy_a = "healthy-a-codex"
+    healthy_b = "healthy-b-codex"
+    huge_int_json = '{"task_id": ' + ("9" * 5000) + "}"
+    redis_client.set(state_key(victim, "current_task"), huge_int_json)
+    redis_client.set(state_key(victim, "last_outcome"), '{"outcome": ' + ("8" * 5000) + "}")
+    redis_client.set(state_key(victim, "last_activity"), str(now - 15))
+    redis_client.set(state_key(healthy_a, "last_activity"), str(now - 4))
+    redis_client.set(state_key(healthy_b, "last_activity"), str(now - 3))
+    victim_state = estimate_lane(victim, redis_client=redis_client, now=now)
+    _check(
+        "huge-int current_task falls back to raw instead of raising",
+        "raw" in (victim_state.signals["session"]["current_task"] or {}),
+        victim_state.to_dict(),
+    )
+    _check(
+        "huge-int last_outcome falls back to raw instead of raising",
+        "raw" in (victim_state.signals["session"]["last_outcome"] or {}),
+        victim_state.to_dict(),
+    )
+    batch = estimate_lanes([healthy_a, victim, healthy_b], redis_client=redis_client, now=now)
+    _check("one malformed lane does not abort estimate_lanes batch", set(batch) == {healthy_a, victim, healthy_b}, batch)
+    _check("healthy lanes remain available in malformed batch", batch[healthy_a].available_now and batch[healthy_b].available_now, batch)
 
     chat_lane = LaneRef(lane_id="chat:claude:display:3", kind="chat", session_id="chat:claude:display:3", platform="claude", display="3")
 

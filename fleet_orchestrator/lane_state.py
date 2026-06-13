@@ -548,7 +548,7 @@ def _read_json_key(redis_client: Any, key: str) -> Optional[dict[str, Any]]:
         raw = raw.decode()
     try:
         value = json.loads(str(raw))
-    except json.JSONDecodeError:
+    except ValueError:
         return {"raw": str(raw)}
     return value if isinstance(value, dict) else {"raw": value}
 
