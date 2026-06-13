@@ -157,6 +157,10 @@ OPTIONAL_ENV = (
      "plan/source refs are disabled fail-safe when unset; any ref use fails loud at validation time"),
     ("ORCH_DASHBOARD_URL", "http://127.0.0.1:5002",
      "local API/UI base URL used by setup/UI helpers; core engine state does not depend on it"),
+    ("ORCH_HOST", "127.0.0.1",
+     "loopback-only bind for the single-user local product; non-loopback is an explicit operator opt-in"),
+    ("ORCH_AUTH_TOKEN", "unset (mutable API tokenless)",
+     "default loopback deployments need no token; when set, mutable HTTP methods require the token"),
     ("ORCH_DATA_DIR", "$XDG_DATA_HOME or ~/.local/share (XDG Base Dir spec)",
      "standard local-tool data location; zero-config by design for a single-user local product"),
 )

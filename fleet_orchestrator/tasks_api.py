@@ -12,8 +12,10 @@ Run:
 """
 from __future__ import annotations
 
+import hmac
 import hashlib
 import json
+import logging
 import os
 import sys
 import subprocess
@@ -39,7 +41,7 @@ from fleet_orchestrator.context_assembler import (
     size_report as wake_size_report,
 )
 from fleet_orchestrator.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
-from fleet_orchestrator.easy_setup import package_version
+from fleet_orchestrator.easy_setup import api_host, package_version
 from fleet_orchestrator.loop_engine import (
     ArtifactNotObservedError,
     ArtifactStore,
@@ -107,6 +109,8 @@ from fleet_orchestrator.plan_loader import (
 )
 from fleet_orchestrator.orch_schema import TaskIdCollisionError, TaskParentNotFoundError
 
+LOGGER = logging.getLogger("uvicorn.error")
+
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
 # SECURITY: chat is an injection vector (posts become content an AI session reads). It is the
 # same class as the session-notify endpoint, which already lives on this app. The router stays
@@ -124,10 +128,63 @@ ALLOWED_NOTIFY_TYPES = {
     "response_ready": "response_ready",
 }
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+MUTABLE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _auth_token() -> Optional[str]:
+    token = os.environ.get("ORCH_AUTH_TOKEN")
+    if token is None:
+        return None
+    token = token.strip()
+    return token or None
+
+
+def _bearer_token(authorization: Optional[str]) -> Optional[str]:
+    if not authorization:
+        return None
+    scheme, _, value = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not value:
+        return None
+    return value.strip() or None
+
+
+def _request_credential(request: Request) -> Optional[str]:
+    return _bearer_token(request.headers.get("authorization")) or request.headers.get("x-api-key")
+
+
+def _credential_matches(expected: str, supplied: Optional[str]) -> bool:
+    return supplied is not None and hmac.compare_digest(supplied, expected)
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip().lower().strip("[]")
+    return normalized == "localhost" or normalized == "::1" or normalized.startswith("127.")
+
+
+def _warn_if_mutable_api_exposed() -> None:
+    host = api_host()
+    if _is_loopback_host(host) or _auth_token():
+        return
+    LOGGER.warning(
+        "Fleet Orchestrator mutable API is bound to %s without ORCH_AUTH_TOKEN; "
+        "POST/PUT/PATCH/DELETE endpoints are reachable without credentials on this interface. "
+        "Set ORCH_AUTH_TOKEN or bind ORCH_HOST to 127.0.0.1 for private-by-default operation.",
+        host,
+    )
+
+
+@app.middleware("http")
+async def _optional_mutable_auth(request: Request, call_next):
+    token = _auth_token()
+    if token and request.method.upper() in MUTABLE_METHODS:
+        if not _credential_matches(token, _request_credential(request)):
+            return JSONResponse(status_code=401, content={"detail": "invalid or missing API credential"})
+    return await call_next(request)
 
 
 @app.on_event("startup")
 def _init_schema_on_startup() -> None:
+    _warn_if_mutable_api_exposed()
     result = init_schema(config=_cfg())
     errors = result.get("errors") or []
     if errors:
