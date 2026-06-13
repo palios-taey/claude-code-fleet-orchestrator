@@ -5,7 +5,8 @@ build/
 *.egg-info/
 .claude/
 AGENTS.md
-CLAUDE.md
+**/CLAUDE.md
+!/CLAUDE.md
 
 # Local deployment config — secrets/topology. Use .env.example as template.
 .env
