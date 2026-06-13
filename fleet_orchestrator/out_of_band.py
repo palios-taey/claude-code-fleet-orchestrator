@@ -6,9 +6,9 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
-from .config import OrchConfig, get_redis_sync
+from .config import OrchConfig, get_neo4j_driver, get_redis_sync
 
 
 DEFAULT_HEARTBEAT_TTL_SECS = 300
@@ -17,6 +17,26 @@ DEFAULT_HEARTBEAT_TTL_SECS = 300
 def out_of_band_task_key(task_id: str) -> str:
     prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
     return f"{prefix}:out-of-band-task:{task_id}"
+
+
+def _task_registration_scope(task_id: str, *, config: Optional[OrchConfig] = None) -> dict[str, Any]:
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run(
+            """
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            RETURN p.supervisor AS supervisor, t.owner AS owner, t.dispatched_to AS dispatched_to
+            """,
+            task_id=task_id,
+        ).single()
+    if not record:
+        raise ValueError(f"out-of-band task does not exist: {task_id}")
+    return {
+        "supervisor": str(record["supervisor"] or ""),
+        "owner": str(record["owner"] or ""),
+        "dispatched_to": str(record["dispatched_to"] or ""),
+    }
 
 
 def register_out_of_band_task(
@@ -35,6 +55,12 @@ def register_out_of_band_task(
         raise ValueError("supervisor is required")
     if not owner.strip():
         raise ValueError("owner is required")
+    scope = _task_registration_scope(task_id, config=config)
+    real_workers = {worker for worker in (scope["owner"], scope["dispatched_to"]) if worker}
+    if supervisor != scope["supervisor"]:
+        raise ValueError(f"out-of-band supervisor mismatch for {task_id}: expected {scope['supervisor']!r}")
+    if owner not in real_workers:
+        raise ValueError(f"out-of-band owner mismatch for {task_id}: expected one of {sorted(real_workers)!r}")
     now = time.time()
     payload: dict[str, Any] = {
         "task_id": task_id,
@@ -74,7 +100,8 @@ def clear_out_of_band_task(task_id: str, *, config: Optional[OrchConfig] = None)
     get_redis_sync(config).delete(out_of_band_task_key(task_id))
 
 
-def out_of_band_task_active(task_id: str, *, now: Optional[float] = None,
+def out_of_band_task_active(task_id: str, *, workers: Optional[Iterable[str]] = None,
+                            now: Optional[float] = None,
                             config: Optional[OrchConfig] = None) -> bool:
     r = get_redis_sync(config)
     raw = r.get(out_of_band_task_key(task_id))
@@ -86,6 +113,13 @@ def out_of_band_task_active(task_id: str, *, now: Optional[float] = None,
         return False
     if not isinstance(payload, dict) or payload.get("task_id") != task_id:
         return False
+    if workers is not None:
+        real_workers = {str(worker) for worker in workers if worker}
+        if not real_workers:
+            return False
+        claimed_workers = {str(payload.get("owner") or ""), str(payload.get("runner") or "")}
+        if not (claimed_workers & real_workers):
+            return False
     try:
         heartbeat_at = float(payload.get("heartbeat_at"))
         ttl = max(1, int(payload.get("heartbeat_ttl_secs") or DEFAULT_HEARTBEAT_TTL_SECS))

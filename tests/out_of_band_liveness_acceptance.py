@@ -49,6 +49,8 @@ CFG = OrchConfig()
 PFX = f"{_require_test_namespace()}-oob-{uuid.uuid4().hex[:8]}"
 SUP = f"{PFX}-sup"
 PEER = f"{SUP}-codex"
+FOREIGN_SUP = f"{PFX}-foreign-sup"
+FOREIGN_PEER = f"{FOREIGN_SUP}-codex"
 PROJECT = f"{PFX}-project"
 PHASE = f"{PROJECT}::phase"
 TASK = f"{PROJECT}::task"
@@ -107,6 +109,35 @@ def main() -> int:
         _check("stale out-of-band heartbeat BLOCKS for gate/investigate",
                blocked.get("block") is True and blocked.get("task_id") == TASK and blocked.get("gate_for") == PEER,
                blocked)
+
+        try:
+            register_out_of_band_task(
+                TASK,
+                supervisor=FOREIGN_SUP,
+                owner=FOREIGN_PEER,
+                runner=FOREIGN_PEER,
+                heartbeat_ttl_secs=5,
+                details="foreign spoof",
+                config=CFG,
+            )
+        except ValueError as exc:
+            rejected = str(exc)
+        else:
+            rejected = ""
+        _check("foreign supervisor/owner registration is rejected",
+               "mismatch" in rejected,
+               rejected)
+
+        spoof = dict(payload)
+        spoof["owner"] = FOREIGN_PEER
+        spoof["runner"] = FOREIGN_PEER
+        spoof["supervisor"] = FOREIGN_SUP
+        spoof["heartbeat_at"] = time.time()
+        get_redis_sync(CFG).set(out_of_band_task_key(TASK), json.dumps(spoof), ex=30)
+        spoof_blocked = _raw_stop_decision(SUP, config=CFG)
+        _check("foreign raw heartbeat does NOT suppress gate/investigate",
+               spoof_blocked.get("block") is True and spoof_blocked.get("task_id") == TASK and spoof_blocked.get("gate_for") == PEER,
+               spoof_blocked)
     finally:
         _cleanup()
 

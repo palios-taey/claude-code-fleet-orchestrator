@@ -1213,7 +1213,7 @@ def _peer_actively_working_task(workers: List[str], task_id: Optional[str],
     cfg = config or OrchConfig()
     from .config import get_redis_sync
 
-    if out_of_band_task_active(task_id, config=cfg):
+    if out_of_band_task_active(task_id, workers=workers, config=cfg):
         return True
 
     r = get_redis_sync(cfg)
