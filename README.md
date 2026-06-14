@@ -283,12 +283,18 @@ curl -s http://127.0.0.1:5002/health
 
 The ship gate runs acceptance scripts under [tests/](tests/), including stop decisions, human-review gates, ref safety, wake packets, public read-only behavior, and task completion evidence.
 
-To run the acceptance suite yourself, install the test extra (the tests use the FastAPI TestClient, which needs `httpx`):
+The acceptance tests are standalone scripts (not `unittest`/`pytest` modules) — each is run individually, exactly as the ship gate does. Install the test extra (the tests use the FastAPI TestClient, which needs `httpx`), then run any test as a script. Most need a reachable Neo4j and the same environment as the API; some set `ORCH_TEST_NAMESPACE` to isolate their data. The authoritative list of tests and their per-test environment is [.github/workflows/ship-gate.yml](.github/workflows/ship-gate.yml).
 
 ```bash
 pip install -e ".[test]"
-python3 -m unittest discover -s tests
+# Acceptance scripts are standalone (run each directly, not via unittest/pytest).
+# Each talks to your orchestrator's Neo4j/Redis and needs a test namespace to
+# isolate its data. With your normal orchestrator env active (ORCH_NEO4J_URI
+# etc. from .env):
+ORCH_TEST_NAMESPACE=local-acceptance python tests/human_review_gate_acceptance.py
 ```
+
+The authoritative list of acceptance scripts and the exact per-test environment is [.github/workflows/ship-gate.yml](.github/workflows/ship-gate.yml) — the ship gate runs each as its own step with an isolated environment. Run additional scripts the same way (one process each); give each its own `ORCH_TEST_NAMESPACE` to avoid cross-test data collisions.
 
 ## More Docs
 
