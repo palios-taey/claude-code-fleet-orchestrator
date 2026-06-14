@@ -45,8 +45,8 @@ def _load_session_roots() -> Dict[str, str]:
     operator's fleet (/home/mira/...), which a downloader could not use. Each
     operator sets ORCH_SESSION_ROOTS in their environment as JSON or
     comma-separated key=value pairs, e.g.
-        ORCH_SESSION_ROOTS={"conductor":"/home/me/repo","worker":"/home/me/w"}
-        ORCH_SESSION_ROOTS=conductor=/home/me/repo,worker=/home/me/w
+        ORCH_SESSION_ROOTS={"supervisor":"/home/me/repo","worker":"/home/me/w"}
+        ORCH_SESSION_ROOTS=supervisor=/home/me/repo,worker=/home/me/w
     Unset -> empty map (callers fall back to MEMORY_BASE-only context).
     """
     raw = os.environ.get("ORCH_SESSION_ROOTS", "").strip()

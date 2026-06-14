@@ -695,8 +695,7 @@ def investigate(r, node_id: str, event_type: str,
 
     last_outcome = get_last_outcome(r, node_id)
     if last_outcome and last_outcome.get("outcome") == "done":
-        # Grace window (treasurer system-integration sign-off TIER-3,
-        # noise complaint): the Stop hook's CAS done-clear is async with
+        # Grace window: the Stop hook's CAS done-clear is async with
         # respect to orch-watch's keyspace event arrival. The hook fires
         # action_stop() which (a) sets idle=1 -> emits a keyspace event,
         # (b) reads current_task + last_outcome, (c) runs the Lua

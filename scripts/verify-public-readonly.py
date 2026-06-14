@@ -26,12 +26,17 @@ os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
 from fleet_orchestrator.orch_schema import create_phase, create_project, create_task  # noqa: E402
-from fleet_orchestrator.public_readonly import _UI_SESSIONS, _hidden_sessions  # noqa: E402
+from fleet_orchestrator.public_readonly import _hidden_sessions, _public_sessions  # noqa: E402
 
+
+PREFIX = f"publicro-{int(time.time())}"
+VISIBLE_SESSION = f"{PREFIX}-visible"
+HIDDEN_SESSION = f"{PREFIX}-hidden"
+os.environ["ORCH_PUBLIC_SHOW_SESSIONS"] = VISIBLE_SESSION
+os.environ["ORCH_PUBLIC_HIDE_SESSIONS"] = HIDDEN_SESSION
 
 CFG = OrchConfig()
 HIDDEN = _hidden_sessions()
-PREFIX = f"publicro-{int(time.time())}"
 
 
 def _request(method: str, url: str, data: Dict[str, Any] | None = None) -> Tuple[int, str]:
@@ -107,10 +112,22 @@ def _seed_pointer_fixture(prefix: str, root: Path) -> Tuple[str, str]:
     project_id = f"{prefix}-public-project"
     phase_id = f"{prefix}-public-phase"
     task_id = f"{prefix}-public-task"
-    create_project(project_id, "public proof", supervisor="conductor", priority=1, source_path=str(plan_path), config=CFG)
-    create_phase(project_id, phase_id, "phase", refs=[{"path": "src/module.py", "l_start": 1, "l_end": 2}], config=CFG)
-    create_task(phase_id, task_id, "task", owner="conductor", priority=5, wake_owner_if_ready=False, config=CFG)
+    create_project(project_id, "public proof", supervisor=VISIBLE_SESSION, priority=1, source_path=str(plan_path), config=CFG)
+    create_phase(project_id, phase_id, "phase", config=CFG)
+    create_task(phase_id, task_id, "task", owner=VISIBLE_SESSION, priority=5,
+                refs=[{"path": "src/module.py", "l_start": 1, "l_end": 2}],
+                wake_owner_if_ready=False, config=CFG)
     return project_id, str(plan_path)
+
+
+def _seed_hidden_fixture(prefix: str) -> str:
+    project_id = f"{prefix}-hidden-project"
+    phase_id = f"{prefix}-hidden-phase"
+    task_id = f"{prefix}-hidden-task"
+    create_project(project_id, "hidden proof", supervisor=HIDDEN_SESSION, priority=1, config=CFG)
+    create_phase(project_id, phase_id, "phase", config=CFG)
+    create_task(phase_id, task_id, "task", owner=HIDDEN_SESSION, priority=5, wake_owner_if_ready=False, config=CFG)
+    return project_id
 
 
 def _hidden_project_id() -> str:
@@ -132,7 +149,7 @@ def _hidden_project_id() -> str:
 
 
 def _visible_session() -> str:
-    for session_id in _UI_SESSIONS:
+    for session_id in _public_sessions():
         if session_id not in HIDDEN:
             return session_id
     raise RuntimeError("no visible session configured")
@@ -150,6 +167,7 @@ def main() -> int:
             shutil.rmtree(fixture_root)
         fixture_root.mkdir(parents=True, exist_ok=True)
         pointer_project_id, _ = _seed_pointer_fixture(PREFIX, fixture_root)
+        _seed_hidden_fixture(PREFIX)
         hidden_project_id = _hidden_project_id()
         env = os.environ.copy()
 
@@ -201,9 +219,8 @@ def main() -> int:
         summary_status, summary_body = _request("GET", f"{base_url}/api/projects/{pointer_project_id}")
         assert summary_status == 200, summary_body
         summary = json.loads(summary_body)
-        phase_ref = summary["phases"][0]["phase"]["ref_context"]["refs"][0]
-        assert phase_ref["pointer"] == "src/module.py:1-2", phase_ref
-        assert "content" not in phase_ref, phase_ref
+        task_ref = summary["phases"][0]["tasks"][0]["refs"][0]
+        assert task_ref == "module.py:L1-L2", task_ref
         print("PASS ref-pointer-only")
 
         ui_status, ui_body = _request("GET", f"{base_url}/ui/")

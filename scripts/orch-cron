@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """orch-cron — recurring task runner with file-tracked state.
 
-Replaces and supersedes the static ``recurring_triggers.json`` pattern
-that conductor's ``recurring_trigger_runner.py`` implements. Backward
-compatible with the existing JSON schema; adds one optional field
+Replaces and supersedes the static ``recurring_triggers.json`` pattern.
+Backward compatible with the existing JSON schema; adds one optional field
 (``state_file``) that turns each recurring task into a first-class
 "process tracked through files" — the supervisor can grep the
 state_file to see the task's full history without context-switching
@@ -106,9 +105,8 @@ def load_registry(path: str) -> dict:
 
 
 def should_fire(trig: dict, now_local: datetime) -> bool:
-    """Exact-minute match within a listed hour. Same rule as conductor's
-    recurring_trigger_runner.py; preserved for backward compat with the
-    existing registry format."""
+    """Exact-minute match within a listed hour; preserved for backward compat
+    with the existing registry format."""
     return now_local.hour in trig.get("hours", []) and now_local.minute == trig.get("minute")
 
 

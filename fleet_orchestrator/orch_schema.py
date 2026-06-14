@@ -1634,8 +1634,8 @@ def _raw_stop_decision(session_id: str,
         # (strip+lower) so 'Active'/'ACTIVE ' still ADMIT (Cosmos: case/whitespace must
         # not starve live work); NULL/missing/unknown -> '' -> EXCLUDED fail-closed
         # (Horizon: unknown must not silently admit). Concluded statuses (stopped/
-        # completed/archived/...) are excluded. hunter token-burn root-cause 2026-06-04;
-        # Family-audit convergence fix (Horizon+Cosmos BLOCK).
+        # completed/archived/...) are excluded. This keeps concluded projects from
+        # re-surfacing work.
         if status not in ("active", "in_progress"):
             continue
         next_ready = get_session_next_ready(ready_owner, project_id=str(project.get("id")), config=cfg)
@@ -1863,8 +1863,8 @@ def _raw_stop_decision(session_id: str,
         # (strip+lower) so 'Active'/'ACTIVE ' still ADMIT (Cosmos: case/whitespace must
         # not starve live work); NULL/missing/unknown -> '' -> EXCLUDED fail-closed
         # (Horizon: unknown must not silently admit). Concluded statuses (stopped/
-        # completed/archived/...) are excluded. hunter token-burn root-cause 2026-06-04;
-        # Family-audit convergence fix (Horizon+Cosmos BLOCK).
+        # completed/archived/...) are excluded so concluded projects do not
+        # re-surface work.
         if status not in ("active", "in_progress"):
             continue
         active_conditions = _active_conditions(list(project.get("user_stop_conditions") or []))
@@ -2919,9 +2919,8 @@ def get_session_current_work(session_id: str,
               )
               // Fail-closed, normalized allowlist: an in_progress task in a concluded
               // project (stopped/completed/unknown) is NOT live work and must not
-              // force-grind its owner (hunter token-burn 2026-06-04). trim+lower so
-              // mixed-case/whitespace status still admits (Cosmos); NULL/'' -> excluded
-              // fail-closed (Horizon). Family-audit convergence fix.
+              // force-grind its owner. trim+lower so mixed-case/whitespace status
+              // still admits; NULL/'' -> excluded fail-closed.
               AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
             RETURN p.id AS project_id,
                    p.name AS project_name,
@@ -3587,7 +3586,7 @@ def _surface_question_to_chat(question: Dict[str, Any], *,
                               config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     from .config import get_redis_sync
 
-    lineage = _chat_lineage(str(question.get("lineage") or question.get("reviewer") or question.get("asked_by") or "conductor"))
+    lineage = _chat_lineage(str(question.get("lineage") or question.get("reviewer") or question.get("asked_by") or "supervisor"))
     reason = str(question.get("text") or "").strip()
     if not reason:
         raise ValueError("question text must be non-empty")

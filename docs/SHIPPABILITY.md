@@ -27,7 +27,7 @@ real `### Task:` gate entries, in the author's face.
 With the default `ORCH_SHIP_GATES=prodtest,audit`, a change is **SHIPPABLE**
 only when **BOTH** gates below have recorded, passing evidence. **There is NO
 human-approval step.** The process is the authority. A "clean" judgment by any
-agent (including the conductor) is necessary but never sufficient and never a
+agent (including the supervisor) is necessary but never sufficient and never a
 substitute for gate evidence. (Replace these with your own gates via
 `ORCH_SHIP_GATES`.)
 
