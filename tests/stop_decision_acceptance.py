@@ -169,6 +169,37 @@ def main() -> int:
             else f"FAIL in-progress-stale-blocked-on-fail-closed {blocked_on_rejected}"
         )
 
+        _cleanup(PREFIX)
+        flag_file = _write_flag_file('{}')
+        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
+        os.environ["CF_STOP_INPROGRESS"] = "1"
+        os.environ["CF_STOP_INPROGRESS_SESSIONS"] = SUPERVISOR
+        await_marker = "AWAIT:family-consent:weaver standalone consent"
+        task_id = _make_in_progress_fixture(owner=SUPERVISOR, blocked_on=await_marker)
+        await_decision = get_session_stop_decision(SUPERVISOR, config=CFG)
+        print(
+            "PASS in-progress-declared-await-signal-allows-stop"
+            if await_decision.get("block") is False and await_decision.get("wake_type") == "ALLOW_STOP" and await_decision.get("awaiting_signal", {}).get("kind") == "family-consent"
+            else f"FAIL in-progress-declared-await-signal-allows-stop {await_decision}"
+        )
+        update_task_status(task_id, "in_progress", owner=SUPERVISOR, blocked_on="", config=CFG)
+        resolved_decision = get_session_stop_decision(SUPERVISOR, config=CFG)
+        print(
+            "PASS declared-await-clear-wakes-with-queue"
+            if resolved_decision.get("block") is True and resolved_decision.get("wake_type") == "WAKE_WITH_QUEUE" and resolved_decision.get("task_id") == task_id
+            else f"FAIL declared-await-clear-wakes-with-queue {resolved_decision}"
+        )
+
+        _cleanup(PREFIX)
+        _make_priority_fixture()
+        _make_in_progress_fixture(owner=SUPERVISOR, blocked_on=await_marker)
+        ready_still_blocks = get_session_stop_decision(SUPERVISOR, config=CFG)
+        print(
+            "PASS ready-work-still-beats-declared-await"
+            if ready_still_blocks.get("block") is True and ready_still_blocks.get("wake_type") == "WAKE_WITH_QUEUE" and ready_still_blocks.get("task_id") == f"{PREFIX}-task-2"
+            else f"FAIL ready-work-still-beats-declared-await {ready_still_blocks}"
+        )
+
         with mock.patch("fleet_orchestrator.orch_schema._raw_stop_decision", return_value={"block": True, "wake_type": "WAKE_WITH_QUEUE", "task_id": "base-task", "reason": "base"}):
             with mock.patch("fleet_orchestrator.orch_schema.validate_stop_handoff", return_value={"state": "dead", "record": {"dispatcher_task_id": "hv-task"}}):
                 base_block_wins = get_session_stop_decision(SUPERVISOR, config=CFG)

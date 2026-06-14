@@ -74,6 +74,10 @@ ANSWERED_QUESTION = f"{PFX}-answered-question"
 PEER_PROJECT = f"{PFX}-peer-project"
 PEER_PHASE = f"{PEER_PROJECT}::phase"
 PEER_TASK = f"{PEER_PROJECT}::peer-work"
+AWAIT_PROJECT = f"{PFX}-await-project"
+AWAIT_PHASE = f"{AWAIT_PROJECT}::phase"
+AWAIT_TASK = f"{AWAIT_PROJECT}::await-family-consent"
+LAZY_TASK = f"{AWAIT_PROJECT}::lazy-free-text"
 FAILURES: list[str] = []
 
 
@@ -194,6 +198,49 @@ def main() -> int:
             "orch-watch suppresses stop-gate wake for awaiting human review",
             watch._handle_user_stop_gate(_NoopRedis(), SUP, {"task_id": GATE}) is True,
             "orch-watch returned false",
+        )
+
+        create_project(project_id=AWAIT_PROJECT, name=AWAIT_PROJECT, supervisor=SUP, priority=2, config=CFG)
+        create_phase(project_id=AWAIT_PROJECT, phase_id=AWAIT_PHASE, name="phase", config=CFG)
+        create_task(
+            phase_id=AWAIT_PHASE,
+            task_id=AWAIT_TASK,
+            description="standalone consent wait",
+            owner=SUP,
+            wake_owner_if_ready=False,
+            config=CFG,
+        )
+        update_task_status(
+            AWAIT_TASK,
+            "in_progress",
+            owner=SUP,
+            blocked_on="AWAIT:family-consent:weaver standalone consent",
+            config=CFG,
+        )
+        _check(
+            "orch-watch suppresses stop-gate wake for declared await signal",
+            watch._handle_user_stop_gate(_NoopRedis(), SUP, {"task_id": AWAIT_TASK}) is True,
+            "orch-watch returned false",
+        )
+        create_task(
+            phase_id=AWAIT_PHASE,
+            task_id=LAZY_TASK,
+            description="lazy free text wait",
+            owner=SUP,
+            wake_owner_if_ready=False,
+            config=CFG,
+        )
+        update_task_status(
+            LAZY_TASK,
+            "in_progress",
+            owner=SUP,
+            blocked_on="waiting on Jesse",
+            config=CFG,
+        )
+        _check(
+            "orch-watch does not suppress lazy free-text blocked_on",
+            watch._handle_user_stop_gate(_NoopRedis(), SUP, {"task_id": LAZY_TASK}) is False,
+            "orch-watch returned true",
         )
 
         condition = conditions[0]
