@@ -46,6 +46,7 @@ from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sy
 from fleet_orchestrator.dispatch import _state_key  # noqa: E402
 from fleet_orchestrator import dispatch as dispatch_module  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
+    create_human_review_gate,
     create_phase,
     create_project,
     create_task,
@@ -63,6 +64,10 @@ PHASE = f"{PROJECT}::phase"
 FIRST = f"{PROJECT}::first"
 SECOND = f"{PROJECT}::second"
 STALL = f"{PROJECT}::stall"
+AWAIT = f"{PROJECT}::await"
+HUMAN_REVIEW = f"{PROJECT}::human-review"
+QUESTION = f"{PFX}-question"
+REVIEWER = f"{PFX}-reviewer"
 FAILURES: list[str] = []
 
 
@@ -104,7 +109,7 @@ def _setup() -> None:
     init_schema(config=CFG)
     create_project(project_id=PROJECT, name=PROJECT, supervisor=SUP, priority=1, config=CFG)
     create_phase(project_id=PROJECT, phase_id=PHASE, name="phase", config=CFG)
-    for task_id in (FIRST, SECOND, STALL):
+    for task_id in (FIRST, SECOND, STALL, AWAIT):
         create_task(
             phase_id=PHASE,
             task_id=task_id,
@@ -114,6 +119,16 @@ def _setup() -> None:
             wake_owner_if_ready=False,
             config=CFG,
         )
+    create_human_review_gate(
+        phase_id=PHASE,
+        task_id=HUMAN_REVIEW,
+        question_id=QUESTION,
+        prompt="Review the liveness wait gate.",
+        reviewer=REVIEWER,
+        requested_by=SUP,
+        notify=False,
+        config=CFG,
+    )
 
 
 def _dispatch(task_id: str) -> None:
@@ -185,6 +200,35 @@ def main() -> int:
         stalled = get_task(STALL, config=CFG)
         _check("worker stall TTL requeues current task", stalled.get("status") == "pending" and stalled.get("needs_attention") is True, stalled)
         _check("worker stall TTL emits supervisor wake", count == 1 and sent and sent[0][0] == SUP and STALL in sent[0][1], sent)
+
+        _dispatch(AWAIT)
+        update_task_status(
+            AWAIT,
+            "in_progress",
+            owner=WORKER,
+            blocked_on="AWAIT:family-consent:liveness acceptance",
+            config=CFG,
+        )
+        time.sleep(1.2)
+        sent.clear()
+        count = _run_liveness_once(sent)
+        await_task = get_task(AWAIT, config=CFG)
+        _check(
+            "AWAIT-gated task past TTL is not escalated",
+            count == 0 and await_task.get("status") == "in_progress" and await_task.get("blocked_on") == "AWAIT:family-consent:liveness acceptance",
+            {"count": count, "task": await_task, "sent": sent},
+        )
+
+        _dispatch(HUMAN_REVIEW)
+        time.sleep(1.2)
+        sent.clear()
+        count = _run_liveness_once(sent)
+        human_review_task = get_task(HUMAN_REVIEW, config=CFG)
+        _check(
+            "human-review gate past TTL is not escalated",
+            count == 0 and human_review_task.get("status") == "in_progress",
+            {"count": count, "task": human_review_task, "sent": sent},
+        )
     finally:
         _cleanup()
 

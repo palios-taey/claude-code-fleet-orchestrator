@@ -229,6 +229,14 @@ def _escalate_task(task: Dict[str, Any], now: float,
     return result
 
 
+def _task_is_declared_wait(task: Dict[str, Any], *, config: Optional[OrchConfig] = None) -> bool:
+    from .orch_schema import is_awaiting_human_review_gate, is_declared_await_signal
+
+    if is_declared_await_signal(task.get("blocked_on")):
+        return True
+    return is_awaiting_human_review_gate(task, config=config)
+
+
 def _registered_in_progress_tasks(*, config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
@@ -242,6 +250,8 @@ def _registered_in_progress_tasks(*, config: Optional[OrchConfig] = None) -> Lis
             RETURN t.id AS task_id,
                    t.description AS description,
                    t.owner AS owner,
+                   t.blocked_on AS blocked_on,
+                   t.task_type AS task_type,
                    t.dispatched_to AS dispatched_to,
                    t.worker_liveness_worker AS worker,
                    t.worker_liveness_supervisor AS supervisor,
@@ -263,6 +273,8 @@ def escalate_stale_worker_tasks(now: Optional[float] = None,
     current_time = time.time() if now is None else float(now)
     escalated: List[Dict[str, Any]] = []
     for task in _registered_in_progress_tasks(config=cfg):
+        if _task_is_declared_wait(task, config=cfg):
+            continue
         task_id = str(task.get("task_id") or "")
         worker = str(task.get("worker") or "")
         try:
