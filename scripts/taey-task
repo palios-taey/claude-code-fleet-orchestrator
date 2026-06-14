@@ -11,6 +11,7 @@ Usage:
     taey-task create "Enhancement: add retry logic to consultation pipeline" --from weaver
     taey-task list                    # Show pending tasks
     taey-task status <task-id>        # Check a task's status
+    taey-task dispatch <task-id> <peer>  # Claim/bind/wake peer work
     taey-task update <task-id> completed --evidence '{"commit_sha":"abc123","production_observation":"verified live"}'
     taey-task update <task-id> failed --evidence '{"reason":"blocked by missing dependency"}'
 """
@@ -137,6 +138,41 @@ def cmd_status(args):
     print(f"  Description: {t.get('description', '?')[:200]}")
 
 
+def cmd_dispatch(args):
+    """Dispatch an OrchTask to a peer through the canonical claim/bind/wake primitive."""
+    sender = detect_from_node()
+    task = api_call("GET", f"/api/tasks/{args.task_id}")
+    if "error" in task:
+        print(f"ERROR: {task['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    task_id = str(task.get("id") or args.task_id)
+    description = str(task.get("description") or task.get("title") or "").strip()
+    if not description:
+        print(f"ERROR: task {task_id} has no description to dispatch", file=sys.stderr)
+        sys.exit(1)
+
+    from fleet_orchestrator.dispatch import (
+        BugLockActive,
+        OrchTaskNotReady,
+        dispatch as dispatch_task,
+    )
+
+    try:
+        dispatch_task(
+            worker=args.peer,
+            task_id=task_id,
+            description=description,
+            supervisor=sender,
+            priority=args.priority,
+        )
+    except (BugLockActive, OrchTaskNotReady, RuntimeError) as exc:
+        print(f"ERROR: dispatch failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"OK: dispatched {task_id} -> {args.peer} (by {sender})")
+
+
 def cmd_update(args):
     """Update a task's status via PATCH /api/task/{id}."""
     sender = detect_from_node()
@@ -184,6 +220,12 @@ def main():
     p_status = sub.add_parser("status", help="Check task status")
     p_status.add_argument("task_id", help="Task ID")
 
+    p_dispatch = sub.add_parser("dispatch", help="Claim, bind, and wake a peer task")
+    p_dispatch.add_argument("task_id", help="Task ID")
+    p_dispatch.add_argument("peer", help="Peer session to dispatch to")
+    p_dispatch.add_argument("--priority", default="normal",
+                            help="Notify priority passed to taey-notify (default: normal)")
+
     p_update = sub.add_parser("update", help="Update task status")
     p_update.add_argument("task_id", help="Task ID")
     p_update.add_argument("status", choices=UPDATE_STATUSES)
@@ -200,6 +242,8 @@ def main():
         cmd_list(args)
     elif args.command == "status":
         cmd_status(args)
+    elif args.command == "dispatch":
+        cmd_dispatch(args)
     elif args.command == "update":
         cmd_update(args)
     else:
