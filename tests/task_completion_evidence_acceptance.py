@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
 import sys
 import uuid
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -25,6 +29,7 @@ os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
+from fleet_orchestrator.evidence_contract import TERMINAL_STATUSES  # noqa: E402
 from fleet_orchestrator.orch_schema import create_phase, create_project, create_task  # noqa: E402
 from fleet_orchestrator.tasks_api import app  # noqa: E402
 
@@ -39,10 +44,10 @@ def _cleanup(prefix: str) -> None:
         session.run("MATCH (p:OrchProject) WHERE p.id STARTS WITH $prefix DETACH DELETE p", prefix=prefix)
 
 
-def _seed_task() -> str:
+def _seed_task(suffix: str = "task") -> str:
     project_id = f"{PREFIX}-project"
     phase_id = f"{PREFIX}-phase"
-    task_id = f"{PREFIX}-task"
+    task_id = f"{PREFIX}-{suffix}"
     create_project(project_id, "evidence project", supervisor="tester", priority=1, config=CFG)
     create_phase(project_id, phase_id, "Main", config=CFG)
     create_task(
@@ -55,6 +60,49 @@ def _seed_task() -> str:
         config=CFG,
     )
     return task_id
+
+
+def _load_taey_task_cli():
+    path = ROOT / "scripts" / "taey-task"
+    loader = SourceFileLoader("taey_task_under_test", str(path))
+    spec = importlib.util.spec_from_loader("taey_task_under_test", loader)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load scripts/taey-task")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _cli_update_round_trip(client: TestClient, task_id: str, status: str, evidence: dict) -> tuple[int, str]:
+    cli = _load_taey_task_cli()
+
+    def api_call(method: str, endpoint: str, data=None):
+        if method == "PATCH":
+            response = client.patch(endpoint, json=data)
+        elif method == "GET":
+            response = client.get(endpoint)
+        else:
+            raise AssertionError(f"unexpected CLI method {method}")
+        if response.status_code >= 400:
+            raise AssertionError(f"CLI API call failed HTTP {response.status_code}: {response.text}")
+        return response.json()
+
+    argv = [
+        "taey-task",
+        "update",
+        task_id,
+        status,
+        "--evidence",
+        json.dumps(evidence),
+    ]
+    with mock.patch.object(cli, "api_call", side_effect=api_call), \
+         mock.patch.object(cli, "detect_from_node", return_value=f"cli-{status}"), \
+         mock.patch.object(sys, "argv", argv):
+        try:
+            cli.main()
+        except SystemExit as exc:
+            return int(exc.code or 0), status
+    return 0, status
 
 
 def main() -> int:
@@ -106,6 +154,22 @@ def main() -> int:
             and payload.get("completion_evidence", {}).get("production_observation") == "verified in acceptance",
             f"update={ok.status_code} payload={payload}",
         )
+
+        for status in sorted(TERMINAL_STATUSES):
+            cli_task_id = _seed_task(f"cli-{status}")
+            if status == "completed":
+                evidence = {"production_observation": f"verified CLI/API round-trip for {status}"}
+            else:
+                evidence = {"reason": f"CLI/API round-trip reason for {status}"}
+            code, _ = _cli_update_round_trip(client, cli_task_id, status, evidence)
+            cli_payload = client.get(f"/api/tasks/{cli_task_id}").json()
+            check(
+                f"taey-task CLI accepts evidence and API persists {status}",
+                code == 0
+                and cli_payload.get("status") == status
+                and all(cli_payload.get("completion_evidence", {}).get(k) == v for k, v in evidence.items()),
+                f"code={code} payload={cli_payload}",
+            )
         if failures:
             print(f"\nFAIL — {len(failures)} assertion(s): {failures}")
             return 1
