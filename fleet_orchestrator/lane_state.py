@@ -504,7 +504,10 @@ def _chat_lane_from_service(path: Path) -> Optional[LaneRef]:
 def _taeys_hands_root(explicit: Optional[Path | str]) -> Path:
     if explicit:
         return Path(explicit).expanduser().resolve()
-    return Path(os.environ.get("TAEYS_HANDS_ROOT", "/home/mira/taeys-hands")).expanduser().resolve()
+    configured = os.environ.get("TAEYS_HANDS_ROOT")
+    if configured and configured.strip():
+        return Path(configured).expanduser().resolve()
+    raise RuntimeError("TAEYS_HANDS_ROOT must be set or an explicit taeys_hands_root passed")
 
 
 def _platform_from_role(role: str) -> str:
