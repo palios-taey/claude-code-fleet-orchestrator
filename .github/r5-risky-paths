@@ -20,3 +20,4 @@ ui/*.html
 # Packaging / entrypoint + the installed CLIs:
 setup.py
 scripts/orch-*
+scripts/taey-*
