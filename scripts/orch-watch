@@ -533,6 +533,43 @@ def notify_supervisor_of_unblock(r, supervisor: str, completed_task: dict,
     return True
 
 
+def _process_worker_liveness_expirations(r, dedup_ttl_sec: int) -> int:
+    from fleet_orchestrator.worker_liveness import (
+        escalate_stale_worker_tasks,
+        worker_task_liveness_dedup_key,
+    )
+
+    escalated = escalate_stale_worker_tasks()
+    sent = 0
+    for task in escalated:
+        task_id = task.get("task_id")
+        supervisor = task.get("supervisor") or task.get("project_supervisor")
+        worker = task.get("worker")
+        if not task_id or not supervisor:
+            continue
+        dedup_key = worker_task_liveness_dedup_key(str(task_id))
+        if r.exists(dedup_key):
+            continue
+        body = (
+            f"[WORKER_LIVENESS_EXPIRED] task={task_id} assigned to {worker} "
+            f"had no task-keyed heartbeat for {task.get('stale_for_sec', '?')}s. "
+            "It has been returned to pending with needs_attention=true so it can be "
+            "redispatched or investigated; it is no longer an indefinite in_progress stall."
+        )
+        if _send_wake(
+            r,
+            str(supervisor),
+            body,
+            priority="high",
+            msg_id=f"orch-watch-worker-liveness-{supervisor}-{task_id}-{int(time.time())}",
+        ):
+            r.set(dedup_key, "1", ex=dedup_ttl_sec)
+            sent += 1
+            log.info("Sent WORKER_LIVENESS_EXPIRED wake: supervisor=%s worker=%s task=%s",
+                     supervisor, worker, task_id)
+    return sent
+
+
 def handle_done_del(r, node_id: str, snapshot: dict,
                      readiness_checker, dedup_ttl_sec: int) -> None:
     """A worker's current_task was DEL'd. Distinguish done-clear (Stop
@@ -839,6 +876,7 @@ def main():
             sweep_count = 0
             try:
                 _process_handoff_timeouts(r)
+                _process_worker_liveness_expirations(r, args.dedup_ttl_sec)
                 for k in r.scan_iter(match=current_task_scan_pattern()):
                     node = node_from_current_task_key(k)
                     if node:
@@ -854,8 +892,9 @@ def main():
         if not message or message.get("type") not in ("pmessage", "message"):
             try:
                 _process_handoff_timeouts(r)
+                _process_worker_liveness_expirations(r, args.dedup_ttl_sec)
             except Exception as exc:
-                log.error("handoff timeout background pass failed: %s", exc)
+                log.error("background liveness pass failed: %s", exc)
             continue
 
         channel = message.get("channel", "")

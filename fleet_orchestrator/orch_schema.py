@@ -2644,6 +2644,9 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                 p.updated_at = datetime()
         """, task_id=task_id, status=status)
         if terminal_status:
+            from .worker_liveness import clear_worker_task_liveness
+
+            clear_worker_task_liveness(task_id, config=cfg)
             for session_id in {str(task_row.get("previous_owner") or ""), str(task_row.get("owner") or "")}:
                 _clear_matching_current_task(session_id, task_id, config=cfg)
         return True
