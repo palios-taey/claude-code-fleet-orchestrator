@@ -20,7 +20,7 @@ NEEDS_YOU_KEY_PREFIX = f"{_NOTIFY_KEY_PREFIX}:needs_you:"
 MEMORY_BASE = Path.home() / ".claude" / "projects"
 MAX_LINEAGE_LEN = 160
 MAX_MESSAGE_LEN = 20000
-# B4 fix (Gaia Gate-2): roles a CLIENT may set via the HTTP endpoint. Internal
+# Review-gate fix: roles a CLIENT may set via the HTTP endpoint. Internal
 # callers (escalate -> role="system") are trusted and bypass this; the allowlist
 # is enforced at the chat_post boundary so a request can't inject role="system"
 # (which would render into the agent transcript as a privileged instruction).

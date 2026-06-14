@@ -171,8 +171,7 @@ def append_state_file(state_file: Optional[str], record: dict) -> Optional[str]:
     Hash-on-fire is the BLACK_HOLE/CANNOT_LIE_PROVENANCE invariant for
     recurring-task state — graph queries (or any downstream auditor) can
     verify the state_file hasn't drifted from what we last wrote without
-    storing the full log in the graph (Logos, Phase C consultation
-    2026-05-26). <1ms IO cost per fire, no cardinality explosion at
+    storing the full log in the graph. <1ms IO cost per fire, no cardinality explosion at
     high-cadence loops (8/day per loop today).
     """
     if not state_file:

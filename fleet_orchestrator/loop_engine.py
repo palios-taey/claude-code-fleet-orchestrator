@@ -264,7 +264,7 @@ class ArtifactStore:
         if query:
             # A presence check must be READ-ONLY. Reject mutating Cypher so a
             # declared/injected query can't write through the orchestrator's DB
-            # credentials (Gaia Gate-2: _neo4j_present executed arbitrary Cypher).
+            # credentials (review gate 2: _neo4j_present executed arbitrary Cypher).
             if re.search(r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|CALL|LOAD\s+CSV)\b",
                          str(query), re.IGNORECASE):
                 raise LoopDeclarationError("neo4j artifact query must be read-only (no write/CALL clauses)")

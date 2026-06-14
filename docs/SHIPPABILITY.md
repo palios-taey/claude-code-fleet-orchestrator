@@ -5,7 +5,7 @@
 itself passed both gates below, this document is the target, not an enforced
 reality. Nothing in this file is "done" until it is production-tested + full-code
 Chat-audited. (This file exists because the failure it prevents was: code marked
-"completed" on API-200s + a prose-only Family audit, shipped broken.)
+"completed" on API-200s + a prose-only external audit, shipped broken.)
 
 ## The gates are CONFIGURABLE per user — these are the reference standard, not a mandate
 
@@ -50,7 +50,7 @@ Not unit tests. Not API `200`s. Real execution of the real feature on real data.
 
 ### Gate 2 — Full-code Chat audit
 
-- The audit packet given to the Family MUST contain the **full code from the dev
+- The audit packet given to reviewers MUST contain the **full code from the dev
   branch (inlined)** AND the **main-branch link**. A prose summary or a bare SHA
   is rejected — browser-bound reviewers cannot fetch a SHA or clone a repo.
 - Verdicts recorded. Any reviewer **BLOCK or refusal-to-certify HALTS** shippable.

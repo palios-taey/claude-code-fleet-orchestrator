@@ -7,7 +7,7 @@ keyspace notifications and fires wakes ONLY when a state transition
 actually warrants supervisor attention.
 
 TWO SIGNALS the daemon pages on (both are silent stalls no awake actor
-would notice — per Gaia, Phase B consultation 2026-05-26):
+would notice):
 
 1. ``Stuck current_task while worker idle`` — a worker is idle with
    current_task still set (outcome != done) longer than
@@ -28,7 +28,7 @@ NEITHER signal is a pull state. Pulls (inbox piling up, no-progress-
 since-last-event) are not paged — supervisors drain them on their next
 loop, or the daemon's safety-net sweep catches them.
 
-HYBRID INVOCATION (Logos, same consultation): primary always-on Redis
+HYBRID INVOCATION: primary always-on Redis
 PSUBSCRIBE for low-latency event-driven wakes + independent low-cadence
 safety-net poll (``--sweep-interval-sec``, default 1800s = 30 min) that
 runs the SAME investigate handler over all known nodes. Keyspace
@@ -38,7 +38,7 @@ death, network partition, or Redis restart. The 30-min poll covers
 that gap with linear complexity delta and exponential reliability gain.
 
 Both invocation paths route through the same ``investigate(node_id)``
-function — single source of truth for "stuck/unblocked" semantics and
+function — canonical source for "stuck/unblocked" semantics and
 the wake message shape.
 
 Requires Redis to have ``notify-keyspace-events`` configured to include
@@ -450,8 +450,7 @@ def notify_supervisor_of_stuck(r, supervisor: str, node_id: str,
     """Push a single 'stuck task' alert to the supervisor. Returns True
     if the message was sent, False if deduped or unable.
 
-    Audit fix (Logos contract #3 + Gaia dispatch #2, code audit
-    2026-05-26): dedup is keyed per ``(node_id, task_id)`` not just
+    Audit fix: dedup is keyed per ``(node_id, task_id)`` not just
     node_id. Otherwise a worker that alerted stuck on task-A, got
     re-dispatched, then stalled on task-B is silent for the dedup TTL.
     The unblock path already keys correctly; this makes stuck consistent.
@@ -577,7 +576,7 @@ def handle_done_del(r, node_id: str, snapshot: dict,
     task or any other administrative wipe), and run the readiness checker
     ONLY for done-clear.
 
-    Audit fix (Gaia orch-watch #2, code audit 2026-05-26): the Stop hook
+    Audit fix: the Stop hook
     writes ``taey:<node>:last_clear_was_done`` (30s TTL marker) right
     when its compare-and-swap clear succeeds. Read that marker here; if
     absent, the DEL was NOT a done-clear (could be force-clear, expiry,
@@ -634,8 +633,7 @@ _TASK_SNAPSHOTS: dict = {}
 def _redis_now(r) -> float:
     """Return Redis-server's current unix time as a float. Use this in
     place of ``time.time()`` for any duration calculation that compares
-    timestamps written by other nodes / processes (Gaia orch-watch #3,
-    code audit 2026-05-26: client-side clock skew across multi-host
+    timestamps written by other nodes / processes. Client-side clock skew across multi-host
     fleets can fire stuck-alerts seconds early or late depending on which
     node wrote the timestamp).
     """
@@ -649,7 +647,7 @@ def _redis_now(r) -> float:
 def investigate(r, node_id: str, event_type: str,
                 stuck_threshold_sec: int, dedup_ttl_sec: int,
                 readiness_checker) -> None:
-    """Single source of truth for what 'stuck' and 'unblocked' mean.
+    """Canonical source for what 'stuck' and 'unblocked' mean.
     Both the PSUBSCRIBE event path and the periodic sweep call this.
 
     ``event_type`` is one of:
@@ -658,7 +656,7 @@ def investigate(r, node_id: str, event_type: str,
       - ``last_activity_set``
       - ``sweep`` (called from periodic poll, treats node as a generic check)
 
-    Audit fix (Gaia orch-watch #1, code audit 2026-05-26): skip snapshot
+    Audit fix: skip snapshot
     refresh on ``current_task_del`` events. Otherwise a SET-then-DEL race
     where a fresh dispatch and a Stop-hook-clear arrive close in time
     causes the refresh to overwrite the snapshot with the NEW task right
@@ -718,8 +716,7 @@ def investigate(r, node_id: str, event_type: str,
     if event_type in {"idle_set", "sweep"} and _handle_user_stop_gate(r, node_id, task):
         return
 
-    # Audit fix #3 (Gaia, code audit 2026-05-26) + fix-of-fix (real-fleet
-    # observation 2026-05-26 evening): a task cannot be "stuck" longer
+    # Audit fix #3 + fix-of-fix: a task cannot be "stuck" longer
     # than it has existed. The original v0.2.0 used time-since-dispatch
     # (task.started_at), which over-fires when a worker is busy 4min then
     # idle 30s. v0.2.1 switched to time-since-last-activity, which under-
@@ -794,7 +791,7 @@ def main():
                         help="Don't re-fire the same alert (stuck or unblock) within this window.")
     parser.add_argument("--sweep-interval-sec", type=int, default=1800,
                         help="Periodic safety-net sweep across all current_task keys "
-                             "(default 30 min per Logos Phase B consultation: keyspace "
+                             "(default 30 min: keyspace "
                              "notifications are best-effort/at-most-once; the poll is "
                              "the reliability backstop).")
     parser.add_argument("--readiness-checker", default=None,
@@ -845,13 +842,13 @@ def main():
              SUBSCRIBE_PATTERNS, args.stuck_threshold_sec, args.dedup_ttl_sec,
              args.sweep_interval_sec)
 
-    # Audit fix (Logos critical reliability gap, code audit 2026-05-26):
+    # Audit fix for the sweep reliability gap:
     # the sweep MUST be able to fire even when no keyspace events arrive.
     # The previous implementation embedded the sweep check inside
     # ``for message in pubsub.listen():`` — a blocking generator that
     # yields nothing in a quiet fleet, so the sweep block never ran after
     # bootstrap. That defeats the explicit "best-effort PSUBSCRIBE +
-    # poll backstop" design from the Phase B consultation. The fix is to
+    # poll backstop" design. The fix is to
     # use ``get_message(timeout=N)`` in a manual loop so we get unblocked
     # every N seconds and can run the sweep regardless of event volume.
     last_sweep = time.time()

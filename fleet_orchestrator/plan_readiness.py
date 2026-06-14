@@ -20,7 +20,7 @@ resolved supervisor that orch-watch already determined.
 
 Semantic choice: LOOSE — wake only on the TRANSITION
 (was-blocked → just-became-ready), not on every completion of an owned
-task. Reasoning per Phase B/C/D consultation grain analysis (Gaia): a
+task. Reasoning from consultation grain analysis: a
 task with N dependencies completing in sequence shouldn't wake the
 supervisor N times — only the last completion that flips the dependent
 task from blocked → ready is actionable. Tasks that become ready for
@@ -31,7 +31,7 @@ The check is best-effort: if Neo4j is unreachable or the schema lookup
 fails, the function returns None (no wake) rather than raising — the
 stuck-task safety-net sweep + the supervisor's own ``taey-plan
 next-ready`` poll will catch any missed wake. Strict consistency is not
-the orchestrator's job; the plan tracker is the source of truth, this
+the orchestrator's job; the plan tracker is the canonical source, this
 is just a wake-on-transition heuristic.
 
 If the operator wants STRICT semantics ("wake on any completion of an
@@ -72,7 +72,7 @@ log = logging.getLogger(__name__)
 #   - T's status is pending
 #   - All of T's dependencies satisfy the canonical ready predicate
 #   - Self-loops excluded (t.id != completed_task_id) — guards against the
-#     degenerate case where a task depends on itself (Gaia Phase D edge #4).
+#     degenerate case where a task depends on itself.
 #
 # Single read transaction = consistent snapshot for one process. The
 # CONCURRENT-FINALS edge case (two workers each completing the last two
@@ -87,7 +87,7 @@ WHERE t.owner = $supervisor
   AND t.id <> $completed_task_id
   AND {_READY_DEPENDENCIES_SATISFIED_CYPHER}
 // Concluded-project dependents must NOT be woken on dep-completion (unified with the
-// readiness/wake fail-closed allowlist; Gaia 5th-surface finding 2026-06-04). OPTIONAL
+// readiness/wake fail-closed allowlist). OPTIONAL
 // so an orphan task with no project keeps prior wake behavior; only a CONCLUDED project
 // (stopped/completed/unknown) is excluded.
 OPTIONAL MATCH (proj:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t)
@@ -113,7 +113,7 @@ def _dedup_wake(redis_client, downstream_task_id: str, ttl_sec: int = 600) -> bo
     caller owns the wake (the key didn't exist), False if another process
     already fired it within the TTL window.
 
-    Handles Gaia Phase D edge #3 (concurrent final completions): when two
+    Handles the concurrent-final-completions edge: when two
     workers complete the final two dependencies of the same downstream
     task T near-simultaneously, both orch-watch processes will run the
     LOOSE check and both will see T as newly ready. Without dedup, both
@@ -161,8 +161,7 @@ def check_readiness(supervisor: str, completed_task: dict) -> Optional[str]:
     Called from ``orch-watch`` when the Stop hook's CAS done-clear fires.
     Best-effort: returns None on any Neo4j failure rather than raising.
 
-    LOOSE semantic + edge-case handling (Gaia Phase D consultation
-    2026-05-26):
+    LOOSE semantic + edge-case handling:
     - Self-loops on the completed task or on T excluded from the Cypher.
     - Concurrent finals: SETNX per-downstream-task dedup so two near-
       simultaneous final completions don't both fire.

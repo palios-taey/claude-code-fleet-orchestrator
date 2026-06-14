@@ -447,7 +447,7 @@ def dispatch(
     # outcome=unknown and outcome_details=None — the supervisor can't
     # tell clean-finish from error-restart from interrupted, and the
     # CAS done-clear never fires so current_task persists as "previous
-    # dispatch did not complete cleanly" (Gaia persistence rule).
+    # dispatch did not complete cleanly" (dispatch persistence rule).
     # Auto-append unless caller opts out by passing the footer themselves
     # (we detect via 'record_outcome' substring already present).
     if "record_outcome" not in prompt_body:
@@ -488,7 +488,7 @@ def dispatch(
         # Wake delivery failed AFTER the claim+bind. Without this rollback the task
         # lingers as status=in_progress (a "live resolver" per _LIVE_RESOLVER_STATUSES)
         # with NO wake delivered -> a supervisor blocked_on it would ALLOW_STOP and the
-        # work silently dead-locks (GAIA dispatched-wake-guarantee: live-set membership
+        # work silently dead-locks (dispatched-wake guarantee: live-set membership
         # is necessary, not sufficient; a live resolver must have an ACTUAL wake). Revert
         # to ready so next-ready re-surfaces it for redispatch instead. The binding_nonce
         # is the claim-token: rollback only reverts THIS dispatch's binding, never a newer
@@ -561,8 +561,7 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
 
     ``outcome`` MUST be one of ``done``, ``error``, ``interrupted``. Any
     other value raises ``ValueError`` — the enum is load-bearing per the
-    Phase A consultation (Gaia 2026-05-26): the Stop hook clears the
-    worker's current_task ONLY when outcome == ``done``. Any other
+    the Stop hook clears the worker's current_task ONLY when outcome == ``done``. Any other
     outcome (or absent record_outcome call entirely) leaves current_task
     persisting as the "previous dispatch did not complete cleanly"
     signal for the next dispatcher.

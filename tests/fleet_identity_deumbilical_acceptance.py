@@ -34,18 +34,28 @@ FLEET_OWNER_NAMES = {
     "taey-ed",
 }
 PRIVATE_NAME_PATTERN = re.compile(
-    r"\b(conductor|weaver|tutor|treasurer|hunter|taey-ed)\b|taeys-hands",
-    re.IGNORECASE,
+    r"(?i:\b(conductor|weaver|tutor|treasurer|hunter|taey-ed)\b|taeys-hands)"
+    r"|\b(Gaia|Logos|Cosmos|Clarity|Horizon|Prophet|Brain|Math|PATHOS|POTENTIAL|TRUTH)\b"
+    r"|\bthe Map\b|\bthe Family\b|\bFamily\b",
 )
 SHIPPED_SURFACES = [
     "README.md",
     "docs/CAPABILITIES.md",
+    "docs/SHIPPABILITY.md",
+    "fleet_orchestrator/accountability_ledger.py",
+    "fleet_orchestrator/chat_layer.py",
+    "fleet_orchestrator/config.py",
     "fleet_orchestrator/orch_template.py",
     "fleet_orchestrator/orch_schema.py",
     "fleet_orchestrator/context_assembler.py",
     "fleet_orchestrator/dispatch.py",
+    "fleet_orchestrator/loop_engine.py",
+    "fleet_orchestrator/plan_readiness.py",
+    "fleet_orchestrator/tasks_api.py",
+    "scripts/orch-cron",
     "scripts/taey-task",
     "scripts/orch-watch",
+    "scripts/verify-public-readonly.py",
     "ui/index.html",
     "ui/static/app.js",
 ]
