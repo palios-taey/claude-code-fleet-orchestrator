@@ -338,14 +338,31 @@ def _handle_user_stop_gate(r, node_id: str, task: dict) -> bool:
         log.warning("Stop gate skipped for %s: task %s not found in OrchTask graph",
                     node_id, task_id)
         return False
-    from fleet_orchestrator.orch_schema import is_awaiting_human_review_gate
+    from fleet_orchestrator.orch_schema import (
+        _blocked_on_has_live_resolver,
+        is_awaiting_human_review_gate,
+        is_declared_await_signal,
+    )
     if is_awaiting_human_review_gate(task_state):
         log.info("Suppressed stop-gate wake: session=%s task=%s awaiting human review",
                  node_id, task_id)
         return True
     if task_state.get("status") != "in_progress":
         return False
-    if ((task_state.get("blocked_on") or "").strip()):
+    blocked_on = ((task_state.get("blocked_on") or "").strip())
+    if blocked_on:
+        if is_declared_await_signal(blocked_on):
+            log.info("Suppressed stop-gate wake: session=%s task=%s awaiting signal=%s",
+                     node_id, task_id, blocked_on)
+            return True
+        try:
+            if _blocked_on_has_live_resolver(blocked_on, current_task_id=task_id):
+                log.info("Suppressed stop-gate wake: session=%s task=%s live resolver=%s",
+                         node_id, task_id, blocked_on)
+                return True
+        except Exception as exc:
+            log.warning("Could not validate blocked_on for stop-gate wake: task=%s blocked_on=%s error=%s",
+                        task_id, blocked_on, exc)
         return False
 
     project_context = _task_project_context(task_id)
@@ -451,9 +468,23 @@ def notify_supervisor_of_stuck(r, supervisor: str, node_id: str,
     task_state = _load_task_state(task_id) if task_id != "?" else None
     blocked_on = ((task_state or {}).get("blocked_on") or "").strip()
     if blocked_on:
-        log.info("Suppressed PEER_IDLE wake: supervisor=%s worker=%s task=%s blocked_on=%s",
-                 supervisor, node_id, task_id, blocked_on)
-        return False
+        from fleet_orchestrator.orch_schema import (
+            _blocked_on_has_live_resolver,
+            is_awaiting_human_review_gate,
+            is_declared_await_signal,
+        )
+        if is_awaiting_human_review_gate(task_state) or is_declared_await_signal(blocked_on):
+            log.info("Suppressed PEER_IDLE wake: supervisor=%s worker=%s task=%s blocked_on=%s",
+                     supervisor, node_id, task_id, blocked_on)
+            return False
+        try:
+            if _blocked_on_has_live_resolver(blocked_on, current_task_id=task_id):
+                log.info("Suppressed PEER_IDLE wake: supervisor=%s worker=%s task=%s resolver=%s",
+                         supervisor, node_id, task_id, blocked_on)
+                return False
+        except Exception as exc:
+            log.warning("Could not validate blocked_on for PEER_IDLE wake: task=%s blocked_on=%s error=%s",
+                        task_id, blocked_on, exc)
 
     try:
         started_at = float(task.get("started_at", 0) or 0)

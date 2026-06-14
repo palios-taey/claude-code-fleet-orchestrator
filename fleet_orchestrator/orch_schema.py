@@ -1051,6 +1051,47 @@ def project_has_non_human_nonterminal_work(project_id: str,
 _LIVE_RESOLVER_STATUSES = {"in_progress", "dispatched"}
 # Max hops when walking the blocked_on chain (cycle/depth guard).
 _MAX_RESOLVER_DEPTH = 8
+_AWAIT_SIGNAL_PREFIX = "AWAIT"
+_AWAIT_SIGNAL_KINDS = frozenset({"human-review", "family-consent", "external-signal"})
+
+
+def _await_signal_gates_enabled() -> bool:
+    raw = os.environ.get("ORCH_AWAIT_SIGNAL_GATES", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _declared_await_signal(blocked_on: Optional[str]) -> Optional[Dict[str, str]]:
+    """Parse the explicit terminal-wait marker accepted by the stop engine.
+
+    Shape: ``AWAIT:<kind>:<detail>`` where kind is one of
+    human-review/family-consent/external-signal. This is deliberately exact
+    and does not scan arbitrary prose, so "waiting on Jesse" remains rejected.
+    """
+    if not _await_signal_gates_enabled() or not blocked_on:
+        return None
+    raw = str(blocked_on).strip()
+    if not raw:
+        return None
+    parts = raw.split(":", 2)
+    if len(parts) != 3:
+        return None
+    prefix, kind, detail = (part.strip() for part in parts)
+    kind = kind.lower()
+    if prefix.upper() != _AWAIT_SIGNAL_PREFIX or kind not in _AWAIT_SIGNAL_KINDS or not detail:
+        return None
+    return {"kind": kind, "detail": detail, "marker": raw}
+
+
+def is_declared_await_signal(blocked_on: Optional[str]) -> bool:
+    return _declared_await_signal(blocked_on) is not None
+
+
+def _declared_await_signal_stop_reason(signal: Dict[str, str]) -> str:
+    return (
+        "ALLOW_STOP: task is explicitly awaiting "
+        f"{signal['kind']} ({signal['detail']}). The session should wake when "
+        "the signal resolves and blocked_on is cleared."
+    )
 
 
 def _blocked_on_has_live_resolver(blocked_on: Optional[str],
@@ -1129,11 +1170,12 @@ def _human_gate_block_reason(task_id: Optional[str], blocked_on: Optional[str]) 
     marker = (str(blocked_on or "")[:120]) or "(empty)"
     return (
         "You cannot stop here. Your blocked_on names no live autonomous resolver "
-        f"(marker: {marker!r}) -- it is a human gate, and human gates are abolished: "
-        "the only valid gates are live production runs and full-code Family audits. "
+        f"(marker: {marker!r}) and is not a declared await-signal marker "
+        "(AWAIT:<human-review|family-consent|external-signal>:<detail>). "
         f"Continue {task_id_value}. If you are genuinely waiting on autonomous work, "
         "set blocked_on to reference the task id you await (e.g. task-abcd1234) so the "
-        "system can wake you when it resolves; otherwise keep going."
+        "system can wake you when it resolves; if you are genuinely awaiting a human, "
+        "Family, or external signal, declare it with the structured AWAIT marker."
     )
 
 
@@ -1684,6 +1726,16 @@ def _raw_stop_decision(session_id: str,
                 "task_title_short": (str(current_work.get("top_task_desc") or "")[:80] or None) if current_work else None,
             }
         if current_task_id and blocked_on:
+            await_signal = _declared_await_signal(blocked_on)
+            if await_signal:
+                return {
+                    "block": False,
+                    "reason": _declared_await_signal_stop_reason(await_signal),
+                    "wake_type": WAKE_ALLOW_STOP,
+                    "task_id": None,
+                    "blocked_on": blocked_on,
+                    "awaiting_signal": await_signal,
+                }
             if _blocked_on_has_live_resolver(blocked_on, current_task_id=current_task_id, config=cfg):
                 return {
                     "block": False,
@@ -1727,6 +1779,16 @@ def _raw_stop_decision(session_id: str,
             }
     blocked_on = _task_blocked_on(observed_task_id, config=cfg)
     if blocked_on:
+        await_signal = _declared_await_signal(blocked_on)
+        if await_signal:
+            return {
+                "block": False,
+                "reason": _declared_await_signal_stop_reason(await_signal),
+                "wake_type": WAKE_ALLOW_STOP,
+                "task_id": None,
+                "blocked_on": blocked_on,
+                "awaiting_signal": await_signal,
+            }
         if _blocked_on_has_live_resolver(blocked_on, current_task_id=observed_task_id, config=cfg):
             return {
                 "block": False,
