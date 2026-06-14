@@ -44,4 +44,9 @@ setup(
         "scripts/taey-task",
     ],
     install_requires=load_requirements(),
+    extras_require={
+        # Running the acceptance suite needs the FastAPI TestClient transport,
+        # which requires httpx. `pip install -e ".[test]"` to run tests/*.py.
+        "test": ["httpx>=0.27,<1.0"],
+    },
 )

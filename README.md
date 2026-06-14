@@ -283,6 +283,13 @@ curl -s http://127.0.0.1:5002/health
 
 The ship gate runs acceptance scripts under [tests/](tests/), including stop decisions, human-review gates, ref safety, wake packets, public read-only behavior, and task completion evidence.
 
+To run the acceptance suite yourself, install the test extra (the tests use the FastAPI TestClient, which needs `httpx`):
+
+```bash
+pip install -e ".[test]"
+python3 -m unittest discover -s tests
+```
+
 ## More Docs
 
 - [SETUP.md](SETUP.md): operator install flow and lifecycle details.
