@@ -77,6 +77,12 @@ taey-plan next
 taey-task status <task-id>
 ```
 
+Dispatch ready peer-owned task work through the canonical claim/bind/wake path:
+
+```bash
+taey-task dispatch <task-id> <peer-session>
+```
+
 Complete a normal task with evidence:
 
 ```bash
