@@ -42,6 +42,7 @@ from fleet_orchestrator.context_assembler import (
 )
 from fleet_orchestrator.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from fleet_orchestrator.easy_setup import api_host, package_version
+from fleet_orchestrator.evidence_contract import REQUEST_TERMINAL_EVIDENCE_KEYS, TERMINAL_STATUSES
 from fleet_orchestrator.loop_engine import (
     ArtifactNotObservedError,
     ArtifactStore,
@@ -366,17 +367,13 @@ async def create(req: Request) -> Dict[str, Any]:
     return {"ok": True, "task_id": task_id, "from": sender, "owner": owner, "task_type": task_type}
 
 
-_TERMINAL_STATUSES = {"completed", "failed", "interrupted"}
-_REQUEST_TERMINAL_EVIDENCE_KEYS = ("reason", "error", "production_observation")
-
-
 def _terminal_evidence_from_request(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     evidence = data.get("evidence")
     if evidence is not None:
         return evidence
     lifted = {
         key: data[key]
-        for key in _REQUEST_TERMINAL_EVIDENCE_KEYS
+        for key in REQUEST_TERMINAL_EVIDENCE_KEYS
         if key in data
     }
     return lifted or None
@@ -387,7 +384,7 @@ def _outcome_details(result: str, evidence: Optional[Dict[str, Any]]) -> Optiona
         return result
     if not isinstance(evidence, dict):
         return None
-    for key in _REQUEST_TERMINAL_EVIDENCE_KEYS:
+    for key in REQUEST_TERMINAL_EVIDENCE_KEYS:
         value = evidence.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -459,7 +456,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             "status": status,
             "owner": owner,
             "blocked_on": blocked_on if blocked_on is not None else task_before.get("blocked_on"),
-            "completion_evidence": completion_evidence if status in _TERMINAL_STATUSES else task_before.get("completion_evidence"),
+            "completion_evidence": completion_evidence if status in TERMINAL_STATUSES else task_before.get("completion_evidence"),
             "phase_completed": phase_completed,
         }
     except CompletionEvidenceError as e:

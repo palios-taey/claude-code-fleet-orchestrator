@@ -22,7 +22,12 @@ import sys
 import urllib.request
 import urllib.error
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from fleet_orchestrator.evidence_contract import TERMINAL_STATUSES
+
 DASHBOARD_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002")
+UPDATE_STATUSES = tuple(sorted(TERMINAL_STATUSES | {"in_progress"}))
 
 
 def detect_from_node():
@@ -135,11 +140,10 @@ def cmd_status(args):
 def cmd_update(args):
     """Update a task's status via PATCH /api/task/{id}."""
     sender = detect_from_node()
-    terminal_statuses = {"completed", "failed", "interrupted"}
-    if args.status in terminal_statuses and args.evidence is None:
+    if args.status in TERMINAL_STATUSES and args.evidence is None:
         print(f"ERROR: {args.status} status requires --evidence JSON", file=sys.stderr)
         sys.exit(1)
-    if args.status not in terminal_statuses and args.evidence is not None:
+    if args.status not in TERMINAL_STATUSES and args.evidence is not None:
         print("ERROR: --evidence is only valid with terminal statuses", file=sys.stderr)
         sys.exit(1)
     data = {
@@ -182,7 +186,7 @@ def main():
 
     p_update = sub.add_parser("update", help="Update task status")
     p_update.add_argument("task_id", help="Task ID")
-    p_update.add_argument("status", choices=["completed", "failed", "in_progress", "interrupted"])
+    p_update.add_argument("status", choices=UPDATE_STATUSES)
     p_update.add_argument("--blocked-on", help="Mark the in-progress task as waiting on an external signal")
     p_update.add_argument("--clear-blocked-on", action="store_true",
                           help="Clear the task's blocked_on marker")
