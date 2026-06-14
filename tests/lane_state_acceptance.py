@@ -19,6 +19,7 @@ os.environ["NOTIFY_KEY_PREFIX"] = PREFIX
 from fleet_orchestrator.lane_state import (  # noqa: E402
     LaneRef,
     UISignal,
+    _taeys_hands_root,
     calibration_stream_key,
     discover_chat_lanes,
     estimate_lane,
@@ -167,6 +168,24 @@ def main() -> int:
         lanes = {lane.lane_id: lane for lane in discover_chat_lanes(taeys_hands_root=root)}
         _check("service display creates chat lane", "chat:claude:display:3" in lanes, lanes)
         _check("machine env display creates chat lane", "chat:gemini:display:4" in lanes, lanes)
+        old_root = os.environ.pop("TAEYS_HANDS_ROOT", None)
+        try:
+            try:
+                _taeys_hands_root(None)
+            except RuntimeError as exc:
+                no_default_error = str(exc)
+            else:
+                no_default_error = ""
+            _check("missing taeys-hands root fails loud without /home/mira default",
+                   "TAEYS_HANDS_ROOT must be set" in no_default_error,
+                   no_default_error)
+            os.environ["TAEYS_HANDS_ROOT"] = str(root)
+            _check("TAEYS_HANDS_ROOT env is honored", _taeys_hands_root(None) == root.resolve(), _taeys_hands_root(None))
+        finally:
+            if old_root is not None:
+                os.environ["TAEYS_HANDS_ROOT"] = old_root
+            else:
+                os.environ.pop("TAEYS_HANDS_ROOT", None)
 
     print("\nPASS lane-state estimator reads passive signals and records calibration.")
     return 0
