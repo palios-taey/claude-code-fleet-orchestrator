@@ -69,7 +69,7 @@ def _ingest(project_id: str) -> dict:
         source_path=f"/tmp/{project_id}.md",
         source_kind="markdown",
         ingested_by="template-test",
-        supervisor="conductor",
+        supervisor="supervisor",
         priority=10,
         config=CFG,
     )
@@ -79,9 +79,11 @@ def main() -> int:
     init_schema(config=CFG)
     _cleanup()
     old_enabled = os.environ.get("ORCH_GATE_TEMPLATE_ENABLED")
+    old_gate_owners = os.environ.get("ORCH_GATE_OWNERS")
     try:
         off_project = f"{PFX}-off"
         os.environ.pop("ORCH_GATE_TEMPLATE_ENABLED", None)
+        os.environ.pop("ORCH_GATE_OWNERS", None)
         off = _ingest(off_project)
         off_tasks = _tasks(off_project)
         _check("template is default-off", off["tasks_created"] == 2 and not any("gate-" in task_id for task_id in off_tasks), off_tasks)
@@ -94,31 +96,49 @@ def main() -> int:
         work = lambda bare: f"{on_project}::{bare}"
 
         expected_gate_ids = {
-            gate("gate-gemini-scout"),
-            gate("gate-codex-code"),
-            gate("gate-grok-audit"),
-            gate("gate-conductor-verify"),
-            gate("gate-family"),
+            gate("gate-scout"),
+            gate("gate-code"),
+            gate("gate-audit"),
+            gate("gate-review"),
+            gate("gate-approval"),
         }
         _check("templated ingest creates original + five gate tasks", on["tasks_created"] == 7 and expected_gate_ids.issubset(tasks), {"result": on, "tasks": sorted(tasks)})
         _check("gate tasks are in scoped gate phase", all(tasks[task_id]["phase_id"] == gate("forced-subrole-gate") for task_id in expected_gate_ids), tasks)
-        _check("gate owners are forced sub-roles", {
-            tasks[gate("gate-gemini-scout")]["owner"],
-            tasks[gate("gate-codex-code")]["owner"],
-            tasks[gate("gate-grok-audit")]["owner"],
-            tasks[gate("gate-conductor-verify")]["owner"],
-            tasks[gate("gate-family")]["owner"],
-        } == {"gemini", "codex", "grok", "conductor", "family"}, tasks)
-        _check("codex-code depends on gemini-scout", tasks[gate("gate-codex-code")]["depends_on"] == [gate("gate-gemini-scout")], tasks[gate("gate-codex-code")])
-        _check("work root depends on codex-code", gate("gate-codex-code") in tasks[work("scout")]["depends_on"], tasks[work("scout")])
+        _check("unset gate owners are generic stage placeholders", {
+            tasks[gate("gate-scout")]["owner"],
+            tasks[gate("gate-code")]["owner"],
+            tasks[gate("gate-audit")]["owner"],
+            tasks[gate("gate-review")]["owner"],
+            tasks[gate("gate-approval")]["owner"],
+        } == {"scout", "code", "audit", "review", "approval"}, tasks)
+        _check("code depends on scout", tasks[gate("gate-code")]["depends_on"] == [gate("gate-scout")], tasks[gate("gate-code")])
+        _check("work root depends on code", gate("gate-code") in tasks[work("scout")]["depends_on"], tasks[work("scout")])
         _check("work chain remains intact", work("scout") in tasks[work("ship")]["depends_on"], tasks[work("ship")])
-        _check("grok-audit depends on work leaf", work("ship") in tasks[gate("gate-grok-audit")]["depends_on"], tasks[gate("gate-grok-audit")])
-        _check("conductor/family chain is intact", tasks[gate("gate-conductor-verify")]["depends_on"] == [gate("gate-grok-audit")] and tasks[gate("gate-family")]["depends_on"] == [gate("gate-conductor-verify")], tasks)
+        _check("audit depends on work leaf", work("ship") in tasks[gate("gate-audit")]["depends_on"], tasks[gate("gate-audit")])
+        _check("review/approval chain is intact", tasks[gate("gate-review")]["depends_on"] == [gate("gate-audit")] and tasks[gate("gate-approval")]["depends_on"] == [gate("gate-review")], tasks)
+
+        mapped_project = f"{PFX}-mapped"
+        os.environ["ORCH_GATE_OWNERS"] = "scout=scout-worker,code=code-worker,audit=audit-worker,review=review-worker,approval=approval-worker"
+        mapped = _ingest(mapped_project)
+        mapped_tasks = _tasks(mapped_project)
+        mapped_gate = lambda bare: f"{mapped_project}::{bare}"
+        _check("env gate owners override generic placeholders", {
+            mapped_tasks[mapped_gate("gate-scout")]["owner"],
+            mapped_tasks[mapped_gate("gate-code")]["owner"],
+            mapped_tasks[mapped_gate("gate-audit")]["owner"],
+            mapped_tasks[mapped_gate("gate-review")]["owner"],
+            mapped_tasks[mapped_gate("gate-approval")]["owner"],
+        } == {"scout-worker", "code-worker", "audit-worker", "review-worker", "approval-worker"}, mapped_tasks)
+        _check("mapped ingest still creates five gate tasks", mapped["tasks_created"] == 7, mapped)
     finally:
         if old_enabled is None:
             os.environ.pop("ORCH_GATE_TEMPLATE_ENABLED", None)
         else:
             os.environ["ORCH_GATE_TEMPLATE_ENABLED"] = old_enabled
+        if old_gate_owners is None:
+            os.environ.pop("ORCH_GATE_OWNERS", None)
+        else:
+            os.environ["ORCH_GATE_OWNERS"] = old_gate_owners
         _cleanup()
 
     if FAILURES:

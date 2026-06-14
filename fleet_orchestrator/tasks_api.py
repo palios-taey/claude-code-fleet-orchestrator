@@ -318,7 +318,7 @@ async def create(req: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="description required")
 
     priority = int(data.get("priority", 50))
-    # Horizon v1.3.0 full audit amendment #3: refuse negative priority values.
+    # External audit amendment #3: refuse negative priority values.
     # A prior migration script wrote priority = -<unix_timestamp> on 33 projects
     # (data-corruption fix applied as one-off Cypher at 2026-05-31 01:51Z). This
     # guard prevents any future write of negative-epoch-style values via the API.
@@ -592,7 +592,7 @@ async def create_project_endpoint(req: Request) -> Dict[str, Any]:
     supervisor = (data.get("supervisor") or "").strip()
     if not supervisor or supervisor == "unassigned":
         raise HTTPException(status_code=400, detail="supervisor must be non-empty and not 'unassigned'")
-    # Horizon v1.3.0 full audit amendment #3: refuse negative project priority.
+    # External audit amendment #3: refuse negative project priority.
     project_priority = data.get("priority")
     if project_priority is not None and int(project_priority) < 0:
         raise HTTPException(
@@ -684,7 +684,7 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
     supervisor = (data.get("supervisor") or "").strip()
     if supervisor in {"", "unassigned", "unknown"}:
         raise HTTPException(status_code=400, detail="supervisor required for non-exempt project ingest (must not be unassigned or unknown)")
-    # Horizon v1.3.0 full audit amendment #3: refuse negative project priority on plan ingest.
+    # External audit amendment #3: refuse negative project priority on plan ingest.
     ingest_priority = data.get("priority")
     if ingest_priority is not None and int(ingest_priority) < 0:
         raise HTTPException(

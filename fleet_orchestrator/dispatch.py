@@ -25,17 +25,17 @@ Usage from a Python supervisor session::
     from fleet_orchestrator.dispatch import dispatch
 
     dispatch(
-        worker="treasurer-codex",
-        task_id="reddit-scout-cycle-22",
-        description="Scout r/MachineLearning for acute-pain replies",
-        prompt_body="Run the deployment's scout workflow.",
+        worker="worker-codex",
+        task_id="example-task",
+        description="Run the assigned worker task",
+        prompt_body="Run the deployment's worker workflow.",
     )
 
 CLI equivalent::
 
-    orch-dispatch treasurer-codex reddit-scout-cycle-22 \\
-        --description "Scout r/MachineLearning for acute-pain replies" \\
-        --prompt-file /tmp/scout.prompt
+    orch-dispatch worker-codex example-task \\
+        --description "Run the assigned worker task" \\
+        --prompt-file /tmp/worker.prompt
 
 Once dispatched, the worker receives the prompt via the released
 ``claude-code-fleet-notify`` daemon (idle=1 + inbox>0 → tmux inject).
@@ -136,8 +136,8 @@ def bind_current_task(
         pipe.set(_state_key(worker, "parent"), supervisor)
     pipe.execute()
 
-    # Oscillation fix (hunter 2026-06-03): binding a task means the worker is
-    # working it — flip it to in_progress so next-ready stops re-surfacing it.
+    # Binding a task means the worker is working it — flip it to in_progress so
+    # next-ready stops re-surfacing it.
     # Best-effort: no-op for ad-hoc tasks / already-claimed / dep-blocked.
     _mark_in_progress_best_effort(task_id, worker)
     register_worker_task_liveness(
@@ -441,13 +441,13 @@ def dispatch(
             f"notify the supervisor when you finish.)"
         )
 
-    # Standard record_outcome footer (Treasurer ergonomic finding 2026-
-    # 05-26): workers reliably forget to call record_outcome unless told
-    # explicitly. Without it, peer_idle reaches the supervisor with
+    # Standard record_outcome footer: workers reliably forget to call
+    # record_outcome unless told explicitly. Without it, peer_idle reaches the
+    # supervisor with
     # outcome=unknown and outcome_details=None — the supervisor can't
     # tell clean-finish from error-restart from interrupted, and the
     # CAS done-clear never fires so current_task persists as "previous
-    # dispatch did not complete cleanly" (Gaia persistence rule).
+    # dispatch did not complete cleanly" (dispatch persistence rule).
     # Auto-append unless caller opts out by passing the footer themselves
     # (we detect via 'record_outcome' substring already present).
     if "record_outcome" not in prompt_body:
@@ -488,7 +488,7 @@ def dispatch(
         # Wake delivery failed AFTER the claim+bind. Without this rollback the task
         # lingers as status=in_progress (a "live resolver" per _LIVE_RESOLVER_STATUSES)
         # with NO wake delivered -> a supervisor blocked_on it would ALLOW_STOP and the
-        # work silently dead-locks (GAIA dispatched-wake-guarantee: live-set membership
+        # work silently dead-locks (dispatched-wake guarantee: live-set membership
         # is necessary, not sufficient; a live resolver must have an ACTUAL wake). Revert
         # to ready so next-ready re-surfaces it for redispatch instead. The binding_nonce
         # is the claim-token: rollback only reverts THIS dispatch's binding, never a newer
@@ -561,8 +561,7 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
 
     ``outcome`` MUST be one of ``done``, ``error``, ``interrupted``. Any
     other value raises ``ValueError`` — the enum is load-bearing per the
-    Phase A consultation (Gaia 2026-05-26): the Stop hook clears the
-    worker's current_task ONLY when outcome == ``done``. Any other
+    the Stop hook clears the worker's current_task ONLY when outcome == ``done``. Any other
     outcome (or absent record_outcome call entirely) leaves current_task
     persisting as the "previous dispatch did not complete cleanly"
     signal for the next dispatcher.
@@ -625,14 +624,14 @@ def check_previous_task(worker: str) -> Optional[dict]:
     Supervisors SHOULD call this before issuing new dispatches. The
     common pattern:
 
-        prev = check_previous_task("treasurer-codex")
+        prev = check_previous_task("worker-codex")
         if prev:
             # Previous dispatch didn't complete cleanly. Decide:
             # - retry: re-dispatch the same task body
             # - investigate: open the worker pane, look at the error
             # - cancel: clear_current_task() and move on
             ...
-        dispatch("treasurer-codex", ...)
+        dispatch("worker-codex", ...)
     """
     r = _redis_connect()
     raw = r.get(_state_key(worker, "current_task"))

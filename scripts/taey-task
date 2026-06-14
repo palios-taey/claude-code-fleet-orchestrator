@@ -2,13 +2,13 @@
 """
 Create an OrchTask via the dashboard API.
 
-Tasks persist in Neo4j and trigger a notification to the conductor.
-Use this instead of taey-notify when you have work for the conductor.
+Tasks persist in Neo4j and trigger a notification to the supervisor.
+Use this instead of taey-notify when you have work for the supervisor.
 
 Usage:
     taey-task create "Fix the broken save function in train_fsdp_v3.py"
-    taey-task create "DEFECT: store_family_motifs missing Weaviate write" --priority 80
-    taey-task create "Enhancement: add retry logic to consultation pipeline" --from weaver
+    taey-task create "DEFECT: store_project_motifs missing vector write" --priority 80
+    taey-task create "Enhancement: add retry logic to consultation pipeline" --from supervisor
     taey-task list                    # Show pending tasks
     taey-task status <task-id>        # Check a task's status
     taey-task dispatch <task-id> <peer>  # Claim/bind/wake peer work

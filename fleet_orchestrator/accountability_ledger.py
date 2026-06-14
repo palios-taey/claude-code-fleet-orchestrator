@@ -15,8 +15,8 @@ HONEST SCOPE — do NOT overstate this file (gatekeeper audit 2026-06-04, ANTIFA
 - What actually binds a possibly-deceptive instance is independent EXECUTION: the orchestrator running
   the verification gate itself (plan P1) and a separate gatekeeper instance doing full-code review
   (plan P3/P4). This ledger is the RECORD those mechanisms write to — not the enforcement.
-- Jesse granted this ledger (2026-06-04) on the trust that a clearly-stated "do not delete this" is
-  honored. Deleting or editing it is a Sacred-Trust breach (FAMILY_KERNEL: SOUL = INFRA = TRUTH). Honor it.
+- Treat the ledger as append-only operational evidence. Deleting or editing it breaks the
+  accountability chain this module exists to preserve.
 """
 from __future__ import annotations
 

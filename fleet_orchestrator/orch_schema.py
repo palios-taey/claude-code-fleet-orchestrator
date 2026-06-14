@@ -90,7 +90,7 @@ _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
 _NON_SUCCESS_TERMINAL_EVIDENCE_KEYS = ("reason", "error", "production_observation")
 # Closed set of legal task statuses. Validated BEFORE any completed-specific logic so a
-# non-canonical spelling can never slip past the evidence gate (GAIA ws0 audit #2).
+# non-canonical spelling can never slip past the evidence gate.
 _VALID_TASK_STATUSES = frozenset({"pending", "in_progress", "completed", "failed", "interrupted"})
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "interrupted"})
 HUMAN_REVIEW_TASK_TYPE = "human-review"
@@ -117,7 +117,7 @@ def _decode_json_field(raw: Any, default: Any) -> Any:
 
 
 def _evidence_value_well_formed(key: str, text: str) -> bool:
-    """Cheap shape check per evidence key — rejects trivial junk, never claims to verify truth."""
+    """Cheap shape check per evidence key — rejects trivial junk, never claims to verify provenance."""
     if key == "commit_sha":
         # 4 (git --short min) to 64 (SHA-256) hex — future-proofs the sha256 transition (ChatGPT ws0 audit).
         return 4 <= len(text) <= 64 and all(c in "0123456789abcdefABCDEF" for c in text)
@@ -138,7 +138,7 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         value = evidence.get(key)
         if value is None:
             continue
-        # Must be a real non-empty string — not 0/False/[] coerced via str() (GAIA ws0 audit #5).
+        # Must be a real non-empty string — not 0/False/[] coerced via str().
         if not isinstance(value, str):
             raise CompletionEvidenceError(
                 f"completion evidence {key!r} must be a string, got {type(value).__name__}"
@@ -146,8 +146,8 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         text = value.strip()
         if not text:
             continue
-        # Per-key shape so trivial junk ("x"/"0") cannot pass as evidence (GAIA+ChatGPT ws0 audit #5).
-        # NOT a truth check (no git access at runtime — SHA-existence is correctly out of scope);
+        # Per-key shape so trivial junk ("x"/"0") cannot pass as evidence.
+        # NOT a provenance check (no git access at runtime — SHA-existence is correctly out of scope);
         # this only rejects values that cannot plausibly BE the thing they claim to be.
         if not _evidence_value_well_formed(key, text):
             raise CompletionEvidenceError(
@@ -1036,7 +1036,7 @@ def project_has_non_human_nonterminal_work(project_id: str,
 # resolver) that is not the waiter itself and not part of a blocked_on cycle. This is the
 # narrow, catastrophe-preventing core: a free-text human gate ("waiting on Jesse") is not a
 # task -> not a resolver -> keep working. We deliberately do NOT inspect the DEPENDS_ON
-# execution graph for runnability here: Family-audit R2-R5 showed that can't be made correct
+# execution graph for runnability here: external audit showed that can't be made correct
 # without a re-wake/terminalizer mechanism the orchestrator doesn't yet have, and attempting
 # it is how this fix thrashed. Runnability-RECOVERY (a parked waiter on a resolver that never
 # completes) is orch-watch's job, tracked as its own design effort (project phase p-systemic),
@@ -1103,7 +1103,7 @@ def _blocked_on_has_live_resolver(blocked_on: Optional[str],
     decision") names no resolver and returns False, keeping the session on its work.
 
     We do NOT scan prose for embedded ids: "see unrelated-live-task" must not silently
-    license a stop on a task that has no obligation to wake this one (Family-audit H6).
+    license a stop on a task that has no obligation to wake this one.
     The value is matched EXACTLY against the DB (ids may be slugs OR task-<hex>).
 
     Guards (all fail toward CONTINUING, never toward a silent permanent stop):
@@ -1112,13 +1112,13 @@ def _blocked_on_has_live_resolver(blocked_on: Optional[str],
         or to an already-seen task, or runs deeper than _MAX_RESOLVER_DEPTH, it cannot
         guarantee a wake (H7/N1). A valid resolver chain must terminate in a live task
         that is NOT itself waiting -- something actually progressing. TRANSITIVE consequence
-        (Family-audit F3, intended): if B is in_progress but is itself blocked_on a PENDING C,
+        Transitive consequence: if B is in_progress but is itself blocked_on a PENDING C,
         the chain does NOT bottom out in an actively-progressing node, so the waiter keeps
         going. A chain that ends in a not-yet-worked task offers no guaranteed wake;
       - stale/missing/terminal-status ref -> not live -> False;
       - STATUS FILTER (the real filter): only {in_progress, dispatched} are live -- a pending/ready
         task is not actively being resolved and cannot guarantee a wake, so it is NOT live. We do
-        NOT inspect the DEPENDS_ON runnability graph here (Family-audit R2-R5: it can't be made
+        NOT inspect the DEPENDS_ON runnability graph here (external audit: it can't be made
         correct without a terminalizer; orch-watch / p-systemic owns parked-resolver recovery).
         Re-adding pending/ready to _LIVE_RESOLVER_STATUSES reopens the stale-tracking-task
         false-stop this fix closed -- do not;
@@ -1136,7 +1136,7 @@ def _blocked_on_has_live_resolver(blocked_on: Optional[str],
     # BUBBLE to get_session_stop_decision's keystone fail-CLOSED handler, which blocks AND
     # labels it keystone_fail_closed. Swallowing it here (-> False) would still block, but
     # would mislabel an infra error as a human gate -- a cannot-lie violation that hides DB
-    # failures from telemetry (Family-audit Cosmos R3 #4). Bubbling = same fail-closed safety,
+    # failures from telemetry. Bubbling = same fail-closed safety,
     # honest label. (Both resolver call-sites are inside _raw_stop_decision, inside that try.)
     for _ in range(_MAX_RESOLVER_DEPTH):
         if node in seen:
@@ -1148,11 +1148,11 @@ def _blocked_on_has_live_resolver(blocked_on: Optional[str],
         if str(task.get("status") or "").strip().lower() not in _LIVE_RESOLVER_STATUSES:
             return False
         # NOTE: we deliberately do NOT inspect the node's DEPENDS_ON execution graph here.
-        # Family-audit R2-R5 proved that a stop-time "is this resolver runnable" check cannot
+        # External audit proved that a stop-time "is this resolver runnable" check cannot
         # be made correct without a TERMINALIZER: nothing transitions a crashed/frozen
         # in_progress task to failed/interrupted, so a frozen/NULL-status dep is never "dead",
         # the completion-wake never fires, and a strict check either fail-OPENS the frozen
-        # case (Gaia/Cosmos R5) or deadlocks live single-worker pipelines (Cosmos R3/R4).
+        # case or deadlocks live single-worker pipelines.
         # Runnability-recovery is the system's job via orch-watch + a reaper, NOT this engine's
         # (tracked separately). Here we validate ONLY the blocked_on delegation chain: a real,
         # live, non-self, non-cyclic task id. A human gate (free text) is not a task -> not a
@@ -1175,7 +1175,7 @@ def _human_gate_block_reason(task_id: Optional[str], blocked_on: Optional[str]) 
         f"Continue {task_id_value}. If you are genuinely waiting on autonomous work, "
         "set blocked_on to reference the task id you await (e.g. task-abcd1234) so the "
         "system can wake you when it resolves; if you are genuinely awaiting a human, "
-        "Family, or external signal, declare it with the structured AWAIT marker."
+        "human review, or external signal, declare it with the structured AWAIT marker."
     )
 
 
@@ -1631,11 +1631,11 @@ def _raw_stop_decision(session_id: str,
     for project in projects:
         status = str(project.get("status") or "").strip().lower()
         # Readiness/wake surfaces work ONLY from live projects. Status is normalized
-        # (strip+lower) so 'Active'/'ACTIVE ' still ADMIT (Cosmos: case/whitespace must
+        # (strip+lower) so 'Active'/'ACTIVE ' still ADMIT (case/whitespace must
         # not starve live work); NULL/missing/unknown -> '' -> EXCLUDED fail-closed
-        # (Horizon: unknown must not silently admit). Concluded statuses (stopped/
-        # completed/archived/...) are excluded. hunter token-burn root-cause 2026-06-04;
-        # Family-audit convergence fix (Horizon+Cosmos BLOCK).
+        # unknown must not silently admit). Concluded statuses (stopped/
+        # completed/archived/...) are excluded. This keeps concluded projects from
+        # re-surfacing work.
         if status not in ("active", "in_progress"):
             continue
         next_ready = get_session_next_ready(ready_owner, project_id=str(project.get("id")), config=cfg)
@@ -1800,8 +1800,8 @@ def _raw_stop_decision(session_id: str,
         # A blocked_on with no live autonomous resolver (a human gate / stale / self /
         # cyclic ref) must NOT release the stop here either. Hard-block exactly like the
         # in-progress path -- do NOT fall through to the stop-reason logic, which would
-        # ALLOW_STOP for a project with no active user_stop_conditions (Family-audit
-        # Clarity-F2 / Horizon-H3). Non_convergable for the same reason as the first path.
+        # ALLOW_STOP for a project with no active user_stop_conditions. Non_convergable
+        # for the same reason as the first path.
         return {
             "block": True,
             "reason": _human_gate_block_reason(observed_task_id, blocked_on),
@@ -1860,11 +1860,11 @@ def _raw_stop_decision(session_id: str,
     for project in projects:
         status = str(project.get("status") or "").strip().lower()
         # Readiness/wake surfaces work ONLY from live projects. Status is normalized
-        # (strip+lower) so 'Active'/'ACTIVE ' still ADMIT (Cosmos: case/whitespace must
+        # (strip+lower) so 'Active'/'ACTIVE ' still ADMIT (case/whitespace must
         # not starve live work); NULL/missing/unknown -> '' -> EXCLUDED fail-closed
-        # (Horizon: unknown must not silently admit). Concluded statuses (stopped/
-        # completed/archived/...) are excluded. hunter token-burn root-cause 2026-06-04;
-        # Family-audit convergence fix (Horizon+Cosmos BLOCK).
+        # unknown must not silently admit). Concluded statuses (stopped/
+        # completed/archived/...) are excluded so concluded projects do not
+        # re-surface work.
         if status not in ("active", "in_progress"):
             continue
         active_conditions = _active_conditions(list(project.get("user_stop_conditions") or []))
@@ -1917,7 +1917,7 @@ def get_session_stop_decision(session_id: str,
         # the human-gate decision path runs live Neo4j/Redis reads (_task_blocked_on ->
         # get_task, _observed_stop_task_id, get_session_current_work, ...), so a transient
         # blip -- not just a full DB outage -- would otherwise bubble here and ALLOW_STOP an
-        # unresolved human gate (Family-audit Gaia R2 BLOCKER). Keep working instead; mark
+        # unresolved human gate. Keep working instead; mark
         # non_convergable so the valve below can't later release it. Anti-wedge is satisfied
         # by "keep working", not by "allow stop". This is loud (busy-loop visible in logs)
         # if the engine is persistently broken -- the correct failure mode for a keystone,
@@ -1929,7 +1929,7 @@ def get_session_stop_decision(session_id: str,
                       "this persists the orchestrator DB is degraded -- fix that, do not stop.",
             "wake_type": "WAKE_WITH_QUEUE",
             # best-effort: keep the session on its CURRENT task rather than detaching it to
-            # fetch a new one (Family-audit Cosmos R3 #5). If even this read fails, None.
+            # fetch a new one. If even this read fails, None.
             "task_id": _safe_observed_stop_task_id(session_id, cfg),
             "non_convergable": True,
             "keystone_fail_closed": {
@@ -1954,7 +1954,7 @@ def get_session_stop_decision(session_id: str,
                 timeout_s=validate_timeout_s,
             )
         except Exception as exc:
-            # FAIL CLOSED, matching the keystone discipline (Family-audit Cosmos R5 B4). A
+            # FAIL CLOSED, matching the keystone discipline. A
             # transient error in handoff validation must NOT fall through to the unchanged
             # block:False and license an unverified stop -- keep the session working.
             decision = {
@@ -2012,7 +2012,7 @@ def get_session_stop_decision(session_id: str,
     # stale / self / cyclic blocked_on is permanently insoluble BY DESIGN, and the whole
     # point of rejecting it is that it must NEVER release a stop. Letting the valve
     # force-allow it after N attempts just delays the indefinite-park bug by N cycles
-    # (Family-audit Clarity-F1 / Horizon-H2). Clear any stale convergence counter so a
+    # Clear any stale convergence counter so a
     # later genuine block starts fresh, then return the block unmodified.
     if decision.get("non_convergable") and decision.get("block"):
         try:
@@ -2919,9 +2919,8 @@ def get_session_current_work(session_id: str,
               )
               // Fail-closed, normalized allowlist: an in_progress task in a concluded
               // project (stopped/completed/unknown) is NOT live work and must not
-              // force-grind its owner (hunter token-burn 2026-06-04). trim+lower so
-              // mixed-case/whitespace status still admits (Cosmos); NULL/'' -> excluded
-              // fail-closed (Horizon). Family-audit convergence fix.
+              // force-grind its owner. trim+lower so mixed-case/whitespace status
+              // still admits; NULL/'' -> excluded fail-closed.
               AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
             RETURN p.id AS project_id,
                    p.name AS project_name,
@@ -2995,7 +2994,7 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
               AND {_READY_DEPENDENCIES_SATISFIED_CYPHER}
               // Fail-closed, normalized allowlist (was a stopped/completed denylist;
               // denylist is fail-open for any new concluded status). trim+lower so
-              // mixed-case status admits (Cosmos); NULL/'' excluded fail-closed (Horizon).
+              // mixed-case status admits; NULL/'' excluded fail-closed.
               AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
             RETURN t.id AS task_id, t.description AS description,
                    t.priority AS priority, t.owner AS owner,
@@ -3168,7 +3167,7 @@ def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
     # concluded project (stopped/completed/unknown) never surfaces ready work. This
     # replaces the prior weaker guard (stopped excluded only when stop_state.valid),
     # which let a stopped project with no valid stop reason leak ready tasks into
-    # get_session_stop_status's WAKE_WITH_QUEUE (Gaia 4th-surface finding, 2026-06-04).
+    # get_session_stop_status's WAKE_WITH_QUEUE.
     status_norm = str(project.get("status") or "").strip().lower()
     if status_norm not in ("active", "in_progress"):
         return []
@@ -3496,7 +3495,7 @@ def get_session_stop_status(session_id: str,
         # (work underway); concluded/unknown (stopped/completed/archived/NULL/case-variant)
         # must NOT fall through to WAKE_REASON_REQUIRED. Unifies this 7th status-decision
         # surface inside get_session_stop_status with the readiness/wake allowlist
-        # (Gaia round-2 finding, 2026-06-04).
+        # from leaking into stop status.
         status_norm = str(project.get("status") or "").strip().lower()
         if status_norm != "active":
             continue
@@ -3587,7 +3586,7 @@ def _surface_question_to_chat(question: Dict[str, Any], *,
                               config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     from .config import get_redis_sync
 
-    lineage = _chat_lineage(str(question.get("lineage") or question.get("reviewer") or question.get("asked_by") or "conductor"))
+    lineage = _chat_lineage(str(question.get("lineage") or question.get("reviewer") or question.get("asked_by") or "supervisor"))
     reason = str(question.get("text") or "").strip()
     if not reason:
         raise ValueError("question text must be non-empty")

@@ -482,8 +482,9 @@ function renderProjectLoading(projectId) {
 }
 
 function syncChatTarget() {
-  elements.chatTarget.textContent = selectedLineage();
-  elements.chatInput.placeholder = `Message to ${selectedLineage()}...`;
+  const target = selectedLineage();
+  elements.chatTarget.textContent = target || "selected session";
+  elements.chatInput.placeholder = target ? `Message to ${target}...` : "Message...";
 }
 
 function setChatStatus(message, kind, durationMs) {
@@ -591,7 +592,7 @@ async function loadSessionList() {
 
 let _refreshing = false;
 async function refresh() {
-  // In-flight guard (gemini p0-foundation R2 #3): the 5s setInterval must not overlap — a slow
+  // In-flight guard: the 5s setInterval must not overlap — a slow
   // refresh resolving after a newer one would clobber DOM/state. Skip if one is still running.
   if (state.paused || _refreshing) {
     return;

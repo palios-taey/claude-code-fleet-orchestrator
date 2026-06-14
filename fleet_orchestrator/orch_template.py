@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
 from typing import Any, Dict, Iterable, List
 
 
 GATE_PHASE_ID = "forced-subrole-gate"
 GATE_TASKS = [
-    ("gate-gemini-scout", "Gemini scout", "gemini", []),
-    ("gate-codex-code", "Codex code", "codex", ["gate-gemini-scout"]),
-    ("gate-grok-audit", "Grok audit", "grok", ["gate-codex-code"]),
-    ("gate-conductor-verify", "Conductor verify", "conductor", ["gate-grok-audit"]),
-    ("gate-family", "Family review", "family", ["gate-conductor-verify"]),
+    ("gate-scout", "Scout", "scout", []),
+    ("gate-code", "Code", "code", ["gate-scout"]),
+    ("gate-audit", "Audit", "audit", ["gate-code"]),
+    ("gate-review", "Review", "review", ["gate-audit"]),
+    ("gate-approval", "Final approval", "approval", ["gate-review"]),
 ]
 GATE_IDS = {tid for tid, _, _, _ in GATE_TASKS}
 
@@ -32,8 +34,8 @@ def apply_gate_template(plan_dict: Dict[str, Any]) -> Dict[str, Any]:
     existing_tasks = _all_tasks(phases)
     existing_ids = {str(task.get("id")) for task in existing_tasks if task.get("id")}
     # Idempotency fix: compute roots/leaves over WORK tasks only (exclude the gate
-    # scaffold). Re-applying must not treat gate-gemini-scout (depends:[]) as a work
-    # root and add gate-codex-code as its dependency -> that created a dep cycle.
+    # scaffold). Re-applying must not treat gate-scout (depends:[]) as a work
+    # root and add gate-code as its dependency -> that created a dep cycle.
     work_tasks = [t for t in existing_tasks if t.get("id") and not _is_gate_task(t)]
     work_ids = {str(t["id"]) for t in work_tasks}
     roots = _work_roots(work_tasks, work_ids)
@@ -48,8 +50,8 @@ def apply_gate_template(plan_dict: Dict[str, Any]) -> Dict[str, Any]:
     if work_ids:
         entry_targets = roots or sorted(work_ids)
         exit_targets = leaves or sorted(work_ids)
-        _add_depends(work_tasks, entry_targets, "gate-codex-code")
-        _set_depends(gate_phase["tasks"], "gate-grok-audit", exit_targets)
+        _add_depends(work_tasks, entry_targets, "gate-code")
+        _set_depends(gate_phase["tasks"], "gate-audit", exit_targets)
 
     return plan
 
@@ -76,7 +78,8 @@ def _merge_gate_tasks(existing_gate_tasks: List[Dict[str, Any]], existing_ids: s
         if isinstance(task, dict) and task.get("id")
     }
     merged = list(existing_gate_tasks)
-    for task_id, description, owner, depends in GATE_TASKS:
+    owners = _gate_owner_mapping()
+    for task_id, description, stage_key, depends in GATE_TASKS:
         if task_id in by_id:
             continue
         if task_id in existing_ids:
@@ -85,13 +88,39 @@ def _merge_gate_tasks(existing_gate_tasks: List[Dict[str, Any]], existing_ids: s
             "id": task_id,
             "description": description,
             "priority": 50,
-            "owner": owner,
+            "owner": owners.get(stage_key, stage_key),
             "tags": ["forced-subrole-gate"],
             "depends": list(depends),
             "refs": [],
             "body": [],
         })
     return merged
+
+
+def _gate_owner_mapping() -> Dict[str, str]:
+    raw = os.environ.get("ORCH_GATE_OWNERS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return {
+                str(key).strip(): str(value).strip()
+                for key, value in parsed.items()
+                if str(key).strip() and str(value).strip()
+            }
+    except (TypeError, ValueError):
+        pass
+    owners: Dict[str, str] = {}
+    for pair in raw.split(","):
+        if "=" not in pair:
+            continue
+        key, _, value = pair.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if key and value:
+            owners[key] = value
+    return owners
 
 
 def _all_tasks(phases: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

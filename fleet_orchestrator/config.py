@@ -275,7 +275,7 @@ class OrchConfig:
     heartbeat_ttl_s: int = 36
     task_stream: str = f"{KEY_PREFIX}streams:tasks"
     event_stream: str = f"{KEY_PREFIX}streams:events"
-    consumer_group: str = "conductors"
+    consumer_group: str = "supervisors"
     stream_maxlen: int = 100_000
     file_lock_ttl_s: int = 1800
     file_lock_prefix: str = f"{KEY_PREFIX}lock:file:"

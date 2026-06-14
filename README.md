@@ -4,7 +4,7 @@
 
 The system gives one person a durable "score" for coordinating multiple coding agents without babysitting every handoff. State lives in Neo4j and Redis because projects, phases, tasks, dependencies, human-review gates, refs, and provenance are graph-shaped; the product asks "what is ready, blocked, supervised, or gated?" more often than it asks for flat rows. A FastAPI service on `:5002`, a browser dashboard, command-line tools, and Claude Code hooks connect each session's lifecycle to that state.
 
-Motivating scenario: you have `conductor`, `conductor-codex`, and `conductor-gemini` sessions open on one Linux workstation. Codex is implementing, Gemini is measuring, and the conductor is supervising. Without a shared score, work gets lost after `/clear`, a worker can stop while a dependent task is ready, and "done" becomes a chat claim. This repo makes those handoffs explicit local state.
+Motivating scenario: you have `supervisor`, `worker-codex`, and `worker-gemini` sessions open on one Linux workstation. Codex is implementing, Gemini is measuring, and the supervisor is coordinating. Without a shared score, work gets lost after `/clear`, a worker can stop while a dependent task is ready, and "done" becomes a chat claim. This repo makes those handoffs explicit local state.
 
 ![Fleet dashboard showing session cards, current work, projects, and task details](docs/dashboard.png)
 
@@ -143,7 +143,7 @@ taey-plan next <session-id>
 A supervisor ingests markdown plans:
 
 ```bash
-taey-plan ingest /absolute/path/to/plan.md --supervisor conductor
+taey-plan ingest /absolute/path/to/plan.md --supervisor supervisor
 ```
 
 The plan format is documented in [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md). Task headers can declare priority, owner, dependencies, and refs. Example:
@@ -153,7 +153,7 @@ The plan format is documented in [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md). Tas
 
 ## Phase: build - Build [order: 1]
 
-### Task: demo::build-1 - Verify install [priority: 50] [owner: conductor-codex]
+### Task: demo::build-1 - Verify install [priority: 50] [owner: worker-codex]
 Run the smoke test and record evidence.
 ```
 
@@ -168,15 +168,15 @@ A human-review gate records a question that must be answered by a person:
 
 ```bash
 taey-question create-gate demo::build demo::human-review "Ship this artifact?" --reviewer jesse
-taey-question answer <question-id> "Ship it" --from conductor
+taey-question answer <question-id> "Ship it" --from supervisor
 ```
 
 For harness-driven work where the runner is not the agent session itself:
 
 ```bash
-taey-dispatch out-of-band register demo::build-1 --supervisor conductor --owner conductor-codex --runner acceptance-harness --ttl 300
+taey-dispatch out-of-band register demo::build-1 --supervisor supervisor --owner worker-codex --runner acceptance-harness --ttl 300
 taey-dispatch out-of-band heartbeat demo::build-1
-taey-dispatch out-of-band complete demo::build-1 --status completed --supervisor conductor --evidence '{"commit_sha":"abc123","gate":"production probe","production_observation":"verified live"}'
+taey-dispatch out-of-band complete demo::build-1 --status completed --supervisor supervisor --evidence '{"commit_sha":"abc123","gate":"production probe","production_observation":"verified live"}'
 ```
 
 The hooks close the loop:
@@ -245,7 +245,7 @@ Enable wake packets:
 
 ```bash
 export ORCH_WAKE_PACKET_ENABLED=1
-curl -s "http://127.0.0.1:5002/api/sessions/conductor-codex/wake-packet?cli=codex"
+curl -s "http://127.0.0.1:5002/api/sessions/worker-codex/wake-packet?cli=codex"
 ```
 
 The response includes `packet` plus `packet_meta` with a provenance hash, size report, snapshot fingerprints, and the generating commit.

@@ -45,8 +45,8 @@ def _load_session_roots() -> Dict[str, str]:
     operator's fleet (/home/mira/...), which a downloader could not use. Each
     operator sets ORCH_SESSION_ROOTS in their environment as JSON or
     comma-separated key=value pairs, e.g.
-        ORCH_SESSION_ROOTS={"conductor":"/home/me/repo","worker":"/home/me/w"}
-        ORCH_SESSION_ROOTS=conductor=/home/me/repo,worker=/home/me/w
+        ORCH_SESSION_ROOTS={"supervisor":"/home/me/repo","worker":"/home/me/w"}
+        ORCH_SESSION_ROOTS=supervisor=/home/me/repo,worker=/home/me/w
     Unset -> empty map (callers fall back to MEMORY_BASE-only context).
     """
     raw = os.environ.get("ORCH_SESSION_ROOTS", "").strip()
@@ -628,9 +628,9 @@ def _render_untrusted(nonce: str, source: str, value: Any) -> List[str]:
 
 def _rendered_sections(ref: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Sections that _render_refs actually emits into the packet — content present
-    and distinct from the top-level ref content. SINGLE SOURCE OF TRUTH so
+    and distinct from the top-level ref content. Canonical render-surface helper so
     _provenance_hash can cover exactly what is rendered and the two cannot drift
-    (Horizon Gate-2 item 2: section bodies were rendered but never hashed ->
+    (review gate 2 item 2: section bodies were rendered but never hashed ->
     forgeable provenance, same defect class as CA-3 one tier down)."""
     content = ref.get("content")
     return [
@@ -720,7 +720,7 @@ def _packet_with_provenance(packet: Dict[str, Any], cli: str, max_refs_per_tier:
 
 
 def _provenance_hash(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> str:
-    # Root-cause fix (Gate-2 round-2 v2 — Gemini/Horizon/Gaia BLOCK): bind the hash to
+    # Root-cause fix from review gate 2 round 2: bind the hash to
     # the EXACT rendered output, not an enumerated subset of fields. The CA-3 and
     # item-2 fixes hashed specific fields (ref content, then section bodies), and the
     # forgery class kept recurring because every OTHER rendered field (ref label,
