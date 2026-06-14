@@ -57,6 +57,7 @@ from typing import Optional
 from .config import OrchConfig, ensure_notify_importable, get_neo4j_session
 from .decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from .handoff_validation import mark_superseded_for_task
+from .worker_liveness import register_worker_task_liveness
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +140,13 @@ def bind_current_task(
     # working it — flip it to in_progress so next-ready stops re-surfacing it.
     # Best-effort: no-op for ad-hoc tasks / already-claimed / dep-blocked.
     _mark_in_progress_best_effort(task_id, worker)
+    register_worker_task_liveness(
+        worker=worker,
+        task_id=task_id,
+        description=description,
+        supervisor=supervisor,
+        started_at=current_task["started_at"],
+    )
     return current_task["started_at"]
 
 
