@@ -1021,6 +1021,18 @@ def session_wake_packet(
     task_id: Optional[str] = Query(None),
     budget_bytes: int = Query(CORE_BUDGET_BYTES, ge=1024, le=128 * 1024),
 ) -> Dict[str, Any]:
+    """Assemble a session's wake-state packet.
+
+    CONTRACT — this endpoint is **fail-open by design**: a wake-state packet is
+    OPTIONAL context, and an assembly error must never break or block a wake. So
+    on any assembler exception it returns HTTP 200 with ``{"ok": false, "enabled":
+    true, "error": ...}`` rather than a 5xx, and a disabled feature returns
+    ``{"ok": true, "enabled": false}``. **Consumers MUST gate on the body
+    (`ok` AND `enabled` AND a non-empty `packet`) — never on the HTTP status
+    alone**, or they will inject an empty/error body as if it were context. The
+    shipped consumer (`claude-code-fleet-notify` `_fetch_wake_packet`) does this
+    correctly; any new consumer must too.
+    """
     if os.environ.get("ORCH_WAKE_PACKET_ENABLED", "").strip().lower() not in TRUE_ENV_VALUES:
         return {"ok": True, "enabled": False}
 
