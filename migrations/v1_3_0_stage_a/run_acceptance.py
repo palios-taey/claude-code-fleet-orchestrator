@@ -243,7 +243,7 @@ def main() -> int:
         else f"FAIL preflight_unknown_orphan row={dict(unknown_row) if unknown_row else None}"
     )
 
-    # 16 get_project_summary tasks ordered by priority ASC (Jesse-caught UX bug — UI rendered DESC)
+    # 16 get_project_summary tasks ordered by priority ASC (operator-caught UX bug — UI rendered DESC)
     ordering_pid = f"{prefix}-ordering-probe"
     create_project(project_id=ordering_pid, name="ordering probe", supervisor="supervisor", priority=10)
     ordering_phase = f"{ordering_pid}-phase"

@@ -147,6 +147,32 @@ def main() -> int:
             leaks[path] = matches
     _check("shipped surfaces contain no private fleet identity literals", not leaks, leaks)
 
+    # Durable recurrence guard (the "extend the scan" gatekeeper recommended on PR#101):
+    # PERSONAL name + operator MACHINE profile must not appear ANYWHERE in the tracked
+    # tree — including tests/ and migrations/, which are outside SHIPPED_SURFACES but
+    # still ship in a public clone. This is narrower than PRIVATE_NAME_PATTERN on purpose:
+    # it flags only personal/machine identity (jesse, ff-profile-mira), NOT generic fleet
+    # ROLE names (conductor/weaver), which are acceptable test data.
+    import subprocess
+    try:
+        grep = subprocess.run(
+            ["git", "grep", "-nIE", "-i", r"\bjesse\b|ff-profile-mira"],
+            cwd=str(ROOT), capture_output=True, text=True,
+        )
+        pm_leaks = []
+        for line in grep.stdout.splitlines():
+            if not line.strip():
+                continue
+            file_path = line.split(":", 1)[0]
+            if file_path == "tests/fleet_identity_deumbilical_acceptance.py":
+                continue  # this scanner names the pattern in its own code/comments
+            if "/home/mira" in line:
+                continue  # legit de-umbilical negative-test guards assert the absence of this path
+            pm_leaks.append(line)
+        _check("no personal/machine operator identity (jesse / ff-profile-mira) anywhere in the tree", not pm_leaks, pm_leaks)
+    except Exception as exc:  # git unavailable — don't fail-open silently
+        _check("personal/machine identity scan ran (git available)", False, str(exc))
+
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
         return 1
