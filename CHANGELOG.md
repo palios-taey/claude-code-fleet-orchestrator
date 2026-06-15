@@ -4,6 +4,30 @@
 
 - No unreleased changes recorded.
 
+## v1.8.2 - 2026-06-14
+
+- Added a `test` extra (`pip install -e ".[test]"`) so a fresh install can run the acceptance suite (the FastAPI TestClient needs `httpx`, which is not a runtime dependency); README documents the real, script-style way to run the suite. (#98)
+- Fixed a long-standing version drift: `fleet_orchestrator/version.py` had stayed at `1.6.0` across the v1.7.0/v1.8.0/v1.8.1 tags, so every install since v1.7.0 misreported its version. Bumped to 1.8.2; added a fail-loud `version-tag-consistency` workflow (a release tag that does not match `version.py` fails), a `RELEASING.md`, derived the version-identity test's expected value from the source of truth (it had hardcoded `1.6.0`), and wired that test into the ship gate. (#99)
+
+## v1.8.1 - 2026-06-14
+
+- Zero operator identity: the forced-subrole gate ships a generic template (scout → code → audit → review → approval) with stage owners resolved from `ORCH_GATE_OWNERS`; the dashboard chat target comes from the configured session list; operator session/role names and codenames removed from all defaults, fallbacks, comments, and examples, enforced by a de-umbilical acceptance test so it cannot regress.
+
+## v1.8.0 - 2026-06-14
+
+- Adoption-ready: pinned `requirements.txt`, AI-native adopter README + contributor `CLAUDE.md`, and a doc-currency CI gate that blocks docs referencing nonexistent functions/files/env-vars/CLI commands.
+- Private by default and self-contained: mutable API/dashboard binds `127.0.0.1` by default with optional `ORCH_AUTH_TOKEN`; no operator umbilical (zero hardcoded operator paths/IPs; missing config fails loud).
+- Autonomous accountability: stop-discipline keep-going with clean stop on declared `AWAIT:<kind>:<detail>` waits; worker-liveness TTL auto-requeue + supervisor wake; one-verb peer dispatch (`taey-task dispatch`); evidence-gated completion across CLI and API; human-review gates as first-class stop states.
+- Adversarial release discipline: `r5-audit-gate` (two independent audits on risky-path changes before merge) now covers the state-mutating `taey-*` CLIs; acceptance tests require an isolated namespace.
+
+## v1.7.0 - 2026-06-11
+
+- Consolidation: a single, pip-installable, AI-native `fleet_orchestrator` package (removed the `lib/` namespace, import-shim, duplicate config, and hardcoded operator path) with a `fleet-orchestrator-api` console-script entrypoint and safe-by-default `127.0.0.1` bind.
+- Trust: introduced the structural `r5-audit-gate` (two independent adversarial auditors must post a `success` status on the exact SHA before merge, enforced by branch protection), plus completion gate, stranger-install gate, and a re-runnable live-capability ledger.
+- Stop-discipline engine: tool-only liveness heartbeat, default-on supervisor keep-going, peer-liveness end to the dispatch busy-loop, actively-worked `blocked_on` release, evidence-required completion keystone.
+- Dynamic context: per-session wake packets (refs + memory + rules) with an unforgeable nonce envelope against prompt injection, decision receipts, forced sub-role gate template, and the signal/clock/task-state loop engine.
+- Robustness/security: wake-packet selection no longer renders empty, dotenv quote-stripping, atomic lock-first task claim, Cypher-injection defense-in-depth, `update_task_status` owner preservation, dashboard panel/slug/project-detail fixes.
+
 ## v1.6.0 - 2026-06-02
 
 - Added a public read-only dashboard surface (`fleet_orchestrator/public_readonly.py`, `scripts/orch-public`, `ui/public_index.html`, `ui/static/public-app.js`): GET-only by construction (no write/mutate/notify route exists in the app), fail-closed session allowlist (`ORCH_PUBLIC_SHOW_SESSIONS`, default approved sessions only), outbound field allowlist with operator-path/host scrubbing, by-id backstop (`ORCH_PUBLIC_HIDE_PROJECT_IDS`), pointer-only refs (file contents never served), `127.0.0.1` bind, sanitized `/health` (no infra detail), and disabled interactive API docs (`/docs`, `/redoc`, `/openapi.json`). Intended for a single read-only tunnel route; never the live mutable API.

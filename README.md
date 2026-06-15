@@ -10,7 +10,7 @@ Motivating scenario: you have `supervisor`, `worker-codex`, and `worker-gemini` 
 
 Screenshot: local `:5005` read-only dashboard view with real fleet state. The operator API/dashboard runs on `:5002`; `:5005` is a separate read-only dashboard surface served by `scripts/orch-public`, useful when you want a scrubbed view without mutable routes.
 
-Status: v1.6.0, active single-user local tool, Apache-2.0 licensed. It is mature enough to run its own ship gates, but it still expects a technical operator comfortable with local Redis, Neo4j, and Claude Code hook wiring.
+Status: active single-user local tool, Apache-2.0 licensed (see [CHANGELOG.md](CHANGELOG.md) and the GitHub releases for the current version — the version is not duplicated here, where it would drift). It is mature enough to run its own ship gates, but it still expects a technical operator comfortable with local Redis, Neo4j, and Claude Code hook wiring.
 
 ## Mental Model
 
