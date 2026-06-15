@@ -53,7 +53,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 |---|---|---|
 | `ORCH_AUTH_TOKEN` | unset (tokenless mutable API) | Bearer token gating mutable methods — see posture above. |
 | `ORCH_REF_ALLOWED_ROOT` | unset | Filesystem sandbox root for `[ref:]` reads; reads outside are refused. |
-| `ORCH_SESSION_IDS` | `""` | Dashboard `/api/sessions` **view filter only** — does not affect enforcement. |
+| `ORCH_SESSION_IDS` | `""` | Optional per-target filter for the dashboard `/api/sessions` view AND the notify/wake endpoints. When **empty (default)** the filter is OFF (any target accepted — the API's real boundary is `ORCH_AUTH_TOKEN`/loopback); when **set**, an unlisted target raises 400. Does not affect task-completion enforcement. |
 | `ORCH_SESSION_ROOTS` | `""` | Maps sessions → repo roots for context. |
 | `ORCH_RULES_ROOT` | `""` | Directory of rule files surfaced in context. |
 
