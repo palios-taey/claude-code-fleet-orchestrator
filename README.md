@@ -301,4 +301,5 @@ The authoritative list of acceptance scripts and the exact per-test environment 
 - [SETUP.md](SETUP.md): operator install flow and lifecycle details.
 - [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md): guided first supervised loop.
 - [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md): markdown plan format.
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every environment flag the orchestrator reads — default, what it gates, and its classification. Core accountability (completion-evidence, supervisor keep-going) is hardcoded with no disable flag.
 - [SECURITY.md](SECURITY.md): security posture and reporting.
