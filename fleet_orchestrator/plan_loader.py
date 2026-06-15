@@ -162,7 +162,14 @@ def _parse_meta(meta_blob: str) -> Dict[str, Any]:
                 continue
             meta.setdefault("refs", []).append(ref)
         elif key in {"tags", "depends"}:
-            meta[key] = [part.strip() for part in value.split(",") if part.strip()]
+            # ACCUMULATE across repeated brackets (like `ref` above), don't overwrite.
+            # A task may carry multiple `[depends: x]` tags AND/OR comma lists
+            # (`[depends: a,b]`); the prior `meta[key] = [...]` kept only the LAST
+            # bracket, silently dropping the others -> multi-dependency tasks were
+            # under-gated (surfaced as ready while an unmet dep remained).
+            meta.setdefault(key, []).extend(
+                part.strip() for part in value.split(",") if part.strip()
+            )
         else:
             meta[key] = value
     return meta
