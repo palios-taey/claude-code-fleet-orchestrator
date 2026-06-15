@@ -10,7 +10,7 @@ inconsistently. So `_peer_actively_working_task` keys on the tool-only heartbeat
   - heartbeat STALE/absent                  -> stopped/dropped/dead  -> NOT working
 This subsumes PR#39 (a stopped/dead peer's heartbeat goes stale -> BLOCK) AND fixes the
 CLI peers (heartbeat fresh while working, even though idle is stuck). Production oracle:
-live Neo4j 10.0.0.163:7689 + Redis 127.0.0.1.
+a live Neo4j + Redis (configured via ORCH_NEO4J_URI / ORCH_REDIS_HOST).
 """
 from __future__ import annotations
 

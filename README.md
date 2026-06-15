@@ -167,7 +167,7 @@ taey-task update demo::build-1 completed --evidence '{"commit_sha":"abc123","gat
 A human-review gate records a question that must be answered by a person:
 
 ```bash
-taey-question create-gate demo::build demo::human-review "Ship this artifact?" --reviewer jesse
+taey-question create-gate demo::build demo::human-review "Ship this artifact?" --reviewer operator
 taey-question answer <question-id> "Ship it" --from supervisor
 ```
 
@@ -301,4 +301,6 @@ The authoritative list of acceptance scripts and the exact per-test environment 
 - [SETUP.md](SETUP.md): operator install flow and lifecycle details.
 - [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md): guided first supervised loop.
 - [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md): markdown plan format.
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every environment flag the orchestrator reads — default, what it gates, and its classification. Core accountability (completion-evidence, supervisor keep-going) is hardcoded with no disable flag.
+- [AUDIT.md](AUDIT.md): reviewer entry point — audit the code against its stated claims (for any code review of this repo).
 - [SECURITY.md](SECURITY.md): security posture and reporting.

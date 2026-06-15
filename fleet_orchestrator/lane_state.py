@@ -3,6 +3,14 @@
 This module deliberately does not choose a lane. It reads existing fleet
 signals, estimates each lane's current survival state, and appends calibration
 events that later policy code can consume.
+
+STATUS (2026-06-15): a measurement SCAFFOLD shipped ahead of integration — NOT
+yet wired. Nothing in the production tree imports it (only its acceptance test
+does): no producer emits calibration events and no consumer reads the estimates.
+It is intentionally additive/decoupled (passive-first v1); "added" means the
+module + tests exist, NOT that the fleet is collecting data. Wiring producers
+(notify-hook events -> observe) and consumers (routing policy) is a separate
+tracked follow-up.
 """
 
 from __future__ import annotations
