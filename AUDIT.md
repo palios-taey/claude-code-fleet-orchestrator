@@ -2,10 +2,10 @@
 
 **You are auditing this repository. Read this, then verify it against the source — do not trust it.**
 
-This file is the single entry point for any code review of `claude-code-fleet-orchestrator`. It states, in falsifiable terms, what the system **claims** to do and is **intended** to do, and points to where each claim lives. Your job is to **clone the repo at the reviewed commit and check the code against every claim below** — confirm it, or flag the gap.
+This file is the single entry point for any code review of `claude-code-fleet-orchestrator`. It states, in falsifiable terms, what the system **claims** to do and is **intended** to do, and points to where each claim lives. Your job is to **read the published repo and check the code against every claim below** — confirm it, or flag the gap.
 
 ## How to audit (non-negotiable)
-1. **The source at the reviewed SHA is the only oracle.** Not this document, not the maintainer's summary, not a dispatch packet. Clone/fetch `https://github.com/palios-taey/claude-code-fleet-orchestrator` at the exact SHA you were given and read the code.
+1. **The published source is the only oracle.** Not this document, not the maintainer's summary, not a dispatch packet. Read `https://github.com/palios-taey/claude-code-fleet-orchestrator` (the repo as published — review what's there; you are not expected to navigate to a specific commit).
 2. **Enumerate yourself.** This doc may be incomplete or wrong. Don't rely on its lists — grep the source. Flag anything security- or accountability-relevant that the code does and this doc does **not** claim (unclaimed surface) as well as anything this doc claims that the code does **not** deliver (overclaim).
 3. **This document is itself under audit.** Every claim here is a claim *about the code*. If a claim is false against the source, that is a finding — report it. Do not endorse a claim you did not verify.
 4. **Three-register every finding** (Observed / Inferred / Unknown) with `file:line`. Default to BLOCK when you cannot verify.
