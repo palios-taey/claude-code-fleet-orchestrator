@@ -152,7 +152,7 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         if not _evidence_value_well_formed(key, text):
             raise CompletionEvidenceError(
                 f"completion evidence {key!r}={text!r} is not well-formed "
-                f"(commit_sha=7-40 hex, gate_run_id>=3 id-chars, production_observation>=8 chars)"
+                f"(commit_sha=4-64 hex, gate_run_id>=3 id-chars, production_observation>=8 chars)"
             )
         normalized[key] = text
     if not normalized:

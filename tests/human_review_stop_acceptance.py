@@ -234,7 +234,7 @@ def main() -> int:
             LAZY_TASK,
             "in_progress",
             owner=SUP,
-            blocked_on="waiting on Jesse",
+            blocked_on="waiting on a person",
             config=CFG,
         )
         _check(
