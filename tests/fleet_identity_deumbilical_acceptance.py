@@ -44,6 +44,8 @@ PRIVATE_NAME_PATTERN = re.compile(
 )
 SHIPPED_SURFACES = [
     "README.md",
+    ".env.example",  # the file README tells users to `cp` — a 2026-06-15 DR audit found
+                     # the whole fleet topology (conductor/weaver/.../project IDs) baked here.
     "docs/CAPABILITIES.md",
     "docs/SHIPPABILITY.md",
     "fleet_orchestrator/accountability_ledger.py",
