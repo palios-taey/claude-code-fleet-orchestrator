@@ -18,7 +18,7 @@ This file is the single entry point for any code review of `claude-code-fleet-or
 ## The invariant claims (verify each against source)
 
 **Accountability (claimed unconditional — no flag, no bypass):**
-- C1. **No task reaches `completed` without passing the evidence gate.** `_validate_terminal_status_write` runs first in `update_task_status` (`orch_schema.py`), no env guard; the only writes that set `status='completed'` are *after* that gate. Verify there is no Cypher/DB path that sets a task completed outside `update_task_status`.
+- C1. **No task reaches `completed` without passing the evidence gate.** `_validate_terminal_status_write` is called in `update_task_status` (`orch_schema.py:2521`) — after local/driver setup but **before any Cypher write**; the only `SET t.status='completed'` writes (`:2539`, `:2582`) are both inside that function, after the gate. `create_task` (`:2294`) likewise gates a terminal `initial_status`. No env guard wraps either call. Verify there is no Cypher/DB path that sets a task `completed` outside this gate. (Wording note: the gate is *not* literally the first statement — local-var/driver setup precedes it — but it precedes all DB writes; a 2026-06-15 reviewer correctly flagged the looser "runs first" phrasing.)
 - C2. **Supervisor keep-going has no off-switch.** Hardcoded; the former `CF_SUPERVISOR_DISPATCH` flag was removed (comment remains). Verify no flag re-introduces a stop-while-ready-work bypass.
 - C3. **The evidence gate checks shape, not truth.** It validates evidence *format* (e.g. `commit_sha` is 4–64 hex), and explicitly cannot verify a SHA exists (no git at runtime). Claim is bounded honestly — verify the boundary is as stated, not stronger.
 
