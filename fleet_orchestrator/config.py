@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
@@ -302,66 +303,105 @@ _async_redis_config: Optional[tuple[str, int, str, str]] = None
 _neo4j_driver = None
 _neo4j_driver_config: Optional[tuple[str, Optional[str], Optional[str], str]] = None
 
+# Lazy-init must be ATOMIC. The clients run under a threadpool (FastAPI
+# run_in_threadpool), so concurrent cold-start requests race the lazy init.
+# The original code published the client (``_sync_pool``/``_neo4j_driver``)
+# BEFORE recording its config tuple, with no lock — so a second thread could
+# observe "client present, config still None", read None != config_tuple, and
+# wrongly raise the "already initialized with a different configuration" guard.
+# If the first thread was then interrupted in that window the process stayed
+# *permanently* broken (client set, config None forever) — a fleet-wide :5002
+# outage (3rd occurrence 2026-06-15). Fix: serialize init under a lock and set
+# the config tuple BEFORE publishing the client, so no thread can ever see a
+# half-initialized singleton. The fast path stays lock-free.
+_sync_redis_lock = threading.Lock()
+_async_redis_lock = threading.Lock()
+_neo4j_driver_lock = threading.Lock()
+
 
 def _redis_config_tuple(cfg: OrchConfig) -> tuple[str, int, str, str]:
     return (cfg.redis_host, cfg.redis_port, cfg.redis_sentinels, cfg.redis_sentinel_master)
+
+
+def _check_sync_redis_config(config_tuple: tuple[str, int, str, str]) -> None:
+    if (_sync_pool is not None or _sentinel_sync is not None) and _sync_redis_config != config_tuple:
+        raise OrchConfigError(
+            "Redis sync client already initialized with a different configuration; restart the process to change ORCH_REDIS_*"
+        )
 
 
 def get_redis_sync(config: Optional[OrchConfig] = None) -> redis.Redis:
     global _sync_pool, _sentinel_sync, _sync_redis_config
     cfg = config or OrchConfig()
     config_tuple = _redis_config_tuple(cfg)
-    if (_sync_pool is not None or _sentinel_sync is not None) and _sync_redis_config != config_tuple:
-        raise OrchConfigError(
-            "Redis sync client already initialized with a different configuration; restart the process to change ORCH_REDIS_*"
-        )
     sentinels = _parse_sentinels(cfg.redis_sentinels)
 
+    # Fast path (lock-free): already initialized. Config is set before the
+    # client is published, so seeing a client guarantees seeing its config.
+    if _sync_pool is not None or _sentinel_sync is not None:
+        _check_sync_redis_config(config_tuple)
+    else:
+        with _sync_redis_lock:
+            _check_sync_redis_config(config_tuple)  # re-check under lock
+            if _sync_pool is None and _sentinel_sync is None:
+                if sentinels:
+                    from redis.sentinel import Sentinel
+
+                    new_sentinel = Sentinel(sentinels, socket_timeout=3, decode_responses=True)
+                    _sync_redis_config = config_tuple   # config BEFORE publish
+                    _sentinel_sync = new_sentinel
+                else:
+                    new_pool = redis.ConnectionPool(
+                        host=cfg.redis_host,
+                        port=cfg.redis_port,
+                        decode_responses=True,
+                        max_connections=20,
+                    )
+                    _sync_redis_config = config_tuple   # config BEFORE publish
+                    _sync_pool = new_pool
+
     if sentinels:
-        if _sentinel_sync is None:
-            from redis.sentinel import Sentinel
-
-            _sentinel_sync = Sentinel(sentinels, socket_timeout=3, decode_responses=True)
-            _sync_redis_config = config_tuple
         return _sentinel_sync.master_for(cfg.redis_sentinel_master, socket_timeout=3)
-
-    if _sync_pool is None:
-        _sync_pool = redis.ConnectionPool(
-            host=cfg.redis_host,
-            port=cfg.redis_port,
-            decode_responses=True,
-            max_connections=20,
-        )
-        _sync_redis_config = config_tuple
     return redis.Redis(connection_pool=_sync_pool)
+
+
+def _check_async_redis_config(config_tuple: tuple[str, int, str, str]) -> None:
+    if (_async_pool is not None or _sentinel_async is not None) and _async_redis_config != config_tuple:
+        raise OrchConfigError(
+            "Redis async client already initialized with a different configuration; restart the process to change ORCH_REDIS_*"
+        )
 
 
 def get_redis_async(config: Optional[OrchConfig] = None) -> aioredis.Redis:
     global _async_pool, _sentinel_async, _async_redis_config
     cfg = config or OrchConfig()
     config_tuple = _redis_config_tuple(cfg)
-    if (_async_pool is not None or _sentinel_async is not None) and _async_redis_config != config_tuple:
-        raise OrchConfigError(
-            "Redis async client already initialized with a different configuration; restart the process to change ORCH_REDIS_*"
-        )
     sentinels = _parse_sentinels(cfg.redis_sentinels)
 
+    if _async_pool is not None or _sentinel_async is not None:
+        _check_async_redis_config(config_tuple)
+    else:
+        with _async_redis_lock:
+            _check_async_redis_config(config_tuple)  # re-check under lock
+            if _async_pool is None and _sentinel_async is None:
+                if sentinels:
+                    from redis.asyncio.sentinel import Sentinel as AsyncSentinel
+
+                    new_sentinel = AsyncSentinel(sentinels, socket_timeout=3, decode_responses=True)
+                    _async_redis_config = config_tuple   # config BEFORE publish
+                    _sentinel_async = new_sentinel
+                else:
+                    new_pool = aioredis.ConnectionPool(
+                        host=cfg.redis_host,
+                        port=cfg.redis_port,
+                        decode_responses=True,
+                        max_connections=20,
+                    )
+                    _async_redis_config = config_tuple   # config BEFORE publish
+                    _async_pool = new_pool
+
     if sentinels:
-        if _sentinel_async is None:
-            from redis.asyncio.sentinel import Sentinel as AsyncSentinel
-
-            _sentinel_async = AsyncSentinel(sentinels, socket_timeout=3, decode_responses=True)
-            _async_redis_config = config_tuple
         return _sentinel_async.master_for(cfg.redis_sentinel_master, socket_timeout=3)
-
-    if _async_pool is None:
-        _async_pool = aioredis.ConnectionPool(
-            host=cfg.redis_host,
-            port=cfg.redis_port,
-            decode_responses=True,
-            max_connections=20,
-        )
-        _async_redis_config = config_tuple
     return aioredis.Redis(connection_pool=_async_pool)
 
 
@@ -376,17 +416,30 @@ def get_neo4j_driver(config: Optional[OrchConfig] = None):
 
     cfg = config or OrchConfig()
     config_tuple = (cfg.neo4j_uri, cfg.neo4j_user, cfg.neo4j_pass, cfg.neo4j_db)
-    if _neo4j_driver is not None and _neo4j_driver_config != config_tuple:
-        raise OrchConfigError(
-            "Neo4j driver already initialized with a different configuration; restart the process to change ORCH_NEO4J_*"
-        )
-    if _neo4j_driver is None:
+
+    # Fast path (lock-free): already initialized. Config is set before the driver
+    # is published below, so observing a non-None driver guarantees its config.
+    if _neo4j_driver is not None:
+        if _neo4j_driver_config != config_tuple:
+            raise OrchConfigError(
+                "Neo4j driver already initialized with a different configuration; restart the process to change ORCH_NEO4J_*"
+            )
+        return _neo4j_driver
+
+    with _neo4j_driver_lock:
+        if _neo4j_driver is not None:  # re-check under lock
+            if _neo4j_driver_config != config_tuple:
+                raise OrchConfigError(
+                    "Neo4j driver already initialized with a different configuration; restart the process to change ORCH_NEO4J_*"
+                )
+            return _neo4j_driver
         if cfg.neo4j_user and cfg.neo4j_pass:
-            _neo4j_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=(cfg.neo4j_user, cfg.neo4j_pass))
+            new_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=(cfg.neo4j_user, cfg.neo4j_pass))
         else:
-            _neo4j_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=None)
-        _neo4j_driver_config = config_tuple
-    return _neo4j_driver
+            new_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=None)
+        _neo4j_driver_config = config_tuple   # config BEFORE publish
+        _neo4j_driver = new_driver
+        return new_driver
 
 
 def get_neo4j_session(config: Optional[OrchConfig] = None):
