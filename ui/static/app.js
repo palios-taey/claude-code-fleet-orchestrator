@@ -660,7 +660,7 @@ elements.chatHistory.addEventListener("click", async (event) => {
     await fetchJson(CHAT_PROMOTE_ENDPOINT(selectedLineage()), {
       method: "POST",
       body: JSON.stringify({
-        sender: message.sender || "jesse",
+        sender: message.sender || "operator",
         reply: message.text || "",
       }),
     });
@@ -687,7 +687,7 @@ elements.chatOpenQuestions.addEventListener("click", async (event) => {
   try {
     await fetchJson(UI_QUESTION_ANSWER_ENDPOINT(questionId), {
       method: "POST",
-      body: JSON.stringify({ answer, answered_by: "jesse" }),
+      body: JSON.stringify({ answer, answered_by: "operator" }),
     });
     await Promise.all([loadChat(), loadSessions(), loadSessionProjects()]);
     ensureSelectedProject();
@@ -714,7 +714,7 @@ elements.chatForm.addEventListener("submit", async (event) => {
   // Optimistic echo: show the message in the thread immediately (like a normal
   // AI chat), expand the panel if collapsed, then reconcile against the server.
   const chat = state.chatByLineage.get(target) || { lineage: target, messages: [], open_questions: [] };
-  chat.messages = [...(chat.messages || []), { id: `local-${Date.now()}`, sender: "jesse", role: "user", text, ts: "sending…" }];
+  chat.messages = [...(chat.messages || []), { id: `local-${Date.now()}`, sender: "operator", role: "user", text, ts: "sending…" }];
   state.chatByLineage.set(target, chat);
   elements.chatInput.value = "";
   updateChatButtonState();
@@ -726,7 +726,7 @@ elements.chatForm.addEventListener("submit", async (event) => {
     // The chat endpoint only stores; delivery to the live session is the notify path.
     await fetchJson(CHAT_ENDPOINT(target), {
       method: "POST",
-      body: JSON.stringify({ sender: "jesse", role: "user", text }),
+      body: JSON.stringify({ sender: "operator", role: "user", text }),
     });
     await fetchJson(SESSION_NOTIFY_ENDPOINT(target), {
       method: "POST",

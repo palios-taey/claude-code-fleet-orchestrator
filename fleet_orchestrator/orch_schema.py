@@ -1034,7 +1034,7 @@ def project_has_non_human_nonterminal_work(project_id: str,
 
 # A blocked_on releases a session to STOP only if it names a REAL, non-terminal task (a live
 # resolver) that is not the waiter itself and not part of a blocked_on cycle. This is the
-# narrow, catastrophe-preventing core: a free-text human gate ("waiting on Jesse") is not a
+# narrow, catastrophe-preventing core: a free-text human gate ("waiting on a person") is not a
 # task -> not a resolver -> keep working. We deliberately do NOT inspect the DEPENDS_ON
 # execution graph for runnability here: external audit showed that can't be made correct
 # without a re-wake/terminalizer mechanism the orchestrator doesn't yet have, and attempting
@@ -1065,7 +1065,7 @@ def _declared_await_signal(blocked_on: Optional[str]) -> Optional[Dict[str, str]
 
     Shape: ``AWAIT:<kind>:<detail>`` where kind is one of
     human-review/family-consent/external-signal. This is deliberately exact
-    and does not scan arbitrary prose, so "waiting on Jesse" remains rejected.
+    and does not scan arbitrary prose, so "waiting on a person" remains rejected.
     """
     if not _await_signal_gates_enabled() or not blocked_on:
         return None
@@ -1099,7 +1099,7 @@ def _blocked_on_has_live_resolver(blocked_on: Optional[str],
                                   config: Optional[OrchConfig] = None) -> bool:
     """True only if `blocked_on` is the id of a task that will actually make progress and
     wake the session. The disciplined convention is that `blocked_on` IS a task id (an
-    exact value), not prose -- so a free-text human gate ("waiting on Jesse's pull-forward
+    exact value), not prose -- so a free-text human gate ("waiting on a person's pull-forward
     decision") names no resolver and returns False, keeping the session on its work.
 
     We do NOT scan prose for embedded ids: "see unrelated-live-task" must not silently

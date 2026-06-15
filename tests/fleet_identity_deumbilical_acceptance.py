@@ -34,7 +34,11 @@ FLEET_OWNER_NAMES = {
     "taey-ed",
 }
 PRIVATE_NAME_PATTERN = re.compile(
-    r"(?i:\b(conductor|weaver|tutor|treasurer|hunter|taey-ed)\b|taeys-hands)"
+    # operator personal name(s) — a repo-grounded audit (2026-06-15) found `"jesse"`
+    # hardcoded as a default in tasks_api.py + chat_layer.py that this scan had
+    # missed because the pattern only listed fleet roles/codenames, not the operator.
+    r"(?i:\bjesse\b)"
+    r"|(?i:\b(conductor|weaver|tutor|treasurer|hunter|taey-ed)\b|taeys-hands)"
     r"|\b(Gaia|Logos|Cosmos|Clarity|Horizon|Prophet|Brain|Math|PATHOS|POTENTIAL|TRUTH)\b"
     r"|\bthe Map\b|\bthe Family\b|\bFamily\b",
 )

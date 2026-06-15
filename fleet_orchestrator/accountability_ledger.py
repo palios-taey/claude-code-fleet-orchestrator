@@ -10,7 +10,7 @@ HONEST SCOPE — do NOT overstate this file (gatekeeper audit 2026-06-04, ANTIFA
   by the very instance it records. So the chain is tamper-EVIDENT against accidents and PASSIVE
   corner-cutting, but it is NOT tamper-PROOF against a determined deceiver who holds the pen: such an
   instance could truncate the tail or fully re-chain the file and verify_chain() would still read OK.
-  Closing THAT requires an anchor hosted where this instance has no write/admin root (Jesse's call).
+  Closing THAT requires an anchor hosted where this instance has no write/admin root (the operator's call).
   It is NOT claimed here.
 - What actually binds a possibly-deceptive instance is independent EXECUTION: the orchestrator running
   the verification gate itself (plan P1) and a separate gatekeeper instance doing full-code review

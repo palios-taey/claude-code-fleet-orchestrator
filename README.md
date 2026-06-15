@@ -167,7 +167,7 @@ taey-task update demo::build-1 completed --evidence '{"commit_sha":"abc123","gat
 A human-review gate records a question that must be answered by a person:
 
 ```bash
-taey-question create-gate demo::build demo::human-review "Ship this artifact?" --reviewer jesse
+taey-question create-gate demo::build demo::human-review "Ship this artifact?" --reviewer operator
 taey-question answer <question-id> "Ship it" --from supervisor
 ```
 

@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("task_id")
     gate.add_argument("prompt")
     gate.add_argument("--question-id", default="")
-    gate.add_argument("--reviewer", default="jesse")
+    gate.add_argument("--reviewer", default="operator")
     gate.add_argument("--from", dest="sender", default="")
     gate.add_argument("--priority", type=int, default=50)
     gate.add_argument("--refs", help="JSON array of ref objects to attach to the gate")

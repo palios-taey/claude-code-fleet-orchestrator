@@ -265,7 +265,7 @@ def list_tasks() -> Dict[str, Any]:
 @app.get("/api/tasks/ranked")
 def list_ranked() -> Dict[str, Any]:
     tasks = get_ready_tasks(_cfg())
-    # Sort by priority ASC (lowest number = highest priority per Jesse convention).
+    # Sort by priority ASC (lowest number = highest priority per project convention).
     # Schema helper already does this; this is belt-and-suspenders for any path that
     # bypasses the helper. Missing priority sorts last via large default.
     tasks.sort(key=lambda t: t.get("priority") if t.get("priority") is not None else 999999999)
@@ -481,7 +481,7 @@ async def create_human_review_gate_endpoint(req: Request) -> Dict[str, Any]:
         task_id = str(data.get("task_id") or "").strip()
         question_id = str(data.get("question_id") or f"question-{uuid.uuid4().hex[:8]}").strip()
         prompt = str(data.get("prompt") or data.get("question") or "").strip()
-        reviewer = str(data.get("reviewer") or data.get("human") or "jesse").strip()
+        reviewer = str(data.get("reviewer") or data.get("human") or "operator").strip()
         requested_by = str(data.get("from") or data.get("requested_by") or "orch-human-review").strip()
         if not phase_id:
             raise HTTPException(status_code=422, detail="phase_id is required")
@@ -536,7 +536,7 @@ async def ui_answer_human_review_gate_endpoint(question_id: str, req: Request) -
         raise HTTPException(status_code=403, detail="origin does not match dashboard host")
     data = await req.json()
     answer = str(data.get("answer") or data.get("verdict") or "").strip()
-    answered_by = str(data.get("answered_by") or data.get("from") or "jesse").strip()
+    answered_by = str(data.get("answered_by") or data.get("from") or "operator").strip()
     if not answer:
         raise HTTPException(status_code=422, detail="answer is required")
     try:

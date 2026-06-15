@@ -228,7 +228,7 @@ async def promote_reply_to_memory(
     reply: str,
     *,
     lineage: str,
-    sender: str = "jesse",
+    sender: str = "operator",
     memory_root: Path = MEMORY_BASE,
 ) -> Dict[str, Any]:
     lineage_value = _normalize_lineage(lineage)
@@ -289,7 +289,7 @@ async def chat_post(lineage: str, req: Request) -> Dict[str, Any]:
             raise ValueError(f"role must be one of {sorted(CLIENT_ROLES)}")
         message = await append_message(
             lineage,
-            sender=data.get("sender") or "jesse",
+            sender=data.get("sender") or "operator",
             role=role,
             text=data.get("text") or data.get("message") or "",
             metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else None,
@@ -326,7 +326,7 @@ async def chat_promote(lineage: str, req: Request) -> Dict[str, Any]:
         return await promote_reply_to_memory(
             data.get("reply") or data.get("text") or "",
             lineage=lineage,
-            sender=data.get("sender") or "jesse",
+            sender=data.get("sender") or "operator",
         )
     except ValueError as exc:
         raise _http_error(exc)
