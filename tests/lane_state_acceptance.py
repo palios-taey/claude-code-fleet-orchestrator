@@ -158,11 +158,11 @@ def main() -> int:
         user_dir = root / "systemd" / "user"
         user_dir.mkdir(parents=True)
         (user_dir / "taey-display-3.service").write_text(
-            "ExecStart=/usr/bin/firefox --profile ff-profile-mira-claude https://claude.ai/new\n",
+            "ExecStart=/usr/bin/firefox --profile ff-profile-claude https://claude.ai/new\n",
             encoding="utf-8",
         )
         (root / "systemd" / "machine.env.template").write_text(
-            'TAEY_DISPLAY_4="gemini:ff-profile-mira-gemini:https://gemini.google.com/app"\n',
+            'TAEY_DISPLAY_4="gemini:ff-profile-gemini:https://gemini.google.com/app"\n',
             encoding="utf-8",
         )
         lanes = {lane.lane_id: lane for lane in discover_chat_lanes(taeys_hands_root=root)}

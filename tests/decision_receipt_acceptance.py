@@ -131,7 +131,7 @@ def _wake_packet_wiring_contract() -> None:
 
 async def _chat_wiring_async(fake: FakeRedis) -> None:
     async_redis = FakeAsyncRedis()
-    await chat_layer.append_message("conductor", "jesse", "hello", redis_client=async_redis)
+    await chat_layer.append_message("conductor", "operator", "hello", redis_client=async_redis)
     await chat_layer.escalate("conductor", "need answer", redis_client=async_redis)
 
 
@@ -198,7 +198,7 @@ def _dispatch_wake_wiring_contract() -> None:
 
 async def _chat_fail_open_async() -> None:
     async_redis = FakeAsyncRedis()
-    await chat_layer.append_message("conductor", "jesse", "hello", redis_client=async_redis)
+    await chat_layer.append_message("conductor", "operator", "hello", redis_client=async_redis)
     await chat_layer.escalate("conductor", "need answer", redis_client=async_redis)
 
 
