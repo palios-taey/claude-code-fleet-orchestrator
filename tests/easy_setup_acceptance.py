@@ -44,7 +44,12 @@ from fleet_orchestrator.easy_setup import (  # noqa: E402
 from fleet_orchestrator.tasks_api import app  # noqa: E402
 
 FAILURES: list[str] = []
-EXPECTED_RELEASE = "1.6.0"
+# Derived from the single source of truth (fleet_orchestrator/version.py) — never
+# hardcode the release literal here. A hardcoded value silently locks in a stale
+# version: this once asserted "1.6.0" while the package had moved to 1.8.x, so the
+# version-identity check "passed" against the wrong number instead of catching the
+# drift it exists to catch.
+from fleet_orchestrator.version import __version__ as EXPECTED_RELEASE  # noqa: E402
 
 
 def _assert(label: str, condition: bool, detail: object) -> None:

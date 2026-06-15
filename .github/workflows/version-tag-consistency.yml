@@ -1,0 +1,31 @@
+name: version-tag-consistency
+
+# Fail-loud release guard. The package version lives in
+# fleet_orchestrator/version.py (consumed by setup.py, __init__, easy_setup).
+# Releases are cut by pushing a `vX.Y.Z` tag — but nothing tied that tag to
+# version.py, so version.py silently sat at 1.6.0 across the v1.7.0, v1.8.0 and
+# v1.8.1 releases (every install since v1.7.0 misreported its version). This job
+# runs on tag push and FAILS the release if the tag does not match version.py,
+# so the drift can never recur silently.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: version.py must match the pushed tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python3 -c 'import ast,pathlib; ns={}; exec(pathlib.Path("fleet_orchestrator/version.py").read_text(), ns); print(ns["__version__"])')"
+          echo "pushed tag: ${tag}"
+          echo "version.py: ${pkg}"
+          if [ "${tag}" != "${pkg}" ]; then
+            echo "::error::Release tag v${tag} does not match fleet_orchestrator/version.py (${pkg}). Bump version.py before tagging."
+            exit 1
+          fi
+          echo "OK: tag and version.py agree."
