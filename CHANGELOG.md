@@ -4,6 +4,15 @@
 
 - No unreleased changes recorded.
 
+## v1.8.3 - 2026-06-15
+
+Honesty/transparency release — behavior-neutral (docs, examples, test hardening; no production logic change). Driven by a repo-grounded multi-lens audit that read the actual source.
+
+- **Operator identity removed from the public surface.** Genericized the operator's personal name and machine profile out of code defaults, UI, examples, comments, `.env.example` (which had shipped the full fleet topology), and test fixtures. (#100, #101, #102)
+- **Durable recurrence guard.** The de-umbilical acceptance test now scans the whole tracked tree (not just a curated surface list) and fails if personal/machine operator identity reappears — narrowly scoped to personal/machine identity, leaving generic fleet-role test data alone. Fails closed if `git` is unavailable. (#102)
+- **Docs match code.** New [docs/CONFIGURATION.md](docs/CONFIGURATION.md) documents all 66 environment variables with honest defaults and posture (including the tokenless-by-default mutable API, the non-env `CF_STOP_INPROGRESS` Redis enablement switch, `ACCOUNTABILITY_LEDGER_PATH`, and the `ORCH_WAKE_PACKET_ENABLED` endpoint-only scope). New [AUDIT.md](AUDIT.md) is a self-checking reviewer entry point stating the system's claims (C1–C9) and known gaps (G1–G3) with file:line. Corrected the `ORCH_SESSION_IDS` doc (empty = unrestricted, not fail-closed). (#100)
+- **Smaller fixes.** `lane_state.py` honestly labeled as a not-yet-wired measurement scaffold; wake-packet endpoint's fail-open-by-design contract documented; the `commit_sha` evidence-rejection message corrected to the real bound (4–64 hex). (#100, #101)
+
 ## v1.8.2 - 2026-06-14
 
 - Added a `test` extra (`pip install -e ".[test]"`) so a fresh install can run the acceptance suite (the FastAPI TestClient needs `httpx`, which is not a runtime dependency); README documents the real, script-style way to run the suite. (#98)
