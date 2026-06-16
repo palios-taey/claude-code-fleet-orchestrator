@@ -6,8 +6,8 @@
 ### Task: freeze-target - Freeze target SHA and audit rules [priority: 100] [owner: conductor-codex]
 Record the exact audited SHA, branches in scope, excluded local/generated artifacts, accepted risks, truth registers, severity rubric, and output paths.
 
-### Task: extract-claims - Extract every claim from shipped docs and operator surfaces [priority: 98] [owner: conductor-codex] [depends: freeze-target]
-Build a claims registry from README, AUDIT, SECURITY, SETUP, CHANGELOG, docs, workflow names, CLI help, public API docs, and comments that promise externally meaningful behavior.
+### Task: extract-claims - Build bootstrap claim registry from shipped docs and operator surfaces [priority: 98] [owner: conductor-codex] [depends: freeze-target]
+Build the initial claims registry and source inventory from README, AUDIT, SECURITY, SETUP, CHANGELOG, docs, workflow names, CLI help, public API docs, and comments that promise externally meaningful behavior. The later invariant-audit tasks must finish the line-by-line claim confirmation.
 
 ### Task: classify-claims - Classify claims by invariant and risk [priority: 95] [owner: conductor-codex] [depends: extract-claims]
 Classify each claim as security, state integrity, installability, shippability, privacy/public surface, config/env, wake/context, task lifecycle, or test/gate claim.
