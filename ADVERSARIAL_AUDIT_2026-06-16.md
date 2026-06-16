@@ -96,23 +96,7 @@ What would invalidate this finding: startup refuses non-loopback mutable API exp
 
 Recommended control: keep the documented local default, but require an explicit `ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1` for warn-only non-loopback startup.
 
-### F5 - Public readonly scrubbing does not scrub identifiers/owners
-
-Severity: Medium to Low, depending on identifier hygiene.
-
-Observed: `fleet_orchestrator/public_readonly.py:29-42` scrubs home paths, IPs, and token-like secrets from text fields.
-
-Observed: `fleet_orchestrator/public_readonly.py:237-270` returns project IDs, phase IDs, task IDs, `supervisor`, and `owner` raw.
-
-Observed: `fleet_orchestrator/public_readonly.py:394-445` exposes only GET routes, with OpenAPI/docs disabled earlier at lines 44-50.
-
-Why this matters: the claim "public readonly" is true for methods, and the secret/path scrubber exists. But raw IDs and owners can still leak operator identity if naming conventions include private session names.
-
-What would invalidate this finding: accepted public contract states IDs/owners are intentionally public, and all private fleet identity defaults are removed or transformed before reaching these fields.
-
-Recommended control: either document identifiers as public data or add a public alias/scrub layer for owner/supervisor/session-like fields.
-
-### F6 - Flat PATCH completion evidence rejects some valid evidence keys
+### F5 - Flat PATCH completion evidence rejects some valid evidence keys
 
 Severity: Medium.
 
@@ -126,7 +110,7 @@ What would invalidate this finding: flat top-level `commit_sha` and `gate_run_id
 
 Recommended control: either document that only `production_observation`, `reason`, and `error` are lifted from flat PATCH payloads, or add `commit_sha` and `gate_run_id` to the lifted request keys.
 
-### F7 - `/ship` is a readonly verdict endpoint despite being a POST
+### F6 - `/ship` is a readonly verdict endpoint despite being a POST
 
 Severity: Low.
 
@@ -138,7 +122,7 @@ What would invalidate this finding: product semantics explicitly define `/ship` 
 
 Recommended control: rename the route/response in docs to "ship verdict", or persist an explicit shipped/ship_attempt event if the API is intended to transition state.
 
-### F8 - Disabled loop declaration returns `ok: true`
+### F7 - Disabled loop declaration returns `ok: true`
 
 Severity: Low.
 
@@ -211,7 +195,6 @@ Do not treat the repo as broadly clean yet. The next cleanup pass should address
 2. Shippability evidence checking in the shippability module itself.
 3. Request-time global env mutation removal beyond the immediate allowlist.
 4. Non-loopback unauthenticated mutable API startup policy.
-5. Public readonly identifier/owner disclosure boundary.
-6. PATCH evidence contract consistency for flat vs nested evidence payloads.
-7. `/ship` and disabled-loop endpoint response semantics.
-8. Full rerun of all acceptance scripts listed in `.github/workflows/ship-gate.yml`.
+5. PATCH evidence contract consistency for flat vs nested evidence payloads.
+6. `/ship` and disabled-loop endpoint response semantics.
+7. Full rerun of all acceptance scripts listed in `.github/workflows/ship-gate.yml`.
