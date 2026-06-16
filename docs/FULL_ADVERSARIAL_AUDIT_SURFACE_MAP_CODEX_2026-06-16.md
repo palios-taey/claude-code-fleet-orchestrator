@@ -70,12 +70,12 @@ Observed shipped scripts:
 
 Initial risk hooks:
 
-- Most `taey-*` scripts call the local API selected by `ORCH_DASHBOARD_URL`.
+- Most taey CLI scripts call the local API selected by `ORCH_DASHBOARD_URL`.
 - `scripts/install` creates a venv, installs the package, may run post-install commands, and calls notify companion scripts.
 - `scripts/orch` lifecycle commands call subprocesses for API/service and notify daemon control.
 - `scripts/orch-cron` reads trigger JSON/prompt files and launches commands; it needs separate shell/argument handling audit.
 - `scripts/orch-pre-merge-gate` shells out to `gh`.
-- `scripts/verify-*` are test/verification tools but still exercise subprocess/file/HTTP surfaces.
+- The verify scripts are test/verification tools but still exercise subprocess/file/HTTP surfaces.
 
 ## Subprocess Surfaces
 
@@ -88,7 +88,7 @@ Observed subprocess call sites include:
 - `fleet_orchestrator/orch_schema.py:453`, `723`, `3669`: helper/notify paths.
 - `fleet_orchestrator/loop_engine.py:527`: loop command execution.
 - `fleet_orchestrator/easy_setup.py`: docker compose, service start, notify hook installer, and process checks.
-- `scripts/install`, `scripts/orch`, `scripts/orch-watch`, `scripts/orch-cron`, `scripts/orch-pre-merge-gate`, `scripts/taey-*`.
+- `scripts/install`, `scripts/orch`, `scripts/orch-watch`, `scripts/orch-cron`, `scripts/orch-pre-merge-gate`, and the taey CLI scripts.
 
 Initial risk hooks:
 
@@ -159,7 +159,7 @@ These are not final findings; they are surfaces requiring proof:
 1. `gate_runner.py` shell execution: determine trust boundary of gate command strings.
 2. Project `force` completion: determine all consumers of project `status='completed'`.
 3. Shippability evidence: determine whether missing `completion_evidence` on completed gate rows can pass.
-4. Disabled loops returning `ok: true`: determine docs/clients and whether this is accepted posture.
+4. Disabled loops returning `ok: true`: determine documented clients and whether this is accepted posture.
 5. Wake-packet fail-open body semantics: ensure all shipped consumers check `ok`, `enabled`, and `packet`.
 6. Session `.env` loading: verify PR #108 allowlist and prove no alternate path imports broad `ORCH_*`.
 7. Chat enabled path: route map, role validation, Redis key scope, injection boundaries.

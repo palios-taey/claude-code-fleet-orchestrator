@@ -29,7 +29,7 @@ Independently map state mutation chokepoints, env/config boundaries, shell/proce
 For every claim, trace enforcing code, bypass writers, tests, and runtime behavior. Mark Confirmed, Contradicted, Unproven, Accepted Risk, or Out of Scope.
 
 ### Task: invariant-audit-gemini - Gemini adversarial claims audit [priority: 94] [owner: conductor-gemini] [depends: surface-map-gemini]
-Audit every claim against implementation and tests. Focus on docs/README/API/CLI claims, install/release claims, and evidence that would invalidate each claim.
+Audit every claim against implementation and tests. Focus on docs, README, API, CLI, install, and release claims, plus evidence that would invalidate each claim.
 
 ### Task: invariant-audit-grok - Grok adversarial backdoor audit [priority: 94] [owner: conductor-grok] [depends: surface-map-grok]
 Audit for bypasses/backdoors independent of docs: unauthenticated mutation, force paths, direct DB writes, env poisoning, fail-open behavior, disabled features returning success, subprocess hazards, filesystem escapes, and silent fallback paths.

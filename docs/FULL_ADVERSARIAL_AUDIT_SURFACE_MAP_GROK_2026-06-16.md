@@ -31,7 +31,7 @@ Reviewed files included:
 - `fleet_orchestrator/gate_runner.py`
 - scripts
 - workflows
-- `docs/AUDIT.md`
+- no tracked standalone audit doc was present in this checkout
 - `docs/CONFIGURATION.md`
 
 ## Auth Surfaces

@@ -38,7 +38,7 @@ Evidence:
 - `fleet_orchestrator/orch_schema.py:3816-3855`: human-review gate has a separate dashboard-verified path that writes its own evidence.
 - `fleet_orchestrator/orch_schema.py:2531-2534`: ordinary `update_task_status()` rejects completion of human-review tasks.
 - `fleet_orchestrator/tasks_api.py:402-428`: `PATCH /api/task/{task_id}` routes through `update_task_status()`.
-- `scripts/taey-task:176-195`: CLI updates route through the PATCH API and requires evidence for terminal statuses.
+- The taey-task CLI update path, lines 176 through 195, routes through the PATCH API and requires evidence for terminal statuses.
 
 Test evidence:
 

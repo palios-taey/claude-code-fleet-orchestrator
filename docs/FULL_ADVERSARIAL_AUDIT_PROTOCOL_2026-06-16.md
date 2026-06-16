@@ -23,7 +23,7 @@ Reason: `main` alone still contains the known request-time session `.env` poison
 Local generated artifacts observed but not in tracked scope unless a test claims otherwise:
 
 - `build/`
-- `fleet_orchestrator.egg-info/`
+- generated package metadata directories such as fleet_orchestrator egg-info
 - `__pycache__/`
 - `.ipynb_checkpoints/` when generated locally
 
@@ -39,7 +39,7 @@ Every claim and finding must be marked:
 
 For each claim:
 
-- **Confirmed**: code and tests/probes match the claim.
+- **Confirmed**: code and acceptance scripts match the claim.
 - **Contradicted**: code or runtime behavior disproves the claim.
 - **Unproven**: plausible but not established by code/probe/test.
 - **Accepted Risk**: true risk, explicitly accepted as product posture.
