@@ -17,10 +17,10 @@ Classify each claim as security, state integrity, installability, shippability, 
 ### Task: surface-map-codex - Map all mutable/read surfaces locally [priority: 95] [owner: conductor-codex] [depends: classify-claims]
 Inventory FastAPI routes, CLI commands, scripts, subprocess calls, env vars, file IO, Redis/Neo4j writes, workflow gates, and feature flags.
 
-### Task: surface-map-gemini - Independent claims/surface map [priority: 94] [owner: conductor-gemini] [depends: classify-claims]
+### Task: surface-map-gemini - Independent claims/surface map [priority: 94] [owner: conductor-gemini] [depends: freeze-target]
 Independently map claims and public/mutable/runtime surfaces. Return Observed/Inferred/Unknown, file:line evidence, and omitted surfaces to conductor-codex.
 
-### Task: surface-map-grok - Independent code/backdoor map [priority: 94] [owner: conductor-grok] [depends: classify-claims]
+### Task: surface-map-grok - Independent code/backdoor map [priority: 94] [owner: conductor-grok] [depends: freeze-target]
 Independently map state mutation chokepoints, env/config boundaries, shell/process execution, broad exception paths, auth boundaries, and hidden force/fail-open behavior.
 
 ## Phase: analyze - Prove or Break Invariants [order: 3]
