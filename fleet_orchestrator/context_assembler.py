@@ -28,6 +28,10 @@ CORE_BUDGET_BYTES = 15 * 1024
 DEFAULT_MAX_MEMORY = 4
 DEFAULT_MAX_REFS_PER_TIER = 5
 MEMORY_BASE = Path.home() / ".claude" / "projects"
+SESSION_ENV_ALLOWLIST = {
+    "ORCH_RULES_ROOT",
+    "ORCH_SESSION_ROOTS",
+}
 UNTRUSTED_NONCE_FIELD = "untrusted_data_nonce"
 UNAVAILABLE_CONTEXT_MARKER = "UNAVAILABLE (context selection error)"
 UNTRUSTED_DATA_PREAMBLE = (
@@ -240,7 +244,10 @@ def _load_session_env(session_aliases: Iterable[str], session_roots: Dict[str, s
             continue
         key, _, value = line.partition("=")
         key = key.replace("export ", "").strip()
-        if key and key.startswith("ORCH_"):
+        # Session-local context assembly may need rules/root hints, but the
+        # shared API process must never let a per-repo .env override global
+        # store/auth/network config such as ORCH_NEO4J_* or ORCH_REDIS_*.
+        if key in SESSION_ENV_ALLOWLIST:
             os.environ.setdefault(key, value.strip())
 
 

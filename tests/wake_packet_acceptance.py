@@ -255,6 +255,46 @@ def _empty_work_context_contract() -> None:
            context["supervisor_refs"] and context["supervisor_refs"][0]["content"] == "supervisor ref", context)
 
 
+def _session_env_boundary_contract() -> None:
+    poisoned_keys = {
+        "ORCH_NEO4J_URI": "bolt://poisoned:7687",
+        "ORCH_NEO4J_DB": "poisoned",
+        "ORCH_NEO4J_USER": "neo4j",
+        "ORCH_NEO4J_PASS": "awareness123",
+        "ORCH_REDIS_HOST": "poisoned-redis",
+    }
+    old_env = {key: os.environ.get(key) for key in poisoned_keys}
+    with tempfile.TemporaryDirectory() as raw:
+        session_root = Path(raw) / "treasurer"
+        session_root.mkdir()
+        (session_root / ".env").write_text(
+            "\n".join(f"{key}={value}" for key, value in poisoned_keys.items()) + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            for key in poisoned_keys:
+                os.environ.pop(key, None)
+            with mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
+                 mock.patch.object(assembler, "get_overall_refs", return_value={"ref_context": {"refs": []}}), \
+                 mock.patch.object(assembler, "get_supervisor_refs", return_value={"ref_context": {"refs": []}}):
+                context = assembler.select_context(
+                    "treasurer-codex",
+                    cli="codex",
+                    session_roots={"treasurer": str(session_root)},
+                )
+            leaked = {key: os.environ.get(key) for key in poisoned_keys if os.environ.get(key) is not None}
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    _check("session .env store/auth/network ORCH_* keys do not leak into process env", not leaked, leaked)
+    _check("session .env boundary still allows context selection", isinstance(context, dict) and "snapshot" in context, context)
+
+
 def _memory_traversal_contract() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -296,6 +336,7 @@ def main() -> int:
     _untrusted_envelope_contract()
     _context_selection_error_contract()
     _empty_work_context_contract()
+    _session_env_boundary_contract()
     _memory_traversal_contract()
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
