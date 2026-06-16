@@ -9,7 +9,7 @@ Coordinator: `conductor-codex`, filling in for `conductor` / Claude while Claude
 Peer audit status:
 
 - `conductor-grok`: response received and incorporated.
-- `conductor-gemini`: request sent; no response was present in `taey:conductor-codex:inbox` when this summary was written.
+- `conductor-gemini`: response received and incorporated in the follow-up update to this report.
 
 Branches/SHAs considered:
 
@@ -27,6 +27,8 @@ Observed: there are still operationally serious issues. The current `main` branc
 Observed: project completion has an explicit `force: true` bypass for unfinished tasks. This is tested as intended behavior. That does not bypass task-level evidence, but it can mark a project completed while work remains incomplete. If project status is used as "done", "ship", or accountability evidence, this is a high-risk semantic bypass.
 
 Observed: shippability claims "completed with evidence", but `evaluate_shippability()` only checks gate task status. The evidence requirement is enforced upstream by the task completion path, not locally by shippability. That dependency is acceptable only if all completed task rows were produced by the gated writer and legacy/manual database writes are out of scope.
+
+Observed: Gemini endorsed the C1-C9 invariants and G1-G3 documented gaps, but found three API-contract sharp edges: flat completion evidence accepts `production_observation` but not flat `commit_sha`/`gate_run_id`, `/ship` returns a verdict without mutating project state, and disabled loops return `ok: true`.
 
 Inferred: this repo should not be merged broadly as "clean" until PR #108 is merged and the project-completion/shippability semantics are explicitly reconciled. PR #108 itself is narrowly scoped and should be considered for merge because it fixes a real production outage class without expanding behavior.
 
@@ -110,6 +112,44 @@ What would invalidate this finding: accepted public contract states IDs/owners a
 
 Recommended control: either document identifiers as public data or add a public alias/scrub layer for owner/supervisor/session-like fields.
 
+### F6 - Flat PATCH completion evidence rejects some valid evidence keys
+
+Severity: Medium.
+
+Observed: `fleet_orchestrator/evidence_contract.py:4` defines top-level request evidence keys as only `reason`, `error`, and `production_observation`.
+
+Observed: `fleet_orchestrator/tasks_api.py:370-379` lifts only those top-level keys into the `completion_evidence` object when callers omit the nested `evidence` block.
+
+Why this matters: `PATCH /api/task/{task_id}` with `{"status": "completed", "production_observation": "..."}` works, but `{"status": "completed", "commit_sha": "abcd1234"}` or `{"status": "completed", "gate_run_id": "run-123"}` is treated as no evidence and rejected. Callers must use nested `{"evidence": {"commit_sha": "..."}}` for those keys. This is likely a client/API contract footgun, not a data integrity bypass.
+
+What would invalidate this finding: flat top-level `commit_sha` and `gate_run_id` are intentionally unsupported and docs/CLI examples consistently require the nested `evidence` object.
+
+Recommended control: either document that only `production_observation`, `reason`, and `error` are lifted from flat PATCH payloads, or add `commit_sha` and `gate_run_id` to the lifted request keys.
+
+### F7 - `/ship` is a readonly verdict endpoint despite being a POST
+
+Severity: Low.
+
+Observed: `fleet_orchestrator/tasks_api.py:736-743` evaluates shippability and returns `{"ok": true, "shippable": true, "verdict": ...}` when gates pass, but does not update Neo4j project state to `shipped`.
+
+Why this matters: automated callers may read the endpoint name and POST method as a state transition. The implementation is a gate verdict, not a ship-state mutation.
+
+What would invalidate this finding: product semantics explicitly define `/ship` as a pure "can ship" assertion endpoint, and no UI/automation treats it as a project state transition.
+
+Recommended control: rename the route/response in docs to "ship verdict", or persist an explicit shipped/ship_attempt event if the API is intended to transition state.
+
+### F8 - Disabled loop declaration returns `ok: true`
+
+Severity: Low.
+
+Observed: `fleet_orchestrator/tasks_api.py:959-962` returns `{"ok": true, "enabled": false}` when `ORCH_LOOPS_ENABLED=0`.
+
+Why this matters: pipelines that only check `ok` can believe loop declaration succeeded even though the feature is disabled. This is similar to a silent mock.
+
+What would invalidate this finding: all clients check `enabled` and docs explicitly state disabled loop endpoints return a non-operative success envelope.
+
+Recommended control: return `ok: false` with `enabled: false`, or use `403`/`501` when loop support is disabled.
+
 ## Claims Matrix
 
 | Claim | Audit Result | Evidence |
@@ -134,7 +174,12 @@ Recommended control: either document identifiers as public data or add a public 
 - Exposure posture is risky by design but accurately documented.
 - Broad `except Exception` blocks and script/env surfaces remain accountability risks.
 
-No `conductor-gemini` response was available at write time.
+`conductor-gemini` later reported:
+
+- Verdict: endorse. C1-C9 confirmed; G1-G3 confirmed.
+- Medium: flat PATCH completion payloads reject flat `commit_sha`/`gate_run_id`; callers must nest those under `evidence`.
+- Low: `/api/projects/{project_id}/ship` returns a shippability verdict but does not mutate project status to `shipped`.
+- Low: disabled loop declaration returns `ok: true, enabled: false`, which can mislead callers that only check `ok`.
 
 ## Commands Run
 
@@ -167,4 +212,6 @@ Do not treat the repo as broadly clean yet. The next cleanup pass should address
 3. Request-time global env mutation removal beyond the immediate allowlist.
 4. Non-loopback unauthenticated mutable API startup policy.
 5. Public readonly identifier/owner disclosure boundary.
-6. Full rerun of all acceptance scripts listed in `.github/workflows/ship-gate.yml`.
+6. PATCH evidence contract consistency for flat vs nested evidence payloads.
+7. `/ship` and disabled-loop endpoint response semantics.
+8. Full rerun of all acceptance scripts listed in `.github/workflows/ship-gate.yml`.
