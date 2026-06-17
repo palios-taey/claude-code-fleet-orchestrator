@@ -10,7 +10,7 @@ The execution tracker indexes markdown plans into `OrchProject`, `OrchPhase`, an
 
 ## Phase: phase-id - Phase Name [order: 1]
 
-### Task: task-id - Task description [priority: 60] [owner: worker-a] [depends: other-task-id] [ref: docs/STRUCTURE.md:10-40]
+### Task: task-id - Task description [priority: 60] [owner: worker-a] [depends: other-task-id] [ref: docs/STRUCTURE.md] [ref: docs/STRUCTURE.md:10-40]
 - Optional bullet content becomes part of the task description.
 
 ## User Stop Conditions
@@ -24,7 +24,7 @@ The execution tracker indexes markdown plans into `OrchProject`, `OrchPhase`, an
 - `order` and `priority` are integers.
 - `owner`, `tags`, and `depends` are optional.
 - `recurring: true` marks a completed task as re-claimable by `dispatch()` for the next cycle. This is for markdown-tracked repeated work items, not the cron-factory `kind=recurring` reservation in `docs/SCHEMA.md`.
-- `ref` is repeatable and uses `[ref: <path>:<Lstart>-<Lend>]`.
+- `ref` is repeatable and accepts either `[ref: <path>]` for a whole-file ref capped by the runtime ref line cap, or `[ref: <path>:<Lstart>-<Lend>]` for an explicit line range.
 - Content inside fenced code blocks is ignored by the loader.
 
 ## Ref semantics

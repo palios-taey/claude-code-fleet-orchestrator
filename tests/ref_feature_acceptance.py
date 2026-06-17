@@ -41,7 +41,7 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
     reset_project,
     resolve_ref_path,
 )
-from fleet_orchestrator.plan_loader import _META_BLOB_BYTE_CAP, _PLAN_LINE_BYTE_CAP, _parse_plan, _parse_ref  # noqa: E402
+from fleet_orchestrator.plan_loader import _META_BLOB_BYTE_CAP, _PLAN_LINE_BYTE_CAP, _WHOLE_FILE_REF_LINE_CAP, _parse_plan, _parse_ref  # noqa: E402
 from fleet_orchestrator.tasks_api import app  # noqa: E402
 
 CFG = OrchConfig()
@@ -126,6 +126,8 @@ def main() -> int:
             source_dir.mkdir()
             in_root = source_dir / "module.py"
             in_root.write_text("line1\nline2\nline3\n", encoding="utf-8")
+            whole_file = plan_dir / "whole.md"
+            whole_file.write_text("whole1\nwhole2\nwhole3\n", encoding="utf-8")
             allowed_root_source_dir = root / "src"
             allowed_root_source_dir.mkdir()
             allowed_root_file = allowed_root_source_dir / "module.py"
@@ -158,6 +160,66 @@ def main() -> int:
                 "null-byte-context-normalized-out",
                 null_ctx["refs"] == [] and null_ctx["warnings"] == [],
                 null_ctx,
+            )
+
+            bare_ref = _parse_ref("whole.md")
+            _assert(
+                "bare-path-ref-parses-as-whole-file",
+                bare_ref == {"path": "whole.md", "l_start": 1, "l_end": _WHOLE_FILE_REF_LINE_CAP},
+                bare_ref,
+            )
+
+            bare_project_id = f"{PREFIX}-bare-ref"
+            bare_resp = CLIENT.post(
+                "/api/projects/load-md",
+                json={
+                    "md_text": (
+                        f"# Project: {bare_project_id} - Bare refs [ref: whole.md]\n\n"
+                        "## Phase: p1 - Phase [ref: whole.md]\n\n"
+                        "### Task: t1 - Task [owner: conductor] [ref: whole.md]\n"
+                    ),
+                    "source_path": str(plan_path),
+                    "source_kind": "markdown",
+                    "ingested_by": "tester",
+                    "supervisor": "conductor",
+                },
+            )
+            bare_body = bare_resp.json()
+            _assert(
+                "bare-path-ref-ingest-has-zero-ref-errors",
+                bare_resp.status_code == 200 and not any("invalid ref" in err for err in bare_body.get("errors", [])),
+                bare_body,
+            )
+            bare_summary = get_project_summary(bare_project_id, config=CFG)
+            bare_project_ref = (bare_summary or {}).get("project", {}).get("ref_context", {}).get("refs", [{}])[0]
+            _assert(
+                "bare-path-ref-resolves-whole-file",
+                bare_project_ref.get("l_start") == 1
+                and bare_project_ref.get("l_end") == _WHOLE_FILE_REF_LINE_CAP
+                and bare_project_ref.get("content") == "whole1\nwhole2\nwhole3",
+                bare_project_ref,
+            )
+
+            bad_ref_project_id = f"{PREFIX}-bad-ref"
+            bad_ref_resp = CLIENT.post(
+                "/api/projects/load-md",
+                json={
+                    "md_text": f"# Project: {bad_ref_project_id} - Bad refs [ref: whole.md:3-1]\n",
+                    "source_path": str(plan_path),
+                    "source_kind": "markdown",
+                    "ingested_by": "tester",
+                    "supervisor": "conductor",
+                },
+            )
+            bad_ref_body = bad_ref_resp.json()
+            expected_ref_error = (
+                "line 1: invalid ref 'whole.md:3-1': line end must be >= line start; "
+                "expected 'path' or 'path:Lstart-Lend'"
+            )
+            _assert(
+                "malformed-ref-error-states-accepted-forms",
+                bad_ref_resp.status_code == 200 and expected_ref_error in bad_ref_body.get("errors", []),
+                bad_ref_body,
             )
 
             resolved, warning = resolve_ref_path("../secrets.txt", str(plan_path))

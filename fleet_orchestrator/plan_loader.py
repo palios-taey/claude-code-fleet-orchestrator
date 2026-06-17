@@ -67,27 +67,49 @@ META_RE = re.compile(r"\[([^\]]+)\]")
 HEADER_SEPARATOR_RE = re.compile(r"\s+[—-]\s+")
 _PLAN_LINE_BYTE_CAP = 4096
 _META_BLOB_BYTE_CAP = 512
+_WHOLE_FILE_REF_LINE_CAP = 200
+_REF_FORMAT_HINT = "expected 'path' or 'path:Lstart-Lend'"
+_REF_RANGE_RE = re.compile(r"\A\s*(\d+)\s*-\s*(\d+)\s*\Z")
 
 
-def _parse_ref(raw_value: str) -> Optional[Dict[str, Any]]:
+def _parse_ref_result(raw_value: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     value = (raw_value or "").strip()
     if not value:
-        return None
-    try:
+        return None, f"empty ref; {_REF_FORMAT_HINT}"
+    if _has_control_chars(value):
+        return None, f"ref contains control characters; {_REF_FORMAT_HINT}"
+
+    path = value
+    l_start = 1
+    l_end = _WHOLE_FILE_REF_LINE_CAP
+
+    if ":" in value:
         path_part, line_part = value.rsplit(":", 1)
-        start_raw, end_raw = line_part.split("-", 1)
-        l_start = int(start_raw.strip())
-        l_end = int(end_raw.strip())
-    except Exception:
-        return None
-    path = path_part.strip()
-    if not path or _has_control_chars(path) or l_start <= 0 or l_end < l_start:
-        return None
+        range_match = _REF_RANGE_RE.match(line_part)
+        if range_match:
+            path = path_part.strip()
+            l_start = int(range_match.group(1))
+            l_end = int(range_match.group(2))
+        elif "-" in line_part or line_part.strip().isdigit() or not line_part.strip():
+            return None, f"bad line range; {_REF_FORMAT_HINT}"
+
+    path = path.strip()
+    if not path:
+        return None, f"missing path; {_REF_FORMAT_HINT}"
+    if l_start <= 0:
+        return None, f"line start must be >= 1; {_REF_FORMAT_HINT}"
+    if l_end < l_start:
+        return None, f"line end must be >= line start; {_REF_FORMAT_HINT}"
     return {
         "path": path,
         "l_start": l_start,
         "l_end": l_end,
-    }
+    }, None
+
+
+def _parse_ref(raw_value: str) -> Optional[Dict[str, Any]]:
+    ref, _error = _parse_ref_result(raw_value)
+    return ref
 
 
 def _split_header_meta(text: str) -> tuple[str, str, Optional[str]]:
@@ -157,9 +179,11 @@ def _parse_meta(meta_blob: str) -> Dict[str, Any]:
             except ValueError:
                 meta[key] = value
         elif key == "ref":
-            ref = _parse_ref(value)
+            ref, ref_error = _parse_ref_result(value)
             if ref is None:
-                meta.setdefault("_ref_errors", []).append(value)
+                meta.setdefault("_ref_errors", []).append(
+                    f"invalid ref '{value}': {ref_error or _REF_FORMAT_HINT}"
+                )
                 continue
             meta.setdefault("refs", []).append(ref)
         elif key in {"tags", "depends"}:
@@ -315,7 +339,7 @@ def _parse_plan(md: str) -> Dict[str, Any]:
                 "tags": meta.get("tags", []),
             }
             for bad_ref in meta.get("_ref_errors", []):
-                errors.append(f"line {line_no}: invalid ref '{bad_ref}'")
+                errors.append(f"line {line_no}: {bad_ref}")
             continue
 
         phase_match = _parse_header(line, "## Phase:")
@@ -341,7 +365,7 @@ def _parse_plan(md: str) -> Dict[str, Any]:
                 "tasks": [],
             }
             for bad_ref in meta.get("_ref_errors", []):
-                errors.append(f"line {line_no}: invalid ref '{bad_ref}'")
+                errors.append(f"line {line_no}: {bad_ref}")
             phases.append(current_phase)
             current_task = None
             continue
@@ -378,7 +402,7 @@ def _parse_plan(md: str) -> Dict[str, Any]:
                 "body": [],
             }
             for bad_ref in meta.get("_ref_errors", []):
-                errors.append(f"line {line_no}: invalid ref '{bad_ref}'")
+                errors.append(f"line {line_no}: {bad_ref}")
             current_phase["tasks"].append(current_task)
             continue
 
