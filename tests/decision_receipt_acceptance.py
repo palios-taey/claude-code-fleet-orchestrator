@@ -1,4 +1,4 @@
-"""Ship-gate e2e — decision receipts are typed, immutable, and flag-gated."""
+"""Ship-gate e2e — decision receipts are typed, immutable, and enabled by default."""
 from __future__ import annotations
 
 import asyncio
@@ -92,16 +92,29 @@ def _receipt_core_contract() -> None:
     _check("receipt payload captures refs before caller mutation", payload["refs_used"][0]["content"] == "original", payload["refs_used"])
     _check("receipt uses requested rule_tier_applied field", isinstance(payload["rule_tier_applied"], str) and "rules/projects/dynctx.md" in payload["rule_tier_applied"], payload)
 
-    os.environ.pop("ORCH_DECISION_RECEIPTS_ENABLED", None)
-    disabled = FakeRedis()
-    with mock.patch.object(receipts, "get_redis_sync", return_value=disabled):
-        result = receipts.maybe_emit_receipt("wake", ctx)
-    _check("maybe_emit_receipt is default-off", result is None and not disabled.events, disabled.events)
+    old_enabled = os.environ.get("ORCH_DECISION_RECEIPTS_ENABLED")
+    try:
+        os.environ.pop("ORCH_DECISION_RECEIPTS_ENABLED", None)
+        default_on = FakeRedis()
+        with mock.patch.object(receipts, "get_redis_sync", return_value=default_on):
+            result = receipts.maybe_emit_receipt("wake", ctx)
+        _check("maybe_emit_receipt defaults on", result is not None and len(default_on.events) == 1, default_on.events)
+
+        os.environ["ORCH_DECISION_RECEIPTS_ENABLED"] = "0"
+        disabled = FakeRedis()
+        with mock.patch.object(receipts, "get_redis_sync", return_value=disabled):
+            result = receipts.maybe_emit_receipt("wake", ctx)
+        _check("explicitly disabled receipts are a no-op", result is None and not disabled.events, disabled.events)
+    finally:
+        if old_enabled is None:
+            os.environ.pop("ORCH_DECISION_RECEIPTS_ENABLED", None)
+        else:
+            os.environ["ORCH_DECISION_RECEIPTS_ENABLED"] = old_enabled
 
 
 def _wake_packet_wiring_contract() -> None:
     fake = FakeRedis()
-    os.environ["ORCH_WAKE_PACKET_ENABLED"] = "1"
+    os.environ["ORCH_WAKE_PACKET_ENDPOINT_ENABLED"] = "1"
     os.environ["ORCH_DECISION_RECEIPTS_ENABLED"] = "1"
     context = {
         "overall_refs": [],
@@ -120,7 +133,7 @@ def _wake_packet_wiring_contract() -> None:
              mock.patch.object(receipts, "get_redis_sync", return_value=fake):
             response = TestClient(tasks_api.app).get("/api/sessions/conductor-codex/wake-packet?cli=codex")
     finally:
-        os.environ.pop("ORCH_WAKE_PACKET_ENABLED", None)
+        os.environ.pop("ORCH_WAKE_PACKET_ENDPOINT_ENABLED", None)
         os.environ.pop("ORCH_DECISION_RECEIPTS_ENABLED", None)
 
     _check("wake-packet endpoint still succeeds with receipts enabled", response.status_code == 200 and response.json().get("ok") is True, response.text)

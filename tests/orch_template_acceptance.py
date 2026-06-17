@@ -1,4 +1,4 @@
-"""Ship-gate e2e — flagged plan ingest creates the forced sub-role gate."""
+"""Ship-gate e2e — requested plan ingest creates the forced sub-role gate by default."""
 from __future__ import annotations
 
 import os
@@ -82,14 +82,14 @@ def main() -> int:
     old_gate_owners = os.environ.get("ORCH_GATE_OWNERS")
     try:
         off_project = f"{PFX}-off"
-        os.environ.pop("ORCH_GATE_TEMPLATE_ENABLED", None)
+        os.environ["ORCH_GATE_TEMPLATE_ENABLED"] = "0"
         os.environ.pop("ORCH_GATE_OWNERS", None)
         off = _ingest(off_project)
         off_tasks = _tasks(off_project)
-        _check("template is default-off", off["tasks_created"] == 2 and not any("gate-" in task_id for task_id in off_tasks), off_tasks)
+        _check("explicitly disabled template leaves requested plan untemplated", off["tasks_created"] == 2 and not any("gate-" in task_id for task_id in off_tasks), off_tasks)
 
         on_project = f"{PFX}-on"
-        os.environ["ORCH_GATE_TEMPLATE_ENABLED"] = "1"
+        os.environ.pop("ORCH_GATE_TEMPLATE_ENABLED", None)
         on = _ingest(on_project)
         tasks = _tasks(on_project)
         gate = lambda bare: f"{on_project}::{bare}"
@@ -102,7 +102,7 @@ def main() -> int:
             gate("gate-review"),
             gate("gate-approval"),
         }
-        _check("templated ingest creates original + five gate tasks", on["tasks_created"] == 7 and expected_gate_ids.issubset(tasks), {"result": on, "tasks": sorted(tasks)})
+        _check("requested template defaults on and creates original + five gate tasks", on["tasks_created"] == 7 and expected_gate_ids.issubset(tasks), {"result": on, "tasks": sorted(tasks)})
         _check("gate tasks are in scoped gate phase", all(tasks[task_id]["phase_id"] == gate("forced-subrole-gate") for task_id in expected_gate_ids), tasks)
         _check("unset gate owners are generic stage placeholders", {
             tasks[gate("gate-scout")]["owner"],

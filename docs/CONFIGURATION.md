@@ -6,8 +6,8 @@ source** (`fleet_orchestrator/` + `scripts/` + `config.py` wrapper reads). The
 the code, the code wins; verify against the repo, do not trust this table alone.
 
 > This doc was rewritten on 2026-06-15 after an audit found the prior version
-> materially incomplete: it listed ~45 flags when the source references **66
-> distinct env names** (60 in the product, 6 test-only), omitted
+> materially incomplete: it listed ~45 flags when the source references **67
+> distinct env names** (61 in the product, 6 test-only), omitted
 > `ACCOUNTABILITY_LEDGER_PATH`, hid a non-env runtime switch (below), and
 > mislabeled the auth posture. Honesty about the surface is the point.
 
@@ -74,21 +74,23 @@ force a pass), `ORCH_PRE_MERGE_REQUIRED_CHECKS` (consumed by the pre-merge gate)
 |---|---|---|
 | `ORCH_AWAIT_SIGNAL_GATES` | **ON** | Stop only on an exact `AWAIT:<kind>:<detail>` marker (prose waits rejected). OFF is *stricter*. |
 | `ORCH_WORKER_TASK_LIVENESS` (+`_TTL_SEC`) | **ON** | Advisory worker stall-detection / heartbeat (non-binding). |
-| `ORCH_CHAT_ENABLED` | OFF | Dashboard chat-to-session box (docs warn: trusted/loopback only). |
-| `ORCH_WAKE_PACKET_ENABLED` | OFF | Gates **only** the `/api/sessions/{id}/wake-packet` context endpoint. **Note:** session *waking* (`send_wake`) runs regardless of this flag — the name overclaims; it does not gate whether sessions get woken. |
-| `ORCH_DECISION_RECEIPTS_ENABLED` | OFF | Fire-and-forget decision-receipt explainability records (nothing blocks on them). For an accountability-branded product, consider enabling. |
-| `ORCH_LOOPS_ENABLED` | OFF | The signal/clock/task-state loop engine (opt-in capability). |
-| `ORCH_GATE_TEMPLATE_ENABLED` | OFF | Forced sub-role gate template on plan ingest. |
+| `ORCH_CHAT_ENABLED` | **ON** | Dashboard chat-to-session box. Chat is an injection vector; keep the mutable API loopback-only or protect non-loopback trusted-LAN deployments with `ORCH_AUTH_TOKEN`. Set `0`/`false` only to intentionally hide the chat route. |
+| `ORCH_WAKE_PACKET_ENDPOINT_ENABLED` (`ORCH_WAKE_PACKET_ENABLED` deprecated alias) | **ON** | Gates **only** the `/api/sessions/{id}/wake-packet` context endpoint. Session *waking* (`send_wake`) runs regardless. The old `ORCH_WAKE_PACKET_ENABLED` name is still read as a non-breaking alias but should not be used in new configs. |
+| `ORCH_DECISION_RECEIPTS_ENABLED` | **ON** | Fire-and-forget decision-receipt explainability records. They are emitted best-effort; no consumer is wired in this phase, and nothing blocks on them. |
+| `ORCH_LOOPS_ENABLED` | **ON** | The additive signal/clock/task-state loop API routes. Core stop/dispatch integration is deliberately not wired in this phase. |
+| `ORCH_GATE_TEMPLATE_ENABLED` | **ON** | Applies the forced sub-role gate template when a plan explicitly requests that template. |
 
 ## 6. Handoff / stop discipline
 
 | Flag | Default | Effect |
 |---|---|---|
-| `CF_HANDOFF_PICKUP_POLL_BUDGET` / `CF_HANDOFF_VALIDATE_TIMEOUT_S` | `5` / `0.2` | Handoff tuning. |
+| `CF_HANDOFF_PICKUP_POLL_BUDGET` / `CF_HANDOFF_VALIDATE_TIMEOUT_S` | `5` / `0.2` | Handoff helper tuning. The current stop-decision path does not call handoff validation. |
 
-Handoff validation and in-progress stop blocking are always active. There is no
+In-progress stop blocking is always active. Handoff validation helper code
+remains available for explicit handoff records/receipts, but pending/unacked
+handoffs are not a stop-decision blocker on current main. There is no
 per-session opt-in/opt-out path, no runtime flag file, and no Redis set that can
-disable or enable either rule for selected sessions.
+disable in-progress stop blocking for selected sessions.
 
 > The in-progress stop-block is **soft**: a release valve force-allows the stop
 > after the same block is hit 3×, so a session cannot wedge permanently.

@@ -72,9 +72,14 @@ def _make_in_progress_fixture(*, owner: str = WORKER, blocked_on: str | None = N
 def main() -> int:
     _cleanup(PREFIX)
     try:
-        with mock.patch("fleet_orchestrator.orch_schema.validate_stop_handoff", side_effect=TimeoutError("boom")):
-            fail_closed = get_session_stop_decision(SUPERVISOR, config=CFG)
-        print("PASS handoff-redis-down-fail-closed" if fail_closed.get("block") is True and fail_closed.get("hv_fail_closed") else f"FAIL handoff-redis-down-fail-closed {fail_closed}")
+        with mock.patch("fleet_orchestrator.orch_schema._raw_stop_decision", return_value={"block": False, "reason": None, "wake_type": "ALLOW_STOP", "task_id": None}):
+            with mock.patch("fleet_orchestrator.orch_schema.validate_stop_handoff", side_effect=AssertionError("handoff validation must not gate stop"), create=True):
+                handoff_not_gated = get_session_stop_decision(SUPERVISOR, config=CFG)
+        print(
+            "PASS handoff-validation-not-stop-gate"
+            if handoff_not_gated.get("block") is False and "handoff_state" not in handoff_not_gated and "hv_fail_closed" not in handoff_not_gated
+            else f"FAIL handoff-validation-not-stop-gate {handoff_not_gated}"
+        )
 
         with mock.patch("fleet_orchestrator.orch_schema._raw_stop_decision", side_effect=RuntimeError("neo4j-boom")):
             raw_fail_closed = get_session_stop_decision(SUPERVISOR, config=CFG)
@@ -148,12 +153,11 @@ def main() -> int:
         )
 
         with mock.patch("fleet_orchestrator.orch_schema._raw_stop_decision", return_value={"block": True, "wake_type": "WAKE_WITH_QUEUE", "task_id": "base-task", "reason": "base"}):
-            with mock.patch("fleet_orchestrator.orch_schema.validate_stop_handoff", return_value={"state": "dead", "record": {"dispatcher_task_id": "hv-task"}}):
-                base_block_wins = get_session_stop_decision(SUPERVISOR, config=CFG)
+            base_block_wins = get_session_stop_decision(SUPERVISOR, config=CFG)
         print(
-            "PASS handoff-dead-does-not-override-base-block"
+            "PASS base-stop-block-still-wins"
             if base_block_wins.get("block") is True and base_block_wins.get("task_id") == "base-task"
-            else f"FAIL handoff-dead-does-not-override-base-block {base_block_wins}"
+            else f"FAIL base-stop-block-still-wins {base_block_wins}"
         )
 
         _cleanup(PREFIX)

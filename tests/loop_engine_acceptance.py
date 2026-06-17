@@ -94,8 +94,12 @@ def _loop_from_adversarial(name: str) -> dict[str, Any]:
 
 
 def main() -> int:
+    old_enabled = os.environ.get("ORCH_LOOPS_ENABLED")
     os.environ.pop("ORCH_LOOPS_ENABLED", None)
-    _check("ORCH_LOOPS_ENABLED defaults off", declare_loop(_base_loop()) == {"ok": True, "enabled": False})
+    default_result = declare_loop(_base_loop())
+    _check("ORCH_LOOPS_ENABLED defaults on", default_result.get("ok") is True and default_result.get("enabled") is True and default_result.get("loop", {}).get("id") == "acceptance-loop", default_result)
+    os.environ["ORCH_LOOPS_ENABLED"] = "0"
+    _check("explicit ORCH_LOOPS_ENABLED=0 disables loop engine", declare_loop(_base_loop()) == {"ok": True, "enabled": False})
 
     adversarial = adversarial_meetable_cases()
     for name in ("external-approval-no-timeout", "increment-vs-floating", "var-no-step-writes"):
@@ -131,6 +135,10 @@ def main() -> int:
         _check("advance wake routes through notification sender", sent == [("conductor", "LOOP ADVANCE [acceptance-loop]: step=observe", "command")], sent)
         _check("should_stop true at threshold", result["should_stop"] is True, result)
 
+    if old_enabled is None:
+        os.environ.pop("ORCH_LOOPS_ENABLED", None)
+    else:
+        os.environ["ORCH_LOOPS_ENABLED"] = old_enabled
     return 0
 
 

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from .config import OrchConfig, get_neo4j_driver
+from .feature_flags import gate_template_enabled
 from .orch_template import GATE_PHASE_ID, apply_gate_template
 from .orch_schema import (
     _has_control_chars,
@@ -427,7 +428,7 @@ def _parse_plan(md: str) -> Dict[str, Any]:
 
 
 def _gate_template_enabled() -> bool:
-    return os.environ.get("ORCH_GATE_TEMPLATE_ENABLED", "").strip().lower() in TRUE_ENV_VALUES
+    return gate_template_enabled()
 
 
 def _gate_template_requested(project: Dict[str, Any]) -> bool:

@@ -4,14 +4,13 @@ Dynamic context injection is the orchestrator's way to rebuild a clean, task-sco
 
 ## Runtime Flow
 
-Enable wake packets with:
-
 ```bash
-export ORCH_WAKE_PACKET_ENABLED=1
 curl -s "http://127.0.0.1:5002/api/sessions/<session-id>/wake-packet?cli=codex"
 ```
 
 `GET /api/sessions/{session_id}/wake-packet` calls `select_context()`, `build_packet()`, and `assemble()` in `fleet_orchestrator/context_assembler.py`. The response contains a rendered `packet` plus `packet_meta` with the packet id, provenance hash, generating commit, snapshot, and size report.
+
+The endpoint is enabled by default. Set `ORCH_WAKE_PACKET_ENDPOINT_ENABLED=0` to disable only this endpoint; `ORCH_WAKE_PACKET_ENABLED` is still accepted as a deprecated alias for existing `.env` files.
 
 The normal usage pattern is:
 
