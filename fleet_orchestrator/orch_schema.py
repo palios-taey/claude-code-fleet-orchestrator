@@ -381,7 +381,7 @@ def _allowed_ref_roots() -> List[Path]:
             candidates = [item.strip() for item in normalized.split(",") if item.strip()]
     # Auto-derive: every supervisor's session root is an allowed ref root, so the
     # explicit ORCH_REF_ALLOWED_ROOT list never has to be hand-synced per supervisor
-    # (the drift that blocked treasurer + taeys-hands from ingesting their own plans).
+    # (the drift that blocked two supervisors sharing one checkout from ingesting their own plans).
     candidates.extend(_session_root_dirs())
     # de-dup by resolved path, preserve order
     seen: set = set()

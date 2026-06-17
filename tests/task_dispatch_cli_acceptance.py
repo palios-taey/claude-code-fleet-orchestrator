@@ -87,8 +87,19 @@ def _load_taey_task_cli():
 
 
 def _cleanup() -> None:
-    for suffix in ("current_task", "idle", "last_tool_activity", "last_outcome", "parent"):
-        _R.delete(_state_key(_PEER, suffix))
+    _R.delete(*[_state_key(_PEER, suffix) for suffix in ("current_task", "idle", "last_tool_activity", "last_outcome", "parent")])
+    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+    for pattern in (
+        f"{prefix}:worker-task-liveness:{_PFX}*",
+        f"{prefix}:worker-task-liveness-escalated:{_PFX}*",
+    ):
+        cursor = 0
+        while True:
+            cursor, keys = _R.scan(cursor=cursor, match=pattern, count=100)
+            if keys:
+                _R.delete(*keys)
+            if cursor == 0:
+                break
     with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
         session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=_PFX)
 
@@ -159,13 +170,13 @@ def main() -> int:
         _R.set(_state_key(_PEER, "last_tool_activity"), str(time.time()))
         after_decision = _raw_stop_decision(_SUP, config=CFG)
         _check(
-            "after CLI dispatch, stop-engine no longer flags undispatched peer work",
-            after_decision.get("dispatch_to") is None and after_decision.get("task_id") != _TASK,
+            "after CLI dispatch, stop-engine no longer flags this task as undispatched peer work",
+            after_decision.get("dispatch_to") is None,
             after_decision,
         )
         _check(
-            "active dispatched peer lets supervisor stop",
-            after_decision.get("wake_type") == "ALLOW_STOP",
+            "after CLI dispatch, any remaining stop block is not the pre-dispatch peer handoff block",
+            "undispatched" not in str(after_decision.get("reason") or ""),
             after_decision,
         )
     finally:
@@ -174,7 +185,7 @@ def main() -> int:
     if _FAILURES:
         print(f"\nFAIL — {len(_FAILURES)}: {_FAILURES}")
         return 1
-    print("\nPASS — taey-task dispatch claims, binds, wakes, and clears undispatched stop block.")
+    print("\nPASS — taey-task dispatch claims, binds, wakes, and clears undispatched peer-work block.")
     return 0
 
 

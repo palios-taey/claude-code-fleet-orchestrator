@@ -49,6 +49,25 @@ def _driver():
 def _clean_graph() -> None:
     with _driver().session(database=CFG.neo4j_db) as session:
         session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=PREFIX)
+    try:
+        redis_client = dispatch_module._redis_connect()
+        prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+        for pattern in (
+            f"{prefix}:{PREFIX}*",
+            f"{prefix}:orch-wake-fired:{PREFIX}*",
+            f"{prefix}:worker-task-liveness:{PREFIX}*",
+            f"{prefix}:worker-task-liveness-escalated:{PREFIX}*",
+            f"{PREFIX}:fleet:*",
+        ):
+            cursor = 0
+            while True:
+                cursor, keys = redis_client.scan(cursor=cursor, match=pattern, count=100)
+                if keys:
+                    redis_client.delete(*keys)
+                if cursor == 0:
+                    break
+    except Exception:
+        pass
 
 
 def _task_claim_lock(task_id: str) -> object:

@@ -89,9 +89,23 @@ def _clean() -> None:
     with _driver().session(database=CFG.neo4j_db) as session:
         session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=PREFIX)
     redis_client = _redis_connect()
-    redis_client.delete(_state_key(WORKER, "current_task"))
-    redis_client.delete(_state_key(WORKER, "last_outcome"))
-    redis_client.delete(_state_key("orch-watch-stuck", f"{WORKER}:{PREFIX}::f12"))
+    redis_client.delete(
+        _state_key(WORKER, "current_task"),
+        _state_key(WORKER, "last_outcome"),
+        _state_key("orch-watch-stuck", f"{WORKER}:{PREFIX}::f12"),
+    )
+    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+    for pattern in (
+        f"{prefix}:worker-task-liveness:{PREFIX}*",
+        f"{prefix}:worker-task-liveness-escalated:{PREFIX}*",
+    ):
+        cursor = 0
+        while True:
+            cursor, keys = redis_client.scan(cursor=cursor, match=pattern, count=100)
+            if keys:
+                redis_client.delete(*keys)
+            if cursor == 0:
+                break
 
 
 def _setup_graph() -> None:

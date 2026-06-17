@@ -75,7 +75,21 @@ def main() -> int:
         with drv.session(database=cfg.neo4j_db) as s:
             s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
         try:
-            D._redis_connect().delete(D._state_key(_WORKER, "current_task"))
+            redis_client = D._redis_connect()
+            prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+            patterns = (
+                D._state_key(_WORKER, "*"),
+                f"{prefix}:worker-task-liveness:{_PFX}*",
+                f"{prefix}:worker-task-liveness-escalated:{_PFX}*",
+            )
+            for pattern in patterns:
+                cursor = 0
+                while True:
+                    cursor, keys = redis_client.scan(cursor=cursor, match=pattern, count=100)
+                    if keys:
+                        redis_client.delete(*keys)
+                    if cursor == 0:
+                        break
         except Exception:
             pass
 

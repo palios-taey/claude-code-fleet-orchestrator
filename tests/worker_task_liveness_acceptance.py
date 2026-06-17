@@ -37,7 +37,9 @@ def _require_test_namespace() -> str:
     return raw
 
 
-PFX = f"{_require_test_namespace()}-wliv-{uuid.uuid4().hex[:8]}"
+_NAMESPACE = _require_test_namespace()
+PFX = f"{_NAMESPACE}-wliv-{uuid.uuid4().hex[:8]}"
+GUARD_PFX = f"{_NAMESPACE}-wlivguard-{uuid.uuid4().hex[:8]}"
 os.environ["NOTIFY_KEY_PREFIX"] = PFX
 os.environ["ORCH_WORKER_TASK_LIVENESS"] = "1"
 os.environ["ORCH_WORKER_TASK_LIVENESS_TTL_SEC"] = "1"
@@ -54,6 +56,7 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
     init_schema,
     update_task_status,
 )
+from fleet_orchestrator.worker_liveness import register_worker_task_liveness  # noqa: E402
 
 
 CFG = OrchConfig()
@@ -68,6 +71,11 @@ AWAIT = f"{PROJECT}::await"
 HUMAN_REVIEW = f"{PROJECT}::human-review"
 QUESTION = f"{PFX}-question"
 REVIEWER = f"{PFX}-reviewer"
+GUARD_PROJECT = f"{GUARD_PFX}-project"
+GUARD_PHASE = f"{GUARD_PROJECT}::phase"
+GUARD_TASK = f"{GUARD_PROJECT}::stale"
+GUARD_WORKER = f"{GUARD_PFX}-worker-codex"
+GUARD_SUP = f"{GUARD_PFX}-sup"
 FAILURES: list[str] = []
 
 
@@ -83,15 +91,24 @@ def _redis():
 
 def _cleanup() -> None:
     r = _redis()
-    cursor = 0
-    while True:
-        cursor, keys = r.scan(cursor=cursor, match=f"{PFX}:*", count=100)
-        if keys:
-            r.delete(*keys)
-        if cursor == 0:
-            break
+    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+    for pattern in (
+        f"{PFX}:*",
+        f"{prefix}:worker-task-liveness:{PFX}*",
+        f"{prefix}:worker-task-liveness-escalated:{PFX}*",
+        f"{prefix}:worker-task-liveness:{GUARD_PFX}*",
+        f"{prefix}:worker-task-liveness-escalated:{GUARD_PFX}*",
+    ):
+        cursor = 0
+        while True:
+            cursor, keys = r.scan(cursor=cursor, match=pattern, count=100)
+            if keys:
+                r.delete(*keys)
+            if cursor == 0:
+                break
     with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
         session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=PFX)
+        session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=GUARD_PFX)
 
 
 def _load_orch_watch():
@@ -129,6 +146,27 @@ def _setup() -> None:
         notify=False,
         config=CFG,
     )
+    create_project(project_id=GUARD_PROJECT, name=GUARD_PROJECT, supervisor=GUARD_SUP, priority=1, config=CFG)
+    create_phase(project_id=GUARD_PROJECT, phase_id=GUARD_PHASE, name="phase", config=CFG)
+    create_task(
+        phase_id=GUARD_PHASE,
+        task_id=GUARD_TASK,
+        description="guard stale task outside the test sweep prefix",
+        owner=GUARD_SUP,
+        priority=10,
+        wake_owner_if_ready=False,
+        config=CFG,
+    )
+    update_task_status(GUARD_TASK, "in_progress", owner=GUARD_WORKER, config=CFG)
+    register_worker_task_liveness(
+        GUARD_WORKER,
+        GUARD_TASK,
+        "guard stale task outside the test sweep prefix",
+        supervisor=GUARD_SUP,
+        started_at=time.time() - 30,
+        ttl_secs=1,
+        config=CFG,
+    )
 
 
 def _dispatch(task_id: str) -> None:
@@ -152,7 +190,12 @@ def _run_liveness_once(sent: list[tuple[str, str]]) -> int:
         return True
 
     with mock.patch.object(watch, "_send_wake", side_effect=fake_send):
-        return watch._process_worker_liveness_expirations(_redis(), dedup_ttl_sec=1)
+        return watch._process_worker_liveness_expirations(
+            _redis(),
+            dedup_ttl_sec=1,
+            task_id_prefix=PFX,
+            project_id_prefix=PFX,
+        )
 
 
 def _fresh_tool_heartbeat() -> None:
@@ -179,6 +222,12 @@ def main() -> int:
         _check("rapid double dispatch orphan requeued", first.get("status") == "pending" and first.get("needs_attention") is True, first)
         _check("rapid double dispatch active second not escalated", second.get("status") == "in_progress", second)
         _check("rapid double dispatch emits supervisor wake", count == 1 and sent and sent[0][0] == SUP and FIRST in sent[0][1], sent)
+        guard = get_task(GUARD_TASK, config=CFG)
+        _check(
+            "namespace-filtered liveness ignores stale tasks outside fixture prefix",
+            guard.get("status") == "in_progress" and guard.get("needs_attention") is not True,
+            guard,
+        )
 
         time.sleep(1.2)
         _fresh_tool_heartbeat()

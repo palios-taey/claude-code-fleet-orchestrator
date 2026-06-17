@@ -262,7 +262,12 @@ def main() -> int:
 
         dry_run_settings = tmp / "dry-run" / "settings.json"
         dry_run_state = tmp / "dry-run-state"
-        dry_run_notify_root = easy_setup.resolve_notify_root()
+        dry_run_notify_root = tmp / "dry-run-notify"
+        (dry_run_notify_root / "scripts").mkdir(parents=True)
+        (dry_run_notify_root / "identity.py").write_text("# dry-run fixture\n", encoding="utf-8")
+        install_hooks = dry_run_notify_root / "scripts" / "install-hooks.sh"
+        install_hooks.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+        install_hooks.chmod(0o755)
         dry_run_env = os.environ.copy()
         dry_run_env.update(
             {

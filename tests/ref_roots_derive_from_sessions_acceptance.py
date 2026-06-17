@@ -5,7 +5,7 @@ Every supervisor's own repo root (its ORCH_SESSION_ROOTS value) is implicitly an
 allowed ref root for its own plans — so adding a supervisor never requires hand-
 syncing ORCH_REF_ALLOWED_ROOT. This is the root-cause fix for the recurring
 "registered supervisor but can't ingest its own plan (422 source_path outside
-ORCH_REF_ALLOWED_ROOT)" drift that blocked treasurer and taeys-hands.
+ORCH_REF_ALLOWED_ROOT)" drift that blocked supervisors with separate checkouts.
 """
 from __future__ import annotations
 
@@ -37,16 +37,16 @@ def main() -> int:
         # explicit allow list, must be an allowed ref root.
         os.environ["ORCH_REF_ALLOWED_ROOT"] = "/home/op/the-conductor"
         os.environ["ORCH_SESSION_ROOTS"] = json.dumps({
-            "weaver": "/home/op/isma",
-            "taeys-hands": "/home/op/taeys-hands",
+            "planner": "/home/op/planner",
+            "automation": "/home/op/automation",
         })
         roots = set(orch_schema._allowed_ref_roots())
         _check("explicit ORCH_REF_ALLOWED_ROOT still honored",
                Path("/home/op/the-conductor").resolve() in roots, roots)
-        _check("session root /home/op/isma (weaver) auto-allowed",
-               Path("/home/op/isma").resolve() in roots, roots)
-        _check("session root /home/op/taeys-hands auto-allowed",
-               Path("/home/op/taeys-hands").resolve() in roots, roots)
+        _check("session root /home/op/planner auto-allowed",
+               Path("/home/op/planner").resolve() in roots, roots)
+        _check("session root /home/op/automation auto-allowed",
+               Path("/home/op/automation").resolve() in roots, roots)
 
         # comma key=value form also works
         os.environ["ORCH_SESSION_ROOTS"] = "infra=/home/op/infra-soul,x=/home/op/x"
@@ -54,7 +54,7 @@ def main() -> int:
         _check("comma key=value session roots auto-allowed",
                Path("/home/op/infra-soul").resolve() in roots2 and Path("/home/op/x").resolve() in roots2, roots2)
 
-        # shared dir (two supervisors, one dir — Jesse's note) de-dups, no crash
+        # shared dir (two supervisors, one checkout) de-dups, no crash
         os.environ["ORCH_SESSION_ROOTS"] = json.dumps({"a": "/home/op/shared", "b": "/home/op/shared"})
         roots3 = orch_schema._allowed_ref_roots()
         _check("shared session dir de-dups (appears once)",

@@ -9,14 +9,19 @@ Proves, against a real Neo4j, that the product runs on ANY user's machine:
 
 Env: ORCH_NEO4J_URI (default bolt://localhost:7687), ORCH_NEO4J_DB (default neo4j).
 Honest scope: integration e2e of the wiring, not a browser UI e2e.
+Run this in a clean/default environment. Operator `.env` overrides such as
+ORCH_GATE_REPO intentionally pin local paths and are not the default-install
+contract this test verifies.
 """
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
+import tempfile
 import uuid
 from dataclasses import replace
+from pathlib import Path
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO)
@@ -53,10 +58,12 @@ def _resolve_paths_under_home(home: str) -> dict:
     env["PYTHONPATH"] = _REPO
     code = (
         "import json, fleet_orchestrator.accountability_ledger as L, fleet_orchestrator.gate_runner as G;"
-        "from fleet_orchestrator.paths import data_dir;"
-        "print(json.dumps({'ledger': L.LEDGER_PATH, 'repo': G.DEFAULT_REPO, 'data_dir': str(data_dir())}))"
+        "from fleet_orchestrator.paths import data_dir, repo_root;"
+        "print(json.dumps({'ledger': L.LEDGER_PATH, 'repo': G.DEFAULT_REPO, 'repo_root': str(repo_root()), 'data_dir': str(data_dir())}))"
     )
-    out = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8") as clean_env:
+        env["ORCH_DOTENV"] = clean_env.name
+        out = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
     import json
     return json.loads(out.strip().splitlines()[-1])
 
@@ -71,7 +78,9 @@ def main() -> int:
         _check("ledger path follows foreign HOME", paths["ledger"].startswith(home + "/"))
         _check("ledger path is NOT the baked /home/mira literal", paths["ledger"] != _OLD_LEDGER)
         _check("data_dir follows foreign HOME", paths["data_dir"].startswith(home + "/"))
-        _check("gate repo default is NOT the baked /home/mira literal", paths["repo"] != _OLD_REPO)
+        gate_source = (Path(_REPO) / "fleet_orchestrator" / "gate_runner.py").read_text(encoding="utf-8")
+        _check("gate repo default follows install root", paths["repo"] == paths["repo_root"])
+        _check("gate repo source has no baked /home/mira literal", _OLD_REPO not in gate_source)
 
         # --- 2. DYNAMIC SESSIONS: fail-closed canonical supervisor allowlist ---
         sup_a, sup_b = f"{_PFX}-alpha", f"{_PFX}-beta"

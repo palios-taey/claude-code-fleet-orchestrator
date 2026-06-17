@@ -237,8 +237,15 @@ def _task_is_declared_wait(task: Dict[str, Any], *, config: Optional[OrchConfig]
     return is_awaiting_human_review_gate(task, config=config)
 
 
-def _registered_in_progress_tasks(*, config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
+def _registered_in_progress_tasks(
+    *,
+    config: Optional[OrchConfig] = None,
+    task_id_prefix: Optional[str] = None,
+    project_id_prefix: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     cfg = config or OrchConfig()
+    task_prefix = str(task_id_prefix or "")
+    project_prefix = str(project_id_prefix or "")
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         return [dict(record) for record in session.run(
@@ -247,6 +254,8 @@ def _registered_in_progress_tasks(*, config: Optional[OrchConfig] = None) -> Lis
             WHERE t.status = 'in_progress'
               AND coalesce(t.worker_liveness_worker, '') <> ''
               AND coalesce(t.worker_liveness_started_at, 0.0) > 0.0
+              AND ($task_prefix = '' OR t.id STARTS WITH $task_prefix)
+              AND ($project_prefix = '' OR p.id STARTS WITH $project_prefix)
             RETURN t.id AS task_id,
                    t.description AS description,
                    t.owner AS owner,
@@ -261,18 +270,27 @@ def _registered_in_progress_tasks(*, config: Optional[OrchConfig] = None) -> Lis
                    p.supervisor AS project_supervisor
             """,
             default_ttl=DEFAULT_WORKER_TASK_LIVENESS_TTL_SECS,
+            task_prefix=task_prefix,
+            project_prefix=project_prefix,
         )]
 
 
 def escalate_stale_worker_tasks(now: Optional[float] = None,
-                                *, config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
+                                *,
+                                config: Optional[OrchConfig] = None,
+                                task_id_prefix: Optional[str] = None,
+                                project_id_prefix: Optional[str] = None) -> List[Dict[str, Any]]:
     if not worker_task_liveness_enabled():
         return []
     cfg = config or OrchConfig()
     r = get_redis_sync(cfg)
     current_time = time.time() if now is None else float(now)
     escalated: List[Dict[str, Any]] = []
-    for task in _registered_in_progress_tasks(config=cfg):
+    for task in _registered_in_progress_tasks(
+        config=cfg,
+        task_id_prefix=task_id_prefix,
+        project_id_prefix=project_id_prefix,
+    ):
         if _task_is_declared_wait(task, config=cfg):
             continue
         task_id = str(task.get("task_id") or "")

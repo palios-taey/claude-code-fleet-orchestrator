@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Acceptance: the orchestrator supports NO internal-service auth (Neo4j/Redis/Weaviate).
 
-Standing rule (Jesse, repeatedly): internal services run with no auth — the network
+Standing operator rule: internal services run with no auth — the network
 is the trust boundary. Supporting internal credentials is the disease, not a feature:
 the recurring fleet-wide :5002 outage ("Neo4j driver already initialized with a
 different configuration") was a per-session .env's ORCH_NEO4J_USER/PASS flipping the
