@@ -26,7 +26,7 @@ os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
 from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
-from fleet_orchestrator.handoff_validation import actionability_for_nudge, process_expired_handoffs, validate_stop_handoff  # noqa: E402
+from fleet_orchestrator.handoff_validation import actionability_for_nudge, process_expired_handoffs, validate_stop_handoff, write_handoff_record  # noqa: E402
 
 CFG = OrchConfig()
 
@@ -75,7 +75,8 @@ def _record(
 
 def _write_record(r, record: dict) -> str:
     key = f"{PREFIX}:handoff:{record['dispatcher_session_id']}:{record['msg_id']}"
-    r.set(key, json.dumps(record, separators=(",", ":")))
+    record["_key"] = key
+    write_handoff_record(r, record, prefix=PREFIX)
     return key
 
 
