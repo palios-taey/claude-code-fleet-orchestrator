@@ -59,6 +59,10 @@ jobs:
           python tests/doc_cli_drift_acceptance.py
       - name: Ship-gate — local bind is the mutable API security boundary
         run: python tests/localbind_acceptance.py
+      - name: Ship-gate — shipped surfaces contain no private fleet identity
+        run: python tests/fleet_identity_deumbilical_acceptance.py
+      - name: Ship-gate — easy setup is install-safe and version-aligned
+        run: python tests/easy_setup_acceptance.py
       - name: Wait for Neo4j (bolt)
         run: |
           python - <<'PY'
@@ -192,6 +196,66 @@ jobs:
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
           ORCH_TEST_NAMESPACE: ship-gate-ci
         run: python tests/current_work_default_reconcile_acceptance.py
+      - name: Ship-gate — current_task clears only after terminal outcome
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+          ORCH_TEST_NAMESPACE: ship-gate-ci
+        run: python tests/current_task_terminal_clear_acceptance.py
+      - name: Ship-gate — out-of-band liveness preserves active work
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+          ORCH_TEST_NAMESPACE: ship-gate-ci
+        run: python tests/out_of_band_liveness_acceptance.py
+      - name: Ship-gate — pre-merge gate reads committed evidence and checks
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+        run: python tests/pre_merge_gate_acceptance.py
+      - name: Ship-gate — refs are stored and rendered with allowed roots
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+        run: python tests/ref_feature_acceptance.py
+      - name: Ship-gate — stop decision acceptance matrix
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+        run: python tests/stop_decision_acceptance.py
+      - name: Ship-gate — task dispatch CLI claims and binds peer work
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+          ORCH_TEST_NAMESPACE: ship-gate-ci
+        run: python tests/task_dispatch_cli_acceptance.py
+      - name: Ship-gate — worker task liveness sweep is namespace-safe
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+          ORCH_TEST_NAMESPACE: ship-gate-ci
+        run: python tests/worker_task_liveness_acceptance.py
       - name: Ship-gate — task claim is atomic under concurrency (F11 lock-first)
         env:
           ORCH_NEO4J_URI: bolt://localhost:7687
@@ -275,6 +339,14 @@ jobs:
           ORCH_REDIS_PORT: "6379"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
         run: python tests/ws2_family_amends_acceptance.py
+      - name: Ship-gate — explicit handoff validation state machine
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+        run: python tests/handoff_validation_acceptance.py
       - name: Ship-gate — dynamic wake packet endpoint is gated and provenance-bound
         env:
           ORCH_NEO4J_URI: bolt://localhost:7687

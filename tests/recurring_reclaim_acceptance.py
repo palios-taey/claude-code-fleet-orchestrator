@@ -68,9 +68,21 @@ def _cleanup() -> None:
     with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
         session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=PFX)
     try:
-        importlib.import_module("fleet_orchestrator.dispatch")._redis_connect().delete(
-            importlib.import_module("fleet_orchestrator.dispatch")._state_key(WORKER, "current_task")
-        )
+        dispatch_module = importlib.import_module("fleet_orchestrator.dispatch")
+        redis_client = dispatch_module._redis_connect()
+        prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+        for pattern in (
+            dispatch_module._state_key(WORKER, "*"),
+            f"{prefix}:worker-task-liveness:{PFX}*",
+            f"{prefix}:worker-task-liveness-escalated:{PFX}*",
+        ):
+            cursor = 0
+            while True:
+                cursor, keys = redis_client.scan(cursor=cursor, match=pattern, count=100)
+                if keys:
+                    redis_client.delete(*keys)
+                if cursor == 0:
+                    break
     except Exception:
         pass
 

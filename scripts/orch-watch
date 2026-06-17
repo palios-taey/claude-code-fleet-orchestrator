@@ -532,13 +532,22 @@ def notify_supervisor_of_unblock(r, supervisor: str, completed_task: dict,
     return True
 
 
-def _process_worker_liveness_expirations(r, dedup_ttl_sec: int) -> int:
+def _process_worker_liveness_expirations(
+    r,
+    dedup_ttl_sec: int,
+    *,
+    task_id_prefix: Optional[str] = None,
+    project_id_prefix: Optional[str] = None,
+) -> int:
     from fleet_orchestrator.worker_liveness import (
         escalate_stale_worker_tasks,
         worker_task_liveness_dedup_key,
     )
 
-    escalated = escalate_stale_worker_tasks()
+    escalated = escalate_stale_worker_tasks(
+        task_id_prefix=task_id_prefix,
+        project_id_prefix=project_id_prefix,
+    )
     sent = 0
     for task in escalated:
         task_id = task.get("task_id")

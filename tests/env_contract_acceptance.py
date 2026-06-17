@@ -3,6 +3,10 @@
 Env required to instantiate OrchConfig should be only the core Redis + Neo4j
 connectivity values. Dashboard URL, notify library path, and refs root are
 supported optional modes.
+
+Run this in a clean/default environment. Operator `.env` files intentionally set
+site-specific values such as `ORCH_DASHBOARD_URL`, so live-fleet production runs
+should treat this as a clean-env contract test rather than an operator-env probe.
 """
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,7 +49,9 @@ print(json.dumps({
     "notify_lib_root": cfg.notify_lib_root,
 }))
 """
-    output = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8") as clean_env:
+        env["ORCH_DOTENV"] = clean_env.name
+        output = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
     return json.loads(output.strip().splitlines()[-1])
 
 
@@ -69,7 +76,9 @@ root.mkdir()
 with mock.patch.object(config, "_notify_root_candidates", return_value=[root]):
     print(json.dumps({"resolved": str(config.resolve_notify_lib_root())}))
 """
-    output = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8") as clean_env:
+        env["ORCH_DOTENV"] = clean_env.name
+        output = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
     return json.loads(output.strip().splitlines()[-1])
 
 
