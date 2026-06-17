@@ -34,7 +34,7 @@ os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
-from fleet_orchestrator.handoff_validation import handoff_key  # noqa: E402
+from fleet_orchestrator.handoff_validation import handoff_key, write_handoff_record  # noqa: E402
 from fleet_orchestrator.orch_schema import create_phase, create_project, create_task, get_session_stop_decision, init_schema, update_task_status  # noqa: E402
 
 CFG = OrchConfig()
@@ -108,10 +108,8 @@ def _write_pending_handoff(task_id: str) -> None:
         "delivery_state": "queued",
         "delivery_poll_count": 0,
     }
-    get_redis_sync(CFG).set(
-        handoff_key(PREFIX, SESSION, msg_id),
-        json.dumps(record, separators=(",", ":")),
-    )
+    record["_key"] = handoff_key(PREFIX, SESSION, msg_id)
+    write_handoff_record(get_redis_sync(CFG), record, prefix=PREFIX)
 
 
 def _assert_runtime_code_has_no_bypass_flags() -> None:

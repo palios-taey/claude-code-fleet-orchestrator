@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fleet_orchestrator.config import OrchConfig
+from fleet_orchestrator.config import OrchConfig, get_redis_sync
 from fleet_orchestrator.chat_layer import router as chat_router
 from fleet_orchestrator.context_assembler import (
     CORE_BUDGET_BYTES,
@@ -43,6 +43,7 @@ from fleet_orchestrator.context_assembler import (
 from fleet_orchestrator.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from fleet_orchestrator.easy_setup import api_host, package_version
 from fleet_orchestrator.evidence_contract import REQUEST_TERMINAL_EVIDENCE_KEYS, TERMINAL_STATUSES
+from fleet_orchestrator.handoff_validation import ensure_handoff_index_backfilled
 from fleet_orchestrator.loop_engine import (
     ArtifactNotObservedError,
     ArtifactStore,
@@ -190,6 +191,16 @@ def _init_schema_on_startup() -> None:
     errors = result.get("errors") or []
     if errors:
         raise RuntimeError(f"orchestrator schema initialization failed: {errors}")
+    try:
+        cfg = _cfg()
+        count = ensure_handoff_index_backfilled(
+            get_redis_sync(cfg),
+            prefix=os.environ.get("NOTIFY_KEY_PREFIX", "taey"),
+        )
+        if count:
+            LOGGER.info("Backfilled Redis handoff dispatcher index with %s record(s)", count)
+    except Exception as exc:
+        LOGGER.warning("Redis handoff dispatcher index backfill failed at startup: %s", exc)
 
 
 def _cfg() -> OrchConfig:

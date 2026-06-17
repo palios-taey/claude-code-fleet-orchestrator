@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Optional
@@ -9,10 +10,16 @@ from typing import Any, Optional
 
 DEFAULT_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
 _EXECUTOR = ThreadPoolExecutor(max_workers=2)
+_BACKFILL_LOCK = threading.Lock()
+_BACKFILLED_PREFIXES: set[str] = set()
 
 
 def handoff_key(prefix: str, dispatcher: str, msg_id: str) -> str:
     return f"{prefix}:handoff:{dispatcher}:{msg_id}"
+
+
+def handoff_index_key(prefix: str, dispatcher: str) -> str:
+    return f"{prefix}:handoff-index:{dispatcher}"
 
 
 def ack_key(prefix: str, dispatcher: str, target: str, msg_id: str) -> str:
@@ -37,20 +44,107 @@ def _json_dict(raw: Any) -> Optional[dict[str, Any]]:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _member_key(prefix: str, dispatcher: str, member: Any) -> tuple[str, str]:
+    value = _text(member)
+    if f"{prefix}:handoff:" in value:
+        return value, value.rsplit(":", 1)[-1]
+    return handoff_key(prefix, dispatcher, value), value
+
+
+def _record_msg_id(record: dict[str, Any]) -> str:
+    return str(record.get("msg_id") or "").strip()
+
+
+def _index_record(redis_client, record: dict[str, Any], *, prefix: str) -> None:
+    dispatcher = str(record.get("dispatcher_session_id") or "").strip()
+    msg_id = _record_msg_id(record)
+    if not dispatcher or not msg_id:
+        return
+    index_key = handoff_index_key(prefix, dispatcher)
+    redis_client.sadd(index_key, msg_id)
+    key = record.get("_key")
+    if not key:
+        return
+    try:
+        record_ttl_ms = int(redis_client.pttl(key))
+        index_ttl_ms = int(redis_client.pttl(index_key))
+    except Exception:
+        return
+    if record_ttl_ms > 0 and (index_ttl_ms < 0 or index_ttl_ms < record_ttl_ms):
+        try:
+            redis_client.pexpire(index_key, record_ttl_ms)
+        except Exception:
+            return
+
+
+def write_handoff_record(redis_client, record: dict[str, Any], *, prefix: str = DEFAULT_PREFIX) -> None:
+    redis_client.set(record["_key"], json.dumps(record, separators=(",", ":")))
+    if record.get("kind") == "explicit_handoff":
+        _index_record(redis_client, record, prefix=prefix)
+
+
+def backfill_handoff_index(redis_client, *, prefix: str = DEFAULT_PREFIX) -> int:
+    """One-time migration for records created before the per-dispatcher index existed."""
+    count = 0
+    pattern = f"{prefix}:handoff:*"
+    for key in redis_client.scan_iter(match=pattern):
+        key_text = _text(key)
+        record = _json_dict(redis_client.get(key))
+        if not record or record.get("kind") != "explicit_handoff":
+            continue
+        dispatcher = str(record.get("dispatcher_session_id") or "").strip()
+        msg_id = _record_msg_id(record)
+        if not dispatcher or not msg_id:
+            continue
+        record["_key"] = key_text
+        _index_record(redis_client, record, prefix=prefix)
+        count += 1
+    _BACKFILLED_PREFIXES.add(prefix)
+    return count
+
+
+def ensure_handoff_index_backfilled(redis_client, *, prefix: str = DEFAULT_PREFIX) -> int:
+    if prefix in _BACKFILLED_PREFIXES:
+        return 0
+    with _BACKFILL_LOCK:
+        if prefix in _BACKFILLED_PREFIXES:
+            return 0
+        return backfill_handoff_index(redis_client, prefix=prefix)
+
+
 def _scan_dispatcher_handoffs(redis_client, dispatcher_session_id: str,
                               prefix: str) -> list[dict[str, Any]]:
-    pattern = f"{prefix}:handoff:{dispatcher_session_id}:*"
+    index_key = handoff_index_key(prefix, dispatcher_session_id)
+    members = list(redis_client.smembers(index_key) or [])
+    if not members and prefix not in _BACKFILLED_PREFIXES:
+        ensure_handoff_index_backfilled(redis_client, prefix=prefix)
+        members = list(redis_client.smembers(index_key) or [])
+    key_pairs = [_member_key(prefix, dispatcher_session_id, member) for member in members]
+    keys = [key for key, _msg_id in key_pairs]
+    payloads = redis_client.mget(keys) if keys else []
     records: list[dict[str, Any]] = []
-    for key in redis_client.scan_iter(match=pattern):
-        record = _json_dict(redis_client.get(key))
+    stale_members: list[str] = []
+    for (key, msg_id), raw in zip(key_pairs, payloads):
+        record = _json_dict(raw)
         if not record:
+            stale_members.append(msg_id)
             continue
         if record.get("kind") != "explicit_handoff":
+            stale_members.append(msg_id)
             continue
         if record.get("dispatcher_session_id") != dispatcher_session_id:
+            stale_members.append(msg_id)
             continue
         record["_key"] = key
         records.append(record)
+    if stale_members:
+        redis_client.srem(index_key, *stale_members)
     records.sort(key=lambda item: float(item.get("created_at", 0) or 0), reverse=True)
     return records
 
@@ -65,7 +159,7 @@ def mark_superseded_for_task(redis_client, dispatcher_session_id: str,
         if record.get("state") in {"resolved", "dead", "superseded"}:
             continue
         record["state"] = "superseded"
-        redis_client.set(record["_key"], json.dumps(record, separators=(",", ":")))
+        write_handoff_record(redis_client, record, prefix=prefix)
 
 
 def _timeout_call(fn, timeout_s: float):
@@ -79,8 +173,8 @@ def _timeout_call(fn, timeout_s: float):
         raise TimeoutError("handoff validation timed out") from exc
 
 
-def _write_record(redis_client, record: dict[str, Any]) -> None:
-    redis_client.set(record["_key"], json.dumps(record, separators=(",", ":")))
+def _write_record(redis_client, record: dict[str, Any], *, prefix: str) -> None:
+    write_handoff_record(redis_client, record, prefix=prefix)
 
 
 def _handoff_resolution(
@@ -97,7 +191,7 @@ def _handoff_resolution(
     ack = _json_dict(redis_client.get(ack_key(prefix, dispatcher_session_id, target, msg_id)))
     if ack and ack.get("ack_by") == target and ack.get("message_hash") == record.get("message_hash"):
         record["state"] = "receipt_acked"
-        _write_record(redis_client, record)
+        _write_record(redis_client, record, prefix=prefix)
         return {"state": "receipt_acked", "record": record}
 
     state = str(record.get("state") or "")
@@ -107,7 +201,7 @@ def _handoff_resolution(
     delivery_state = str(record.get("delivery_state") or "queued")
     if delivery_state == "not_deliverable":
         record["state"] = "delivery_failed"
-        _write_record(redis_client, record)
+        _write_record(redis_client, record, prefix=prefix)
         return {"state": "delivery_failed", "record": record}
 
     poll_budget = int(record.get("pickup_poll_budget", _default_pickup_poll_budget()) or _default_pickup_poll_budget())
@@ -115,18 +209,18 @@ def _handoff_resolution(
     if delivery_state == "injected_waiting_ack" and delivery_poll_count >= poll_budget:
         record["state"] = "delivery_failed"
         record.setdefault("delivery_failure_reason", "poll_budget_exhausted")
-        _write_record(redis_client, record)
+        _write_record(redis_client, record, prefix=prefix)
         return {"state": "delivery_failed", "record": record}
 
     backstop = float(record.get("ack_backstop_at", record.get("ack_deadline_at", 0)) or 0)
     if backstop and backstop < now:
         record["state"] = "delivery_failed"
         record.setdefault("delivery_failure_reason", "backstop_expired")
-        _write_record(redis_client, record)
+        _write_record(redis_client, record, prefix=prefix)
         return {"state": "delivery_failed", "record": record}
 
     record["state"] = "pending_unacked"
-    _write_record(redis_client, record)
+    _write_record(redis_client, record, prefix=prefix)
     return {"state": "pending_unacked", "record": record}
 
 
@@ -223,7 +317,7 @@ def process_expired_handoffs(
         if wake_count >= max_attempts:
             record["state"] = "dead"
             record["dead_at"] = now
-            redis_client.set(record["_key"], json.dumps(record, separators=(",", ":")))
+            write_handoff_record(redis_client, record, prefix=prefix)
             events.append({"type": "handoff_dead", "dispatcher_task_id": record.get("dispatcher_task_id")})
             continue
         task = load_task(str(record.get("dispatcher_task_id") or "")) if record.get("dispatcher_task_id") else None
@@ -259,6 +353,6 @@ def process_expired_handoffs(
         else:
             record.pop("last_wake_error", None)
         record["next_wake_after"] = now + (base_backoff_s * (2 ** min(max(wake_count - 1, 0), backoff_exponent_cap)))
-        _write_record(redis_client, record)
+        _write_record(redis_client, record, prefix=prefix)
         events.append(event)
     return events
