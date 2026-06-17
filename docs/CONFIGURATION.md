@@ -38,8 +38,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ORCH_HOST` | `127.0.0.1` | Bind interface for the mutable API/dashboard (see posture above). |
 | `ORCH_PORT` | `5002` | Mutable API/dashboard port. |
 | `ORCH_API_BASE` / `ORCH_DASHBOARD_URL` | `http://127.0.0.1:5002` | Base URL the CLIs call. |
-| `ORCH_NEO4J_URI` / `ORCH_NEO4J_DB` | (required) | Neo4j connection. |
-| `ORCH_NEO4J_USER` / `ORCH_NEO4J_PASS` | unset | Neo4j credentials (set for an authenticated Neo4j). |
+| `ORCH_NEO4J_URI` / `ORCH_NEO4J_DB` | (required) | Neo4j connection. **No auth** — the orchestrator connects with no credentials and does not support internal-service auth (run Neo4j with `NEO4J_AUTH=none`). Internal-service credentials are intentionally unsupported: the network is the boundary, and a credential dimension in the driver config caused a recurring outage. |
 | `ORCH_REDIS_HOST` / `ORCH_REDIS_PORT` (also bare `REDIS_HOST`/`REDIS_PORT` fallbacks) | `127.0.0.1` / `6379` | Redis connection. |
 | `ORCH_REDIS_SENTINELS` / `ORCH_REDIS_SENTINEL_MASTER` | `""` / `orch-master` | Optional Redis Sentinel HA. |
 | `ORCH_DATA_DIR` / `ORCH_STATE_DIR` | platform dirs | Data / state directories. |

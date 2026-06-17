@@ -227,6 +227,9 @@ def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
     return {"project_id": None, "description": "", "task_id": None}
 
 
+SESSION_ENV_ALLOWLIST = {"ORCH_RULES_ROOT", "ORCH_SESSION_ROOTS"}
+
+
 def _load_session_env(session_aliases: Iterable[str], session_roots: Dict[str, str]) -> None:
     root = _session_root(session_aliases, session_roots)
     if not root:
@@ -240,7 +243,11 @@ def _load_session_env(session_aliases: Iterable[str], session_roots: Dict[str, s
             continue
         key, _, value = line.partition("=")
         key = key.replace("export ", "").strip()
-        if key and key.startswith("ORCH_"):
+        # Defense-in-depth: a per-session repo .env must never override shared
+        # store/network config in this process. Only context-assembly hints pass.
+        # (Internal auth keys no longer exist at all -- see config.py -- so this is
+        # belt-and-suspenders, not the primary guard.)
+        if key in SESSION_ENV_ALLOWLIST:
             os.environ.setdefault(key, value.strip())
 
 
