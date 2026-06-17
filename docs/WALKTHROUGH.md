@@ -126,7 +126,7 @@ behavior comes from. Full spec: [docs/PLAN_FORMAT.md](PLAN_FORMAT.md).
 | `[priority: <int>]` | optional | ranking among ready tasks (lower = higher) |
 | `[depends: a,b]` | optional | **the gate** — the task stays unready until `a` and `b` are `completed` |
 | `[tags: ...]` | optional | capability tags; gate tasks use `prodtest` / `audit` |
-| `[ref: path:Lx-Ly]` | optional | clickable file-slice pointer in the dashboard (needs `ORCH_REF_ALLOWED_ROOT`) |
+| `[ref: path]` / `[ref: path:Lx-Ly]` | optional | clickable whole-file or file-slice pointer in the dashboard (needs `ORCH_REF_ALLOWED_ROOT`) |
 
 **Design tip:** make the last tasks of a project its release gate (a `prodtest` task + an `audit`
 task) and wire everything else to `depends` into them. That is what makes "shippable" unreachable
