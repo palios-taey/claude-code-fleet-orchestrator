@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -15,8 +14,6 @@ sys.path.insert(0, str(ROOT))
 
 PREFIX = f"hvacc-{uuid.uuid4().hex[:8]}"
 os.environ["NOTIFY_KEY_PREFIX"] = PREFIX
-os.environ["CF_HANDOFF_ENFORCE"] = "1"
-os.environ["CF_HANDOFF_ENFORCE_SESSIONS"] = "conductor-codex"
 if "ORCH_DOTENV" not in os.environ:
     for candidate in (
         ROOT / ".env",

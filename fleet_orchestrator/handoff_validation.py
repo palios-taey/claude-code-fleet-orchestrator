@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Optional
@@ -10,67 +9,6 @@ from typing import Any, Optional
 
 DEFAULT_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
 _EXECUTOR = ThreadPoolExecutor(max_workers=2)
-_FLAG_CACHE_TTL_S = 2.0
-_FLAG_CACHE_PATH: Optional[str] = None
-_FLAG_CACHE_AT = 0.0
-_FLAG_CACHE_DATA: dict[str, dict[str, bool]] = {}
-_FLAG_CACHE_LOCK = threading.Lock()
-
-
-def _truthy(raw: Any) -> bool:
-    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _session_items(raw: str) -> set[str]:
-    return {item.strip() for item in raw.replace(";", ",").split(",") if item.strip()}
-
-
-def _flag_file_map() -> dict[str, dict[str, bool]]:
-    path = os.environ.get("CF_HANDOFF_SESSION_FLAGS_FILE", "").strip()
-    if not path:
-        return {}
-    ttl_raw = os.environ.get("CF_HANDOFF_SESSION_FLAGS_TTL_SECS", str(_FLAG_CACHE_TTL_S)).strip()
-    try:
-        ttl_s = max(0.0, float(ttl_raw))
-    except Exception:
-        ttl_s = _FLAG_CACHE_TTL_S
-    global _FLAG_CACHE_PATH, _FLAG_CACHE_AT, _FLAG_CACHE_DATA
-    now = time.time()
-    with _FLAG_CACHE_LOCK:
-        if path == _FLAG_CACHE_PATH and (now - _FLAG_CACHE_AT) <= ttl_s:
-            return dict(_FLAG_CACHE_DATA)
-    try:
-        with open(path, encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except Exception:
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    result: dict[str, dict[str, bool]] = {}
-    for session_id, flags in payload.items():
-        if not isinstance(flags, dict):
-            continue
-        result[str(session_id)] = {
-            "enforce": _truthy(flags.get("enforce")),
-            "ack_passive": _truthy(flags.get("ack_passive")),
-        }
-    with _FLAG_CACHE_LOCK:
-        _FLAG_CACHE_PATH = path
-        _FLAG_CACHE_AT = now
-        _FLAG_CACHE_DATA = dict(result)
-    return result
-
-
-def flags_for_session(session_id: str) -> dict[str, bool]:
-    file_map = _flag_file_map()
-    file_flags = file_map.get(session_id, {})
-    enforce_requested = _truthy(os.environ.get("CF_HANDOFF_ENFORCE"))
-    ack_requested = _truthy(os.environ.get("CF_HANDOFF_ACK_PASSIVE"))
-    enforce_sessions = _session_items(os.environ.get("CF_HANDOFF_ENFORCE_SESSIONS", ""))
-    ack_sessions = _session_items(os.environ.get("CF_HANDOFF_ACK_PASSIVE_SESSIONS", ""))
-    enforce = bool(file_flags.get("enforce")) or (enforce_requested and session_id in enforce_sessions)
-    ack_passive = bool(file_flags.get("ack_passive")) or (ack_requested and session_id in ack_sessions)
-    return {"enforce": enforce, "ack_passive": ack_passive}
 
 
 def handoff_key(prefix: str, dispatcher: str, msg_id: str) -> str:
@@ -259,9 +197,6 @@ def process_expired_handoffs(
     max_attempts: int = 3,
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
-    flags = flags_for_session(session_id)
-    if not flags["enforce"]:
-        return events
     now = time.time()
     backoff_exponent_cap = 10
     for record in _scan_dispatcher_handoffs(redis_client, session_id, prefix):

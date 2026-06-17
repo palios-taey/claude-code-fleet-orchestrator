@@ -80,27 +80,18 @@ force a pass), `ORCH_PRE_MERGE_REQUIRED_CHECKS` (consumed by the pre-merge gate)
 | `ORCH_LOOPS_ENABLED` | OFF | The signal/clock/task-state loop engine (opt-in capability). |
 | `ORCH_GATE_TEMPLATE_ENABLED` | OFF | Forced sub-role gate template on plan ingest. |
 
-## 6. Handoff / stop enforcement (per-session, default OFF) — see note
+## 6. Handoff / stop discipline
 
 | Flag | Default | Effect |
 |---|---|---|
-| `CF_HANDOFF_ENFORCE` (+`_SESSIONS`) | OFF | Handoff-validation enforcement, enabled **only for sessions in the allowlist**. |
-| `CF_HANDOFF_ACK_PASSIVE` (+`_SESSIONS`) | OFF | Per-session passive-ack handoff mode. |
-| `CF_STOP_INPROGRESS` (+`_SESSIONS`) | OFF | Blocks a session from stopping while it holds live in-progress work, for allowlisted sessions. |
 | `CF_HANDOFF_PICKUP_POLL_BUDGET` / `CF_HANDOFF_VALIDATE_TIMEOUT_S` | `5` / `0.2` | Handoff tuning. |
-| `CF_HANDOFF_SESSION_FLAGS_FILE` (+`_TTL_SECS`) | unset | A file that can set per-session handoff `enforce`/`ack_passive` at runtime. |
 
-> **Honest notes on this cluster (flagged by audit, not yet redesigned):**
-> 1. **There is no "enforce-all-sessions" mode.** Enforcement requires enumerating
->    session IDs in an allowlist, so it is opt-in per session and dormant for any
->    session not listed — a worker-but-not-supervisor asymmetry. A global/default-on
->    mode is the planned fix.
-> 2. **`CF_STOP_INPROGRESS` has a second, NON-ENV enablement path:** it also checks
->    a Redis set `{NOTIFY_KEY_PREFIX}:stop_inprogress_enabled` for the session — so
->    this can be toggled at runtime with no env var, invisible to anyone auditing
->    env flags. Documented here so the surface is honest.
-> 3. The stop-block is **soft**: a release valve force-allows the stop after the
->    same block is hit 3× (so a session cannot wedge permanently).
+Handoff validation and in-progress stop blocking are always active. There is no
+per-session opt-in/opt-out path, no runtime flag file, and no Redis set that can
+disable or enable either rule for selected sessions.
+
+> The in-progress stop-block is **soft**: a release valve force-allows the stop
+> after the same block is hit 3×, so a session cannot wedge permanently.
 
 ## 7. System / namespacing (read but not product config)
 
