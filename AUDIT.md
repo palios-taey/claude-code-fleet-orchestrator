@@ -40,7 +40,7 @@ This file is the single entry point for any code review of `claude-code-fleet-or
 - G1. **Wake-packet gating is endpoint-scoped.** The canonical flag is now `ORCH_WAKE_PACKET_ENDPOINT_ENABLED`; the deprecated `ORCH_WAKE_PACKET_ENABLED` alias remains for old `.env` files. Either flag gates only the `/wake-packet` context endpoint, not session waking (`send_wake`).
 
 ## Recently closed gaps reviewers should regression-check
-- R1. Handoff validation and stop-on-in-progress are no longer per-session opt-in. There should be no live `CF_HANDOFF_ENFORCE`, `CF_HANDOFF_SESSION_FLAGS_FILE`, `CF_STOP_INPROGRESS`, `flags_for_session`, or Redis `{prefix}:stop_inprogress_enabled` bypass in runtime code. (`tests/no_flag_bypass_acceptance.py`.)
+- R1. Stop-on-in-progress is no longer per-session opt-in. Handoff validation helpers remain present, but pending/unacked handoff records are **not** a stop-decision blocker on current main. There should be no live `CF_HANDOFF_ENFORCE`, `CF_HANDOFF_SESSION_FLAGS_FILE`, `CF_STOP_INPROGRESS`, `flags_for_session`, or Redis `{prefix}:stop_inprogress_enabled` bypass in runtime code; pending handoff records should not produce a stop block. (`tests/no_flag_bypass_acceptance.py`.)
 
 ## Deliverable
 Per claim (C1–C9), live gap (G1), and regression target (R1): CONFIRMED / GAP (with `file:line`). Plus: any unclaimed security/accountability-relevant behavior you found by reading the source. Then a top-level verdict: ENDORSE (code matches its stated claims; gaps are only as bad as stated) or BLOCK (named claim is false, or an unclaimed bypass exists).

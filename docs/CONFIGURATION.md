@@ -84,11 +84,13 @@ force a pass), `ORCH_PRE_MERGE_REQUIRED_CHECKS` (consumed by the pre-merge gate)
 
 | Flag | Default | Effect |
 |---|---|---|
-| `CF_HANDOFF_PICKUP_POLL_BUDGET` / `CF_HANDOFF_VALIDATE_TIMEOUT_S` | `5` / `0.2` | Handoff tuning. |
+| `CF_HANDOFF_PICKUP_POLL_BUDGET` / `CF_HANDOFF_VALIDATE_TIMEOUT_S` | `5` / `0.2` | Handoff helper tuning. The current stop-decision path does not call handoff validation. |
 
-Handoff validation and in-progress stop blocking are always active. There is no
+In-progress stop blocking is always active. Handoff validation helper code
+remains available for explicit handoff records/receipts, but pending/unacked
+handoffs are not a stop-decision blocker on current main. There is no
 per-session opt-in/opt-out path, no runtime flag file, and no Redis set that can
-disable or enable either rule for selected sessions.
+disable in-progress stop blocking for selected sessions.
 
 > The in-progress stop-block is **soft**: a release valve force-allows the stop
 > after the same block is hit 3×, so a session cannot wedge permanently.
