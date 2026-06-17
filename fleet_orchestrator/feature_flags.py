@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Iterable
 
 
+LOG = logging.getLogger(__name__)
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 
@@ -19,9 +21,15 @@ def default_on_feature_enabled(name: str, *, aliases: Iterable[str] = ()) -> boo
         value = raw.strip().lower()
         if value in TRUE_ENV_VALUES:
             return True
-        if value in FALSE_ENV_VALUES or value == "":
+        if value in FALSE_ENV_VALUES:
             return False
-        return False
+        if value:
+            LOG.warning(
+                "unrecognized value for default-on feature flag %s=%r; treating as enabled",
+                key,
+                raw,
+            )
+        return True
     return True
 
 
