@@ -1,11 +1,11 @@
 # Shippability Gate — Definition of Shippable
 
-**STATUS: SPEC / TARGET (2026-06-03).** The engine enforcement described under
-"Enforcement" is being built in validated stages. Until a stage lands AND has
-itself passed both gates below, this document is the target, not an enforced
-reality. Nothing in this file is "done" until it is production-tested + full-code
-Chat-audited. (This file exists because the failure it prevents was: code marked
-"completed" on API-200s + a prose-only external audit, shipped broken.)
+**STATUS: LIVE & ENFORCED (2026-06-17).** The engine enforcement described under
+"Enforcement" is implemented in `fleet_orchestrator/shippability.py` and exposed
+through the project shippability endpoint in `fleet_orchestrator/tasks_api.py`.
+This file defines the enforced reference standard and the operator-configurable
+gate names. It exists because the failure it prevents was: code marked
+"completed" on API-200s + a prose-only external audit, shipped broken.
 
 ## The gates are CONFIGURABLE per user — these are the reference standard, not a mandate
 

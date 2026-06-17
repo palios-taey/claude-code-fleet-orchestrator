@@ -65,9 +65,10 @@ taey-task create "<description>"
 taey-task list
 taey-task status <task-id>
 taey-task update <task-id> <status>
+taey-task dispatch <task-id> <peer>
 ```
 
-Use `taey-plan` for project / phase / task structures sourced from markdown. Use `taey-task` for direct task creation, ranking, inspection, and status updates through the API.
+Use `taey-plan` for project / phase / task structures sourced from markdown. Use `taey-task` for direct task creation, ranking, inspection, status updates, and peer dispatch through the API.
 
 ## API surface
 
