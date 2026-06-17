@@ -232,6 +232,8 @@ jobs:
         run: python tests/singleton_init_race_acceptance.py
       - name: Ship-gate — no internal-service auth (Neo4j connects auth=None, no credential config)
         run: python tests/no_internal_auth_acceptance.py
+      - name: Ship-gate — allowed ref roots auto-derive from supervisor session roots
+        run: python tests/ref_roots_derive_from_sessions_acceptance.py
       - name: Ship-gate — loader captures all task dependencies (multi-depends not dropped)
         run: python tests/plan_loader_multi_depends_acceptance.py
       - name: Ship-gate — human-review gates are first-class stop states

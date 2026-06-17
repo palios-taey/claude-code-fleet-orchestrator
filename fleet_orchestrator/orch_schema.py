@@ -341,21 +341,58 @@ def _has_control_chars(value: str) -> bool:
     return any(ord(ch) < 32 for ch in value)
 
 
-def _allowed_ref_roots() -> List[Path]:
-    raw = str(os.environ.get("ORCH_REF_ALLOWED_ROOT") or "").strip()
+def _session_root_dirs() -> List[str]:
+    """Directory values from ORCH_SESSION_ROOTS (JSON dict OR comma key=value).
+
+    Each supervisor's own repo root is implicitly an allowed ref root for its
+    own plans — so adding a supervisor (ORCH_SESSION_ROOTS) auto-grants ingestion
+    without separately maintaining ORCH_REF_ALLOWED_ROOT. (Local parser, mirroring
+    context_assembler, to avoid an import cycle.)
+    """
+    raw = os.environ.get("ORCH_SESSION_ROOTS", "").strip()
     if not raw:
         return []
-    candidates: List[str]
-    if raw.startswith("["):
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            parsed = []
-        candidates = [str(item).strip() for item in parsed if str(item).strip()]
-    else:
-        normalized = raw.replace(os.pathsep, ",")
-        candidates = [item.strip() for item in normalized.split(",") if item.strip()]
-    return [Path(item).expanduser().resolve(strict=False) for item in candidates]
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return [str(v).strip() for v in parsed.values() if str(v).strip()]
+    except (ValueError, TypeError):
+        pass
+    dirs: List[str] = []
+    for pair in raw.split(","):
+        if "=" in pair:
+            _, _, value = pair.partition("=")
+            if value.strip():
+                dirs.append(value.strip())
+    return dirs
+
+
+def _allowed_ref_roots() -> List[Path]:
+    candidates: List[str] = []
+    raw = str(os.environ.get("ORCH_REF_ALLOWED_ROOT") or "").strip()
+    if raw:
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = []
+            candidates = [str(item).strip() for item in parsed if str(item).strip()]
+        else:
+            normalized = raw.replace(os.pathsep, ",")
+            candidates = [item.strip() for item in normalized.split(",") if item.strip()]
+    # Auto-derive: every supervisor's session root is an allowed ref root, so the
+    # explicit ORCH_REF_ALLOWED_ROOT list never has to be hand-synced per supervisor
+    # (the drift that blocked treasurer + taeys-hands from ingesting their own plans).
+    candidates.extend(_session_root_dirs())
+    # de-dup by resolved path, preserve order
+    seen: set = set()
+    roots: List[Path] = []
+    for item in candidates:
+        p = Path(item).expanduser().resolve(strict=False)
+        if p not in seen:
+            seen.add(p)
+            roots.append(p)
+    return roots
 
 
 def _path_within_any_root(path: Path, roots: List[Path]) -> bool:
