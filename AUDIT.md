@@ -37,9 +37,10 @@ This file is the single entry point for any code review of `claude-code-fleet-or
 - C9. **`version.py` is the single source of truth for the version**, and a release tag that disagrees with it fails CI (`.github/workflows/version-tag-consistency.yml`).
 
 ## Known gaps the code does NOT hide (verify these are still only-this-bad)
-- G1. **Handoff/stop enforcement (`CF_HANDOFF_ENFORCE`, `CF_STOP_INPROGRESS`, …) is per-session opt-in via allowlists, with no enforce-all mode** — dormant for any session not enumerated. A global/default-on mode is planned, not built. (`handoff_validation.py:flags_for_session`, `orch_schema.py:_stop_inprogress_enabled`.)
-- G2. **`CF_STOP_INPROGRESS` has a non-env enablement path:** a Redis set `{NOTIFY_KEY_PREFIX}:stop_inprogress_enabled`. Toggleable at runtime, invisible to env-flag audits.
-- G3. **`ORCH_WAKE_PACKET_ENABLED` only gates the `/wake-packet` context endpoint** — it does NOT gate session waking (`send_wake`). The name overclaims.
+- G1. **`ORCH_WAKE_PACKET_ENABLED` only gates the `/wake-packet` context endpoint** — it does NOT gate session waking (`send_wake`). The name overclaims.
+
+## Recently closed gaps reviewers should regression-check
+- R1. Handoff validation and stop-on-in-progress are no longer per-session opt-in. There should be no live `CF_HANDOFF_ENFORCE`, `CF_HANDOFF_SESSION_FLAGS_FILE`, `CF_STOP_INPROGRESS`, `flags_for_session`, or Redis `{prefix}:stop_inprogress_enabled` bypass in runtime code. (`tests/no_flag_bypass_acceptance.py`.)
 
 ## Deliverable
-Per claim (C1–C9) and gap (G1–G3): CONFIRMED / GAP (with `file:line`). Plus: any unclaimed security/accountability-relevant behavior you found by reading the source. Then a top-level verdict: ENDORSE (code matches its stated claims; gaps are only as bad as stated) or BLOCK (named claim is false, or an unclaimed bypass exists).
+Per claim (C1–C9), live gap (G1), and regression target (R1): CONFIRMED / GAP (with `file:line`). Plus: any unclaimed security/accountability-relevant behavior you found by reading the source. Then a top-level verdict: ENDORSE (code matches its stated claims; gaps are only as bad as stated) or BLOCK (named claim is false, or an unclaimed bypass exists).

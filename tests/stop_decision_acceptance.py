@@ -2,10 +2,7 @@
 from __future__ import annotations
 
 import os
-import socket
-import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -18,7 +15,6 @@ sys.path.insert(0, str(ROOT))
 PREFIX = f"hvstop-{uuid.uuid4().hex[:8]}"
 SUPERVISOR = f"{PREFIX}-sup"
 WORKER = f"{SUPERVISOR}-codex"
-UNENFORCED = f"{PREFIX}-free"
 os.environ["NOTIFY_KEY_PREFIX"] = PREFIX
 if "ORCH_DOTENV" not in os.environ:
     for candidate in (
@@ -30,11 +26,9 @@ if "ORCH_DOTENV" not in os.environ:
             break
 os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
-os.environ.pop("CF_STOP_INPROGRESS", None)
-os.environ.pop("CF_STOP_INPROGRESS_SESSIONS", None)
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
-from fleet_orchestrator.orch_schema import create_phase, create_project, create_task, get_session_next_ready, get_session_stop_decision, update_task_status, _stop_inprogress_enabled  # noqa: E402
+from fleet_orchestrator.orch_schema import create_phase, create_project, create_task, get_session_next_ready, get_session_stop_decision, update_task_status  # noqa: E402
 
 CFG = OrchConfig()
 
@@ -53,14 +47,6 @@ def _cleanup(prefix: str) -> None:
             r.delete(*keys)
         if cursor == 0:
             break
-
-
-def _write_flag_file(payload: str) -> str:
-    handle = tempfile.NamedTemporaryFile("w", delete=False, suffix=".json")
-    handle.write(payload)
-    handle.flush()
-    handle.close()
-    return handle.name
 
 
 def _make_priority_fixture() -> None:
@@ -86,16 +72,6 @@ def _make_in_progress_fixture(*, owner: str = WORKER, blocked_on: str | None = N
 def main() -> int:
     _cleanup(PREFIX)
     try:
-        flag_file = _write_flag_file(f'{{"{SUPERVISOR}":{{"enforce":true}},"{UNENFORCED}":{{"enforce":false}}}}')
-        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
-
-        off = get_session_stop_decision(UNENFORCED, config=CFG)
-        print("PASS conductor-only-enforce" if off.get("block") is False and off.get("wake_type") == "ALLOW_STOP" else f"FAIL conductor-only-enforce {off}")
-
-        with mock.patch("fleet_orchestrator.orch_schema.flags_for_session", side_effect=RuntimeError("flag-boom")):
-            flag_fail_open = get_session_stop_decision(UNENFORCED, config=CFG)
-        print("PASS flags-for-session-fail-open" if flag_fail_open.get("wake_type") == off.get("wake_type") and flag_fail_open.get("block") == off.get("block") else f"FAIL flags-for-session-fail-open {flag_fail_open}")
-
         with mock.patch("fleet_orchestrator.orch_schema.validate_stop_handoff", side_effect=TimeoutError("boom")):
             fail_closed = get_session_stop_decision(SUPERVISOR, config=CFG)
         print("PASS handoff-redis-down-fail-closed" if fail_closed.get("block") is True and fail_closed.get("hv_fail_closed") else f"FAIL handoff-redis-down-fail-closed {fail_closed}")
@@ -108,20 +84,7 @@ def main() -> int:
         next_ready = get_session_next_ready(SUPERVISOR, config=CFG)
         print("PASS next-ready-priority-ascending" if next_ready and next_ready.get("task_id") == f"{PREFIX}-task-2" else f"FAIL next-ready-priority-ascending {next_ready}")
 
-        class HangingRedis:
-            def sismember(self, *_args, **_kwargs):
-                time.sleep(0.5)
-                return True
-
-        with mock.patch("fleet_orchestrator.config.get_redis_sync", return_value=HangingRedis()):
-            timeout_flag = _stop_inprogress_enabled(SUPERVISOR, config=CFG)
-        print("PASS stop-inprogress-redis-timeout-fail-open" if timeout_flag is False else f"FAIL stop-inprogress-redis-timeout-fail-open {timeout_flag}")
-
         _cleanup(PREFIX)
-        flag_file = _write_flag_file(f'{{"{SUPERVISOR}":{{"enforce":true}}}}')
-        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
-        os.environ.pop("CF_STOP_INPROGRESS", None)
-        os.environ.pop("CF_STOP_INPROGRESS_SESSIONS", None)
         task_id = _make_in_progress_fixture(blocked_on=None)
         in_progress_gate = get_session_stop_decision(SUPERVISOR, config=CFG)
         print(
@@ -131,36 +94,24 @@ def main() -> int:
         )
 
         _cleanup(PREFIX)
-        flag_file = _write_flag_file('{}')
-        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
-        os.environ["CF_STOP_INPROGRESS"] = "1"
-        os.environ["CF_STOP_INPROGRESS_SESSIONS"] = SUPERVISOR
         task_id = _make_in_progress_fixture(owner=SUPERVISOR, blocked_on=None)
-        in_progress_block_no_enforce = get_session_stop_decision(SUPERVISOR, config=CFG)
+        in_progress_block_no_flags = get_session_stop_decision(SUPERVISOR, config=CFG)
         print(
-            "PASS in-progress-blocks-with-enforce-off"
-            if in_progress_block_no_enforce.get("block") is True and in_progress_block_no_enforce.get("task_id") == task_id and in_progress_block_no_enforce.get("wake_type") == "WAKE_WITH_QUEUE"
-            else f"FAIL in-progress-blocks-with-enforce-off {in_progress_block_no_enforce}"
+            "PASS in-progress-blocks-without-flags"
+            if in_progress_block_no_flags.get("block") is True and in_progress_block_no_flags.get("task_id") == task_id and in_progress_block_no_flags.get("wake_type") == "WAKE_WITH_QUEUE"
+            else f"FAIL in-progress-blocks-without-flags {in_progress_block_no_flags}"
         )
 
         _cleanup(PREFIX)
-        flag_file = _write_flag_file(f'{{"{SUPERVISOR}":{{"enforce":true}}}}')
-        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
-        os.environ["CF_STOP_INPROGRESS"] = "1"
-        os.environ["CF_STOP_INPROGRESS_SESSIONS"] = SUPERVISOR
         task_id = _make_in_progress_fixture(blocked_on=None)
         in_progress_block = get_session_stop_decision(SUPERVISOR, config=CFG)
         print(
-            "PASS in-progress-allowlisted-blocks"
+            "PASS peer-in-progress-blocks"
             if in_progress_block.get("block") is True and in_progress_block.get("task_id") == task_id and in_progress_block.get("gate_for") == WORKER and in_progress_block.get("wake_type") == "WAKE_WITH_QUEUE"
-            else f"FAIL in-progress-allowlisted-blocks {in_progress_block}"
+            else f"FAIL peer-in-progress-blocks {in_progress_block}"
         )
 
         _cleanup(PREFIX)
-        flag_file = _write_flag_file(f'{{"{SUPERVISOR}":{{"enforce":true}}}}')
-        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
-        os.environ["CF_STOP_INPROGRESS"] = "1"
-        os.environ["CF_STOP_INPROGRESS_SESSIONS"] = SUPERVISOR
         task_id = _make_in_progress_fixture(owner=SUPERVISOR, blocked_on=WORKER)
         blocked_on_rejected = get_session_stop_decision(SUPERVISOR, config=CFG)
         print(
@@ -170,10 +121,6 @@ def main() -> int:
         )
 
         _cleanup(PREFIX)
-        flag_file = _write_flag_file('{}')
-        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
-        os.environ["CF_STOP_INPROGRESS"] = "1"
-        os.environ["CF_STOP_INPROGRESS_SESSIONS"] = SUPERVISOR
         await_marker = "AWAIT:family-consent:weaver standalone consent"
         task_id = _make_in_progress_fixture(owner=SUPERVISOR, blocked_on=await_marker)
         await_decision = get_session_stop_decision(SUPERVISOR, config=CFG)
@@ -210,10 +157,6 @@ def main() -> int:
         )
 
         _cleanup(PREFIX)
-        flag_file = _write_flag_file(f'{{"{SUPERVISOR}":{{"enforce":true}}}}')
-        os.environ["CF_HANDOFF_SESSION_FLAGS_FILE"] = flag_file
-        os.environ["CF_STOP_INPROGRESS"] = "1"
-        os.environ["CF_STOP_INPROGRESS_SESSIONS"] = SUPERVISOR
         _make_in_progress_fixture(owner=SUPERVISOR, blocked_on=None)
         convergence_results = [
             get_session_stop_decision(SUPERVISOR, stop_hook_active=True, config=CFG)

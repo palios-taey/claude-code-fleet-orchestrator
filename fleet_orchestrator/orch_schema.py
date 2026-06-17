@@ -20,12 +20,12 @@ import subprocess
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, ensure_notify_importable, get_neo4j_driver
-from .handoff_validation import flags_for_session, validate_stop_handoff
+from .handoff_validation import validate_stop_handoff
 from .out_of_band import out_of_band_task_active
 
 
@@ -748,8 +748,6 @@ _STOP_BLOCK_CONVERGENCE_LIMIT = 3
 # may survive until expiry if a process dies mid-cycle.
 _STOP_BLOCK_TTL_SECS = 3600
 WAKE_ALLOW_STOP = "ALLOW_STOP"
-_STOP_INPROGRESS_EXECUTOR = ThreadPoolExecutor(max_workers=1)
-_STOP_INPROGRESS_REDIS_TIMEOUT_S = 0.2
 _STOP_MARKER_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 _STOP_MARKER_REDIS_TIMEOUT_S = 0.2
 _LOG = logging.getLogger(__name__)
@@ -1235,33 +1233,6 @@ def _in_progress_block_reason(task_id: Optional[str], description: Optional[str]
     return f"Finish in-progress task {task_id_value}: {task_title}."
 
 
-def _stop_inprogress_enabled(session_id: str, config: Optional[OrchConfig] = None) -> bool:
-    from .config import get_redis_sync
-
-    cfg = config or OrchConfig()
-    if str(os.environ.get("CF_STOP_INPROGRESS") or "").strip().lower() in {"1", "true", "yes", "on"}:
-        allowed = {
-            item.strip()
-            for item in str(os.environ.get("CF_STOP_INPROGRESS_SESSIONS") or "").replace(";", ",").split(",")
-            if item.strip()
-        }
-        if session_id in allowed:
-            return True
-    try:
-        prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
-        redis_client = get_redis_sync(cfg)
-        future = _STOP_INPROGRESS_EXECUTOR.submit(
-            redis_client.sismember,
-            f"{prefix}:stop_inprogress_enabled",
-            session_id,
-        )
-        return bool(future.result(timeout=_STOP_INPROGRESS_REDIS_TIMEOUT_S))
-    except FuturesTimeoutError:
-        return False
-    except Exception:
-        return False
-
-
 def _redis_marker_call(fn, *args):
     future = _STOP_MARKER_EXECUTOR.submit(fn, *args)
     return future.result(timeout=_STOP_MARKER_REDIS_TIMEOUT_S)
@@ -1744,60 +1715,59 @@ def _raw_stop_decision(session_id: str,
                 "gate_for": inflight.get("owner"),
             }
 
-    if _stop_inprogress_enabled(session_id, config=cfg):
-        current_work = get_session_current_work(session_id, config=cfg)
-        current_task_id = current_work.get("top_task_id") if current_work else None
-        blocked_on = _task_blocked_on(current_task_id, config=cfg)
-        if current_task_id and not blocked_on:
-            # This block is intentionally bounded by the wrapper-level
-            # convergence release valve: after the same stop block is observed
-            # three times in stop-hook context, get_session_stop_decision()
-            # force-allows so sessions cannot wedge permanently.
+    current_work = get_session_current_work(session_id, config=cfg)
+    current_task_id = current_work.get("top_task_id") if current_work else None
+    blocked_on = _task_blocked_on(current_task_id, config=cfg)
+    if current_task_id and not blocked_on:
+        # This block is intentionally bounded by the wrapper-level
+        # convergence release valve: after the same stop block is observed
+        # three times in stop-hook context, get_session_stop_decision()
+        # force-allows so sessions cannot wedge permanently.
+        return {
+            "block": True,
+            "reason": _in_progress_block_reason(current_task_id, current_work.get("top_task_desc") if current_work else None),
+            "wake_type": "WAKE_WITH_QUEUE",
+            "task_id": current_task_id,
+            "project_id": current_work.get("project_id") if current_work else None,
+            "phase_id": current_work.get("phase_id") if current_work else None,
+            "task_title_short": (str(current_work.get("top_task_desc") or "")[:80] or None) if current_work else None,
+        }
+    if current_task_id and blocked_on:
+        await_signal = _declared_await_signal(blocked_on)
+        if await_signal:
             return {
-                "block": True,
-                "reason": _in_progress_block_reason(current_task_id, current_work.get("top_task_desc") if current_work else None),
-                "wake_type": "WAKE_WITH_QUEUE",
-                "task_id": current_task_id,
-                "project_id": current_work.get("project_id") if current_work else None,
-                "phase_id": current_work.get("phase_id") if current_work else None,
-                "task_title_short": (str(current_work.get("top_task_desc") or "")[:80] or None) if current_work else None,
+                "block": False,
+                "reason": _declared_await_signal_stop_reason(await_signal),
+                "wake_type": WAKE_ALLOW_STOP,
+                "task_id": None,
+                "blocked_on": blocked_on,
+                "awaiting_signal": await_signal,
             }
-        if current_task_id and blocked_on:
-            await_signal = _declared_await_signal(blocked_on)
-            if await_signal:
-                return {
-                    "block": False,
-                    "reason": _declared_await_signal_stop_reason(await_signal),
-                    "wake_type": WAKE_ALLOW_STOP,
-                    "task_id": None,
-                    "blocked_on": blocked_on,
-                    "awaiting_signal": await_signal,
-                }
-            if _blocked_on_has_live_resolver(blocked_on, current_task_id=current_task_id, config=cfg):
-                return {
-                    "block": False,
-                    "reason": None,
-                    "wake_type": WAKE_ALLOW_STOP,
-                    "task_id": None,
-                    "blocked_on": blocked_on,
-                }
-            # blocked_on names no live autonomous resolver -> it is a human gate (or a
-            # stale/self/cyclic reference). A human gate must NOT park a session in an
-            # active plan: keep it on its in-progress task. This block is NON_CONVERGABLE
-            # -- a human gate is permanently insoluble, so the wrapper convergence valve
-            # must NOT force-allow it after N attempts (that would just delay the same
-            # indefinite-park bug). See get_session_stop_decision.
+        if _blocked_on_has_live_resolver(blocked_on, current_task_id=current_task_id, config=cfg):
             return {
-                "block": True,
-                "reason": _human_gate_block_reason(current_task_id, blocked_on),
-                "wake_type": "WAKE_WITH_QUEUE",
-                "task_id": current_task_id,
-                "project_id": current_work.get("project_id") if current_work else None,
-                "phase_id": current_work.get("phase_id") if current_work else None,
-                "task_title_short": (str(current_work.get("top_task_desc") or "")[:80] or None) if current_work else None,
-                "blocked_on_rejected": blocked_on,
-                "non_convergable": True,
+                "block": False,
+                "reason": None,
+                "wake_type": WAKE_ALLOW_STOP,
+                "task_id": None,
+                "blocked_on": blocked_on,
             }
+        # blocked_on names no live autonomous resolver -> it is a human gate (or a
+        # stale/self/cyclic reference). A human gate must NOT park a session in an
+        # active plan: keep it on its in-progress task. This block is NON_CONVERGABLE
+        # -- a human gate is permanently insoluble, so the wrapper convergence valve
+        # must NOT force-allow it after N attempts (that would just delay the same
+        # indefinite-park bug). See get_session_stop_decision.
+        return {
+            "block": True,
+            "reason": _human_gate_block_reason(current_task_id, blocked_on),
+            "wake_type": "WAKE_WITH_QUEUE",
+            "task_id": current_task_id,
+            "project_id": current_work.get("project_id") if current_work else None,
+            "phase_id": current_work.get("phase_id") if current_work else None,
+            "task_title_short": (str(current_work.get("top_task_desc") or "")[:80] or None) if current_work else None,
+            "blocked_on_rejected": blocked_on,
+            "non_convergable": True,
+        }
 
     observed_task_id = _observed_stop_task_id(session_id, config=cfg)
     if observed_task_id:
@@ -1943,11 +1913,6 @@ def get_session_stop_decision(session_id: str,
 
     cfg = config or OrchConfig()
     try:
-        enforce_handoff = flags_for_session(session_id)["enforce"]
-    except Exception:
-        enforce_handoff = False
-
-    try:
         decision = _raw_stop_decision(session_id, config=cfg)
     except Exception as exc:
         # FAIL CLOSED. A stop-DISCIPLINE engine must never let an error license a stop:
@@ -1976,7 +1941,7 @@ def get_session_stop_decision(session_id: str,
             },
         }
 
-    if enforce_handoff and not decision.get("block"):
+    if not decision.get("block"):
         observed_task_id = _observed_stop_task_id(session_id, config=cfg)
         try:
             validate_timeout_s = float(os.environ.get("CF_HANDOFF_VALIDATE_TIMEOUT_S", "0.2") or 0.2)
