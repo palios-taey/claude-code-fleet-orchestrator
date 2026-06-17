@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import io
 import os
 import sys
 import tempfile
-from importlib.machinery import SourceFileLoader
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -115,14 +114,7 @@ def _contract_rules(result: dict[str, object]) -> list[str]:
 
 
 def _load_taey_plan_module():
-    script = ROOT / "scripts" / "taey-plan"
-    loader = SourceFileLoader("taey_plan_cli_acceptance", str(script))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    if spec is None:
-        raise RuntimeError("could not load taey-plan module spec")
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    return importlib.import_module("fleet_orchestrator.cli_taey_plan")
 
 
 def _cli_stdout(result: dict[str, object]) -> str:

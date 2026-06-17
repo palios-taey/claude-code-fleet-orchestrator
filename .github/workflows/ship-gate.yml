@@ -59,6 +59,8 @@ jobs:
         run: |
           python scripts/verify-doc-cli-drift.py
           python tests/doc_cli_drift_acceptance.py
+      - name: Ship-gate — installed CLIs stay live-linked after editable install
+        run: python tests/cli_entrypoint_drift_acceptance.py
       - name: Ship-gate — local bind is the mutable API security boundary
         run: python tests/localbind_acceptance.py
       - name: Ship-gate — shipped surfaces contain no private fleet identity

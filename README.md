@@ -46,6 +46,22 @@ python -m pip install -e .
 cp .env.example .env
 ```
 
+The installed CLIs are Python entry points into the editable checkout. After a `git pull --ff-only`, the `taey-*`, `orch`, `install`, `orch-cron`, `orch-watch`, and `fleet-orchestrator-api` commands load the updated checkout without reinstalling copied script files.
+
+To update an existing local deployment:
+
+```bash
+git pull --ff-only
+python -m pip install -e .
+orch --version
+orch doctor --explain-scope
+orch disable
+orch enable
+curl -s http://127.0.0.1:5002/health
+```
+
+Run the editable install command again when dependency metadata changes. The entry-point wrappers themselves stay stable; `--version` reports the live checkout version and catches stale non-editable installs during verification.
+
 The bundled compose file sets `NEO4J_AUTH=none`. Neo4j and Redis bind to loopback and run **without auth** — the orchestrator does not support internal-service credentials (the network is the trust boundary; run these on a trusted host/LAN):
 
 ```bash
@@ -268,6 +284,15 @@ Useful local checks:
 
 ```bash
 python3 -c "import fleet_orchestrator; print(fleet_orchestrator.__version__)"
+fleet-orchestrator-api --version
+orch --version
+install --version
+orch-cron --version
+orch-watch --version
+taey-dispatch --version
+taey-plan --version
+taey-question --version
+taey-task --version
 orch --help
 orch doctor --explain-scope
 taey-plan --help

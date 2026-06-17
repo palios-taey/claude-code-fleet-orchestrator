@@ -54,9 +54,20 @@ def main() -> None:
         scripts.mkdir()
         docs.mkdir()
         (root / "README.md").write_text("Run `taey-demo run --count 2`.\n", encoding="utf-8")
+        (root / "setup.py").write_text(
+            "\n".join(
+                [
+                    "from setuptools import setup",
+                    "setup(entry_points={'console_scripts': ['taey-demo = demo:main']})",
+                ]
+            ),
+            encoding="utf-8",
+        )
         _write_demo_cli(scripts / "taey-demo")
 
         assert gate.check_repo(root) == []
+        (docs / "entrypoint-version.md").write_text("Entrypoint wrapper: `taey-demo --version`.\n", encoding="utf-8")
+        assert gate.check_repo(root, doc_paths=[docs / "entrypoint-version.md"]) == []
 
         (docs / "bad.md").write_text(
             "\n".join(

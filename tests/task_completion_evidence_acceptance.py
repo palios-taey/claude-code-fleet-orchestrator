@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import json
 import os
 import sys
 import uuid
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
 
@@ -63,14 +62,7 @@ def _seed_task(suffix: str = "task") -> str:
 
 
 def _load_taey_task_cli():
-    path = ROOT / "scripts" / "taey-task"
-    loader = SourceFileLoader("taey_task_under_test", str(path))
-    spec = importlib.util.spec_from_loader("taey_task_under_test", loader)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("could not load scripts/taey-task")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module("fleet_orchestrator.cli_taey_task")
 
 
 def _cli_update_round_trip(client: TestClient, task_id: str, status: str, evidence: dict) -> tuple[int, str]:
