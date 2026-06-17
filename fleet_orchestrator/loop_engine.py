@@ -5,7 +5,6 @@ import ast
 import copy
 import datetime as dt
 import json
-import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync
+from fleet_orchestrator.feature_flags import loops_enabled
 
 
 TRIGGER_KINDS = {"clock", "signal", "task-state"}
@@ -35,7 +35,6 @@ WRITABLE_ROOTS = {
     "ledger",
     "levers",
 }
-TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 NotifySender = Callable[[str, str, str], None]
 
 
@@ -462,10 +461,6 @@ def adversarial_meetable_cases() -> Dict[str, bool]:
         name: meetable(case["stop_condition"], case["step_bundle"], case["cycle_state"])
         for name, case in cases.items()
     }
-
-
-def loops_enabled() -> bool:
-    return os.environ.get("ORCH_LOOPS_ENABLED", "").strip().lower() in TRUE_ENV_VALUES
 
 
 def declare_loop(raw: Dict[str, Any], persistence: Optional[CycleStateStore] = None) -> Dict[str, Any]:

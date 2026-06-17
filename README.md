@@ -18,7 +18,7 @@ You run several Claude Code or CLI sessions as a fleet. The orchestrator keeps t
 
 **Stop-discipline engine.** The hook path is designed so a session does not silently stop while it still has ready work. The Stop hook asks the orchestrator for a stop decision; if work remains and hooks are installed, the hook blocks the stop and feeds back the next action. Human-review gates are a first-class stop state: when work is waiting on a person, the session can stop cleanly instead of looping.
 
-**Dynamic context injection.** Plans and tasks can attach reference docs at overall, supervisor, project, phase, and task tiers. When `ORCH_WAKE_PACKET_ENABLED=1`, `GET /api/sessions/{session_id}/wake-packet` assembles a task-scoped packet with refs, ranked memory, rules, provenance, and a size report. This pairs with `/clear`: clear accumulated chat context, then re-inject the clean slice for the current task. Empty refs mean none were attached; that is valid.
+**Dynamic context injection.** Plans and tasks can attach reference docs at overall, supervisor, project, phase, and task tiers. `GET /api/sessions/{session_id}/wake-packet` is enabled by default and assembles a task-scoped packet with refs, ranked memory, rules, provenance, and a size report. `ORCH_WAKE_PACKET_ENDPOINT_ENABLED=0` disables only that endpoint; the old `ORCH_WAKE_PACKET_ENABLED` name remains as a deprecated alias. This pairs with `/clear`: clear accumulated chat context, then re-inject the clean slice for the current task. Empty refs mean none were attached; that is valid.
 
 **Evidence-gated completion.** Terminal task updates are designed to require evidence. For normal task completion, provide a JSON object with real artifacts such as `commit_sha`, `gate`, and `production_observation`; the API rejects evidence-less terminal claims. Human-review gate tasks must be completed through the question/UI path, not by ordinary task status updates.
 
@@ -118,7 +118,7 @@ Fleet and context:
 - `ORCH_NOTIFY_CLI`: notify CLI name. Default is `taey-notify`.
 - `ORCH_REF_ALLOWED_ROOT`: one or more trusted roots for plan/source refs. Refs are disabled fail-safe when unset.
 - `ORCH_SESSION_ROOTS`: JSON or comma-separated `session=/repo/root` map used by the context assembler to find each session's `MEMORY.md` and repo rules.
-- `ORCH_WAKE_PACKET_ENABLED`: set to `1` to enable the wake-packet API.
+- `ORCH_WAKE_PACKET_ENDPOINT_ENABLED`: default `1`; set `0` to disable only the wake-packet API endpoint. Deprecated alias: `ORCH_WAKE_PACKET_ENABLED`.
 - `ORCH_RULES_ROOT`: optional rules directory used by the context assembler.
 - `ORCH_SHIP_GATES`: comma-separated task-id suffixes that must be complete before a project can be marked shippable.
 
@@ -238,10 +238,9 @@ Refs are structured pointers attached to the plan. They are not copied into Neo4
 
 Enable refs by setting `ORCH_REF_ALLOWED_ROOT` to trusted roots. Without it, ref use fails closed.
 
-Enable wake packets:
+Wake packets are enabled by default:
 
 ```bash
-export ORCH_WAKE_PACKET_ENABLED=1
 curl -s "http://127.0.0.1:5002/api/sessions/worker-codex/wake-packet?cli=codex"
 ```
 

@@ -43,6 +43,7 @@ from fleet_orchestrator.context_assembler import (
 from fleet_orchestrator.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from fleet_orchestrator.easy_setup import api_host, package_version
 from fleet_orchestrator.evidence_contract import REQUEST_TERMINAL_EVIDENCE_KEYS, TERMINAL_STATUSES
+from fleet_orchestrator.feature_flags import chat_enabled, wake_packet_endpoint_enabled
 from fleet_orchestrator.handoff_validation import ensure_handoff_index_backfilled
 from fleet_orchestrator.loop_engine import (
     ArtifactNotObservedError,
@@ -114,13 +115,10 @@ from fleet_orchestrator.orch_schema import TaskIdCollisionError, TaskParentNotFo
 LOGGER = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
-# SECURITY: chat is an injection vector (posts become content an AI session reads). It is the
-# same class as the session-notify endpoint, which already lives on this app. The router stays
-# OFF by default so a fresh install on an UNTRUSTED network never exposes it. Operators enable
-# it (ORCH_CHAT_ENABLED) only on a trusted/contained network or a loopback-only deployment,
-# where the network — not an app-route check — is the security boundary. (Operator decision,
-# 2026-06-03: the fleet's internal LAN is contained, no port-forward, so chat is enabled there.)
-if os.environ.get("ORCH_CHAT_ENABLED", "").strip().lower() in ("1", "true", "yes"):
+# SECURITY: chat is an injection vector (posts become content an AI session reads). It defaults
+# ON because it is a promised local/trusted-LAN capability; do not expose a non-loopback mutable
+# API without ORCH_AUTH_TOKEN. _warn_if_mutable_api_exposed logs that deployment guard.
+if chat_enabled():
     app.include_router(chat_router)
 _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
 ALLOWED_NOTIFY_TYPES = {
@@ -129,7 +127,6 @@ ALLOWED_NOTIFY_TYPES = {
     "command": "command",
     "response_ready": "response_ready",
 }
-TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 MUTABLE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -1044,7 +1041,7 @@ def session_wake_packet(
     shipped consumer (`claude-code-fleet-notify` `_fetch_wake_packet`) does this
     correctly; any new consumer must too.
     """
-    if os.environ.get("ORCH_WAKE_PACKET_ENABLED", "").strip().lower() not in TRUE_ENV_VALUES:
+    if not wake_packet_endpoint_enabled():
         return {"ok": True, "enabled": False}
 
     cli_key = cli.lower().strip()

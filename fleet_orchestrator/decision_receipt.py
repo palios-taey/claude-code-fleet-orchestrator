@@ -4,12 +4,12 @@ import copy
 import hashlib
 import json
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fleet_orchestrator.config import OrchConfig, get_redis_sync
+from fleet_orchestrator.feature_flags import decision_receipts_enabled
 
 
 logger = logging.getLogger(__name__)
@@ -22,11 +22,6 @@ RECEIPT_FIELDS = (
     "blocked_on",
     "next_contract",
 )
-TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
-
-
-def decision_receipts_enabled() -> bool:
-    return os.environ.get("ORCH_DECISION_RECEIPTS_ENABLED", "").strip().lower() in TRUE_ENV_VALUES
 
 
 def maybe_emit_receipt(

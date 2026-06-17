@@ -82,7 +82,7 @@ Enable the optional features you intend to use:
 - **Dashboard network exposure**: default `ORCH_HOST=127.0.0.1` is the security boundary. Any
   non-loopback bind or LAN URL is an explicit, deliberate opt-in only for a trusted single-user
   network. There is no auth; do not accept untrusted callers.
-- **Two-way chat** (an injection vector — off by default): `ORCH_CHAT_ENABLED=1`.
+- **Two-way chat** is on by default. It is an injection vector, so keep the API loopback-only or use `ORCH_AUTH_TOKEN` on a trusted LAN; set `ORCH_CHAT_ENABLED=0` only to hide the route intentionally.
 
 **Expect:** re-run `scripts/orch doctor` after edits; still green.
 

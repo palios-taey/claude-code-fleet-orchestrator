@@ -959,7 +959,9 @@ def enable_services() -> List[str]:
 
     host = api_host()
     port = api_port()
-    chat_on = (os.environ.get("ORCH_CHAT_ENABLED", "").strip().lower() in ("1", "true", "yes"))
+    from fleet_orchestrator.feature_flags import chat_enabled
+
+    chat_on = chat_enabled()
     api_record = read_pid_record(API_PID_PATH)
     if isinstance(api_record, dict) and _identity_matches(api_record, _proc_identity(int(api_record["pid"])), suffix="uvicorn"):
         messages.append("api: already managed")
@@ -974,7 +976,7 @@ def enable_services() -> List[str]:
         write_pid_record(API_PID_PATH, pid)
         reach = "this machine only" if host == "127.0.0.1" else f"reachable on your network via {host}"
         messages.append(f"api: started pid={pid} on {host}:{port} ({reach})")
-        messages.append(f"api: chat box {'ENABLED' if chat_on else 'off (set ORCH_CHAT_ENABLED=1 on a trusted network)'}")
+        messages.append(f"api: chat box {'ENABLED' if chat_on else 'off (ORCH_CHAT_ENABLED=0)'}")
 
     watch_record = read_pid_record(WATCH_PID_PATH)
     if isinstance(watch_record, dict) and _identity_matches(watch_record, _proc_identity(int(watch_record["pid"])), suffix="scripts/orch-watch"):
