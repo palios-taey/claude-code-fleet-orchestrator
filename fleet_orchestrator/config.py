@@ -263,8 +263,11 @@ class OrchConfig:
     redis_host: str = field(default_factory=lambda: _require_env("ORCH_REDIS_HOST"))
     redis_port: int = field(default_factory=lambda: _int_env("ORCH_REDIS_PORT"))
     neo4j_uri: str = field(default_factory=lambda: _require_env("ORCH_NEO4J_URI"))
-    neo4j_user: Optional[str] = field(default_factory=lambda: _optional_env("ORCH_NEO4J_USER"))
-    neo4j_pass: Optional[str] = field(default_factory=lambda: _optional_env("ORCH_NEO4J_PASS"))
+    # NO internal-service auth (Neo4j/Redis/Weaviate). The network is the boundary;
+    # internal credentials serve no purpose and caused the recurring config-tuple
+    # poisoning outage (a per-session .env's ORCH_NEO4J_USER/PASS flipped the no-auth
+    # tuple after driver init -> singleton guard bricked the process). Do NOT
+    # reintroduce ORCH_NEO4J_USER/PASS. Enforced by tests/no_internal_auth_acceptance.py.
     neo4j_db: str = field(default_factory=lambda: _require_env("ORCH_NEO4J_DB"))
     dashboard_url: str = field(default_factory=lambda: _optional_env("ORCH_DASHBOARD_URL", "http://127.0.0.1:5002") or "http://127.0.0.1:5002")
     redis_sentinels: str = field(default_factory=lambda: _optional_env("ORCH_REDIS_SENTINELS", "") or "")
@@ -415,14 +418,17 @@ def get_neo4j_driver(config: Optional[OrchConfig] = None):
     from neo4j import GraphDatabase
 
     cfg = config or OrchConfig()
-    config_tuple = (cfg.neo4j_uri, cfg.neo4j_user, cfg.neo4j_pass, cfg.neo4j_db)
+    # No internal auth: the only config dimensions are the URI and DB. There is no
+    # credential dimension to flip, so a per-session .env can no longer poison the
+    # tuple. (The lock still guards against a genuine URI/DB change mid-process.)
+    config_tuple = (cfg.neo4j_uri, cfg.neo4j_db)
 
     # Fast path (lock-free): already initialized. Config is set before the driver
     # is published below, so observing a non-None driver guarantees its config.
     if _neo4j_driver is not None:
         if _neo4j_driver_config != config_tuple:
             raise OrchConfigError(
-                "Neo4j driver already initialized with a different configuration; restart the process to change ORCH_NEO4J_*"
+                "Neo4j driver already initialized with a different configuration; restart the process to change ORCH_NEO4J_URI/DB"
             )
         return _neo4j_driver
 
@@ -430,13 +436,10 @@ def get_neo4j_driver(config: Optional[OrchConfig] = None):
         if _neo4j_driver is not None:  # re-check under lock
             if _neo4j_driver_config != config_tuple:
                 raise OrchConfigError(
-                    "Neo4j driver already initialized with a different configuration; restart the process to change ORCH_NEO4J_*"
+                    "Neo4j driver already initialized with a different configuration; restart the process to change ORCH_NEO4J_URI/DB"
                 )
             return _neo4j_driver
-        if cfg.neo4j_user and cfg.neo4j_pass:
-            new_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=(cfg.neo4j_user, cfg.neo4j_pass))
-        else:
-            new_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=None)
+        new_driver = GraphDatabase.driver(cfg.neo4j_uri, auth=None)
         _neo4j_driver_config = config_tuple   # config BEFORE publish
         _neo4j_driver = new_driver
         return new_driver

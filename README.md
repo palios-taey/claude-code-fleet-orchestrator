@@ -46,21 +46,19 @@ python -m pip install -e .
 cp .env.example .env
 ```
 
-The bundled compose file sets `NEO4J_AUTH=none`, so the default `.env.example` does not need `ORCH_NEO4J_USER` or `ORCH_NEO4J_PASS`. It binds Redis and Neo4j to loopback:
+The bundled compose file sets `NEO4J_AUTH=none`. Neo4j and Redis bind to loopback and run **without auth** — the orchestrator does not support internal-service credentials (the network is the trust boundary; run these on a trusted host/LAN):
 
 ```bash
 docker compose up -d
 ```
 
-If Docker is unavailable and you already run Redis and Neo4j yourself, edit `.env` first and use `scripts/install --skip-compose`. External Neo4j commonly has auth enabled; set the credentials explicitly in that case:
+If Docker is unavailable and you already run Redis and Neo4j yourself, edit `.env` first and use `scripts/install --skip-compose`. Run your Neo4j with auth disabled (`NEO4J_AUTH=none`):
 
 ```bash
 ORCH_REDIS_HOST=127.0.0.1
 ORCH_REDIS_PORT=6379
 ORCH_NEO4J_URI=bolt://127.0.0.1:7687
 ORCH_NEO4J_DB=neo4j
-ORCH_NEO4J_USER=neo4j
-ORCH_NEO4J_PASS=<your-password>
 ```
 
 Verify the install:
@@ -102,8 +100,7 @@ Copy [.env.example](.env.example) to `.env`. The loader reads `ORCH_DOTENV` firs
 Required:
 
 - `ORCH_REDIS_HOST` and `ORCH_REDIS_PORT`: Redis used by notifications, liveness, locks, and daemon state.
-- `ORCH_NEO4J_URI` and `ORCH_NEO4J_DB`: Neo4j used for projects, phases, tasks, refs, gates, and evidence.
-- `ORCH_NEO4J_USER` / `ORCH_NEO4J_PASS`: leave unset for this repo's bundled compose path (`NEO4J_AUTH=none`); set both for an external Neo4j instance that enforces auth.
+- `ORCH_NEO4J_URI` and `ORCH_NEO4J_DB`: Neo4j used for projects, phases, tasks, refs, gates, and evidence. Run Neo4j with auth disabled (`NEO4J_AUTH=none`) — the orchestrator connects with no credentials and does not support internal-service auth.
 
 Network posture:
 
