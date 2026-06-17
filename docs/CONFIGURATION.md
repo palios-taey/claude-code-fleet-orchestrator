@@ -6,8 +6,8 @@ source** (`fleet_orchestrator/` + `scripts/` + `config.py` wrapper reads). The
 the code, the code wins; verify against the repo, do not trust this table alone.
 
 > This doc was rewritten on 2026-06-15 after an audit found the prior version
-> materially incomplete: it listed ~45 flags when the source references **66
-> distinct env names** (60 in the product, 6 test-only), omitted
+> materially incomplete: it listed ~45 flags when the source references **67
+> distinct env names** (61 in the product, 6 test-only), omitted
 > `ACCOUNTABILITY_LEDGER_PATH`, hid a non-env runtime switch (below), and
 > mislabeled the auth posture. Honesty about the surface is the point.
 
@@ -74,11 +74,11 @@ force a pass), `ORCH_PRE_MERGE_REQUIRED_CHECKS` (consumed by the pre-merge gate)
 |---|---|---|
 | `ORCH_AWAIT_SIGNAL_GATES` | **ON** | Stop only on an exact `AWAIT:<kind>:<detail>` marker (prose waits rejected). OFF is *stricter*. |
 | `ORCH_WORKER_TASK_LIVENESS` (+`_TTL_SEC`) | **ON** | Advisory worker stall-detection / heartbeat (non-binding). |
-| `ORCH_CHAT_ENABLED` | OFF | Dashboard chat-to-session box (docs warn: trusted/loopback only). |
-| `ORCH_WAKE_PACKET_ENABLED` | OFF | Gates **only** the `/api/sessions/{id}/wake-packet` context endpoint. **Note:** session *waking* (`send_wake`) runs regardless of this flag — the name overclaims; it does not gate whether sessions get woken. |
-| `ORCH_DECISION_RECEIPTS_ENABLED` | OFF | Fire-and-forget decision-receipt explainability records (nothing blocks on them). For an accountability-branded product, consider enabling. |
-| `ORCH_LOOPS_ENABLED` | OFF | The signal/clock/task-state loop engine (opt-in capability). |
-| `ORCH_GATE_TEMPLATE_ENABLED` | OFF | Forced sub-role gate template on plan ingest. |
+| `ORCH_CHAT_ENABLED` | **ON** | Dashboard chat-to-session box. Chat is an injection vector; keep the mutable API loopback-only or protect non-loopback trusted-LAN deployments with `ORCH_AUTH_TOKEN`. Set `0`/`false` only to intentionally hide the chat route. |
+| `ORCH_WAKE_PACKET_ENDPOINT_ENABLED` (`ORCH_WAKE_PACKET_ENABLED` deprecated alias) | **ON** | Gates **only** the `/api/sessions/{id}/wake-packet` context endpoint. Session *waking* (`send_wake`) runs regardless. The old `ORCH_WAKE_PACKET_ENABLED` name is still read as a non-breaking alias but should not be used in new configs. |
+| `ORCH_DECISION_RECEIPTS_ENABLED` | **ON** | Fire-and-forget decision-receipt explainability records. They are emitted best-effort; no consumer is wired in this phase, and nothing blocks on them. |
+| `ORCH_LOOPS_ENABLED` | **ON** | The additive signal/clock/task-state loop API routes. Core stop/dispatch integration is deliberately not wired in this phase. |
+| `ORCH_GATE_TEMPLATE_ENABLED` | **ON** | Applies the forced sub-role gate template when a plan explicitly requests that template. |
 
 ## 6. Handoff / stop discipline
 
