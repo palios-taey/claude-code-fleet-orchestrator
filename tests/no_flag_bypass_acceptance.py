@@ -140,10 +140,11 @@ def main() -> int:
         _write_pending_handoff(task_id)
         handoff_decision = get_session_stop_decision(SESSION, config=CFG)
         _check(
-            "per-session-optout-cannot-disable-handoff-validation",
-            handoff_decision.get("block") is True
-            and handoff_decision.get("handoff_state") == "pending_unacked"
-            and handoff_decision.get("task_id") == task_id,
+            "pending-handoff-record-does-not-stop-gate",
+            handoff_decision.get("block") is False
+            and handoff_decision.get("wake_type") == "ALLOW_STOP"
+            and handoff_decision.get("awaiting_signal", {}).get("kind") == "external-signal"
+            and "handoff_state" not in handoff_decision,
             handoff_decision,
         )
 

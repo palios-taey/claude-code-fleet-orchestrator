@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, ensure_notify_importable, get_neo4j_driver
-from .handoff_validation import validate_stop_handoff
 from .out_of_band import out_of_band_task_active
 
 
@@ -1940,71 +1939,6 @@ def get_session_stop_decision(session_id: str,
                 "exception_class": exc.__class__.__name__,
             },
         }
-
-    if not decision.get("block"):
-        observed_task_id = _observed_stop_task_id(session_id, config=cfg)
-        try:
-            validate_timeout_s = float(os.environ.get("CF_HANDOFF_VALIDATE_TIMEOUT_S", "0.2") or 0.2)
-        except Exception:
-            validate_timeout_s = 0.2
-        try:
-            hv_result = validate_stop_handoff(
-                get_redis_sync(cfg),
-                session_id,
-                observed_task_id,
-                prefix=os.environ.get("NOTIFY_KEY_PREFIX", "taey"),
-                timeout_s=validate_timeout_s,
-            )
-        except Exception as exc:
-            # FAIL CLOSED, matching the keystone discipline. A
-            # transient error in handoff validation must NOT fall through to the unchanged
-            # block:False and license an unverified stop -- keep the session working.
-            decision = {
-                "block": True,
-                "reason": "Handoff validation errored; failing CLOSED (keep working) so a "
-                          "transient error cannot license an unverified stop.",
-                "wake_type": "WAKE_WITH_QUEUE",
-                "task_id": observed_task_id,
-                "non_convergable": True,
-                "hv_fail_closed": {
-                    "session": session_id,
-                    "operation": "validate_stop_handoff",
-                    "exception_class": exc.__class__.__name__,
-                    "handoff_id": observed_task_id,
-                },
-            }
-            _LOG.warning(
-                "handoff validation fail-CLOSED for %s (%s): %s",
-                session_id,
-                observed_task_id,
-                exc.__class__.__name__,
-            )
-        else:
-            hv_state = hv_result.get("state")
-            # Handoff-specific blocks bypass the convergence valve below. They
-            # rely on the daemon/handoff retry machinery for bounded release.
-            if hv_state in {"pending_unacked", "delivery_failed", "redispatch_requested"}:
-                record = hv_result.get("record") or {}
-                return {
-                    "block": True,
-                    "reason": "Explicit handoff has not produced a scoped receipt yet; stop is blocked until receipt_acked or bounded wake gives up.",
-                    "wake_type": "WAKE_REASON_REQUIRED",
-                    "task_id": observed_task_id,
-                    "handoff_state": hv_state,
-                    "target_session_id": record.get("target_session_id"),
-                    "dispatcher_task_id": record.get("dispatcher_task_id"),
-                    "delivery_failure_reason": record.get("delivery_failure_reason"),
-                    "last_delivery_signal": record.get("last_delivery_signal"),
-                    "delivery_signal_source": record.get("delivery_signal_source"),
-                }
-            if hv_state == "dead":
-                return {
-                    "block": False,
-                    "reason": "handoff delivery failed after bounded retries; manual handling required.",
-                    "wake_type": WAKE_ALLOW_STOP,
-                    "task_id": None,
-                    "handoff_state": "dead",
-                }
 
     if not stop_hook_active:
         return decision
