@@ -9,14 +9,13 @@ Env: ORCH_NEO4J_URI, ORCH_NEO4J_DB, ORCH_REDIS_HOST/PORT,
 """
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import json
 import os
 import re
 import sys
 import time
 import uuid
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -76,14 +75,7 @@ def _check(label: str, cond: bool, extra: object = "") -> None:
 
 
 def _load_taey_task_cli():
-    path = ROOT / "scripts" / "taey-task"
-    loader = SourceFileLoader("taey_task_dispatch_under_test", str(path))
-    spec = importlib.util.spec_from_loader("taey_task_dispatch_under_test", loader)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("could not load scripts/taey-task")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module("fleet_orchestrator.cli_taey_task")
 
 
 def _cleanup() -> None:

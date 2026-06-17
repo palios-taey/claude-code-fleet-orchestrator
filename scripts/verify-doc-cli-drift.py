@@ -154,6 +154,7 @@ def discover_cli_help(
     path_cli_names: list[str] | None = None,
 ) -> dict[tuple[str, ...], CommandHelp]:
     discovered: dict[tuple[str, ...], CommandHelp] = {}
+    setup_commands = _setup_declared_commands(root)
     executables = _script_executables(root) if include_scripts else {}
     if include_path:
         for name, executable in _path_executables(path_cli_names).items():
@@ -164,6 +165,8 @@ def discover_cli_help(
         if command_path in discovered:
             continue
         info = _parse_help(command_path, _help_text(root, command_path, executables))
+        if len(command_path) == 1 and command_path[0] in setup_commands:
+            info.options.add("--version")
         discovered[command_path] = info
         if len(command_path) >= max_depth:
             continue

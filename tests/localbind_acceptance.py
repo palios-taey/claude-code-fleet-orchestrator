@@ -63,8 +63,8 @@ def main() -> int:
         if saved is not None:
             os.environ["ORCH_HOST"] = saved
 
-    scripts_orch = _read("scripts/orch")
-    _check("orch serve launches uvicorn with explicit --host", '"--host", host' in scripts_orch)
+    cli_orch = _read("fleet_orchestrator/cli_orch.py")
+    _check("orch serve launches uvicorn with explicit --host", '"--host", host' in cli_orch)
     _check("orch public dashboard stays loopback-bound", '"127.0.0.1"' in _read("scripts/orch-public"))
 
     if FAILURES:

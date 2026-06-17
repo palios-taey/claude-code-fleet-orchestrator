@@ -30,19 +30,17 @@ setup(
     include_package_data=True,
     entry_points={
         "console_scripts": [
-            "fleet-orchestrator-api = fleet_orchestrator.cli:main",
+            "fleet-orchestrator-api = fleet_orchestrator.script_entrypoints:fleet_orchestrator_api_main",
+            "orch = fleet_orchestrator.script_entrypoints:orch_main",
+            "install = fleet_orchestrator.script_entrypoints:install_main",
+            "orch-cron = fleet_orchestrator.script_entrypoints:orch_cron_main",
+            "orch-watch = fleet_orchestrator.script_entrypoints:orch_watch_main",
+            "taey-dispatch = fleet_orchestrator.script_entrypoints:taey_dispatch_main",
+            "taey-plan = fleet_orchestrator.script_entrypoints:taey_plan_main",
+            "taey-question = fleet_orchestrator.script_entrypoints:taey_question_main",
+            "taey-task = fleet_orchestrator.script_entrypoints:taey_task_main",
         ],
     },
-    scripts=[
-        "scripts/orch",
-        "scripts/install",
-        "scripts/orch-cron",
-        "scripts/orch-watch",
-        "scripts/taey-dispatch",
-        "scripts/taey-plan",
-        "scripts/taey-question",
-        "scripts/taey-task",
-    ],
     install_requires=load_requirements(),
     extras_require={
         # Running the acceptance suite needs the FastAPI TestClient transport,

@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-compose", action="store_true")
+    parser.add_argument("--phase", choices=("bootstrap", "post"), default="bootstrap")
+    return parser
+
+
+def _venv_python() -> Path:
+    return ROOT / ".venv" / "bin" / "python"
+
+
+def _bootstrap(args: argparse.Namespace) -> int:
+    from fleet_orchestrator.easy_setup import detect_local_infra_ports, docker_compose_up, docker_running, require_command, resolve_notify_root, set_compose_managed
+
+    require_command("python3")
+    require_command("pip")
+    resolve_notify_root()
+    ports = detect_local_infra_ports()
+    use_byo = args.skip_compose or any(ports.values())
+
+    if use_byo:
+        status = ", ".join(f"{name}={'open' if open_ else 'closed'}" for name, open_ in ports.items())
+        print(f"compose: skipped (BYO/existing infra; {status})")
+        if not args.dry_run:
+            set_compose_managed(False)
+    else:
+        require_command("docker")
+        if not docker_running():
+            raise SystemExit("Docker daemon is not running")
+        if args.dry_run:
+            print("compose: would run docker compose up -d and wait for healthy services")
+        else:
+            docker_compose_up()
+            set_compose_managed(True)
+            print("compose: up and healthy")
+
+    if args.dry_run:
+        print("venv: skipped write")
+        post_args = [sys.executable, str(Path(__file__).resolve()), "--phase", "post", "--dry-run"]
+        if args.skip_compose:
+            post_args.append("--skip-compose")
+        return subprocess.run(post_args, check=False, cwd=str(ROOT)).returncode
+
+    venv_path = ROOT / ".venv"
+    if not venv_path.exists():
+        subprocess.run([sys.executable, "-m", "venv", str(venv_path)], check=True, cwd=str(ROOT))
+    pip = venv_path / "bin" / "pip"
+    subprocess.run([str(pip), "install", "--upgrade", "pip"], check=True, cwd=str(ROOT))
+    subprocess.run([str(pip), "install", "-e", "."], check=True, cwd=str(ROOT))
+    post_args = [str(_venv_python()), str(Path(__file__).resolve()), "--phase", "post"]
+    if args.skip_compose:
+        post_args.append("--skip-compose")
+    return subprocess.run(post_args, check=False, cwd=str(ROOT)).returncode
+
+
+def _post_install(args: argparse.Namespace) -> int:
+    from fleet_orchestrator.easy_setup import enable_services, ensure_claude_integration, managed_python, notify_script, package_version, print_doctor_results, resolve_notify_root, run_doctor
+
+    try:
+        managed_python(required=not args.dry_run)
+        integration = ensure_claude_integration(dry_run=args.dry_run)
+        if args.dry_run:
+            print(f"hooks: would run {notify_script('install-hooks.sh')} --apply")
+            if integration["guard"]["diff"]:
+                print(integration["guard"]["diff"], end="")
+            return 0
+        print(f"python: installed version {package_version()} into {ROOT / '.venv'}")
+        if integration["guard"]["diff"]:
+            print(integration["guard"]["diff"], end="")
+        # The starter launches the daemon with bare `python3`; on a fresh machine its
+        # redis dep lives only in this repo's venv, so the daemon dies on import in
+        # under a second (stranger-install gate, red runs 1+2 — run 2 proved my fix at
+        # the install-hooks call-site was the WRONG SITE; THIS is where the daemon is
+        # spawned). Prefix the venv bin so `python3` resolves to an interpreter that
+        # has the daemon's deps.
+        daemon_env = os.environ.copy()
+        venv_bin = ROOT / ".venv" / "bin"
+        if venv_bin.is_dir():
+            daemon_env["PATH"] = f"{venv_bin}{os.pathsep}{daemon_env.get('PATH', '')}"
+        subprocess.run([str(notify_script("start_notify_daemons.sh")), "start"], check=True, cwd=str(resolve_notify_root()), env=daemon_env)
+        for line in enable_services():
+            print(line)
+        return print_doctor_results(run_doctor(), explain_scope=False)
+    except Exception as exc:
+        print(f"ERROR: install failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.phase == "bootstrap":
+        return _bootstrap(args)
+    return _post_install(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

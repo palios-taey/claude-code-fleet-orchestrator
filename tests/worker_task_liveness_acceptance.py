@@ -9,14 +9,13 @@ task, while active current work is not falsely escalated.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import re
 import sys
 import time
 import uuid
-from importlib.machinery import SourceFileLoader
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -112,14 +111,7 @@ def _cleanup() -> None:
 
 
 def _load_orch_watch():
-    path = ROOT / "scripts" / "orch-watch"
-    loader = SourceFileLoader("orch_watch_worker_liveness_under_test", str(path))
-    spec = importlib.util.spec_from_loader("orch_watch_worker_liveness_under_test", loader)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("could not load scripts/orch-watch")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module("fleet_orchestrator.cli_orch_watch")
 
 
 def _setup() -> None:
