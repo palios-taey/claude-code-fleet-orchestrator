@@ -316,6 +316,8 @@ jobs:
         run: python tests/ref_roots_derive_from_sessions_acceptance.py
       - name: Ship-gate — loader captures all task dependencies (multi-depends not dropped)
         run: python tests/plan_loader_multi_depends_acceptance.py
+      - name: Ship-gate — plan ingest injects modeling contract and lint
+        run: python tests/plan_modeling_contract_acceptance.py
       - name: Ship-gate — human-review gates are first-class stop states
         env:
           ORCH_NEO4J_URI: bolt://localhost:7687

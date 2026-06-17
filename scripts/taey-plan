@@ -91,6 +91,24 @@ def print_table(headers: List[str], rows: Iterable[Iterable[Any]]) -> None:
         print("  ".join(cell.ljust(widths[idx]) for idx, cell in enumerate(row)))
 
 
+def print_plan_modeling(result: Dict[str, Any]) -> None:
+    print("plan_modeling_contract:")
+    contract = result.get("plan_modeling_contract")
+    rules = contract.get("rules") if isinstance(contract, dict) else []
+    if rules:
+        for rule in rules:
+            print(f"  - {rule}")
+    else:
+        print("  - MISSING from server response")
+
+    warnings = result.get("plan_modeling_warnings", [])
+    if not isinstance(warnings, list):
+        warnings = []
+    print(f"plan_modeling_warnings={len(warnings)}")
+    for item in warnings:
+        print(f"  - {item}")
+
+
 def detect_kind(path: Path) -> str:
     lower = str(path).lower()
     if "consultations" in lower:
@@ -231,6 +249,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print("warnings:")
         for item in result["warnings"]:
             print(f"  - {item}")
+    print_plan_modeling(result)
     if result.get("stale_tasks"):
         print("stale_tasks:")
         for item in result["stale_tasks"]:

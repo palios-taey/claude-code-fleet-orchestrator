@@ -26,6 +26,36 @@ TASK_ID_SEP = "::"
 # Allowed characters in a DECLARED project/phase/task id (ids appear in /api/.../{id} URLs).
 _ID_OK = re.compile(r"\A[A-Za-z0-9._-]+\Z")
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+PLAN_MODELING_CONTRACT_RULES = (
+    "`owner` is the single session that executes the task, not who is accountable for the outcome; "
+    "the stop-engine checks the owner's liveness heartbeat to decide if work is in-flight.",
+    "Decompose multi-actor or multi-phase work into one task per executor, gated by `depends` "
+    "(rca[grok] -> fix[codex] -> gate[conductor] -> deploy[conductor]); never one task spanning several actors.",
+    "A supervisor-owned `in_progress` task is correct only while the supervisor is actively executing it; "
+    "the supervisor gates by executing its own gate tasks.",
+    "Dispatch (`taey-task dispatch` / `taey-plan assign`) binds the worker; bare `taey-notify` does not.",
+)
+SUPERVISOR_OWNER_IDS = {"conductor", "weaver", "tutor", "infra", "treasurer", "taeys-hands", "hunter"}
+PEER_ROLE_IDS = {"codex", "grok", "gemini"}
+SESSION_ROLE_IDS = SUPERVISOR_OWNER_IDS | PEER_ROLE_IDS
+PLAN_DELIVERABLE_TOKENS = {
+    "audit",
+    "build",
+    "close",
+    "deploy",
+    "dispatch",
+    "fix",
+    "gate",
+    "handoff",
+    "implement",
+    "merge",
+    "rca",
+    "remediate",
+    "review",
+    "run",
+    "ship",
+    "verify",
+}
 
 
 class PlanIdError(ValueError):
@@ -38,6 +68,12 @@ class PlanIdError(ValueError):
 
 class PlanTerminalStatusError(ValueError):
     pass
+
+
+def plan_modeling_contract() -> Dict[str, Any]:
+    return {
+        "rules": list(PLAN_MODELING_CONTRACT_RULES),
+    }
 
 
 def validate_project_id(project_id: str) -> str:
@@ -286,6 +322,57 @@ def _collect_ref_warnings(parsed: Dict[str, Any], source_path: str) -> List[str]
     return warnings
 
 
+def _word_tokens(text: str) -> Set[str]:
+    return set(re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).split())
+
+
+def _session_roles_in_text(text: str) -> Set[str]:
+    tokens = _word_tokens(text)
+    roles = {role for role in SESSION_ROLE_IDS if role in tokens}
+    if "taeys" in tokens and "hands" in tokens:
+        roles.add("taeys-hands")
+    return roles
+
+
+def _deliverables_in_text(text: str) -> Set[str]:
+    return PLAN_DELIVERABLE_TOKENS & _word_tokens(text)
+
+
+def _looks_like_multi_actor_task(task: Dict[str, Any]) -> bool:
+    text = str(task.get("description") or "")
+    roles = _session_roles_in_text(text)
+    deliverables = _deliverables_in_text(text)
+    has_joiner = " + " in text or ";" in text or " and " in f" {text.lower()} "
+    return bool(
+        len(roles) >= 2
+        and len(deliverables) >= 2
+        and (has_joiner or len(deliverables) >= 3)
+    )
+
+
+def _plan_modeling_warnings(parsed: Dict[str, Any]) -> List[str]:
+    warnings: List[str] = []
+    for phase in parsed.get("phases", []):
+        for task in phase.get("tasks", []):
+            owner = str(task.get("owner") or "").strip().lower()
+            if not owner:
+                continue
+            task_id = str(task.get("id") or "?")
+            description = str(task.get("description") or "")
+            roles = _session_roles_in_text(description)
+            if _looks_like_multi_actor_task(task):
+                warnings.append(
+                    f"task {task_id} looks like multiple steps across actors; "
+                    "decompose into one-task-per-executor gated by depends"
+                )
+            if owner in SUPERVISOR_OWNER_IDS and (roles & PEER_ROLE_IDS):
+                warnings.append(
+                    f"task {task_id} is owned by supervisor {owner} but description implies peer execution; "
+                    "owner should be the executing session"
+                )
+    return warnings
+
+
 def _parse_plan(md: str) -> Dict[str, Any]:
     project: Optional[Dict[str, Any]] = None
     current_phase: Optional[Dict[str, Any]] = None
@@ -485,6 +572,8 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
     project = parsed["project"]
     errors = list(parsed["errors"])
     warnings = list(parsed.get("warnings", []))
+    modeling_contract = plan_modeling_contract()
+    modeling_warnings = _plan_modeling_warnings(parsed)
     if source_path:
         warnings.extend(_collect_ref_warnings(parsed, source_path))
     if project is None:
@@ -495,12 +584,15 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
             "tasks_updated": 0,
             "errors": errors,
             "warnings": warnings,
+            "plan_modeling_contract": modeling_contract,
+            "plan_modeling_warnings": modeling_warnings,
             "stale_tasks": [],
         }
     if _gate_template_enabled() and _gate_template_requested(project):
         parsed = apply_gate_template(parsed)
         project = parsed["project"]
         warnings = list(parsed.get("warnings", warnings))
+        modeling_warnings = _plan_modeling_warnings(parsed)
 
     # Project-scope every phase/task id (and intra-plan depends) to <project_id>::<bare_id> BEFORE any
     # existence check or write, so identity is project-local: two plans may reuse a generic id (audit,
@@ -618,5 +710,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
         "tasks_updated": tasks_updated,
         "errors": errors,
         "warnings": warnings,
+        "plan_modeling_contract": modeling_contract,
+        "plan_modeling_warnings": modeling_warnings,
         "stale_tasks": stale_tasks,
     }
