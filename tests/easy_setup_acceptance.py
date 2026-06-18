@@ -172,10 +172,11 @@ def main() -> int:
         legacy_compact_path = _temp_settings(tmp / "legacy-compact", [])
         legacy_compact_doc = {
             "permissions": {"deny": []},
-            "pre_compact": "python3 /notify/hooks/pre_compact.py",
+            "pre_compact": "python3 /user/hooks/pre_compact.py",
             "post_compact": "python3 /notify/hooks/post_compact.py",
             "hooks": {
-                "PreCompact": [{"hooks": [{"type": "command", "command": "python3 /notify/hooks/pre_compact.py"}]}],
+                "pre_compact": [{"hooks": [{"type": "command", "command": "python3 /notify/hooks/pre_compact.py"}]}],
+                "PreCompact": [{"hooks": [{"type": "command", "command": "python3 /user/hooks/pre_compact.py"}]}],
                 "PostCompact": [{"hooks": [{"type": "command", "command": "python3 /notify/hooks/post_compact.py"}]}],
                 "Stop": [{"hooks": [{"type": "command", "command": "python3 /notify/hooks/stop_idle.py", "timeout": 5000}]}],
             },
@@ -187,12 +188,13 @@ def main() -> int:
         legacy_settings = json.loads(legacy_compact_path.read_text(encoding="utf-8"))
         _assert(
             "legacy-compact-hooks-removed",
-            "pre_compact" not in legacy_settings
+            legacy_settings.get("pre_compact") == "python3 /user/hooks/pre_compact.py"
             and "post_compact" not in legacy_settings
-            and "PreCompact" not in legacy_settings.get("hooks", {})
+            and "pre_compact" not in legacy_settings.get("hooks", {})
+            and "PreCompact" in legacy_settings.get("hooks", {})
             and "PostCompact" not in legacy_settings.get("hooks", {})
             and "Stop" in legacy_settings.get("hooks", {})
-            and set(legacy_result["legacy_compact_hooks_removed"]) == {"pre_compact", "post_compact", "hooks.PreCompact", "hooks.PostCompact"}
+            and set(legacy_result["legacy_compact_hooks_removed"]) == {"post_compact", "hooks.pre_compact", "hooks.PostCompact"}
             and legacy_second["legacy_compact_hooks_removed"] == [],
             legacy_settings,
         )
