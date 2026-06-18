@@ -188,10 +188,14 @@ def cmd_current(args: argparse.Namespace) -> None:
     if not current:
         print("no in-progress work")
         return
+    liveness = result.get("liveness") or current.get("liveness") or {}
+    state = str(liveness.get("label") or liveness.get("state") or "in_progress").replace("_", " ").upper()
+    summary = str(liveness.get("summary") or "").strip()
+    status = f" — {state} ({summary})" if summary else f" — {state}"
     print(
         f"Project: {current.get('project_name', current.get('project_id', '?'))} / "
         f"Phase: {current.get('phase_name', current.get('phase_id', '?'))} / "
-        f"Current task: {current.get('top_task_id', '?')} (in_progress)"
+        f"Current task: {current.get('top_task_id', '?')}{status}"
     )
 
 
