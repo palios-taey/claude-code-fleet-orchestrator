@@ -233,12 +233,34 @@ def _cleanup_managed_marker(settings: Dict[str, Any]) -> None:
 
 def _expected_hook_scripts(notify_root: Path) -> Dict[str, Path]:
     hooks_root = notify_root / "hooks"
-    return {
+    expected = {
         "PreToolUse": (hooks_root / "pre_tool_activity.py").resolve(),
         "PostToolUse": (hooks_root / "check_notifications.py").resolve(),
         "Stop": (hooks_root / "stop_idle.py").resolve(),
         "UserPromptSubmit": (hooks_root / "prompt_activity.py").resolve(),
     }
+    session_start = hooks_root / "session_start.py"
+    if session_start.is_file():
+        expected = {"SessionStart": session_start.resolve(), **expected}
+    return expected
+
+
+def _remove_legacy_compact_hooks(settings: Dict[str, Any]) -> List[str]:
+    removed: List[str] = []
+    for key in ("pre_compact", "post_compact"):
+        if key in settings:
+            settings.pop(key, None)
+            removed.append(key)
+
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return removed
+    for key in ("pre_compact", "post_compact", "PreCompact", "PostCompact"):
+        if key in hooks:
+            hooks.pop(key, None)
+            removed.append(f"hooks.{key}")
+    _cleanup_empty_settings_containers(settings)
+    return removed
 
 
 def _extract_command_path(command: str) -> Optional[Path]:
@@ -467,6 +489,7 @@ def apply_claude_permission_guard(
 ) -> Dict[str, Any]:
     settings, original = load_claude_settings(path)
     _dedupe_expected_hook_commands(settings)
+    legacy_compact_hooks_removed = _remove_legacy_compact_hooks(settings)
     permissions = settings["permissions"]
     deny = permissions["deny"]
     existing_owner = _managed_owner(settings)
@@ -504,6 +527,7 @@ def apply_claude_permission_guard(
         "deny_added": newly_added,
         "recorded_deny_added": recorded_added,
         "recorded_hook_commands": _recorded_hook_commands(marker or {}),
+        "legacy_compact_hooks_removed": legacy_compact_hooks_removed,
     }
 
 
@@ -1014,7 +1038,7 @@ def compose_scope() -> Dict[str, Any]:
         "ports": ["127.0.0.1:6379", "127.0.0.1:7687", "127.0.0.1:7474"],
         "volumes": ["orch_redis_data", "orch_neo4j_data"],
         "files": [str(DOCKER_COMPOSE_FILE), str(CLAUDE_SETTINGS_PATH), str(SETUP_STATE_PATH)],
-        "hooks": ["Stop", "PreToolUse", "PostToolUse", "UserPromptSubmit"],
+        "hooks": ["SessionStart", "Stop", "PreToolUse", "PostToolUse", "UserPromptSubmit"],
     }
 
 
