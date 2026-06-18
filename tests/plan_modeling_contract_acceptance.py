@@ -44,6 +44,15 @@ CLEAN_PLAN = """# Project: plan-modeling-clean - Clean Plan
 - verify evidence and decide merge
 """
 
+SUPERVISOR_PEER_PROSE_PLAN = """# Project: plan-modeling-supervisor-peer-prose - Supervisor Peer Prose
+> supervisor-owned gate work can mention peers without making them executors
+
+## Phase: p1 - Work
+
+### Task: r5-gate - Conductor peer-review decision [owner: conductor]
+- conductor reads grok's peer-review note and records the acceptance decision
+"""
+
 OWNERLESS_PLAN = """# Project: plan-modeling-ownerless - Ownerless Plan
 > ownerless tasks are claimable by matched sessions
 
@@ -165,6 +174,13 @@ def main() -> int:
         "clean decomposed ingest response has zero plan-modeling warnings",
         clean_warnings == [],
         clean_warnings,
+    )
+
+    supervisor_peer_prose = _ingest(SUPERVISOR_PEER_PROSE_PLAN)
+    _check(
+        "supervisor-owned gate task mentioning peers has zero plan-modeling warnings",
+        supervisor_peer_prose.get("plan_modeling_warnings") == [],
+        supervisor_peer_prose.get("plan_modeling_warnings"),
     )
 
     ownerless = _ingest(OWNERLESS_PLAN)
