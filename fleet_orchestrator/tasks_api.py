@@ -447,6 +447,17 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             owner = task_before.get("owner", "")
         blocked_on = data["blocked_on"] if "blocked_on" in data else None
         completion_evidence = _terminal_evidence_from_request(data)
+        from fleet_orchestrator.completion_guard import peer_self_completion_rejection
+
+        rejection = peer_self_completion_rejection(
+            task_id,
+            task_before,
+            sender,
+            status,
+            config=cfg,
+        )
+        if rejection:
+            return JSONResponse(status_code=409, content=rejection)
 
         update_task_status(
             task_id,
@@ -832,9 +843,9 @@ def session_current(session_id: str) -> Dict[str, Any]:
     work = get_session_current_work(session_id, config=cfg)
     if not work:
         return {"session": session_id, "current": None, "activity": activity, "liveness": None}
-    from fleet_orchestrator.current_liveness import current_task_liveness
+    from fleet_orchestrator.current_liveness import safe_current_task_liveness
 
-    liveness = current_task_liveness(session_id, work, config=cfg)
+    liveness = safe_current_task_liveness(session_id, work, config=cfg)
     current = {**work, "liveness": liveness}
     return {"session": session_id, "current": current, "activity": activity, "liveness": liveness}
 

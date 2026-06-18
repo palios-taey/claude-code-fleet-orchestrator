@@ -58,7 +58,7 @@ import sys
 import time
 from typing import Any, Optional
 
-from .config import OrchConfig, get_neo4j_session
+from .config import OrchConfig, get_neo4j_session, notify_cli
 from .notify_state import redis_connect as _notify_redis_connect
 from .notify_state import state_key as _notify_state_key
 from .decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
@@ -654,6 +654,76 @@ def _current_task_id(raw: Optional[str]) -> Optional[str]:
     return str(task_id) if task_id else None
 
 
+def _outcome_payload(outcome: str, details: Optional[str], current_task: Optional[dict[str, Any]]) -> dict[str, Any]:
+    payload = {"outcome": outcome}
+    detail_text = str(details or "")
+    task_id = str((current_task or {}).get("task_id") or "").strip()
+    if task_id:
+        payload["task_id"] = task_id
+        if task_id not in detail_text:
+            suffix = f" [task_id={task_id}]"
+            detail_text = f"{detail_text[:max(0, 500 - len(suffix))]}{suffix}".strip()
+    if detail_text:
+        payload["details"] = detail_text[:500]
+    return payload
+
+
+def _notify_supervisor_response_ready(worker: str,
+                                      current_task: Optional[dict[str, Any]],
+                                      payload: dict[str, Any]) -> None:
+    if not current_task:
+        return
+    supervisor = str(current_task.get("supervisor") or "").strip()
+    if not supervisor or supervisor == worker:
+        return
+    task_id = str(current_task.get("task_id") or "").strip()
+    description = str(current_task.get("description") or "").strip()
+    details = str(payload.get("details") or "").strip()
+    body = (
+        f"{worker} reported done"
+        f"{f' for {task_id}' if task_id else ''}"
+        f"{f': {description}' if description else ''}"
+        f"{f' - {details}' if details else ''}"
+    )
+    cli = notify_cli()
+    try:
+        result = subprocess.run(
+            [
+                cli,
+                supervisor,
+                body,
+                "--from",
+                worker,
+                "--type",
+                "response_ready",
+                "--priority",
+                "high",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "supervisor response_ready wake failed worker=%s supervisor=%s task=%s error=%s",
+            worker,
+            supervisor,
+            task_id,
+            exc,
+        )
+        return
+    if result.returncode != 0:
+        logger.warning(
+            "supervisor response_ready wake failed worker=%s supervisor=%s task=%s rc=%s stderr=%s",
+            worker,
+            supervisor,
+            task_id,
+            result.returncode,
+            (result.stderr or "").strip(),
+        )
+
+
 def _revert_outcome_claim(worker: str, task_id: str) -> None:
     if not _orch_task_exists(task_id):
         return
@@ -703,13 +773,13 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
             f"outcome must be one of {_VALID_OUTCOMES!r}, got {outcome!r}"
         )
     r = _redis_connect()
-    payload = {"outcome": outcome}
-    if details:
-        payload["details"] = details[:500]
     last_outcome_key = _state_key(worker, "last_outcome")
     current_task_key = _state_key(worker, "current_task")
     if outcome == "done":
+        current_task = _decode_current_task(r.get(current_task_key))
+        payload = _outcome_payload(outcome, details, current_task)
         r.set(last_outcome_key, json.dumps(payload))
+        _notify_supervisor_response_ready(worker, current_task, payload)
         return
 
     from redis import WatchError
@@ -719,7 +789,9 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
         with r.pipeline() as pipe:
             try:
                 pipe.watch(current_task_key)
-                current_task_id = _current_task_id(pipe.get(current_task_key))
+                current_task_raw = pipe.get(current_task_key)
+                current_task_id = _current_task_id(current_task_raw)
+                payload = _outcome_payload(outcome, details, _decode_current_task(current_task_raw))
                 pipe.multi()
                 pipe.set(last_outcome_key, json.dumps(payload))
                 pipe.execute()

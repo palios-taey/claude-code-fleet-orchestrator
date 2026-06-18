@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any, Dict, Optional
 
@@ -10,6 +11,8 @@ from redis import RedisError
 from .config import OrchConfig
 from .notify_state import redis_connect, state_key
 from .worker_liveness import worker_task_liveness_ttl_secs
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _float_or_none(value: Any) -> Optional[float]:
@@ -111,3 +114,20 @@ def current_task_liveness(session_id: str,
         "age_seconds": age_seconds,
         "threshold_seconds": int(ttl),
     }
+
+
+def safe_current_task_liveness(session_id: str,
+                               work: Optional[Dict[str, Any]],
+                               *,
+                               now: Optional[float] = None,
+                               config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
+    """Best-effort liveness sidecar for status endpoints.
+
+    Current work is authoritative; liveness is diagnostic. A Redis/Neo4j sidecar
+    failure must not turn a valid current-task read into a 500.
+    """
+    try:
+        return current_task_liveness(session_id, work, now=now, config=config)
+    except Exception as exc:
+        LOGGER.warning("current-task liveness unavailable session=%s error=%s", session_id, exc)
+        return None
