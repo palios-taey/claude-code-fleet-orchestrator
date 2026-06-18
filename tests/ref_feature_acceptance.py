@@ -364,6 +364,7 @@ def main() -> int:
 
             force_cases = [
                 ("force-false-bool", {"force": False}, 409),
+                ("force-true-no-reason", {"force": True}, 422),
                 ("force-false-string", {"force": "false"}, 422),
                 ("force-zero-int", {"force": 0}, 422),
                 ("force-zero-string", {"force": "0"}, 422),
@@ -379,8 +380,20 @@ def main() -> int:
             _assert("force-non-object-body", non_object_resp.status_code == 422, non_object_resp.text)
 
             force_true_project = _project_fixture("force-true")
-            force_true = CLIENT.post(f"/api/projects/{force_true_project}/complete", json={"force": True})
-            _assert("force-true-bypasses", force_true.status_code == 200 and force_true.json().get("force") is True, force_true.text)
+            force_true = CLIENT.post(
+                f"/api/projects/{force_true_project}/complete",
+                json={"force": True, "reason": "ref acceptance force close", "from": "ref-acceptance"},
+            )
+            force_true_body = force_true.json() if force_true.status_code == 200 else {}
+            _assert(
+                "force-true-bypasses-with-reason",
+                force_true.status_code == 200
+                and force_true_body.get("force") is True
+                and force_true_body.get("forced_closure") is True
+                and force_true_body.get("closure_reason") == "ref acceptance force close"
+                and force_true_body.get("completed_by") == "ref-acceptance",
+                force_true.text,
+            )
             _assert("complete-project-direct-conflict", _complete_conflicts(), "complete_project should conflict on unfinished work")
 
             project_a = _project_fixture("reset-a", owner="shared-session")
