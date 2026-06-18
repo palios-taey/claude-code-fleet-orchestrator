@@ -40,6 +40,8 @@ if "ORCH_DOTENV" not in os.environ:
             break
 os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
+os.environ.setdefault("ORCH_NEO4J_URI", "bolt://localhost:7687")
+os.environ.setdefault("ORCH_NEO4J_DB", "neo4j")
 
 from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
 from fleet_orchestrator.handoff_validation import (  # noqa: E402
