@@ -245,10 +245,40 @@ def _expected_hook_scripts(notify_root: Path) -> Dict[str, Path]:
     return expected
 
 
+def _is_under_path(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _legacy_compact_value_owned_by_notify(value: Any, notify_root: Path) -> bool:
+    hooks_root = (notify_root / "hooks").resolve()
+    if isinstance(value, str):
+        command_path = _extract_command_path(value)
+        return command_path is not None and _is_under_path(command_path, hooks_root)
+    if isinstance(value, list):
+        return any(_legacy_compact_value_owned_by_notify(item, notify_root) for item in value)
+    if isinstance(value, dict):
+        command = value.get("command")
+        if isinstance(command, str) and _legacy_compact_value_owned_by_notify(command, notify_root):
+            return True
+        hooks = value.get("hooks")
+        if isinstance(hooks, list) and _legacy_compact_value_owned_by_notify(hooks, notify_root):
+            return True
+        return any(_legacy_compact_value_owned_by_notify(item, notify_root) for item in value.values() if isinstance(item, (dict, list)))
+    return False
+
+
 def _remove_legacy_compact_hooks(settings: Dict[str, Any]) -> List[str]:
+    try:
+        notify_root = resolve_notify_root()
+    except RuntimeError:
+        return []
     removed: List[str] = []
     for key in ("pre_compact", "post_compact"):
-        if key in settings:
+        if key in settings and _legacy_compact_value_owned_by_notify(settings[key], notify_root):
             settings.pop(key, None)
             removed.append(key)
 
@@ -256,7 +286,7 @@ def _remove_legacy_compact_hooks(settings: Dict[str, Any]) -> List[str]:
     if not isinstance(hooks, dict):
         return removed
     for key in ("pre_compact", "post_compact", "PreCompact", "PostCompact"):
-        if key in hooks:
+        if key in hooks and _legacy_compact_value_owned_by_notify(hooks[key], notify_root):
             hooks.pop(key, None)
             removed.append(f"hooks.{key}")
     _cleanup_empty_settings_containers(settings)
