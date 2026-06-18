@@ -127,8 +127,9 @@ Network posture:
 - `ORCH_PORT`: dashboard/API port. Default is `5002`.
 - `ORCH_DASHBOARD_URL`: base URL used by CLIs and hooks. Default is `http://127.0.0.1:5002`.
 - `ORCH_AUTH_TOKEN`: optional mutable-endpoint token. When set, `POST`, `PUT`, `PATCH`, and `DELETE` requests require either `Authorization: Bearer <token>` or `X-API-Key: <token>`. Read endpoints remain open. When unset, the default loopback bind is the security boundary.
+- `ORCH_ALLOW_UNAUTH_NON_LOOPBACK`: unset by default. Set to `1` only to explicitly acknowledge a tokenless non-loopback trusted-LAN mutable API bind. This override is not authentication.
 
-By default the dashboard binds `127.0.0.1`, reachable only from the machine it runs on. That localhost bind is the security boundary for the mutable API: the dashboard is not a multi-user service and must not accept untrusted callers. Binding to any non-loopback interface is an explicit, deliberate operator opt-in for a trusted single-user network only.
+By default the dashboard binds `127.0.0.1`, reachable only from the machine it runs on. That localhost bind is the security boundary for the mutable API: the dashboard is not a multi-user service and must not accept untrusted callers. Binding to any non-loopback interface remains an explicit, deliberate operator opt-in; without `ORCH_AUTH_TOKEN`, startup fails closed unless `ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1` is set as a trusted single-user LAN exposure acknowledgement.
 
 Fleet and context:
 

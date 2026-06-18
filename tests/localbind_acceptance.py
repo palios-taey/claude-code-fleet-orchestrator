@@ -36,6 +36,7 @@ def main() -> int:
     env_example = _read(".env.example")
     readme = _read("README.md")
     readme_flat = " ".join(readme.split())
+    security = _read("SECURITY.md")
     walkthrough = _read("docs/WALKTHROUGH.md")
     all_interface = ".".join(["0", "0", "0", "0"])
 
@@ -45,14 +46,22 @@ def main() -> int:
     _check(".env.example contains no all-interface bind example", all_interface not in env_example)
     _check(".env.example contains no hardcoded LAN dashboard URL",
            not re.search(r"ORCH_DASHBOARD_URL=http://(?:10|172\\.(?:1[6-9]|2\\d|3[01])|192\\.168)\\.", env_example))
+    _check(".env.example documents tokenless non-loopback fail-closed override",
+           "startup fails closed" in env_example and "ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1" in env_example)
 
     _check("README documents loopback as default", "By default the dashboard binds `127.0.0.1`" in readme)
     _check("README states localhost bind is the security boundary",
            "localhost bind is the security boundary" in readme)
     _check("README requires non-loopback exposure to be explicit opt-in",
            "explicit, deliberate operator opt-in" in readme_flat and "must not accept untrusted callers" in readme_flat)
+    _check("README documents tokenless non-loopback override as acknowledgement",
+           "fails closed unless `ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1`" in readme and "override is not authentication" in readme)
     _check("Walkthrough documents loopback security boundary",
            "default `ORCH_HOST=127.0.0.1` is the security boundary" in walkthrough)
+    _check("Walkthrough documents non-loopback override",
+           "ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1" in walkthrough)
+    _check("SECURITY documents override is not auth",
+           "ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1" in security and "not authentication" in security)
 
     saved = os.environ.pop("ORCH_HOST", None)
     try:

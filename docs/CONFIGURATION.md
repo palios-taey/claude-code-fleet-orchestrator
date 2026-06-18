@@ -18,10 +18,11 @@ the code, the code wins; verify against the repo, do not trust this table alone.
   reachable **with no credential**. When set, those methods require the token.
 - **`ORCH_HOST` defaults to `127.0.0.1`** (loopback/private). If you bind a
   non-loopback interface (`0.0.0.0`, a LAN IP) **without** a token, the mutable
-  API is reachable unauthenticated from that network. The server **only logs a
-  warning** in that case (`_warn_if_mutable_api_exposed`) — it does **not** refuse
-  to start. This is intentional for a single trusted machine/LAN; **if you expose
-  it off a trusted network, set `ORCH_AUTH_TOKEN`.**
+  API would be reachable unauthenticated from that network, so startup **fails
+  closed**. To start a tokenless non-loopback trusted-LAN deployment, set
+  `ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1` as an explicit exposure acknowledgement.
+  Prefer `ORCH_AUTH_TOKEN` for any non-loopback deployment that can receive
+  untrusted callers.
 - The completion-evidence gate checks evidence **shape, not truth** (it has no git
   access to verify a SHA exists). It stops accidental evidence-less completions; it
   does not stop a deliberate caller who can reach the port from submitting a
@@ -52,6 +53,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | Flag | Default | Purpose |
 |---|---|---|
 | `ORCH_AUTH_TOKEN` | unset (tokenless mutable API) | Bearer token gating mutable methods — see posture above. |
+| `ORCH_ALLOW_UNAUTH_NON_LOOPBACK` | unset (fail closed) | Explicit acknowledgement that a non-loopback mutable API bind without `ORCH_AUTH_TOKEN` is intentional. This is not auth; it only permits startup in the trusted single-user LAN posture. |
 | `ORCH_REF_ALLOWED_ROOT` | unset | Explicit filesystem sandbox root(s) for `[ref:]` reads; reads outside allowed roots are refused. |
 | `ORCH_SESSION_IDS` | `""` | Optional per-target filter for the dashboard `/api/sessions` view AND the notify/wake endpoints. When **empty (default)** the filter is OFF (any target accepted — the API's real boundary is `ORCH_AUTH_TOKEN`/loopback); when **set**, an unlisted target raises 400. Does not affect task-completion enforcement. |
 | `ORCH_SESSION_ROOTS` | `""` | Maps sessions → repo roots for context; these roots are also auto-derived as allowed `[ref:]` roots. |
