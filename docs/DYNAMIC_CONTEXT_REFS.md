@@ -1,6 +1,6 @@
 # Dynamic Context And Tiered Refs
 
-Dynamic context injection is the orchestrator's way to rebuild a clean, task-scoped working set after chat history has been cleared. Plans and API-created work can attach refs, and the wake-packet endpoint renders the refs that match the session's current task.
+Dynamic context injection is the orchestrator's way to rebuild a clean, task-scoped working set after chat history has been cleared. Plans and API-created work can attach refs, and the wake-packet endpoint renders the refs that match the session's current task. With managed `claude-code-fleet-notify` hooks installed, `SessionStart` and `UserPromptSubmit` use this endpoint as the primary context vehicle, so a session arrives at ordinary prompts with scoped state instead of waiting for a manual paste.
 
 ## Runtime Flow
 
@@ -20,6 +20,8 @@ The normal usage pattern is:
 4. Continue the task with only the selected operating guidance, identity, refs, memory, rules, provenance, cycle state, human state, and stop state.
 
 This is a clear-then-reinject pattern, not hidden long-context magic. The packet is the current scoped slice.
+
+The hook path uses the same endpoint. `SessionStart` and `UserPromptSubmit` emit the packet as additional hook context; `PostToolUse` appends it after drained notifications. Hook delivery is fail-open: if the local API is down or the endpoint is disabled, the hook emits no packet context rather than blocking the operator.
 
 ## Identity Tier
 

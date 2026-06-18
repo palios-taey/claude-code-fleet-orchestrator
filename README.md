@@ -18,7 +18,7 @@ You run several Claude Code or CLI sessions as a fleet. The orchestrator keeps t
 
 **Stop-discipline engine.** The hook path is designed so a session does not silently stop while it still has ready work. The Stop hook asks the orchestrator for a stop decision; if work remains and hooks are installed, the hook blocks the stop and feeds back the next action. Human-review gates are a first-class stop state: when work is waiting on a person, the session can stop cleanly instead of looping.
 
-**Dynamic context injection.** Plans and tasks can attach reference docs at overall, supervisor, project, phase, and task tiers. `GET /api/sessions/{session_id}/wake-packet` is enabled by default and assembles a task-scoped packet with operating guidance, a per-role identity tier, refs, ranked memory, rules, provenance, and a size report. `ORCH_WAKE_PACKET_ENDPOINT_ENABLED=0` disables only that endpoint; the old `ORCH_WAKE_PACKET_ENABLED` name remains as a deprecated alias. This pairs with `/clear`: clear accumulated chat context, then re-inject the clean slice for the current task. Empty refs mean none were attached; that is valid.
+**Dynamic context injection.** Plans and tasks can attach reference docs at overall, supervisor, project, phase, and task tiers. `GET /api/sessions/{session_id}/wake-packet` is enabled by default and assembles a task-scoped packet with operating guidance, a per-role identity tier, refs, ranked memory, rules, provenance, and a size report. Managed notify hooks surface that scoped packet on `SessionStart`, `UserPromptSubmit`, and `PostToolUse` when the local API can provide it. `ORCH_WAKE_PACKET_ENDPOINT_ENABLED=0` disables only that endpoint; the old `ORCH_WAKE_PACKET_ENABLED` name remains as a deprecated alias. This pairs with `/clear`: clear accumulated chat context, then re-inject the clean slice for the current task. Empty refs mean none were attached; that is valid.
 
 **Evidence-gated completion.** Terminal task updates are designed to require evidence. For normal task completion, provide a JSON object with real artifacts such as `commit_sha`, `gate`, and `production_observation`; the API rejects evidence-less terminal claims. Human-review gate tasks must be completed through the question/UI path, not by ordinary task status updates.
 
@@ -207,6 +207,7 @@ taey-receipts list --json --limit 5
 
 The hooks close the loop:
 
+- `SessionStart` and `UserPromptSubmit` hooks fetch the current wake packet so sessions arrive with scoped state.
 - `PreToolUse` / `PostToolUse` activity hooks keep liveness fresh.
 - The Stop hook asks the orchestrator whether the session may stop.
 - `orch-watch` listens for Redis state transitions and wakes supervisors when a stopped or idle session has actionable work.
@@ -274,6 +275,8 @@ curl -s "http://127.0.0.1:5002/api/sessions/worker-codex/wake-packet?cli=codex"
 ```
 
 The response includes `packet` plus `packet_meta` with a provenance hash, size report, snapshot fingerprints, and the generating commit.
+
+When `claude-code-fleet-notify` hooks are installed, the same packet is delivered as hook context on `SessionStart` and `UserPromptSubmit`; `PostToolUse` appends it after drained notifications. If the endpoint is disabled or unavailable, the hooks fail open and emit no wake-packet context.
 
 ## Scope
 

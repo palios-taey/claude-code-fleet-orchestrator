@@ -157,6 +157,41 @@ def main() -> int:
             stop_commands,
         )
 
+        expected_hooks = easy_setup._expected_hook_scripts(Path("/notify"))
+        _assert(
+            "expected-hooks-include-session-start",
+            expected_hooks.get("SessionStart") == Path("/notify/hooks/session_start.py"),
+            expected_hooks,
+        )
+
+        legacy_compact_path = _temp_settings(tmp / "legacy-compact", [])
+        legacy_compact_doc = {
+            "permissions": {"deny": []},
+            "pre_compact": "python3 /notify/hooks/pre_compact.py",
+            "post_compact": "python3 /notify/hooks/post_compact.py",
+            "hooks": {
+                "PreCompact": [{"hooks": [{"type": "command", "command": "python3 /notify/hooks/pre_compact.py"}]}],
+                "PostCompact": [{"hooks": [{"type": "command", "command": "python3 /notify/hooks/post_compact.py"}]}],
+                "Stop": [{"hooks": [{"type": "command", "command": "python3 /notify/hooks/stop_idle.py", "timeout": 5000}]}],
+            },
+        }
+        legacy_compact_path.write_text(json.dumps(legacy_compact_doc, indent=2) + "\n", encoding="utf-8")
+        with mock.patch("fleet_orchestrator.easy_setup.resolve_notify_root", return_value=Path("/notify")):
+            legacy_result = apply_claude_permission_guard(legacy_compact_path, apply=True)
+            legacy_second = apply_claude_permission_guard(legacy_compact_path, apply=True)
+        legacy_settings = json.loads(legacy_compact_path.read_text(encoding="utf-8"))
+        _assert(
+            "legacy-compact-hooks-removed",
+            "pre_compact" not in legacy_settings
+            and "post_compact" not in legacy_settings
+            and "PreCompact" not in legacy_settings.get("hooks", {})
+            and "PostCompact" not in legacy_settings.get("hooks", {})
+            and "Stop" in legacy_settings.get("hooks", {})
+            and set(legacy_result["legacy_compact_hooks_removed"]) == {"pre_compact", "post_compact", "hooks.PreCompact", "hooks.PostCompact"}
+            and legacy_second["legacy_compact_hooks_removed"] == [],
+            legacy_settings,
+        )
+
         with mock.patch.object(easy_setup, "STATE_DIR", tmp / "drift-state"), \
              mock.patch.object(easy_setup, "SETUP_STATE_PATH", tmp / "drift-state" / "easy_setup_state.json"), \
              mock.patch.object(easy_setup, "CLAUDE_SETTINGS_PATH", tmp / "drift-b" / "settings.json"):
@@ -368,7 +403,7 @@ def main() -> int:
         scope = compose_scope()
         _assert(
             "doctor-scope-shape",
-            "127.0.0.1:7687" in scope["ports"] and "orch_neo4j_data" in scope["volumes"] and any(path.endswith("settings.json") for path in scope["files"]),
+            "127.0.0.1:7687" in scope["ports"] and "orch_neo4j_data" in scope["volumes"] and "SessionStart" in scope["hooks"] and any(path.endswith("settings.json") for path in scope["files"]),
             scope,
         )
 
