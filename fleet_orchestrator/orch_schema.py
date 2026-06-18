@@ -184,6 +184,13 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
     return normalized
 
 
+def has_valid_completion_evidence(evidence: Optional[Dict[str, Any]]) -> bool:
+    try:
+        return bool(_normalize_completion_evidence(evidence))
+    except CompletionEvidenceError:
+        return False
+
+
 def _normalize_non_success_terminal_evidence(
     status: str,
     evidence: Optional[Dict[str, Any]],

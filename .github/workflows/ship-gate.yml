@@ -116,6 +116,15 @@ jobs:
           ORCH_REDIS_PORT: "6379"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
         run: python tests/task_completion_evidence_acceptance.py
+      - name: Ship-gate — shippability requires completed gate evidence
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+          ORCH_TEST_NAMESPACE: ship-gate-ci
+        run: python tests/shippability_evidence_acceptance.py
       - name: Ship-gate — bare task-id resolver (stop-engine phantom self-clear)
         env:
           ORCH_NEO4J_URI: bolt://localhost:7687
