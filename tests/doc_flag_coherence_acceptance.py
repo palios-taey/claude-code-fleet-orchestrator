@@ -50,6 +50,7 @@ def probe():
     _require_env("ORCH_REQUIRED_FLAG")
     default_on_feature_enabled("ORCH_FEATURE_FLAG", aliases=("ORCH_ALIAS_FLAG",))
     _optional_env("ORCH_OPTIONAL_FLAG")
+    _scoped_env_value(None, "ORCH_SCOPED_HELPER_FLAG")
 """,
             encoding="utf-8",
         )

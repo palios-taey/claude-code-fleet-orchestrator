@@ -38,7 +38,7 @@ UNTRUSTED_DATA_PREAMBLE = (
 )
 
 
-def _load_session_roots() -> Dict[str, str]:
+def _load_session_roots(scoped_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Session -> repo-root map, loaded from config (no hardcoded operator paths).
 
     De-umbilical fix: this used to ship a hardcoded map of the reference
@@ -49,7 +49,7 @@ def _load_session_roots() -> Dict[str, str]:
         ORCH_SESSION_ROOTS=supervisor=/home/me/repo,worker=/home/me/w
     Unset -> empty map (callers fall back to MEMORY_BASE-only context).
     """
-    raw = os.environ.get("ORCH_SESSION_ROOTS", "").strip()
+    raw = _scoped_env_value(scoped_env, "ORCH_SESSION_ROOTS").strip()
     if not raw:
         return {}
     try:
@@ -76,8 +76,9 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
     raw_session = (session or "").strip()
     session_key = _normalize_session(session)
     aliases = _session_aliases(raw_session, session_key)
-    roots = session_roots if session_roots is not None else _load_session_roots()
-    _load_session_env(aliases, roots)
+    base_roots = session_roots if session_roots is not None else _load_session_roots()
+    scoped_env = _read_session_env(aliases, base_roots)
+    roots = _load_session_roots(scoped_env) if "ORCH_SESSION_ROOTS" in scoped_env else base_roots
     work = _resolve_work(session_key, task_id)
     summary = get_project_summary(work["project_id"]) if work.get("project_id") else None
 
@@ -85,7 +86,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
     refs = _select_refs(summary, work, task_id, session_key)
     memory_files = _read_memory_files(_memory_dirs(session_key, work, summary, roots, aliases))
     selected_memory = _rank_memory(memory_files, task_text, max_memory=max_memory)
-    rules = _select_rules(session_key, work, summary, task_text)
+    rules = _select_rules(session_key, work, summary, task_text, scoped_env=scoped_env)
 
     context = {
         "overall_refs": refs["overall"],
@@ -230,13 +231,20 @@ def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
 SESSION_ENV_ALLOWLIST = {"ORCH_RULES_ROOT", "ORCH_SESSION_ROOTS"}
 
 
-def _load_session_env(session_aliases: Iterable[str], session_roots: Dict[str, str]) -> None:
+def _scoped_env_value(scoped_env: Optional[Dict[str, str]], key: str) -> str:
+    if scoped_env is not None and key in scoped_env:
+        return str(scoped_env.get(key) or "")
+    return os.environ.get(key, "")
+
+
+def _read_session_env(session_aliases: Iterable[str], session_roots: Dict[str, str]) -> Dict[str, str]:
     root = _session_root(session_aliases, session_roots)
     if not root:
-        return
+        return {}
     env_path = Path(root) / ".env"
     if not env_path.is_file():
-        return
+        return {}
+    values: Dict[str, str] = {}
     for raw_line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -248,7 +256,8 @@ def _load_session_env(session_aliases: Iterable[str], session_roots: Dict[str, s
         # (Internal auth keys no longer exist at all -- see config.py -- so this is
         # belt-and-suspenders, not the primary guard.)
         if key in SESSION_ENV_ALLOWLIST:
-            os.environ.setdefault(key, value.strip())
+            values[key] = value.strip()
+    return values
 
 
 def _task_text(work: Dict[str, Any], summary: Optional[Dict[str, Any]], task_id: Optional[str]) -> str:
@@ -461,19 +470,19 @@ def _public_memory_item(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _select_rules(session: str, work: Dict[str, Any], summary: Optional[Dict[str, Any]],
-                  task_text: str) -> List[Dict[str, Any]]:
+                  task_text: str, scoped_env: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     project = (
         work.get("project_id")
         or ((summary or {}).get("project") or {}).get("id")
         or work.get("project_name")
         or ((summary or {}).get("project") or {}).get("name")
     )
-    rules = get_rules(session, project=str(project) if project else None, rules_root=_rules_root())
+    rules = get_rules(session, project=str(project) if project else None, rules_root=_rules_root(scoped_env))
     return _rank_rules(rules, task_text)
 
 
-def _rules_root() -> Optional[Path]:
-    raw = os.environ.get("ORCH_RULES_ROOT", "").strip()
+def _rules_root(scoped_env: Optional[Dict[str, str]] = None) -> Optional[Path]:
+    raw = _scoped_env_value(scoped_env, "ORCH_RULES_ROOT").strip()
     if not raw:
         return None
     root = Path(raw).expanduser().resolve(strict=False)
