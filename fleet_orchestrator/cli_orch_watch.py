@@ -234,6 +234,24 @@ def _send_wake(r, target: str, body: str, priority: str, msg_id: str) -> bool:
     return True
 
 
+def _target_stop_decision_allows_stop(target: str, wake_reason: str,
+                                      task_id: Optional[str] = None) -> bool:
+    from fleet_orchestrator.orch_schema import WAKE_ALLOW_STOP, get_session_stop_decision
+
+    try:
+        decision = get_session_stop_decision(target)
+    except Exception as exc:
+        log.error("Stop-decision consult failed before %s wake: target=%s task=%s error=%s",
+                  wake_reason, target, task_id, exc)
+        return False
+
+    if decision.get("block") is False and decision.get("wake_type") == WAKE_ALLOW_STOP:
+        log.info("Suppressed %s wake: target=%s task=%s stop_decision=ALLOW_STOP reason=%s",
+                 wake_reason, target, task_id, decision.get("reason"))
+        return True
+    return False
+
+
 def _process_handoff_timeouts(r) -> None:
     prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
     seen: set[str] = set()
@@ -490,6 +508,8 @@ def notify_supervisor_of_stuck(r, supervisor: str, node_id: str,
     except Exception:
         started_at = 0.0
     duration_sec = int(max(0.0, _redis_now(r) - started_at)) if started_at > 0 else stuck_for_sec
+    if _target_stop_decision_allows_stop(supervisor, "PEER_IDLE", task_id):
+        return False
     body = _build_peer_idle_body(r, supervisor, node_id, task, outcome, details, duration_sec)
 
     if not _send_wake(
@@ -515,6 +535,9 @@ def notify_supervisor_of_unblock(r, supervisor: str, completed_task: dict,
     task_id = completed_task.get("task_id", "?")
     dedup_key = orch_key("orch-watch-unblock", supervisor, task_id)
     if r.exists(dedup_key):
+        return False
+
+    if _target_stop_decision_allows_stop(supervisor, "UNBLOCK", task_id):
         return False
 
     if not _send_wake(
@@ -557,6 +580,8 @@ def _process_worker_liveness_expirations(
             continue
         dedup_key = worker_task_liveness_dedup_key(str(task_id))
         if r.exists(dedup_key):
+            continue
+        if _target_stop_decision_allows_stop(str(supervisor), "WORKER_LIVENESS_EXPIRED", str(task_id)):
             continue
         body = (
             f"[WORKER_LIVENESS_EXPIRED] task={task_id} assigned to {worker} "
