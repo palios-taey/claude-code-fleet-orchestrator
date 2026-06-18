@@ -369,17 +369,10 @@ def _plan_modeling_warnings(parsed: Dict[str, Any]) -> List[str]:
             if not owner:
                 continue
             task_id = str(task.get("id") or "?")
-            description = str(task.get("description") or "")
-            roles = _session_roles_in_text(description)
             if _looks_like_multi_actor_task(task):
                 warnings.append(
                     f"task {task_id} looks like multiple steps across actors; "
                     "decompose into one-task-per-executor gated by depends"
-                )
-            if owner in SUPERVISOR_OWNER_IDS and (roles & PEER_ROLE_IDS):
-                warnings.append(
-                    f"task {task_id} is owned by supervisor {owner} but description implies peer execution; "
-                    "owner should be the executing session"
                 )
     return warnings
 
