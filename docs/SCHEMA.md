@@ -85,9 +85,9 @@ For one-shot tasks dispatched to workers via `fleet_orchestrator/dispatch.py:dis
 
 | Redis key | Type | Lifecycle |
 |---|---|---|
-| `taey:<worker>:current_task` | JSON | Set on dispatch. Cleared by Stop hook only when outcome=done. |
+| `taey:<worker>:current_task` | JSON `{task_id, description, supervisor, dispatcher, started_at}` | Set on dispatch. Dispatch refuses to overwrite a different dispatcher's live non-terminal binding unless the caller explicitly forces replacement. Cleared by Stop hook only when outcome=done. Older/direct bind paths may omit `dispatcher`; the guard falls back to `supervisor` for those records. |
 | `taey:<worker>:last_outcome` | JSON `{outcome, details}` | Optionally set by worker via `record_outcome()` before stopping. |
 | `taey:<worker>:parent` | string | Optional explicit supervisor override (else suffix-strip). |
 | `taey:<worker>:idle` | "1" | Set by Stop hook, cleared by UserPromptSubmit hook. |
 
-These keys coexist with the live Neo4j task tracker. When a dispatched task already exists as an OrchTask, `dispatch()` claims it in Neo4j and also sets `current_task` in Redis. Redis remains the direct source of truth for stop-hook / idle-state coordination.
+These keys coexist with the live Neo4j task tracker. When a dispatched task already exists as an OrchTask, `dispatch()` claims it in Neo4j and also sets `current_task` in Redis. If the Redis bind is refused because another dispatcher already owns a live worker slot, the new claim is rolled back to `pending` and the existing binding is preserved. Redis remains the direct source of truth for stop-hook / idle-state coordination.

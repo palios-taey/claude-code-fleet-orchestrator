@@ -12,6 +12,7 @@ Usage:
     taey-task list                    # Show pending tasks
     taey-task status <task-id>        # Check a task's status
     taey-task dispatch <task-id> <peer>  # Claim/bind/wake peer work
+    taey-task dispatch <task-id> <peer> --force  # Explicitly replace a peer's live current_task
     taey-task update <task-id> completed --evidence '{"commit_sha":"abc123","production_observation":"verified live"}'
     taey-task update <task-id> failed --evidence '{"reason":"blocked by missing dependency"}'
 """
@@ -155,6 +156,7 @@ def cmd_dispatch(args):
     from fleet_orchestrator.dispatch import (
         BugLockActive,
         OrchTaskNotReady,
+        WorkerBusy,
         dispatch as dispatch_task,
     )
 
@@ -165,8 +167,9 @@ def cmd_dispatch(args):
             description=description,
             supervisor=sender,
             priority=args.priority,
+            force=bool(args.force),
         )
-    except (BugLockActive, OrchTaskNotReady, RuntimeError) as exc:
+    except (BugLockActive, OrchTaskNotReady, WorkerBusy, RuntimeError) as exc:
         print(f"ERROR: dispatch failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -225,6 +228,8 @@ def main():
     p_dispatch.add_argument("peer", help="Peer session to dispatch to")
     p_dispatch.add_argument("--priority", default="normal",
                             help="Notify priority passed to taey-notify (default: normal)")
+    p_dispatch.add_argument("--force", action="store_true",
+                            help="Replace an existing live current_task binding for the peer")
 
     p_update = sub.add_parser("update", help="Update task status")
     p_update.add_argument("task_id", help="Task ID")
