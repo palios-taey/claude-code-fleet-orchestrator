@@ -59,5 +59,9 @@ def taey_question_main() -> Any:
     return _run_callable("fleet_orchestrator.cli_taey_question:main")
 
 
+def taey_receipts_main() -> Any:
+    return _run_callable("fleet_orchestrator.cli_taey_receipts:main")
+
+
 def taey_task_main() -> Any:
     return _run_callable("fleet_orchestrator.cli_taey_task:main")

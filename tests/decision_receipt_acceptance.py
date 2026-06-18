@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import importlib
 import os
@@ -15,6 +17,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 chat_layer = importlib.import_module("fleet_orchestrator.chat_layer")  # noqa: E402
+cli_receipts = importlib.import_module("fleet_orchestrator.cli_taey_receipts")  # noqa: E402
 receipts = importlib.import_module("fleet_orchestrator.decision_receipt")  # noqa: E402
 dispatch_module = importlib.import_module("fleet_orchestrator.dispatch")  # noqa: E402
 tasks_api = importlib.import_module("fleet_orchestrator.tasks_api")  # noqa: E402
@@ -31,6 +34,23 @@ class FakeRedis:
     def xadd(self, stream: str, fields: dict, maxlen: int | None = None, approximate: bool | None = None) -> str:
         self.events.append((stream, dict(fields), maxlen, approximate))
         return f"{len(self.events)}-0"
+
+    def _entries(self, stream: str) -> list[tuple[str, dict]]:
+        return [
+            (f"{idx}-0", fields)
+            for idx, (event_stream, fields, _maxlen, _approximate) in enumerate(self.events, start=1)
+            if event_stream == stream
+        ]
+
+    def xrevrange(self, stream: str, max: str = "+", min: str = "-", count: int | None = None) -> list[tuple[str, dict]]:
+        del max, min
+        entries = list(reversed(self._entries(stream)))
+        return entries[:count] if count is not None else entries
+
+    def xrange(self, stream: str, min: str = "-", max: str = "+", count: int | None = None) -> list[tuple[str, dict]]:
+        del min, max
+        entries = self._entries(stream)
+        return entries[:count] if count is not None else entries
 
 
 class FailingRedis:
@@ -209,6 +229,39 @@ def _dispatch_wake_wiring_contract() -> None:
     _check("dispatch wake receipt records dispatch source", payload["kind"] == "wake", payload)
 
 
+def _receipt_consumer_contract() -> None:
+    fake = FakeRedis()
+    receipts.emit_receipt(
+        "wake",
+        {
+            "why_this_context": "wake explanation",
+            "observable_state": {"session": "worker"},
+        },
+        redis_client=fake,
+    )
+    receipts.emit_receipt(
+        "chat_send",
+        {
+            "why_this_context": "chat explanation",
+            "observable_state": {"session": "worker"},
+        },
+        redis_client=fake,
+    )
+
+    recent = receipts.read_recent_receipts(limit=5, redis_client=fake)
+    _check("receipt reader consumes Redis stream", [item["kind"] for item in recent] == ["chat_send", "wake"], recent)
+    _check("receipt reader surfaces stream ids", all(item.get("_stream_id") for item in recent), recent)
+    filtered = receipts.read_recent_receipts(limit=5, kind="wake", redis_client=fake)
+    _check("receipt reader filters by kind", [item["kind"] for item in filtered] == ["wake"], filtered)
+
+    out = io.StringIO()
+    with mock.patch.object(cli_receipts, "read_recent_receipts", return_value=recent), contextlib.redirect_stdout(out):
+        code = cli_receipts.main(["list", "--json", "--limit", "5"])
+    rendered = json.loads(out.getvalue())
+    _check("taey-receipts CLI exits cleanly", code == 0, code)
+    _check("taey-receipts CLI surfaces receipts", [item["kind"] for item in rendered] == ["chat_send", "wake"], rendered)
+
+
 async def _chat_fail_open_async() -> None:
     async_redis = FakeAsyncRedis()
     await chat_layer.append_message("conductor", "operator", "hello", redis_client=async_redis)
@@ -264,6 +317,7 @@ def main() -> int:
     _chat_wiring_contract()
     _wake_wiring_contract()
     _dispatch_wake_wiring_contract()
+    _receipt_consumer_contract()
     _receipt_sink_fail_open_contract()
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
