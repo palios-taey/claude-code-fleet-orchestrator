@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, get_neo4j_driver
+from .inflight import active_inflight_signal, task_actively_in_flight
 from .notify_state import key as _notify_key
 from .notify_state import redis_connect as _notify_redis_connect
 from .notify_state import state_key as _notify_state_key
@@ -144,19 +145,6 @@ def _last_outcome_terminal_for_current_task(r, worker: str, task_id: str) -> boo
     return str(outcome.get("outcome") or "").strip().lower() in {"done", "error", "interrupted"}
 
 
-def _fresh_tool_heartbeat_for_current_task(r, worker: str, task_id: str,
-                                           ttl_secs: int, now: float) -> bool:
-    if _current_task_id(r, worker) != task_id:
-        return False
-    raw = r.get(_state_key(worker, "last_tool_activity"))
-    if raw is None:
-        return False
-    try:
-        return now - float(raw) < ttl_secs
-    except (TypeError, ValueError):
-        return False
-
-
 def _mark_liveness_heartbeat(task_id: str, worker: str, now: float, ttl_secs: int,
                              *, config: Optional[OrchConfig] = None) -> None:
     cfg = config or OrchConfig()
@@ -192,6 +180,20 @@ def _clear_matching_current_task(r, worker: str, task_id: str) -> None:
         r.delete(_state_key(worker, "current_task"))
 
 
+def _task_out_of_band_workers(task: Dict[str, Any]) -> List[str]:
+    return [
+        str(worker)
+        for worker in (
+            task.get("worker"),
+            task.get("owner"),
+            task.get("dispatched_to"),
+            task.get("supervisor"),
+            task.get("project_supervisor"),
+        )
+        if worker
+    ]
+
+
 def _escalate_task(task: Dict[str, Any], now: float,
                    *, config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
     task_id = str(task.get("task_id") or "")
@@ -199,6 +201,14 @@ def _escalate_task(task: Dict[str, Any], now: float,
     if not task_id or not worker:
         return None
     cfg = config or OrchConfig()
+    if task_actively_in_flight(
+        task_id,
+        workers=_task_out_of_band_workers(task),
+        now=now,
+        config=cfg,
+        heartbeat_mode="none",
+    ):
+        return None
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         record = session.run(
@@ -306,8 +316,19 @@ def escalate_stale_worker_tasks(now: Optional[float] = None,
             continue
         if _last_outcome_terminal_for_current_task(r, worker, task_id):
             continue
-        if _fresh_tool_heartbeat_for_current_task(r, worker, task_id, ttl_secs, current_time):
+        signal = active_inflight_signal(
+            task_id,
+            workers=[worker],
+            oob_workers=_task_out_of_band_workers(task),
+            now=current_time,
+            config=cfg,
+            heartbeat_ttl_secs=ttl_secs,
+            heartbeat_mode="current_task",
+        )
+        if signal and signal.source == "tool_heartbeat":
             _mark_liveness_heartbeat(task_id, worker, current_time, ttl_secs, config=cfg)
+            continue
+        if signal:
             continue
         if heartbeat_at <= 0 or current_time - heartbeat_at < ttl_secs:
             continue
