@@ -12,13 +12,17 @@ hook has something to report.
 Public API:
     dispatch(worker, task_id, description, supervisor=None,
              prompt_body=None, priority="normal",
-             is_bugfix=False) -> None
+             is_bugfix=False, force=False) -> None
 
 The ``supervisor`` argument is informational — it's stamped on the
 current_task payload so the Stop hook knows who to address even when
 the suffix-strip rule wouldn't reach them (e.g., multi-level trees).
 For single-level use, leave it None and the Stop hook uses
 ``<worker-name>-<cli>`` suffix-strip → supervisor.
+
+The dispatcher's identity is stored separately in the current_task payload
+for clobber protection; ``force=True`` is the explicit escape hatch when a
+supervisor intends to replace another dispatcher's live worker binding.
 
 Usage from a Python supervisor session::
 
@@ -52,7 +56,7 @@ import os
 import subprocess
 import sys
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from .config import OrchConfig, ensure_notify_importable, get_neo4j_session
 from .decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
@@ -66,6 +70,7 @@ logger = logging.getLogger(__name__)
 # the worst case at well under a second, after which we give up rather than livelock.
 _WATCH_MAX_ATTEMPTS = 8
 _WATCH_BACKOFF_S = 0.02
+_TERMINAL_TASK_STATUSES = {"completed", "failed", "interrupted"}
 
 
 class BugLockActive(Exception):
@@ -74,6 +79,10 @@ class BugLockActive(Exception):
 
 class OrchTaskNotReady(Exception):
     """Dispatch blocked because the OrchTask is not ready at claim time."""
+
+
+class WorkerBusy(Exception):
+    """Dispatch blocked because another live dispatcher already owns the worker slot."""
 
 
 def _base_session_name(worker: str) -> str:
@@ -102,12 +111,86 @@ def _state_key(node_id: str, suffix: str) -> str:
     return f"{prefix}:{node_id}:{suffix}"
 
 
+def _decode_current_task(raw: Optional[str]) -> Optional[dict[str, Any]]:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _current_task_status(task_id: str) -> Optional[str]:
+    if not task_id or not _orch_task_exists(task_id):
+        return None
+    cfg = OrchConfig()
+    with get_neo4j_session(cfg) as session:
+        row = session.run(
+            "MATCH (t:OrchTask {id: $task_id}) RETURN coalesce(t.status, 'pending') AS status",
+            task_id=task_id,
+        ).single()
+    return str(row["status"]) if row else None
+
+
+def _busy_current_task_error(worker: str, existing: Optional[dict[str, Any]],
+                             dispatcher: Optional[str]) -> Optional[WorkerBusy]:
+    if not existing:
+        return None
+    existing_dispatcher = str(existing.get("dispatcher") or existing.get("supervisor") or "").strip()
+    incoming_dispatcher = str(dispatcher or "").strip()
+    if existing_dispatcher == incoming_dispatcher:
+        return None
+    existing_task_id = str(existing.get("task_id") or "").strip()
+    status = _current_task_status(existing_task_id)
+    if status in _TERMINAL_TASK_STATUSES:
+        return None
+    display_status = status or "unknown"
+    dispatcher_label = existing_dispatcher or "unknown"
+    task_label = existing_task_id or "unknown-task"
+    return WorkerBusy(f"worker busy with {dispatcher_label}:{task_label} ({display_status})")
+
+
+def _bind_current_task_checked(r: Any, worker: str, current_task: dict[str, Any],
+                               set_parent: bool, supervisor: Optional[str],
+                               dispatcher: Optional[str],
+                               *, force: bool = False) -> None:
+    from redis import WatchError
+
+    key = _state_key(worker, "current_task")
+    for attempt in range(_WATCH_MAX_ATTEMPTS):
+        with r.pipeline() as pipe:
+            try:
+                pipe.watch(key)
+                if not force:
+                    busy = _busy_current_task_error(worker, _decode_current_task(pipe.get(key)), dispatcher)
+                    if busy:
+                        pipe.unwatch()
+                        raise busy
+                pipe.multi()
+                pipe.delete(_state_key(worker, "last_outcome"))
+                pipe.delete(_state_key("orch-watch-stuck", f"{worker}:{current_task['task_id']}"))
+                pipe.set(key, json.dumps(current_task))
+                if set_parent and supervisor:
+                    pipe.set(_state_key(worker, "parent"), supervisor)
+                pipe.execute()
+                return
+            except WatchError:
+                if attempt == _WATCH_MAX_ATTEMPTS - 1:
+                    raise RuntimeError(f"worker busy with changing current_task: {worker}")
+                time.sleep(_WATCH_BACKOFF_S * (attempt + 1))
+    raise RuntimeError(f"worker busy with changing current_task: {worker}")
+
+
 def bind_current_task(
     worker: str,
     task_id: str,
     description: str,
     supervisor: Optional[str] = None,
     set_parent: bool = False,
+    force: bool = False,
+    guard_existing: bool = False,
+    dispatcher: Optional[str] = None,
 ) -> float:
     """Write the canonical dispatch/current-task wire for ``worker``.
 
@@ -127,14 +210,19 @@ def bind_current_task(
         "supervisor": supervisor,
         "started_at": time.time(),
     }
+    if dispatcher:
+        current_task["dispatcher"] = dispatcher
 
-    pipe = r.pipeline(transaction=True)
-    pipe.delete(_state_key(worker, "last_outcome"))
-    pipe.delete(_state_key("orch-watch-stuck", f"{worker}:{task_id}"))
-    pipe.set(_state_key(worker, "current_task"), json.dumps(current_task))
-    if set_parent and supervisor:
-        pipe.set(_state_key(worker, "parent"), supervisor)
-    pipe.execute()
+    if guard_existing:
+        _bind_current_task_checked(r, worker, current_task, set_parent, supervisor, dispatcher or supervisor, force=force)
+    else:
+        pipe = r.pipeline(transaction=True)
+        pipe.delete(_state_key(worker, "last_outcome"))
+        pipe.delete(_state_key("orch-watch-stuck", f"{worker}:{task_id}"))
+        pipe.set(_state_key(worker, "current_task"), json.dumps(current_task))
+        if set_parent and supervisor:
+            pipe.set(_state_key(worker, "parent"), supervisor)
+        pipe.execute()
 
     # Binding a task means the worker is working it — flip it to in_progress so
     # next-ready stops re-surfacing it.
@@ -235,6 +323,33 @@ def _binding_is_ours(raw: Optional[str], task_id: str, binding_nonce: Optional[f
     if not isinstance(cur, dict) or cur.get("task_id") != task_id:
         return False
     return binding_nonce is None or cur.get("started_at") == binding_nonce
+
+
+def _rollback_claim_only(worker: str, task_id: str) -> None:
+    """Undo the OrchTask claim made before a guarded bind refusal."""
+    try:
+        if _orch_task_exists(task_id):
+            cfg = OrchConfig()
+            with get_neo4j_session(cfg) as session:
+                session.run(
+                    """
+                    MATCH (t:OrchTask {id: $task_id})
+                    WHERE t.status = 'in_progress'
+                      AND (
+                          coalesce(t.dispatched_to, '') = $worker
+                          OR (coalesce(t.dispatched_to, '') = '' AND coalesce(t.owner, '') = $worker)
+                      )
+                    SET t.status = 'pending',
+                        t.dispatched_to = NULL,
+                        t.updated_at = datetime()
+                    """,
+                    task_id=task_id,
+                    worker=worker,
+                )
+    except Exception as exc:
+        logger.warning(
+            "dispatch rollback: neo claim-only revert FAILED worker=%s task=%s "
+            "(task may linger in_progress as a phantom): %r", worker, task_id, exc)
 
 
 def _rollback_claim(worker: str, task_id: str, binding_nonce: Optional[float]) -> None:
@@ -387,6 +502,7 @@ def dispatch(
     prompt_body: Optional[str] = None,
     priority: str = "normal",
     is_bugfix: bool = False,
+    force: bool = False,
 ) -> None:
     """Record the task on the worker side and inject the prompt.
 
@@ -422,16 +538,24 @@ def dispatch(
             )
             raise BugLockActive(f"BUG_LOCK_ACTIVE for {product_id}: {reason}")
 
-    _claim_ready_orch_task(task_id=task_id, worker=worker)
-    mark_superseded_for_task(_redis_connect(), from_session := (supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")), task_id)
+    from_session = supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")
 
-    binding_nonce = bind_current_task(
-        worker=worker,
-        task_id=task_id,
-        description=description,
-        supervisor=supervisor,
-        set_parent=bool(supervisor),
-    )
+    _claim_ready_orch_task(task_id=task_id, worker=worker)
+    try:
+        binding_nonce = bind_current_task(
+            worker=worker,
+            task_id=task_id,
+            description=description,
+            supervisor=supervisor,
+            set_parent=bool(supervisor),
+            force=force,
+            guard_existing=True,
+            dispatcher=from_session,
+        )
+    except WorkerBusy:
+        _rollback_claim_only(worker, task_id)
+        raise
+    mark_superseded_for_task(_redis_connect(), from_session, task_id)
 
     if prompt_body is None:
         prompt_body = (
