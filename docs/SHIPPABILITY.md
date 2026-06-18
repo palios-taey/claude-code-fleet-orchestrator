@@ -77,6 +77,11 @@ The helper resolves the PR head SHA, verifies `r5-audit-gate` and
 the supplied OrchTask is `completed` with `completion_evidence.commit_sha`
 matching the head SHA and either `gate_run_id` or `production_observation`.
 
+Gate-runner command strings (`--clean`, `--boot`, and `--assert`) are trusted
+operator-authored local input and are executed through the local shell by design.
+They are not sandboxed or safe for untrusted gate definitions. See
+[SECURITY.md](../SECURITY.md) for the full gate-runner trust boundary.
+
 ## Applies to everything — including this gate itself
 
 This feature (the gate, the harnesses, the enforcement) is itself code in the

@@ -77,6 +77,8 @@ jobs:
         run: python tests/cli_entrypoint_drift_acceptance.py
       - name: Ship-gate — local bind is the mutable API security boundary
         run: python tests/localbind_acceptance.py
+      - name: Ship-gate — gate runner shell trust boundary is explicit
+        run: python tests/gate_runner_trust_boundary_acceptance.py
       - name: Ship-gate — shipped surfaces contain no private fleet identity
         run: python tests/fleet_identity_deumbilical_acceptance.py
       - name: Ship-gate — easy setup is install-safe and version-aligned

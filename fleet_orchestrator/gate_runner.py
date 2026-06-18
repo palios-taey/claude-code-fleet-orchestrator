@@ -5,11 +5,14 @@ The orchestrator runs the gate ITSELF: fresh detached checkout of the EXACT sha 
 ONLY from what this runner observed by executing those commands — never from a builder-supplied value.
 A `gate_run` row is appended to the accountability ledger. The builder is never asked "did it pass?"
 
-Trust boundary: the builder declares the gate (WHAT to check, e.g. `curl -fsS :PORT/x | grep y`); the
-runner executes it and records the result. Honest limit: the runner trusts the gate DEFINITION (a
-builder could declare a vacuous `assert: true`) — gate-definition quality is the gatekeeper's (P4)
-judgment review, not something this mechanical runner can decide. What this closes is "marked done
-without anything being run": here, something independent of the builder ran it and recorded the proof.
+Trust boundary: the builder/operator declares the gate command strings (WHAT to check, e.g.
+`curl -fsS :PORT/x | grep y`); the runner executes them through the local shell and records the
+result. Honest limit: the runner trusts the gate DEFINITION (a builder could declare a vacuous
+`assert: true`) — gate-definition quality is the gatekeeper's (P4) judgment review, not something
+this mechanical runner can decide. This is the accepted local-tool risk documented in SECURITY.md;
+if gate definitions ever come from untrusted input, shell execution must be replaced by structured
+commands and/or sandboxing. What this closes is "marked done without anything being run": here,
+something independent of the builder ran it and recorded the proof.
 """
 from __future__ import annotations
 

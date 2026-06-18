@@ -28,6 +28,20 @@ This policy covers this repository only.
 
 - Local single-user deployment on a trusted host.
 - The localhost API is not an authenticated multi-tenant service.
+- Gate-runner command strings are trusted local input. `scripts/orch-gate-run`
+  accepts `--clean`, `--boot`, and `--assert` command strings from the operator,
+  and code callers pass the same values to `fleet_orchestrator.gate_runner.run_gate`
+  as `clean`, `boot`, and `assert_cmd`. The runner executes those strings through
+  the local shell by design so operator-authored gates can use normal shell
+  pipelines and setup commands. The runner does not sandbox those gate commands
+  and must not be treated as safe for untrusted gate definitions.
+- `ORCH_SHIP_GATES` config selects which project-local task names must carry
+  completion evidence before a project can receive a successful ship verdict; it
+  does not supply shell command strings to the gate runner.
+- If gate command definitions ever originate from untrusted input, another user,
+  the network, or uploaded plans accepted from an untrusted source, the gate
+  runner must move away from raw shell strings to structured argv commands, a
+  sandbox, or both before executing them.
 - Plan/source refs are enabled only when `ORCH_REF_ALLOWED_ROOT` is configured.
 - Incoming `source_path` values are accepted for ref use only when they resolve inside `ORCH_REF_ALLOWED_ROOT`.
 - Ref reads are sandboxed to both the persisted plan-source directory and `ORCH_REF_ALLOWED_ROOT`.
