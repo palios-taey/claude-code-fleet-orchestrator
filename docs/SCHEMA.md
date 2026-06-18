@@ -14,7 +14,7 @@ One node label for all tasks. Two `kind` values that change which fields are val
 | `description` | string | yes | One-line human description |
 | `kind` | enum | yes | `one_shot` (default) or `recurring` |
 | `owner` | string | no | Session name that owns the task |
-| `priority` | int | no | Higher = earlier in queue |
+| `priority` | int | no | Lower = earlier in ready-task queues |
 | `created_at` | float | yes | unix epoch |
 | `updated_at` | float | yes | unix epoch |
 

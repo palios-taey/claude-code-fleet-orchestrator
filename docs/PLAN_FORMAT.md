@@ -21,7 +21,7 @@ The execution tracker indexes markdown plans into `OrchProject`, `OrchPhase`, an
 
 - One `# Project:` header per file.
 - Zero or one `## User Stop Conditions` section at project scope.
-- `order` and `priority` are integers.
+- `order` and `priority` are integers; lower `priority` values are selected earlier from ready-task queues.
 - `owner`, `tags`, and `depends` are optional.
 - `recurring: true` marks a completed task as re-claimable by `dispatch()` for the next cycle. This is for markdown-tracked repeated work items, not the cron-factory `kind=recurring` reservation in `docs/SCHEMA.md`.
 - `ref` is repeatable and accepts either `[ref: <path>]` for a whole-file ref capped by the runtime ref line cap, or `[ref: <path>:<Lstart>-<Lend>]` for an explicit line range.

@@ -728,6 +728,12 @@ NOT EXISTS {
 }
 """
 
+_READY_TASK_ORDER_CYPHER = (
+    "toInteger(coalesce(t.priority, 999999999)) ASC, "
+    "t.created_at ASC, "
+    "t.id ASC"
+)
+
 _ZERO_DEP_READY_CYPHER = f"""
 MATCH (t:OrchTask {{id: $task_id}})
 WHERE coalesce(t.owner, '') <> ''
@@ -2436,7 +2442,7 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
                    t.capability_tags AS capability_tags,
                    t.file_blast_radius AS file_blast_radius,
                    t.estimated_tokens AS estimated_tokens
-            ORDER BY coalesce(t.priority, 999999999) ASC
+            ORDER BY {_READY_TASK_ORDER_CYPHER}
         """)
         return [dict(r) for r in result]
 
@@ -2976,9 +2982,7 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
                    ph.refs AS phase_refs, ph.source_path AS phase_source_path,
                    proj.id AS project_id, proj.name AS project_name,
                    proj.refs AS project_refs, proj.source_path AS project_source_path
-            ORDER BY toInteger(coalesce(proj.priority, 999999999)) ASC,
-                     toInteger(coalesce(t.priority, 999999999)) ASC,
-                     t.created_at ASC
+            ORDER BY {_READY_TASK_ORDER_CYPHER}
             LIMIT 1
         """,
             sess=session_id,
@@ -3175,7 +3179,7 @@ def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
                    t.permissions_available AS permissions_available,
                    ph.id AS phase_id,
                    ph.name AS phase_name
-            ORDER BY coalesce(t.priority, 999999999) ASC, t.created_at ASC
+            ORDER BY {_READY_TASK_ORDER_CYPHER}
         """,
             project_id=project_id,
             owner=owner_value,

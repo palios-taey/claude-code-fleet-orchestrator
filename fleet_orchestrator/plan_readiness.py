@@ -59,6 +59,7 @@ if _PKG_ROOT not in sys.path:
 from fleet_orchestrator.config import OrchConfig, get_neo4j_session  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     _READY_DEPENDENCIES_SATISFIED_CYPHER,
+    _READY_TASK_ORDER_CYPHER,
     get_session_next_ready,
 )
 
@@ -103,7 +104,7 @@ RETURN
   t.priority    AS priority,
   t.owner       AS owner,
   size(others)  AS other_dep_count
-ORDER BY coalesce(t.priority, 999999999) ASC, t.id
+ORDER BY {_READY_TASK_ORDER_CYPHER}
 LIMIT 5
 """
 
