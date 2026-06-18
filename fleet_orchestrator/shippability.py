@@ -20,7 +20,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from fleet_orchestrator.config import OrchConfig
-from fleet_orchestrator.orch_schema import get_project_summary
+from fleet_orchestrator.orch_schema import get_project_summary, get_task, has_valid_completion_evidence
 
 DEFAULT_SHIP_GATES = "prodtest,audit"  # reference operator's standard (example, not mandated)
 _ID_SEP = "::"  # task ids are project-scoped <project>::<bare>; gate-match on the bare name
@@ -42,22 +42,35 @@ def _all_tasks(summary: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def evaluate_shippability(project_id: str, config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     """Return a structured shippability verdict. shippable=True ONLY when every
-    gate task (project-local name in ORCH_SHIP_GATES, default prodtest/audit) is completed."""
-    summary = get_project_summary(project_id, config)
+    gate task (project-local name in ORCH_SHIP_GATES, default prodtest/audit) is completed with valid evidence."""
+    cfg = config or OrchConfig()
+    summary = get_project_summary(project_id, cfg)
     if not summary:
         return {"project": project_id, "shippable": False, "reason": "project not found",
                 "gate_tasks": 0, "incomplete_gates": []}
     tasks = _all_tasks(summary)
     suffixes = _gate_suffixes()
-    gates = [t for t in tasks if _bare_id(t.get("id")) in suffixes]
+    gate_refs = [t for t in tasks if _bare_id(t.get("id")) in suffixes]
+    gates = [get_task(str(t.get("id") or ""), config=cfg) or t for t in gate_refs]
     if not gates:
         return {"project": project_id, "shippable": False,
                 "reason": f"no ship-gate tasks declared (fail-closed); configured gates={list(suffixes)}",
                 "gate_tasks": 0, "incomplete_gates": [], "configured_gates": list(suffixes)}
-    incomplete = [
-        {"id": t.get("id"), "status": t.get("status"), "blocked_on": t.get("blocked_on")}
-        for t in gates if t.get("status") != "completed"
-    ]
+    incomplete = []
+    for task in gates:
+        status = task.get("status")
+        reason = ""
+        if status != "completed":
+            reason = "not completed"
+        elif not has_valid_completion_evidence(task.get("completion_evidence")):
+            reason = "completed without evidence"
+        if reason:
+            incomplete.append({
+                "id": task.get("id"),
+                "status": status,
+                "blocked_on": task.get("blocked_on"),
+                "reason": reason,
+            })
     shippable = not incomplete
     return {
         "project": project_id,
@@ -65,6 +78,6 @@ def evaluate_shippability(project_id: str, config: Optional[OrchConfig] = None) 
         "gate_tasks": len(gates),
         "completed_gates": len(gates) - len(incomplete),
         "incomplete_gates": incomplete,
-        "reason": "all ship-gates completed with evidence" if shippable
-                  else f"{len(incomplete)}/{len(gates)} ship-gates not completed",
+        "reason": "all ship-gates completed with valid evidence" if shippable
+                  else f"{len(incomplete)}/{len(gates)} ship-gates incomplete or missing valid evidence",
     }
