@@ -4,9 +4,9 @@ Env required to instantiate OrchConfig should be only the core Redis + Neo4j
 connectivity values. Dashboard URL, notify library path, and refs root are
 supported optional modes.
 
-Run this in a clean/default environment. Operator `.env` files intentionally set
-site-specific values such as `ORCH_DASHBOARD_URL`, so live-fleet production runs
-should treat this as a clean-env contract test rather than an operator-env probe.
+This script sets `ORCH_DOTENV=empty` for its default probes and runs them from
+a cwd containing a poisoned `.env`, so local deployment config cannot make the
+minimal-defaults contract diverge from clean CI.
 """
 from __future__ import annotations
 
@@ -19,6 +19,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FAILURES: list[str] = []
+POISON_DOTENV = (
+    "ORCH_DASHBOARD_URL=http://deployment.invalid:9999\n"
+    "ORCH_NOTIFY_LIB_ROOT=/tmp/poison-notify-root\n"
+)
 
 
 def _check(label: str, cond: bool, extra: object = "") -> None:
@@ -27,17 +31,29 @@ def _check(label: str, cond: bool, extra: object = "") -> None:
         FAILURES.append(label)
 
 
-def _minimal_config_probe() -> dict:
+def _base_probe_env() -> dict:
     env = {
         "PYTHONPATH": str(ROOT),
         "ORCH_REDIS_HOST": "127.0.0.1",
         "ORCH_REDIS_PORT": "6379",
         "ORCH_NEO4J_URI": "bolt://127.0.0.1:7687",
         "ORCH_NEO4J_DB": "neo4j",
+        "ORCH_DOTENV": "empty",
     }
     for key, value in os.environ.items():
         if key.startswith("PYTHON") and key != "PYTHONPATH":
             env[key] = value
+    return env
+
+
+def _poisoned_cwd():
+    cwd = tempfile.TemporaryDirectory()
+    Path(cwd.name, ".env").write_text(POISON_DOTENV, encoding="utf-8")
+    return cwd
+
+
+def _minimal_config_probe() -> dict:
+    env = _base_probe_env()
     code = """
 import json
 from fleet_orchestrator.config import OrchConfig, REQUIRED_ENV, OPTIONAL_ENV
@@ -49,23 +65,13 @@ print(json.dumps({
     "notify_lib_root": cfg.notify_lib_root,
 }))
 """
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8") as clean_env:
-        env["ORCH_DOTENV"] = clean_env.name
-        output = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
+    with _poisoned_cwd() as cwd:
+        output = subprocess.check_output([sys.executable, "-c", code], env=env, text=True, cwd=cwd)
     return json.loads(output.strip().splitlines()[-1])
 
 
 def _notify_autoresolve_probe() -> dict:
-    env = {
-        "PYTHONPATH": str(ROOT),
-        "ORCH_REDIS_HOST": "127.0.0.1",
-        "ORCH_REDIS_PORT": "6379",
-        "ORCH_NEO4J_URI": "bolt://127.0.0.1:7687",
-        "ORCH_NEO4J_DB": "neo4j",
-    }
-    for key, value in os.environ.items():
-        if key.startswith("PYTHON") and key != "PYTHONPATH":
-            env[key] = value
+    env = _base_probe_env()
     code = """
 import json, tempfile
 from pathlib import Path
@@ -76,9 +82,8 @@ root.mkdir()
 with mock.patch.object(config, "_notify_root_candidates", return_value=[root]):
     print(json.dumps({"resolved": str(config.resolve_notify_lib_root())}))
 """
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8") as clean_env:
-        env["ORCH_DOTENV"] = clean_env.name
-        output = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
+    with _poisoned_cwd() as cwd:
+        output = subprocess.check_output([sys.executable, "-c", code], env=env, text=True, cwd=cwd)
     return json.loads(output.strip().splitlines()[-1])
 
 
@@ -138,6 +143,7 @@ def main() -> int:
     _check("ORCH_REF_ALLOWED_ROOT is optional", "ORCH_REF_ALLOWED_ROOT" in optional and "ORCH_REF_ALLOWED_ROOT" not in required, probe)
     _check("minimal generic config defaults dashboard URL", probe["dashboard_url"] == "http://127.0.0.1:5002", probe)
     _check("minimal generic config leaves notify root unset", probe["notify_lib_root"] is None, probe)
+    _check("minimal generic config suppresses cwd/repo dotenv", "deployment.invalid" not in probe["dashboard_url"], probe)
     notify = _notify_autoresolve_probe()
     _check("notify root auto-resolves sibling checkout", notify["resolved"].endswith("claude-code-fleet-notify"), notify)
 

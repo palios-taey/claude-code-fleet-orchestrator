@@ -59,6 +59,8 @@ jobs:
           PYIDENT
           echo "PYTHONPATH=$RUNNER_TEMP/notifystub" >> "$GITHUB_ENV"
       - name: Ship-gate — generic operator env contract
+        env:
+          ORCH_DOTENV: empty
         run: python tests/env_contract_acceptance.py
       - name: Ship-gate — promised feature flags stay default-on
         run: python tests/feature_flags_acceptance.py
@@ -107,6 +109,7 @@ jobs:
           ORCH_REDIS_HOST: 127.0.0.1
           ORCH_REDIS_PORT: "6379"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+          ORCH_DOTENV: empty
         run: python tests/standalone_sessions_acceptance.py
       - name: Ship-gate — evidence gate (ws0 keystone — evidence-less 'completed' must be rejected)
         env:

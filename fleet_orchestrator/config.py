@@ -17,9 +17,14 @@ class OrchConfigError(ValueError):
     """Raised when required orchestrator configuration is missing or invalid."""
 
 
+_DOTENV_SUPPRESS_VALUES = {"empty"}
+
+
 def _load_dotenv_candidates() -> None:
     candidates = []
     explicit = os.environ.get("ORCH_DOTENV")
+    if explicit and explicit.strip().lower() in _DOTENV_SUPPRESS_VALUES:
+        return
     if explicit:
         candidates.append(Path(explicit))
     candidates.append(Path.cwd() / ".env")

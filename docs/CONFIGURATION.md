@@ -43,7 +43,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `REDIS_HOST` / `REDIS_PORT` | `127.0.0.1` / `6379` | Fleet-notify/session-state Redis used by dispatch `current_task`, Stop-hook `idle`/outcome state, session pause, and worker liveness. Set this to the same instance as `ORCH_REDIS_*` for normal local installs; split only for deliberate divergence testing. |
 | `ORCH_REDIS_SENTINELS` / `ORCH_REDIS_SENTINEL_MASTER` | `""` / `orch-master` | Optional Redis Sentinel HA. |
 | `ORCH_DATA_DIR` / `ORCH_STATE_DIR` | platform dirs | Data / state directories. |
-| `ORCH_DOTENV` | auto-discover | Explicit dotenv path. |
+| `ORCH_DOTENV` | auto-discover | Explicit dotenv path. Set to `empty` to suppress cwd/repo `.env` auto-loading for defaults-contract tests; normal operator runs can leave auto-discovery enabled. |
 | `ORCH_NOTIFY_CLI` / `ORCH_NOTIFY_LIB_ROOT` | `taey-notify` / auto | Notification CLI name + lib root. |
 | `ACCOUNTABILITY_LEDGER_PATH` | platform state dir | Location of the hash-chained accountability ledger. The ledger module is explicit that it is **tamper-evident, not tamper-proof**; an ephemeral path silently loses the record — point it at durable, operator-owned storage. |
 
