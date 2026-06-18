@@ -28,6 +28,9 @@ This policy covers this repository only.
 
 - Local single-user deployment on a trusted host.
 - The localhost API is not an authenticated multi-tenant service.
+- The mutable API fails closed on non-loopback binds without `ORCH_AUTH_TOKEN`
+  unless `ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1` is set. That override is an explicit
+  trusted-LAN exposure acknowledgement, not authentication.
 - Gate-runner command strings are trusted local input. `scripts/orch-gate-run`
   accepts `--clean`, `--boot`, and `--assert` command strings from the operator,
   and code callers pass the same values to `fleet_orchestrator.gate_runner.run_gate`

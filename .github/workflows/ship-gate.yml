@@ -77,6 +77,8 @@ jobs:
         run: python tests/cli_entrypoint_drift_acceptance.py
       - name: Ship-gate — local bind is the mutable API security boundary
         run: python tests/localbind_acceptance.py
+      - name: Ship-gate — non-loopback tokenless mutable API requires explicit override
+        run: python tests/nonloopback_override_acceptance.py
       - name: Ship-gate — session .env context hints are request-scoped
         run: python tests/request_scoped_env_acceptance.py
       - name: Ship-gate — gate runner shell trust boundary is explicit

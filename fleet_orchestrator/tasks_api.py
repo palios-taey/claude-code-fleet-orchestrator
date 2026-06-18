@@ -43,7 +43,7 @@ from fleet_orchestrator.context_assembler import (
 from fleet_orchestrator.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from fleet_orchestrator.easy_setup import api_host, package_version
 from fleet_orchestrator.evidence_contract import REQUEST_TERMINAL_EVIDENCE_KEYS, TERMINAL_STATUSES
-from fleet_orchestrator.feature_flags import chat_enabled, wake_packet_endpoint_enabled
+from fleet_orchestrator.feature_flags import TRUE_ENV_VALUES, chat_enabled, wake_packet_endpoint_enabled
 from fleet_orchestrator.handoff_validation import ensure_handoff_index_backfilled
 from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect
 from fleet_orchestrator.loop_engine import (
@@ -118,8 +118,9 @@ LOGGER = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
 # SECURITY: chat is an injection vector (posts become content an AI session reads). It defaults
-# ON because it is a promised local/trusted-LAN capability; do not expose a non-loopback mutable
-# API without ORCH_AUTH_TOKEN. _warn_if_mutable_api_exposed logs that deployment guard.
+# ON because it is a promised local/trusted-LAN capability. Non-loopback mutable API startup
+# fails closed unless ORCH_AUTH_TOKEN is set or ORCH_ALLOW_UNAUTH_NON_LOOPBACK acknowledges
+# the trusted-LAN exposure.
 if chat_enabled():
     app.include_router(chat_router)
 _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
@@ -162,16 +163,33 @@ def _is_loopback_host(host: str) -> bool:
     return normalized == "localhost" or normalized == "::1" or normalized.startswith("127.")
 
 
+def _allow_unauth_non_loopback() -> bool:
+    return os.environ.get("ORCH_ALLOW_UNAUTH_NON_LOOPBACK", "").strip().lower() in TRUE_ENV_VALUES
+
+
 def _warn_if_mutable_api_exposed() -> None:
     host = api_host()
     if _is_loopback_host(host) or _auth_token():
         return
-    LOGGER.warning(
-        "Fleet Orchestrator mutable API is bound to %s without ORCH_AUTH_TOKEN; "
-        "POST/PUT/PATCH/DELETE endpoints are reachable without credentials on this interface. "
-        "Set ORCH_AUTH_TOKEN or bind ORCH_HOST to 127.0.0.1 for private-by-default operation.",
-        host,
+    if _allow_unauth_non_loopback():
+        LOGGER.warning(
+            "Fleet Orchestrator mutable API is bound to %s without ORCH_AUTH_TOKEN because "
+            "ORCH_ALLOW_UNAUTH_NON_LOOPBACK is set; unauthenticated non-loopback exposure is "
+            "explicitly acknowledged for this trusted single-user network.",
+            host,
+        )
+        return
+    message = (
+        f"Fleet Orchestrator refuses to start mutable API on non-loopback host {host!r} "
+        "without ORCH_AUTH_TOKEN. Set ORCH_AUTH_TOKEN, bind ORCH_HOST=127.0.0.1, "
+        "or set ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1 to explicitly acknowledge trusted-LAN "
+        "unauthenticated exposure."
     )
+    LOGGER.warning(
+        "%s POST/PUT/PATCH/DELETE endpoints would otherwise be reachable without credentials.",
+        message,
+    )
+    raise SystemExit(message)
 
 
 @app.middleware("http")
