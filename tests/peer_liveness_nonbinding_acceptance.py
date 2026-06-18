@@ -25,10 +25,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     _state_key, _peer_actively_working_task, _PEER_HEARTBEAT_STALE_SEC,
 )
-from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
+from fleet_orchestrator.config import OrchConfig  # noqa: E402
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
 
 CFG = OrchConfig()
-_R = get_redis_sync(CFG)
+_R = notify_redis_connect()
 _PFX = f"hbliven-ci-{uuid.uuid4().hex[:8]}"
 _PEER = f"{_PFX}-sup-codex"   # a CLI peer
 T = f"{_PFX}::codexwork"

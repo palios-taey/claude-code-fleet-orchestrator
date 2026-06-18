@@ -97,6 +97,11 @@ if _REPO_ROOT not in sys.path:
 
 from fleet_orchestrator.config import OrchConfig
 from fleet_orchestrator.handoff_validation import process_expired_handoffs
+from fleet_orchestrator.notify_state import (
+    key as notify_key,
+    key_prefix as notify_key_prefix,
+    state_key as notify_state_key,
+)
 
 import redis as redis_lib
 
@@ -109,19 +114,19 @@ log = logging.getLogger(__name__)
 # Reuse fleet-notify's supervisor resolution rule so this daemon and the
 # Stop hook never disagree about who to address.
 SUFFIX_SUPERVISOR_RULES = ("-codex", "-gemini", "-grok")
-NOTIFY_KEY_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+NOTIFY_KEY_PREFIX = notify_key_prefix()
 
 
 def state_key(node_id: str, suffix: str) -> str:
-    return f"{NOTIFY_KEY_PREFIX}:{node_id}:{suffix}"
+    return notify_state_key(node_id, suffix, prefix=NOTIFY_KEY_PREFIX)
 
 
 def orch_key(namespace: str, *parts: str) -> str:
-    return ":".join([NOTIFY_KEY_PREFIX, namespace, *[str(part) for part in parts]])
+    return notify_key(":".join([namespace, *[str(part) for part in parts]]), prefix=NOTIFY_KEY_PREFIX)
 
 
 def current_task_scan_pattern() -> str:
-    return f"{NOTIFY_KEY_PREFIX}:*:current_task"
+    return notify_key("*:current_task", prefix=NOTIFY_KEY_PREFIX)
 
 
 def node_from_current_task_key(key: str) -> Optional[str]:

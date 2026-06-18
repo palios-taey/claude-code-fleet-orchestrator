@@ -28,6 +28,7 @@ os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
 from fleet_orchestrator.orch_schema import create_phase, create_project, create_task, get_session_next_ready, get_session_stop_decision, update_task_status  # noqa: E402
 
 CFG = OrchConfig()
@@ -39,14 +40,14 @@ def _cleanup(prefix: str) -> None:
         session.run("MATCH (t:OrchTask) WHERE t.id STARTS WITH $prefix DETACH DELETE t", prefix=prefix)
         session.run("MATCH (ph:OrchPhase) WHERE ph.id STARTS WITH $prefix DETACH DELETE ph", prefix=prefix)
         session.run("MATCH (p:OrchProject) WHERE p.id STARTS WITH $prefix DETACH DELETE p", prefix=prefix)
-    r = get_redis_sync(CFG)
-    cursor = 0
-    while True:
-        cursor, keys = r.scan(cursor=cursor, match=f"{prefix}:*", count=100)
-        if keys:
-            r.delete(*keys)
-        if cursor == 0:
-            break
+    for r in (get_redis_sync(CFG), notify_redis_connect()):
+        cursor = 0
+        while True:
+            cursor, keys = r.scan(cursor=cursor, match=f"{prefix}:*", count=100)
+            if keys:
+                r.delete(*keys)
+            if cursor == 0:
+                break
 
 
 def _make_priority_fixture() -> None:
@@ -186,7 +187,7 @@ def main() -> int:
                 time.sleep(0.5)
                 return True
 
-        with mock.patch("fleet_orchestrator.config.get_redis_sync", return_value=HangingMarkerRedis()):
+        with mock.patch("fleet_orchestrator.orch_schema._fleet_state_redis", return_value=HangingMarkerRedis()):
             with mock.patch("fleet_orchestrator.orch_schema._raw_stop_decision", return_value={"block": True, "wake_type": "WAKE_WITH_QUEUE", "task_id": "task-marker", "reason": "marker"}):
                 marker_fail_open = get_session_stop_decision(SUPERVISOR, stop_hook_active=True, config=CFG)
         print(

@@ -81,7 +81,7 @@ Current behavior does not create per-fire nodes — the cardinality (8/day per l
 
 ## Dispatch tracking (Phase A primitive, v0.1.0+)
 
-For one-shot tasks dispatched to workers via `fleet_orchestrator/dispatch.py:dispatch()`, the Redis state is the source of truth (no Neo4j needed for the dispatch loop itself):
+For one-shot tasks dispatched to workers via `fleet_orchestrator/dispatch.py:dispatch()`, the fleet-notify Redis state (`REDIS_HOST` / `REDIS_PORT`) is the source of truth (no Neo4j needed for the dispatch loop itself):
 
 | Redis key | Type | Lifecycle |
 |---|---|---|
@@ -90,4 +90,4 @@ For one-shot tasks dispatched to workers via `fleet_orchestrator/dispatch.py:dis
 | `taey:<worker>:parent` | string | Optional explicit supervisor override (else suffix-strip). |
 | `taey:<worker>:idle` | "1" | Set by Stop hook, cleared by UserPromptSubmit hook. |
 
-These keys coexist with the live Neo4j task tracker. When a dispatched task already exists as an OrchTask, `dispatch()` claims it in Neo4j and also sets `current_task` in Redis. If the Redis bind is refused because another dispatcher already owns a live worker slot, the new claim is rolled back to `pending` and the existing binding is preserved. Redis remains the direct source of truth for stop-hook / idle-state coordination.
+These keys coexist with the live Neo4j task tracker. When a dispatched task already exists as an OrchTask, `dispatch()` claims it in Neo4j and also sets `current_task` in fleet-notify Redis. If the Redis bind is refused because another dispatcher already owns a live worker slot, the new claim is rolled back to `pending` and the existing binding is preserved. Fleet-notify Redis remains the direct source of truth for stop-hook / idle-state coordination.

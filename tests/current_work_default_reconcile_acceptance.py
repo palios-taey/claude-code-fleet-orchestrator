@@ -15,8 +15,9 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
+from fleet_orchestrator.config import OrchConfig  # noqa: E402
 from fleet_orchestrator.dispatch import _state_key  # noqa: E402
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     create_phase,
     create_project,
@@ -58,7 +59,7 @@ def _check(label: str, cond: bool, extra: object = "") -> None:
 
 
 def _cleanup() -> None:
-    get_redis_sync(CFG).delete(_state_key(OWNER, "current_task"))
+    notify_redis_connect().delete(_state_key(OWNER, "current_task"))
     with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
         session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=PFX)
         session.run(
@@ -68,7 +69,7 @@ def _cleanup() -> None:
 
 
 def _bind(task_id: str) -> None:
-    get_redis_sync(CFG).set(
+    notify_redis_connect().set(
         _state_key(OWNER, "current_task"),
         json.dumps({"task_id": task_id, "description": "bound default", "supervisor": OWNER, "started_at": 1.0}),
     )

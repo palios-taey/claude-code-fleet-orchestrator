@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     _PEER_HEARTBEAT_STALE_SEC,
     _raw_stop_decision,
@@ -87,10 +88,11 @@ def _check(label: str, cond: bool, extra: object = "") -> None:
 
 
 def _cleanup() -> None:
-    r = get_redis_sync(CFG)
+    state_r = notify_redis_connect()
     for owner in (SUP, PEER):
         for suffix in ("current_task", "idle", "last_activity", "last_tool_activity", "last_outcome"):
-            r.delete(_state_key(owner, suffix))
+            state_r.delete(_state_key(owner, suffix))
+    r = get_redis_sync(CFG)
     prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
     for kind in ("openq", "needs_you", "chat"):
         r.delete(f"{prefix}:{kind}:{REVIEWER}")
@@ -108,7 +110,7 @@ class _NoopRedis:
 
 
 def _set_peer_done() -> None:
-    r = get_redis_sync(CFG)
+    r = notify_redis_connect()
     r.delete(_state_key(PEER, "current_task"))
     r.set(_state_key(PEER, "idle"), "1")
     r.set(_state_key(PEER, "last_tool_activity"), str(time.time() - (_PEER_HEARTBEAT_STALE_SEC + 60)))

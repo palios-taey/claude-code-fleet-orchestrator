@@ -18,8 +18,9 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
+from fleet_orchestrator.config import OrchConfig  # noqa: E402
 from fleet_orchestrator.dispatch import _state_key  # noqa: E402
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     create_phase,
     create_project,
@@ -63,7 +64,7 @@ def _check(label: str, cond: bool, extra: object = "") -> None:
 
 
 def _redis():
-    return get_redis_sync(CFG)
+    return notify_redis_connect()
 
 
 def _bind(task_id: str) -> None:
@@ -149,7 +150,7 @@ def main() -> int:
                _new_owner_current_task_id() == "unrelated",
                _new_owner_current_task_id())
 
-        with mock.patch("fleet_orchestrator.config.get_redis_sync", side_effect=RedisConnectionError("forced redis down")):
+        with mock.patch("fleet_orchestrator.orch_schema._fleet_state_redis", side_effect=RedisConnectionError("forced redis down")):
             redis_down_result = update_task_status(
                 REDIS_DOWN,
                 "completed",

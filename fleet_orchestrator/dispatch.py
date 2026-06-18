@@ -58,7 +58,9 @@ import sys
 import time
 from typing import Any, Optional
 
-from .config import OrchConfig, ensure_notify_importable, get_neo4j_session
+from .config import OrchConfig, get_neo4j_session
+from .notify_state import redis_connect as _notify_redis_connect
+from .notify_state import state_key as _notify_state_key
 from .decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from .handoff_validation import mark_superseded_for_task
 from .worker_liveness import register_worker_task_liveness
@@ -98,17 +100,11 @@ def _resolve_product_id(worker: str) -> Optional[str]:
 
 def _redis_connect():
     """Connect to Redis via the fleet-notify identity module."""
-    ensure_notify_importable()
-    from identity import redis_connect
-    return redis_connect()
+    return _notify_redis_connect()
 
 
 def _state_key(node_id: str, suffix: str) -> str:
-    """Reproduce fleet-notify's state_key without importing — keeps this
-    module usable in contexts where the notifications package isn't on
-    sys.path."""
-    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
-    return f"{prefix}:{node_id}:{suffix}"
+    return _notify_state_key(node_id, suffix)
 
 
 def _decode_current_task(raw: Optional[str]) -> Optional[dict[str, Any]]:

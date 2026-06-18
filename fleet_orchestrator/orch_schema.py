@@ -25,7 +25,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import OrchConfig, ensure_notify_importable, get_neo4j_driver
+from .config import OrchConfig, get_neo4j_driver
+from .notify_state import redis_connect as _notify_redis_connect
+from .notify_state import state_key as _notify_state_key
 from .out_of_band import out_of_band_task_active
 
 
@@ -748,14 +750,15 @@ RETURN t.id AS task_id,
 
 
 def _fleet_redis_connect():
-    ensure_notify_importable()
-    from identity import redis_connect  # type: ignore
-    return redis_connect()
+    return _notify_redis_connect()
+
+
+def _fleet_state_redis():
+    return _notify_redis_connect()
 
 
 def _state_key(node_id: str, suffix: str) -> str:
-    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
-    return f"{prefix}:{node_id}:{suffix}"
+    return _notify_state_key(node_id, suffix)
 
 
 # A peer counts as "actively working" (so the supervisor may ALLOW_STOP and wait
@@ -825,10 +828,7 @@ def _stop_block_count_key(node_id: str) -> str:
 
 
 def _session_pause_active(session_id: str, config: Optional[OrchConfig] = None) -> bool:
-    from .config import get_redis_sync
-
-    cfg = config or OrchConfig()
-    r = get_redis_sync(cfg)
+    r = _fleet_state_redis()
     pause_key = _state_key(session_id, "pause")
     meta_key = _state_key(session_id, "pause_meta")
     if not r.exists(pause_key):
@@ -848,10 +848,7 @@ def _session_pause_active(session_id: str, config: Optional[OrchConfig] = None) 
 
 
 def _resolve_supervisor_session(session_id: str, config: Optional[OrchConfig] = None) -> str:
-    from .config import get_redis_sync
-
-    cfg = config or OrchConfig()
-    r = get_redis_sync(cfg)
+    r = _fleet_state_redis()
     try:
         explicit = r.get(_state_key(session_id, "parent"))
     except Exception:
@@ -944,10 +941,7 @@ def list_sessions(config: Optional[OrchConfig] = None) -> list:
 
 
 def _observed_stop_task_id(session_id: str, config: Optional[OrchConfig] = None) -> Optional[str]:
-    from .config import get_redis_sync
-
-    cfg = config or OrchConfig()
-    r = get_redis_sync(cfg)
+    r = _fleet_state_redis()
     raw = r.get(_state_key(session_id, "current_task"))
     if not raw:
         return None
@@ -1440,12 +1434,11 @@ def _peer_actively_working_task(workers: List[str], task_id: Optional[str],
     if not task_id:
         return False
     cfg = config or OrchConfig()
-    from .config import get_redis_sync
 
     if out_of_band_task_active(task_id, workers=workers, config=cfg):
         return True
 
-    r = get_redis_sync(cfg)
+    r = _fleet_state_redis()
     now = time.time()
     for worker in workers:
         if not worker:
@@ -1493,9 +1486,6 @@ def _peer_actively_working_task(workers: List[str], task_id: Optional[str],
 
 
 def get_session_liveness(session_id: str, config: Optional[OrchConfig] = None) -> Dict[str, Any]:
-    cfg = config or OrchConfig()
-    from .config import get_redis_sync
-
     payload: Dict[str, Any] = {
         "state": "idle",
         "active": False,
@@ -1504,7 +1494,7 @@ def get_session_liveness(session_id: str, config: Optional[OrchConfig] = None) -
         "threshold_seconds": _PEER_HEARTBEAT_STALE_SEC,
     }
     try:
-        raw = get_redis_sync(cfg).get(_state_key(session_id, "last_tool_activity"))
+        raw = _fleet_state_redis().get(_state_key(session_id, "last_tool_activity"))
     except Exception:
         return payload
     if raw is None:
@@ -1949,8 +1939,6 @@ def _raw_stop_decision(session_id: str,
 def get_session_stop_decision(session_id: str,
                               stop_hook_active: bool = False,
                               config: Optional[OrchConfig] = None) -> Dict[str, Any]:
-    from .config import get_redis_sync
-
     cfg = config or OrchConfig()
     try:
         decision = _raw_stop_decision(session_id, config=cfg)
@@ -1993,7 +1981,7 @@ def get_session_stop_decision(session_id: str,
     # later genuine block starts fresh, then return the block unmodified.
     if decision.get("non_convergable") and decision.get("block"):
         try:
-            r = get_redis_sync(cfg)
+            r = _fleet_state_redis()
             _redis_marker_call(r.delete, _stop_block_marker_key(session_id), _stop_block_count_key(session_id))
         except Exception:
             pass
@@ -2002,7 +1990,7 @@ def get_session_stop_decision(session_id: str,
     marker_key = _stop_block_marker_key(session_id)
     count_key = _stop_block_count_key(session_id)
     try:
-        r = get_redis_sync(cfg)
+        r = _fleet_state_redis()
         if not decision.get("block"):
             _redis_marker_call(r.delete, marker_key, count_key)
             return decision
@@ -2450,11 +2438,10 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
 def _clear_matching_current_task(owner: str, task_id: str, config: Optional[OrchConfig] = None) -> bool:
     if not owner or not task_id:
         return False
-    from .config import get_redis_sync
     from redis import RedisError, WatchError
 
     try:
-        r = get_redis_sync(config)
+        r = _fleet_state_redis()
         key = _state_key(owner, "current_task")
         for attempt in range(5):
             with r.pipeline() as pipe:
@@ -3493,9 +3480,7 @@ def set_session_pause(session_id: str, pause_source: str, pause_reason: str,
                       config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     if pause_source not in _PAUSE_SOURCES:
         raise PauseValidationError("pause_source invalid")
-    cfg = config or OrchConfig()
-    from .config import get_redis_sync
-    r = get_redis_sync(cfg)
+    r = _fleet_state_redis()
     expires_at = _parse_pause_expires_at(pause_expires_at)
     ttl_seconds: Optional[int] = None
     if expires_at is not None:
@@ -3523,16 +3508,15 @@ def set_session_pause(session_id: str, pause_source: str, pause_reason: str,
 
 def clear_session_pause(session_id: str, cleared_by: str,
                         config: Optional[OrchConfig] = None) -> Dict[str, Any]:
-    cfg = config or OrchConfig()
-    from .config import get_redis_sync
-    r = get_redis_sync(cfg)
-    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
-    meta_raw = r.get(f"{prefix}:{session_id}:pause_meta")
+    r = _fleet_state_redis()
+    meta_key = _state_key(session_id, "pause_meta")
+    pause_key = _state_key(session_id, "pause")
+    meta_raw = r.get(meta_key)
     meta = _decode_json_field(meta_raw, {})
     meta["cleared_by"] = cleared_by
     meta["cleared_at"] = _utc_now_iso()
-    r.delete(f"{prefix}:{session_id}:pause")
-    r.delete(f"{prefix}:{session_id}:pause_meta")
+    r.delete(pause_key)
+    r.delete(meta_key)
     return meta
 
 
