@@ -309,6 +309,17 @@ jobs:
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
           ORCH_TEST_NAMESPACE: ship-gate-ci
         run: python tests/redis_split_brain_acceptance.py
+      - name: Ship-gate — handoff-index backfill stays on notify Redis when ORCH Redis diverges
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: "6380"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+          ORCH_TEST_NAMESPACE: ship-gate-ci
+        run: python tests/handoff_index_split_brain_acceptance.py
       - name: Ship-gate — orch-watch wakes honor stop decisions
         env:
           ORCH_NEO4J_URI: bolt://localhost:7687
