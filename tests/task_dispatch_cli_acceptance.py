@@ -5,7 +5,7 @@ the task body, calls ``fleet_orchestrator.dispatch.dispatch()``, and the existin
 primitive claims the OrchTask, binds Redis ``current_task``, and wakes the peer.
 
 Env: ORCH_NEO4J_URI, ORCH_NEO4J_DB, ORCH_REDIS_HOST/PORT,
-     ORCH_TEST_NAMESPACE (required; must include test/ci/acceptance).
+     REDIS_HOST/PORT, ORCH_TEST_NAMESPACE (required; must include test/ci/acceptance).
 """
 from __future__ import annotations
 
@@ -46,7 +46,8 @@ _NAMESPACE = _require_test_namespace()
 os.environ["NOTIFY_KEY_PREFIX"] = f"{_NAMESPACE}:task-dispatch-cli:{uuid.uuid4().hex[:8]}"
 
 from fleet_orchestrator import dispatch as dispatch_module  # noqa: E402
-from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
+from fleet_orchestrator.config import OrchConfig  # noqa: E402
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     _raw_stop_decision,
     _state_key,
@@ -60,7 +61,7 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
 from fleet_orchestrator.tasks_api import app  # noqa: E402
 
 CFG = OrchConfig()
-_R = get_redis_sync(CFG)
+_R = notify_redis_connect()
 _PFX = f"{_NAMESPACE}-dispatch-cli-{uuid.uuid4().hex[:8]}"
 _SUP = f"{_PFX}-sup"
 _PEER = f"{_SUP}-codex"

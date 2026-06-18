@@ -42,7 +42,8 @@ os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 os.environ.setdefault("ORCH_NEO4J_URI", "bolt://localhost:7687")
 os.environ.setdefault("ORCH_NEO4J_DB", "neo4j")
 
-from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     create_phase,
     create_project,
@@ -69,7 +70,7 @@ def _pause_key(suffix: str) -> str:
 def _cleanup() -> None:
     with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
         session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=PFX)
-    r = get_redis_sync(CFG)
+    r = notify_redis_connect()
     cursor = 0
     while True:
         cursor, keys = r.scan(cursor=cursor, match=f"{PFX}:*", count=100)
@@ -133,7 +134,7 @@ def main() -> int:
             config=CFG,
         )
         time.sleep(1.1)
-        r = get_redis_sync(CFG)
+        r = notify_redis_connect()
         indefinite = get_session_stop_decision(SUPERVISOR, config=CFG)
         _check(
             "indefinite pause persists without ttl",
@@ -145,7 +146,7 @@ def main() -> int:
 
         _cleanup()
         ready_task = _make_ready_project("stale")
-        r = get_redis_sync(CFG)
+        r = notify_redis_connect()
         r.set(_pause_key("pause"), "1")
         r.set(_pause_key("pause_meta"), json.dumps({"pause_expires_at": _past_iso(10)}))
         stale = get_session_stop_decision(SUPERVISOR, config=CFG)

@@ -73,6 +73,8 @@ If Docker is unavailable and you already run Redis and Neo4j yourself, edit `.en
 ```bash
 ORCH_REDIS_HOST=127.0.0.1
 ORCH_REDIS_PORT=6379
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
 ORCH_NEO4J_URI=bolt://127.0.0.1:7687
 ORCH_NEO4J_DB=neo4j
 ```
@@ -115,7 +117,8 @@ Copy [.env.example](.env.example) to `.env`. The loader reads `ORCH_DOTENV` firs
 
 Required:
 
-- `ORCH_REDIS_HOST` and `ORCH_REDIS_PORT`: Redis used by notifications, liveness, locks, and daemon state.
+- `ORCH_REDIS_HOST` and `ORCH_REDIS_PORT`: Redis used by orchestrator API/dashboard state, locks, receipts, and other orchestrator-owned runtime state.
+- `REDIS_HOST` and `REDIS_PORT`: Redis used by `claude-code-fleet-notify` session state: dispatch `current_task`, Stop-hook `idle`/outcome state, session pause, and worker liveness. In normal local installs, set these to the same host/port as `ORCH_REDIS_*`; split them only when intentionally testing config divergence.
 - `ORCH_NEO4J_URI` and `ORCH_NEO4J_DB`: Neo4j used for projects, phases, tasks, refs, gates, and evidence. Run Neo4j with auth disabled (`NEO4J_AUTH=none`) — the orchestrator connects with no credentials and does not support internal-service auth.
 
 Network posture:

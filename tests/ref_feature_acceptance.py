@@ -28,6 +28,7 @@ os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     _REF_READ_BYTE_CAP,
     _read_ref_context,
@@ -64,14 +65,14 @@ def _cleanup(prefix: str) -> None:
         session.run("MATCH (t:OrchTask) WHERE t.id STARTS WITH $prefix DETACH DELETE t", prefix=prefix)
         session.run("MATCH (ph:OrchPhase) WHERE ph.id STARTS WITH $prefix DETACH DELETE ph", prefix=prefix)
         session.run("MATCH (p:OrchProject) WHERE p.id STARTS WITH $prefix DETACH DELETE p", prefix=prefix)
-    redis_client = get_redis_sync(CFG)
-    cursor = 0
-    while True:
-        cursor, keys = redis_client.scan(cursor=cursor, match=f"{prefix}:*", count=100)
-        if keys:
-            redis_client.delete(*keys)
-        if cursor == 0:
-            break
+    for redis_client in (get_redis_sync(CFG), notify_redis_connect()):
+        cursor = 0
+        while True:
+            cursor, keys = redis_client.scan(cursor=cursor, match=f"{prefix}:*", count=100)
+            if keys:
+                redis_client.delete(*keys)
+            if cursor == 0:
+                break
 
 
 def _project_fixture(name: str, *, owner: str = "worker-a") -> str:
@@ -384,7 +385,7 @@ def main() -> int:
 
             project_a = _project_fixture("reset-a", owner="shared-session")
             _project_fixture("reset-b", owner="shared-session")
-            redis_client = get_redis_sync(CFG)
+            redis_client = notify_redis_connect()
             marker_key = _stop_block_marker_key("shared-session")
             count_key = _stop_block_count_key("shared-session")
             redis_client.set(marker_key, "still-here")

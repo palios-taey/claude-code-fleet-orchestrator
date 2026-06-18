@@ -6,7 +6,10 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-from .config import OrchConfig, get_neo4j_driver, get_redis_sync
+from .config import OrchConfig, get_neo4j_driver
+from .notify_state import key as _notify_key
+from .notify_state import redis_connect as _notify_redis_connect
+from .notify_state import state_key as _notify_state_key
 
 
 DEFAULT_WORKER_TASK_LIVENESS_TTL_SECS = 300
@@ -28,18 +31,19 @@ def worker_task_liveness_ttl_secs() -> int:
 
 
 def worker_task_liveness_key(task_id: str) -> str:
-    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
-    return f"{prefix}:worker-task-liveness:{task_id}"
+    return _notify_key(f"worker-task-liveness:{task_id}")
 
 
 def worker_task_liveness_dedup_key(task_id: str) -> str:
-    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
-    return f"{prefix}:worker-task-liveness-escalated:{task_id}"
+    return _notify_key(f"worker-task-liveness-escalated:{task_id}")
 
 
 def _state_key(node_id: str, suffix: str) -> str:
-    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
-    return f"{prefix}:{node_id}:{suffix}"
+    return _notify_state_key(node_id, suffix)
+
+
+def _redis_connect():
+    return _notify_redis_connect()
 
 
 def register_worker_task_liveness(
@@ -96,7 +100,7 @@ def register_worker_task_liveness(
     if record is None:
         return False
     try:
-        get_redis_sync(cfg).set(
+        _redis_connect().set(
             worker_task_liveness_key(task_id),
             json.dumps(payload, separators=(",", ":")),
         )
@@ -110,7 +114,7 @@ def clear_worker_task_liveness(task_id: str, *, config: Optional[OrchConfig] = N
     if not task_id:
         return
     try:
-        get_redis_sync(config).delete(worker_task_liveness_key(task_id))
+        _redis_connect().delete(worker_task_liveness_key(task_id))
     except Exception:
         return
 
@@ -175,7 +179,7 @@ def _mark_liveness_heartbeat(task_id: str, worker: str, now: float, ttl_secs: in
         "heartbeat_ttl_secs": ttl_secs,
         "ack_at": now,
     }
-    get_redis_sync(cfg).set(
+    _redis_connect().set(
         worker_task_liveness_key(task_id),
         json.dumps(payload, separators=(",", ":")),
     )
@@ -220,7 +224,7 @@ def _escalate_task(task: Dict[str, Any], now: float,
         ).single()
     if record is None:
         return None
-    r = get_redis_sync(cfg)
+    r = _redis_connect()
     r.delete(worker_task_liveness_key(task_id))
     _clear_matching_current_task(r, worker, task_id)
     result = dict(record)
@@ -283,7 +287,7 @@ def escalate_stale_worker_tasks(now: Optional[float] = None,
     if not worker_task_liveness_enabled():
         return []
     cfg = config or OrchConfig()
-    r = get_redis_sync(cfg)
+    r = _redis_connect()
     current_time = time.time() if now is None else float(now)
     escalated: List[Dict[str, Any]] = []
     for task in _registered_in_progress_tasks(

@@ -24,7 +24,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
-from fleet_orchestrator.config import OrchConfig, get_redis_sync
+from fleet_orchestrator.config import OrchConfig
+from fleet_orchestrator.notify_state import key as notify_key
+from fleet_orchestrator.notify_state import key_prefix as _notify_key_prefix
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect
+from fleet_orchestrator.notify_state import state_key as notify_state_key
 
 
 TTL_BUCKETS = ("expired", "lt_5m", "5m_30m", "gt_30m", "unknown")
@@ -145,15 +149,15 @@ UIProbe = Callable[[LaneRef, float], Optional[UISignal | Mapping[str, Any]]]
 
 
 def notify_key_prefix() -> str:
-    return os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+    return _notify_key_prefix()
 
 
 def state_key(node_id: str, suffix: str, *, prefix: Optional[str] = None) -> str:
-    return f"{prefix or notify_key_prefix()}:{node_id}:{suffix}"
+    return notify_state_key(node_id, suffix, prefix=prefix)
 
 
 def lane_key(suffix: str, *, prefix: Optional[str] = None) -> str:
-    return f"{prefix or notify_key_prefix()}:{suffix}"
+    return notify_key(suffix, prefix=prefix)
 
 
 def calibration_stream_key(*, prefix: Optional[str] = None) -> str:
@@ -171,7 +175,7 @@ def estimate_lane(
 ) -> LaneState:
     observed_at = time.time() if now is None else now
     lane_ref = LaneRef.parse(lane)
-    client = redis_client or get_redis_sync(config)
+    client = redis_client or notify_redis_connect()
     session_signals = read_session_signals(lane_ref, client, now=observed_at, prefix=prefix)
     ui_signal = _read_ui_signal(lane_ref, observed_at, ui_probe)
 
@@ -223,7 +227,7 @@ def estimate_lanes(
     prefix: Optional[str] = None,
 ) -> dict[str, LaneState]:
     observed_at = time.time() if now is None else now
-    client = redis_client or get_redis_sync(config)
+    client = redis_client or notify_redis_connect()
     result: dict[str, LaneState] = {}
     for lane in lanes:
         state = estimate_lane(lane, redis_client=client, now=observed_at, ui_probe=ui_probe, prefix=prefix)
@@ -266,7 +270,7 @@ def record_calibration(
     metadata: Optional[Mapping[str, Any]] = None,
     prefix: Optional[str] = None,
 ) -> str:
-    client = redis_client or get_redis_sync(config)
+    client = redis_client or notify_redis_connect()
     lane_ref = LaneRef.parse(lane)
     observed_at = time.time() if ts is None else ts
     fields: dict[str, Any] = {
@@ -321,7 +325,7 @@ def discover_lanes(
     for session_id in _configured_session_ids():
         ref = LaneRef(lane_id=session_id, kind="session", session_id=session_id)
         lanes[ref.lane_id] = ref
-    client = redis_client or get_redis_sync(config)
+    client = redis_client or notify_redis_connect()
     for key in _scan_keys(client, f"{prefix or notify_key_prefix()}:*:last_activity"):
         node_id = _node_from_state_key(key, "last_activity", prefix=prefix)
         if node_id:

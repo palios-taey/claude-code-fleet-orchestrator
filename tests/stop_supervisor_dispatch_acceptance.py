@@ -33,7 +33,8 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
     _raw_stop_decision, init_schema, get_neo4j_driver, _state_key,
     _PEER_HEARTBEAT_STALE_SEC, set_project_user_stop_conditions,
 )
-from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
+from fleet_orchestrator.config import OrchConfig  # noqa: E402
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
 
 
 def _require_test_namespace() -> str:
@@ -54,7 +55,7 @@ def _require_test_namespace() -> str:
 
 _NAMESPACE = _require_test_namespace()
 CFG = OrchConfig()
-_R = get_redis_sync(CFG)
+_R = notify_redis_connect()
 _PFX = f"{_NAMESPACE}-supkeep-{uuid.uuid4().hex[:8]}"
 _SUP = f"{_PFX}-sup"
 _PEER = f"{_SUP}-codex"

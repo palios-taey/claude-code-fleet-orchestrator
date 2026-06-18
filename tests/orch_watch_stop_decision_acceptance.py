@@ -33,7 +33,8 @@ os.environ["NOTIFY_KEY_PREFIX"] = PFX
 os.environ["ORCH_WORKER_TASK_LIVENESS"] = "1"
 os.environ["ORCH_WORKER_TASK_LIVENESS_TTL_SEC"] = "1"
 
-from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
+from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     _state_key,
     create_phase,
@@ -70,7 +71,7 @@ def _check(label: str, cond: bool, extra: object = "") -> None:
 
 
 def _redis():
-    return get_redis_sync(CFG)
+    return notify_redis_connect()
 
 
 def _cleanup() -> None:

@@ -39,7 +39,8 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ORCH_PORT` | `5002` | Mutable API/dashboard port. |
 | `ORCH_API_BASE` / `ORCH_DASHBOARD_URL` | `http://127.0.0.1:5002` | Base URL the CLIs call. |
 | `ORCH_NEO4J_URI` / `ORCH_NEO4J_DB` | (required) | Neo4j connection. **No auth** — the orchestrator connects with no credentials and does not support internal-service auth (run Neo4j with `NEO4J_AUTH=none`). Internal-service credentials are intentionally unsupported: the network is the boundary, and a credential dimension in the driver config caused a recurring outage. |
-| `ORCH_REDIS_HOST` / `ORCH_REDIS_PORT` | (required) | Redis connection. The core `OrchConfig` has no built-in default and no bare `REDIS_HOST`/`REDIS_PORT` fallback; set these explicitly, as in `.env.example`. |
+| `ORCH_REDIS_HOST` / `ORCH_REDIS_PORT` | (required) | Orchestrator Redis connection for API/dashboard state, locks, receipts, and orchestrator-owned runtime data. The core `OrchConfig` has no built-in default; set these explicitly, as in `.env.example`. |
+| `REDIS_HOST` / `REDIS_PORT` | `127.0.0.1` / `6379` | Fleet-notify/session-state Redis used by dispatch `current_task`, Stop-hook `idle`/outcome state, session pause, and worker liveness. Set this to the same instance as `ORCH_REDIS_*` for normal local installs; split only for deliberate divergence testing. |
 | `ORCH_REDIS_SENTINELS` / `ORCH_REDIS_SENTINEL_MASTER` | `""` / `orch-master` | Optional Redis Sentinel HA. |
 | `ORCH_DATA_DIR` / `ORCH_STATE_DIR` | platform dirs | Data / state directories. |
 | `ORCH_DOTENV` | auto-discover | Explicit dotenv path. |
