@@ -26,9 +26,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, get_neo4j_driver
+from .inflight import PEER_HEARTBEAT_STALE_SEC as _DEFAULT_PEER_HEARTBEAT_STALE_SEC
+from .inflight import task_actively_in_flight
 from .notify_state import redis_connect as _notify_redis_connect
 from .notify_state import state_key as _notify_state_key
-from .out_of_band import out_of_band_task_active
 
 
 SCHEMA_CONSTRAINTS = [
@@ -769,7 +770,7 @@ def _state_key(node_id: str, suffix: str) -> str:
 # peers that were merely woken. 300s tolerates normal think/tool gaps; the
 # failure direction past it is a brief busy-loop (bounded by the convergence
 # valve), never a strand.
-_PEER_HEARTBEAT_STALE_SEC = 300
+_PEER_HEARTBEAT_STALE_SEC = _DEFAULT_PEER_HEARTBEAT_STALE_SEC
 _STOP_BLOCK_CONVERGENCE_LIMIT = 3
 # This TTL deliberately survives short-lived process restarts so a stop cycle
 # can still converge after a crash/restart. The tradeoff is a stale marker/count
@@ -1356,30 +1357,6 @@ def _supervisor_dispatch_block_reason(task_id: Optional[str], owner: Optional[st
 _PEER_DISPATCH_STALE_SEC = 1800
 
 
-def _peer_reported_terminal_for(worker: str, task_id: Optional[str], r) -> bool:
-    """True if ``worker``'s last_outcome is a terminal outcome (done/error/
-    interrupted) referencing ``task_id`` -- the peer reported this task finished,
-    so it now awaits the supervisor's gate (NOT still-working). codex/grok set
-    last_outcome via record_outcome / their RESPONSE_READY; it is their one
-    reliable queryable done-signal. Fail-closed to False only on an absent/
-    unparseable outcome."""
-    try:
-        raw = r.get(_state_key(worker, "last_outcome"))
-    except Exception:
-        return False
-    if not raw:
-        return False
-    try:
-        lo = json.loads(raw)
-    except Exception:
-        return False
-    if not isinstance(lo, dict):
-        return False
-    if str(lo.get("outcome") or "").strip().lower() not in ("done", "error", "interrupted"):
-        return False
-    return bool(task_id) and task_id in str(lo.get("details") or "")
-
-
 def _dispatch_age_seconds(task_id: str, config: Optional[OrchConfig] = None) -> Optional[float]:
     """Seconds since ``task_id`` last changed state (its in_progress dispatch age,
     via OrchTask.updated_at -- a peer working a task does not touch the node).
@@ -1433,56 +1410,13 @@ def _peer_actively_working_task(workers: List[str], task_id: Optional[str],
     keeps the supervisor up rather than stranding work."""
     if not task_id:
         return False
-    cfg = config or OrchConfig()
-
-    if out_of_band_task_active(task_id, workers=workers, config=cfg):
-        return True
-
-    r = _fleet_state_redis()
-    now = time.time()
-    for worker in workers:
-        if not worker:
-            continue
-        # current_task is a BONUS precision signal only (the CLI peers bind it
-        # INCONSISTENTLY -- empirically absent for some dispatches, bound for others).
-        # If it IS bound to a DIFFERENT task, this worker is provably on other work -> skip.
-        try:
-            raw = r.get(_state_key(worker, "current_task"))
-        except Exception:
-            raw = None
-        if raw:
-            try:
-                cur = json.loads(raw)
-            except Exception:
-                cur = None
-            if isinstance(cur, dict) and cur.get("task_id") and cur.get("task_id") != task_id:
-                continue
-
-        # DONE signal -- the peer reported this task terminal (done/error/interrupt) ->
-        # it awaits the supervisor's GATE, not still working. last_outcome is the one
-        # reliable queryable done-marker (set on completion by record_outcome / the CLI
-        # peers' RESPONSE_READY). Fires immediately on a clean finish.
-        if _peer_reported_terminal_for(worker, task_id, r):
-            continue
-
-        # WORKING signal -- the tool-only heartbeat refreshes from pre/post-tool
-        # hooks while a peer is actually executing tools. The broader last_activity
-        # key also refreshes on daemon-injected prompts, so it can make a merely
-        # woken peer look active; do not use it for stop-engine liveness. Fresh
-        # last_tool_activity -> actively working -> ALLOW (RESPONSE_READY re-wakes
-        # the supervisor on done). Stale/absent -> stopped/dropped/dead -> BLOCK.
-        try:
-            last_activity = r.get(_state_key(worker, "last_tool_activity"))
-        except Exception:
-            continue
-        if last_activity is None:
-            continue
-        try:
-            if now - float(last_activity) < _PEER_HEARTBEAT_STALE_SEC:
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
+    return task_actively_in_flight(
+        task_id,
+        workers=workers,
+        config=config,
+        heartbeat_ttl_secs=_PEER_HEARTBEAT_STALE_SEC,
+        heartbeat_mode="peer",
+    )
 
 
 def get_session_liveness(session_id: str, config: Optional[OrchConfig] = None) -> Dict[str, Any]:
@@ -1749,6 +1683,19 @@ def _raw_stop_decision(session_id: str,
     current_task_id = current_work.get("top_task_id") if current_work else None
     blocked_on = _task_blocked_on(current_task_id, config=cfg)
     if current_task_id and not blocked_on:
+        if task_actively_in_flight(
+            current_task_id,
+            workers=[session_id, supervisor],
+            config=cfg,
+            heartbeat_mode="none",
+        ):
+            return {
+                "block": False,
+                "reason": None,
+                "wake_type": WAKE_ALLOW_STOP,
+                "task_id": None,
+                "out_of_band_inflight": True,
+            }
         # This block is intentionally bounded by the wrapper-level
         # convergence release valve: after the same stop block is observed
         # three times in stop-hook context, get_session_stop_decision()
