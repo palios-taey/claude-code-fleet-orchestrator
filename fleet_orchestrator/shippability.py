@@ -1,7 +1,7 @@
 """Engine-level Shippability Gate (rp0).
 
 A project is SHIPPABLE only when every ship-gate task is completed with evidence
-on record. The ship transition is REFUSED unless the gates are closed — there is
+on record. The successful ship verdict is REFUSED unless the gates are closed — there is
 no human-approval override, the process is the authority. Fail-closed: a project
 with NO matching gate tasks is NOT shippable, so declaring ship-gates is not
 optional — a plan that ships must include them.

@@ -55,6 +55,7 @@ from fleet_orchestrator.loop_engine import (
     Neo4jCycleStateStore,
     advance_loop_step,
     declare_loop,
+    disabled_loop_response,
     loops_enabled,
 )
 from fleet_orchestrator.shippability import evaluate_shippability
@@ -755,12 +756,21 @@ async def project_shippability_endpoint(project_id: str) -> Dict[str, Any]:
 
 @app.post("/api/projects/{project_id}/ship")
 async def ship_project_endpoint(project_id: str) -> Dict[str, Any]:
-    """ENGINE SHIP GATE (rp0): refuse the ship transition unless all ship-gates are
-    completed with evidence. No human-approval override — the gates are the authority."""
+    """Return a ship-gate verdict only.
+
+    This endpoint refuses unshippable projects, but it does not persist shipped
+    state or mutate the project into a shipped lifecycle state.
+    """
     verdict = evaluate_shippability(project_id, config=_cfg())
     if not verdict.get("shippable"):
         raise HTTPException(status_code=409, detail=verdict)
-    return {"ok": True, "shippable": True, "verdict": verdict}
+    return {
+        "ok": True,
+        "action": "verdict",
+        "shipped": False,
+        "shippable": True,
+        "verdict": verdict,
+    }
 
 
 @app.post("/api/projects/{project_id}/reset")
@@ -979,7 +989,7 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
 @app.post("/api/loops/declare")
 async def loop_declare(req: Request) -> Dict[str, Any]:
     if not loops_enabled():
-        return {"ok": True, "enabled": False}
+        return disabled_loop_response()
     data = await req.json()
     raw_loop = data.get("loop") if isinstance(data, dict) and "loop" in data else data
     try:
@@ -993,7 +1003,7 @@ async def loop_declare(req: Request) -> Dict[str, Any]:
 @app.post("/api/loops/{loop_id}/advance")
 async def loop_advance(loop_id: str, req: Request) -> Dict[str, Any]:
     if not loops_enabled():
-        return {"ok": True, "enabled": False}
+        return disabled_loop_response()
     data = await req.json()
     step_name = str(data.get("step") or "").strip()
     if not step_name:
@@ -1023,7 +1033,7 @@ async def loop_advance(loop_id: str, req: Request) -> Dict[str, Any]:
 @app.get("/api/loops/{loop_id}/should-stop")
 def loop_should_stop(loop_id: str) -> Dict[str, Any]:
     if not loops_enabled():
-        return {"ok": True, "enabled": False}
+        return disabled_loop_response()
     raw_loop = Neo4jCycleStateStore(config=_cfg()).load(loop_id)
     if raw_loop is None:
         raise HTTPException(status_code=404, detail=f"Loop {loop_id} not found")
@@ -1046,7 +1056,7 @@ def session_wake_packet(
     CONTRACT — this endpoint is **fail-open by design**: a wake-state packet is
     OPTIONAL context, and an assembly error must never break or block a wake. So
     on any assembler exception it returns HTTP 200 with ``{"ok": false, "enabled":
-    true, "error": ...}`` rather than a 5xx, and a disabled feature returns
+    true, "error": ...}`` rather than a 5xx, and this endpoint's disabled flag returns
     ``{"ok": true, "enabled": false}``. **Consumers MUST gate on the body
     (`ok` AND `enabled` AND a non-empty `packet`) — never on the HTTP status
     alone**, or they will inject an empty/error body as if it were context. The
