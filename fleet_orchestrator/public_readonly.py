@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from fleet_orchestrator.config import OrchConfig
+from fleet_orchestrator.current_liveness import current_task_liveness
 from fleet_orchestrator.easy_setup import package_version
 from fleet_orchestrator.orch_schema import (
     get_neo4j_driver,
@@ -344,10 +345,13 @@ def _current_visible(session_id: str) -> Dict[str, Any]:
     _require_visible_session(session_id)
     work = get_session_current_work(session_id, config=_cfg())
     if not work:
-        return {"session": session_id, "current": None}
+        return {"session": session_id, "current": None, "liveness": None}
     if not _project_visible(str(work.get("project_id") or "")):
-        return {"session": session_id, "current": None}
-    return {"session": session_id, "current": _public_current_work(work)}
+        return {"session": session_id, "current": None, "liveness": None}
+    liveness = current_task_liveness(session_id, work, config=_cfg())
+    public_work = _public_current_work(work)
+    public_work["liveness"] = liveness
+    return {"session": session_id, "current": public_work, "liveness": liveness}
 
 
 def _next_visible(session_id: str) -> Dict[str, Any]:

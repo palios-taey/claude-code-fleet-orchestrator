@@ -831,8 +831,12 @@ def session_current(session_id: str) -> Dict[str, Any]:
     activity = get_session_liveness(session_id, config=cfg)
     work = get_session_current_work(session_id, config=cfg)
     if not work:
-        return {"session": session_id, "current": None, "activity": activity}
-    return {"session": session_id, "current": work, "activity": activity}
+        return {"session": session_id, "current": None, "activity": activity, "liveness": None}
+    from fleet_orchestrator.current_liveness import current_task_liveness
+
+    liveness = current_task_liveness(session_id, work, config=cfg)
+    current = {**work, "liveness": liveness}
+    return {"session": session_id, "current": current, "activity": activity, "liveness": liveness}
 
 
 @app.get("/api/sessions/{session_id}/next-ready")
