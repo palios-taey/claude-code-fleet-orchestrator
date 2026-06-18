@@ -34,11 +34,11 @@ Observed in `fleet_orchestrator/orch_schema.py`:
 - refs are stored as structured metadata and resolved later into `ref_context`
 - the orchestrator reads ref file slices fresh at API/runtime read time rather than copying file contents into Neo4j
 - refs require a `source_path` for the ingested plan when refs are present
-- refs are disabled unless `ORCH_REF_ALLOWED_ROOT` is set
-- `ORCH_REF_ALLOWED_ROOT` can be a single path, a comma-separated list, or a JSON list of paths
+- refs are disabled unless at least one allowed root exists
+- allowed roots come from `ORCH_REF_ALLOWED_ROOT` (single path, comma-separated list, or JSON list) plus every repo root value in `ORCH_SESSION_ROOTS` (JSON object or comma-separated `session=/path` pairs)
 - ref paths must be relative
 - absolute paths, `~`, control characters, `..` escapes, and symlink escapes are rejected
-- the resolved ref path must stay under both the plan file directory and one of the configured allowed roots
+- the resolved ref path must stay under both the plan file directory and one of the allowed roots
 - unreadable or oversized refs degrade to warnings in `ref_context`
 
 ## CLI surface

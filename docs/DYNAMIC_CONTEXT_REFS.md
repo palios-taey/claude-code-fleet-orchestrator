@@ -77,7 +77,7 @@ The assembler works when refs are present:
 - `_render_packet()` renders all five tiers and prints `- none` for any empty tier.
 - `tests/wake_packet_acceptance.py` verifies empty ref arrays are accepted and that overall/supervisor refs render when supplied.
 
-If a packet has no refs, attach refs to the plan or API-created project/phase/task first, and make sure `ORCH_REF_ALLOWED_ROOT` allows the referenced files. Empty refs mean no refs attached; unreadable refs render warnings in `ref_context`.
+If a packet has no refs, attach refs to the plan or API-created project/phase/task first, and make sure allowed roots from `ORCH_REF_ALLOWED_ROOT` or `ORCH_SESSION_ROOTS` allow the referenced files. Empty refs mean no refs attached; unreadable refs render warnings in `ref_context`.
 
 ## Ref Resolution And Safety
 
@@ -85,7 +85,7 @@ Refs are stored as structured metadata, not permanent file contents. Runtime rea
 
 Observed constraints from `fleet_orchestrator/orch_schema.py`:
 
-- refs require `ORCH_REF_ALLOWED_ROOT`
+- refs require at least one allowed root from `ORCH_REF_ALLOWED_ROOT` or `ORCH_SESSION_ROOTS`
 - plan-ingested refs require a `source_path`
 - ref paths must be relative
 - absolute paths, `~`, control characters, `..` escapes, and symlink escapes are rejected

@@ -105,7 +105,7 @@ _PLAN_LINE_BYTE_CAP = 4096
 _META_BLOB_BYTE_CAP = 512
 _WHOLE_FILE_REF_LINE_CAP = 200
 _REF_FORMAT_HINT = "expected 'path' or 'path:Lstart-Lend'"
-_REF_RANGE_RE = re.compile(r"\A\s*(\d+)\s*-\s*(\d+)\s*\Z")
+_REF_RANGE_RE = re.compile(r"\A\s*[Ll]?(\d+)\s*-\s*[Ll]?(\d+)\s*\Z")
 
 
 def _parse_ref_result(raw_value: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:

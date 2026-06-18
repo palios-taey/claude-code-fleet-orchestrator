@@ -14,6 +14,7 @@ import hashlib
 import itertools
 import json
 import logging
+import math
 import os
 import stat
 import subprocess
@@ -98,6 +99,25 @@ HUMAN_REVIEW_QUESTION_TYPE = "human_review_gate"
 
 def _utc_now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def _parse_pause_expires_at(value: Optional[str]) -> Optional[dt.datetime]:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise PauseValidationError("pause_expires_at must be an ISO-8601 string")
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        expires_at = dt.datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise PauseValidationError("pause_expires_at must be an ISO-8601 timestamp") from exc
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=dt.timezone.utc)
+    return expires_at.astimezone(dt.timezone.utc)
 
 
 def _json_encode(value: Any) -> str:
@@ -426,13 +446,13 @@ def validate_source_path_for_refs(source_path: Optional[str], refs_present: bool
         return None, "refs require source_path"
     allowed_roots = _allowed_ref_roots()
     if not allowed_roots:
-        return None, "refs require ORCH_REF_ALLOWED_ROOT"
+        return None, "refs require ORCH_REF_ALLOWED_ROOT or ORCH_SESSION_ROOTS"
     try:
         resolved_source = Path(raw_path).resolve(strict=False)
     except Exception as exc:
         return None, f"invalid source_path ({exc.__class__.__name__})"
     if not _path_within_any_root(resolved_source, allowed_roots):
-        return None, f"source_path outside ORCH_REF_ALLOWED_ROOT: {raw_path}"
+        return None, f"source_path outside allowed ref roots: {raw_path}"
     return str(resolved_source), None
 
 
@@ -451,7 +471,7 @@ def resolve_ref_path(ref_path: str, source_path: Optional[str]) -> tuple[Optiona
         return None, f"ref outside allowed root: {raw_path}"
     allowed_roots = _allowed_ref_roots()
     if not allowed_roots:
-        return None, "ref disabled: ORCH_REF_ALLOWED_ROOT is unset"
+        return None, "ref disabled: ORCH_REF_ALLOWED_ROOT and ORCH_SESSION_ROOTS are unset"
     # Resolution bases, in order of author intent:
     #   1) the source plan's own directory — a bare filename means "the file
     #      next to this plan" (source_path is validated within an allowed root
@@ -803,7 +823,22 @@ def _session_pause_active(session_id: str, config: Optional[OrchConfig] = None) 
 
     cfg = config or OrchConfig()
     r = get_redis_sync(cfg)
-    return bool(r.exists(_state_key(session_id, "pause")))
+    pause_key = _state_key(session_id, "pause")
+    meta_key = _state_key(session_id, "pause_meta")
+    if not r.exists(pause_key):
+        return False
+    meta = _decode_json_field(r.get(meta_key), {})
+    expires_at = None
+    if isinstance(meta, dict):
+        try:
+            expires_at = _parse_pause_expires_at(meta.get("pause_expires_at"))
+        except PauseValidationError:
+            expires_at = dt.datetime.now(dt.timezone.utc)
+    if expires_at and expires_at <= dt.datetime.now(dt.timezone.utc):
+        r.delete(pause_key)
+        r.delete(meta_key)
+        return False
+    return True
 
 
 def _resolve_supervisor_session(session_id: str, config: Optional[OrchConfig] = None) -> str:
@@ -3457,16 +3492,28 @@ def set_session_pause(session_id: str, pause_source: str, pause_reason: str,
     cfg = config or OrchConfig()
     from .config import get_redis_sync
     r = get_redis_sync(cfg)
+    expires_at = _parse_pause_expires_at(pause_expires_at)
+    ttl_seconds: Optional[int] = None
+    if expires_at is not None:
+        delta = (expires_at - dt.datetime.now(dt.timezone.utc)).total_seconds()
+        if delta <= 0:
+            raise PauseValidationError("pause_expires_at must be in the future")
+        ttl_seconds = max(1, int(math.ceil(delta)))
     meta = {
         "paused_by": paused_by or session_id,
         "paused_at": _utc_now_iso(),
         "pause_source": pause_source,
         "pause_reason": pause_reason or "",
-        "pause_expires_at": pause_expires_at,
+        "pause_expires_at": expires_at.isoformat() if expires_at else None,
     }
-    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
-    r.set(f"{prefix}:{session_id}:pause", "1")
-    r.set(f"{prefix}:{session_id}:pause_meta", _json_encode(meta))
+    pause_key = _state_key(session_id, "pause")
+    meta_key = _state_key(session_id, "pause_meta")
+    if ttl_seconds is None:
+        r.set(pause_key, "1")
+        r.set(meta_key, _json_encode(meta))
+    else:
+        r.set(pause_key, "1", ex=ttl_seconds)
+        r.set(meta_key, _json_encode(meta), ex=ttl_seconds)
     return meta
 
 

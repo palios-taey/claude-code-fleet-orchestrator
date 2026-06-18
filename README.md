@@ -132,8 +132,8 @@ Fleet and context:
 - `ORCH_SESSION_IDS`: optional comma-separated session allowlist for the dashboard notify form and wake-packet endpoint.
 - `ORCH_NOTIFY_LIB_ROOT`: path to `claude-code-fleet-notify` if it is not importable and not a sibling checkout. Required for managed Claude Code hook wiring and stop discipline.
 - `ORCH_NOTIFY_CLI`: notify CLI name. Default is `taey-notify`.
-- `ORCH_REF_ALLOWED_ROOT`: one or more trusted roots for plan/source refs. Refs are disabled fail-safe when unset.
-- `ORCH_SESSION_ROOTS`: JSON or comma-separated `session=/repo/root` map used by the context assembler to find each session's `MEMORY.md` and repo rules.
+- `ORCH_REF_ALLOWED_ROOT`: one or more explicit trusted roots for plan/source refs.
+- `ORCH_SESSION_ROOTS`: JSON or comma-separated `session=/repo/root` map used by the context assembler to find each session's `MEMORY.md` and repo rules. These repo roots are also auto-derived as allowed ref roots, so refs can work without `ORCH_REF_ALLOWED_ROOT` when session roots are configured.
 - `ORCH_WAKE_PACKET_ENDPOINT_ENABLED`: default `1`; set `0` to disable only the wake-packet API endpoint. Deprecated alias: `ORCH_WAKE_PACKET_ENABLED`.
 - `ORCH_RULES_ROOT`: optional rules directory used by the context assembler.
 - `ORCH_SHIP_GATES`: comma-separated task-id suffixes that must be complete before a project can be marked shippable.
@@ -252,7 +252,7 @@ That serves `fleet_orchestrator.public_readonly:app` on `127.0.0.1:5005`. It has
 
 Refs are structured pointers attached to the plan. They are not copied into Neo4j as permanent file contents. At runtime, the assembler reads allowed refs fresh and wraps untrusted content in nonce envelopes designed to keep file text from being interpreted as packet structure. See [Dynamic Context And Tiered Refs](docs/DYNAMIC_CONTEXT_REFS.md) for the five tiers, clear-then-reinject workflow, and empty-context framing.
 
-Enable refs by setting `ORCH_REF_ALLOWED_ROOT` to trusted roots. Without it, ref use fails closed.
+Enable refs by setting `ORCH_REF_ALLOWED_ROOT` to trusted roots or by setting `ORCH_SESSION_ROOTS` so session repo roots are auto-derived as allowed ref roots. Without either source, ref use fails closed.
 
 Wake packets are enabled by default:
 

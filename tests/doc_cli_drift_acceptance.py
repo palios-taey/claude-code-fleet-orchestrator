@@ -108,7 +108,7 @@ def main() -> None:
         package = root / "fleet_orchestrator"
         package.mkdir()
         (package / "__init__.py").write_text("__version__ = '0.test'\n", encoding="utf-8")
-        (package / "demo.py").write_text("app = object()\nORCH_KNOWN_ENV = 'set'\n", encoding="utf-8")
+        (package / "demo.py").write_text("app = object()\nORCH_KNOWN_ENV = 'set'\ndef live_symbol():\n    pass\n", encoding="utf-8")
         (package / "dispatch.py").write_text("def bind_current_task():\n    pass\n", encoding="utf-8")
         (scripts / "good-tool").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
         (root / "tests").mkdir()
@@ -129,6 +129,7 @@ def main() -> None:
                     "`REAL_BARE.md`",
                     "`config/real.yaml`",
                     "`fleet_orchestrator.demo:app`",
+                    "`fleet_orchestrator/demo.py:live_symbol`",
                     "`ORCH_KNOWN_ENV`",
                     "`bind_current_task()`",
                     "Plain prose taey-demo run --count 2 is valid.",
@@ -151,6 +152,7 @@ def main() -> None:
                     "`MISSING_BARE.md`",
                     "`config/secret.yaml`",
                     "`fleet_orchestrator.demo:missing_symbol`",
+                    "`fleet_orchestrator/demo.py:missing_file_symbol`",
                     "`fleet_orchestrator.missing:app`",
                     "`ORCH_DOCS_ONLY`",
                     "`_bind_orch_task_if_ready()`",
@@ -167,6 +169,7 @@ def main() -> None:
         assert any("documented repo-shaped file does not exist" in item and "MISSING_BARE.md" in item for item in currency_errors), currency_errors
         assert any("documented repo-shaped file does not exist" in item and "config/secret.yaml" in item for item in currency_errors), currency_errors
         assert any("documented Python entrypoint does not exist" in item and "fleet_orchestrator.demo:missing_symbol" in item for item in currency_errors), currency_errors
+        assert any("documented Python file symbol does not exist" in item and "fleet_orchestrator/demo.py:missing_file_symbol" in item for item in currency_errors), currency_errors
         assert any("documented Python entrypoint does not exist" in item and "fleet_orchestrator.missing:app" in item for item in currency_errors), currency_errors
         assert any("documented env var is not referenced by repo code/config" in item and "ORCH_DOCS_ONLY" in item for item in currency_errors), currency_errors
         assert any("documented function call does not exist" in item and "_bind_orch_task_if_ready()" in item for item in currency_errors), currency_errors
