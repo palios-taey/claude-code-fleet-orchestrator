@@ -155,9 +155,75 @@ def _resolver_contract() -> None:
     _check("resolver surfaces own in-progress work", work.get("source") == "in_progress_own" and work.get("task_id") == "sup::current", work)
 
 
+def _operating_source_contract() -> None:
+    cases = [
+        ("none stays none", {"source": "none"}, None, "none"),
+        ("pending stays pending", {"source": "pending", "status": "pending"}, None, "pending"),
+        ("status pending maps without explicit source", {"status": "pending"}, None, "pending"),
+        ("explicit pending task maps to pending", {"source": "explicit_task", "status": "pending"}, "demo::pending", "pending"),
+        (
+            "explicit in-progress task maps to own work",
+            {"source": "explicit_task", "status": "in_progress"},
+            "demo::active",
+            "in_progress_own",
+        ),
+        (
+            "status in-progress maps without explicit source",
+            {"status": "in_progress"},
+            None,
+            "in_progress_own",
+        ),
+        (
+            "peer reported done is preserved",
+            {"source": "peer_reported_done", "status": "in_progress"},
+            None,
+            "peer_reported_done",
+        ),
+        ("explicit unknown stays explicit", {"source": "explicit_task"}, "demo::unknown", "explicit_task"),
+    ]
+    for label, work, task_id, expected in cases:
+        actual = assembler._operating_source(work, task_id)
+        _check(f"operating source: {label}", actual == expected, {"actual": actual, "expected": expected})
+
+
+def _snapshot_source_chain_contract() -> None:
+    work = {
+        "source": "explicit_task",
+        "status": "in_progress",
+        "task_id": "demo::active",
+        "description": "active explicit task",
+        "owner": "sup",
+    }
+    context = {
+        "overall_refs": [],
+        "supervisor_refs": [],
+        "project_refs": [],
+        "phase_refs": [],
+        "task_refs": [],
+        "memory": [],
+        "rules": [],
+        "snapshot": assembler._build_snapshot("sup", "codex", "demo::active", work, None, [], []),
+        "budget_used": 0,
+    }
+    rendered = assembler.assemble(assembler.build_packet("sup-codex", context), "codex")
+    section = _operating_section(rendered)
+    _check(
+        "snapshot chain maps explicit in-progress source",
+        context["snapshot"]["resolved_work"]["source"] == "in_progress_own",
+        context["snapshot"]["resolved_work"],
+    )
+    _check(
+        "snapshot chain renders own in-progress variant",
+        "taey-task update demo::active completed" in section,
+        section,
+    )
+
+
 def main() -> int:
     _rendering_contract()
     _resolver_contract()
+    _operating_source_contract()
+    _snapshot_source_chain_contract()
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
         return 1
