@@ -45,6 +45,7 @@ from fleet_orchestrator.easy_setup import api_host, package_version
 from fleet_orchestrator.evidence_contract import REQUEST_TERMINAL_EVIDENCE_KEYS, TERMINAL_STATUSES
 from fleet_orchestrator.feature_flags import chat_enabled, wake_packet_endpoint_enabled
 from fleet_orchestrator.handoff_validation import ensure_handoff_index_backfilled
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect
 from fleet_orchestrator.loop_engine import (
     ArtifactNotObservedError,
     ArtifactStore,
@@ -191,7 +192,7 @@ def _init_schema_on_startup() -> None:
     try:
         cfg = _cfg()
         count = ensure_handoff_index_backfilled(
-            get_redis_sync(cfg),
+            notify_redis_connect(),
             prefix=os.environ.get("NOTIFY_KEY_PREFIX", "taey"),
         )
         if count:
