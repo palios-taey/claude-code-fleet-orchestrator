@@ -29,6 +29,7 @@ HELPER_ENV_READERS = {
     "_int_env",
     "_optional_env",
     "_require_env",
+    "_scoped_env_value",
     "default_on_feature_enabled",
 }
 DOCUMENTED_ONLY = {
