@@ -499,6 +499,12 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
     except HTTPException:
         raise
     except Exception as e:
+        LOGGER.exception(
+            "Unhandled task update failed task=%s status=%s sender=%s",
+            task_id,
+            status,
+            sender,
+        )
         return JSONResponse(
             status_code=500,
             content={"ok": False, "error": str(e)},
@@ -539,6 +545,12 @@ async def create_human_review_gate_endpoint(req: Request) -> Dict[str, Any]:
     except (TaskParentNotFoundError, TaskIdCollisionError, CompletionEvidenceError, ValueError) as exc:
         return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
     except Exception as exc:
+        LOGGER.exception(
+            "Unhandled human-review gate creation failed phase=%s task=%s question=%s",
+            data.get("phase_id"),
+            data.get("task_id"),
+            data.get("question_id"),
+        )
         return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
 
@@ -559,6 +571,7 @@ async def answer_question_endpoint(question_id: str, req: Request) -> Dict[str, 
     except (CompletionEvidenceError, ValueError) as exc:
         return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
     except Exception as exc:
+        LOGGER.exception("Unhandled question answer failed question=%s", question_id)
         return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
 
@@ -581,6 +594,7 @@ async def ui_answer_human_review_gate_endpoint(question_id: str, req: Request) -
     except (CompletionEvidenceError, ValueError) as exc:
         return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
     except Exception as exc:
+        LOGGER.exception("Unhandled UI human-review answer failed question=%s", question_id)
         return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
 

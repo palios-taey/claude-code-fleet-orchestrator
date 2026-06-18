@@ -116,7 +116,8 @@ def clear_worker_task_liveness(task_id: str, *, config: Optional[OrchConfig] = N
         return
     try:
         _redis_connect().delete(worker_task_liveness_key(task_id))
-    except Exception:
+    except Exception as exc:
+        LOG.warning("worker task liveness Redis cleanup failed task=%s: %s", task_id, exc)
         return
 
 

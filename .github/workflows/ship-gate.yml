@@ -73,6 +73,10 @@ jobs:
           python scripts/verify-doc-flag-coherence.py
           python tests/doc_flag_coherence_acceptance.py
           python tests/audit_symbol_citations_acceptance.py
+      - name: Ship-gate — critical broad exception handlers are classified
+        run: |
+          python scripts/verify-exception-classification.py
+          python tests/exception_classification_acceptance.py
       - name: Ship-gate — installed CLIs stay live-linked after editable install
         run: python tests/cli_entrypoint_drift_acceptance.py
       - name: Ship-gate — local bind is the mutable API security boundary
