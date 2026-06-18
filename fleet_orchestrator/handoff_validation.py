@@ -7,11 +7,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Optional
 
+from .evidence_contract import TERMINAL_STATUSES
+
 
 DEFAULT_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
 _EXECUTOR = ThreadPoolExecutor(max_workers=2)
 _BACKFILL_LOCK = threading.Lock()
 _BACKFILLED_PREFIXES: set[str] = set()
+_HANDOFF_GC_TERMINAL_STATUSES = TERMINAL_STATUSES | frozenset({"done", "killed", "superseded"})
 
 
 def handoff_key(prefix: str, dispatcher: str, msg_id: str) -> str:
@@ -87,6 +90,18 @@ def write_handoff_record(redis_client, record: dict[str, Any], *, prefix: str = 
     redis_client.set(record["_key"], json.dumps(record, separators=(",", ":")))
     if record.get("kind") == "explicit_handoff":
         _index_record(redis_client, record, prefix=prefix)
+
+
+def _delete_handoff_record(redis_client, record: dict[str, Any], *, prefix: str) -> None:
+    dispatcher = str(record.get("dispatcher_session_id") or "").strip()
+    msg_id = _record_msg_id(record)
+    key = str(record.get("_key") or "").strip()
+    if not key and dispatcher and msg_id:
+        key = handoff_key(prefix, dispatcher, msg_id)
+    if key:
+        redis_client.delete(key)
+    if dispatcher and msg_id:
+        redis_client.srem(handoff_index_key(prefix, dispatcher), msg_id, key)
 
 
 def backfill_handoff_index(redis_client, *, prefix: str = DEFAULT_PREFIX) -> int:
@@ -280,6 +295,15 @@ def actionability_for_nudge(task: Optional[dict[str, Any]], session_id: str) -> 
     return True, "execute"
 
 
+def _handoff_gc_reason(task: Optional[dict[str, Any]]) -> Optional[str]:
+    if not task:
+        return "orphaned_dispatcher_task"
+    status = str(task.get("status") or "").strip().lower()
+    if status in _HANDOFF_GC_TERMINAL_STATUSES:
+        return f"terminal_status={status}"
+    return None
+
+
 def process_expired_handoffs(
     redis_client,
     *,
@@ -310,6 +334,11 @@ def process_expired_handoffs(
             continue
         if state == "pending_unacked":
             continue
+        task_id = str(record.get("dispatcher_task_id") or "")
+        task = load_task(task_id) if task_id else None
+        if _handoff_gc_reason(task):
+            _delete_handoff_record(redis_client, record, prefix=prefix)
+            continue
         next_wake_after = float(record.get("next_wake_after", 0) or 0)
         if next_wake_after and next_wake_after > now:
             continue
@@ -320,7 +349,6 @@ def process_expired_handoffs(
             write_handoff_record(redis_client, record, prefix=prefix)
             events.append({"type": "handoff_dead", "dispatcher_task_id": record.get("dispatcher_task_id")})
             continue
-        task = load_task(str(record.get("dispatcher_task_id") or "")) if record.get("dispatcher_task_id") else None
         actionable, reason = actionability_for_nudge(task, session_id)
         advisory_type = "handoff_wake" if actionable else "handoff_triage"
         event = {
