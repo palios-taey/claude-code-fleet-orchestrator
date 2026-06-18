@@ -587,7 +587,7 @@ def _select_identity(raw_session: str, session: str, cli: str) -> Dict[str, Any]
 
 
 def _identity_role(raw_session: str, session: str, cli: str) -> str:
-    if any((raw_session or "").strip().endswith(suffix) for suffix in ("-codex", "-gemini", "-grok")):
+    if any((raw_session or "").strip().endswith(suffix) for suffix in ("-codex", "-gemini", "-grok", "-claude")):
         return "engineering"
     companions = _companion_sessions()
     if session in companions or (raw_session or "").strip() in companions:
@@ -1039,7 +1039,7 @@ def _trim_packet(packet: Dict[str, Any], cli: str, budget_bytes: int, max_refs_p
                 break
         if shortened:
             continue
-        identity = context.get("identity") or {}
+        identity = context.get("identity") or {}  # companion full; 15KB trim is engineering-only
         if identity.get("role") != "companion" and identity.get("content"):
             identity["content"] = _halve(str(identity["content"]))
             context["identity"] = identity
