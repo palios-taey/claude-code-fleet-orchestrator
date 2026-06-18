@@ -113,7 +113,7 @@ For automation, the package also exposes `fleet-orchestrator-api`, which starts 
 
 ## Configuration
 
-Copy [.env.example](.env.example) to `.env`. The loader reads `ORCH_DOTENV` first if set, then `.env` in the current directory, then `.env` at the repo root.
+Copy [.env.example](.env.example) to `.env`. The loader reads `ORCH_DOTENV` first if set, then `.env` in the current directory, then `.env` at the repo root. Set `ORCH_DOTENV=empty` for tests or probes that must assert built-in defaults instead of deployment-specific `.env` values; normal operator runs can leave auto-discovery enabled.
 
 Required:
 
@@ -312,6 +312,9 @@ The acceptance tests are standalone scripts (not `unittest`/`pytest` modules) â€
 ```bash
 pip install -e ".[test]"
 # Acceptance scripts are standalone (run each directly, not via unittest/pytest).
+# Defaults-contract probes suppress deployment .env so local runs match clean CI.
+ORCH_DOTENV=empty python tests/env_contract_acceptance.py
+ORCH_DOTENV=empty ORCH_NEO4J_URI=bolt://127.0.0.1:7687 ORCH_NEO4J_DB=neo4j ORCH_REDIS_HOST=127.0.0.1 ORCH_REDIS_PORT=6379 python tests/standalone_sessions_acceptance.py
 # Each talks to your orchestrator's Neo4j/Redis and needs a test namespace to
 # isolate its data. With your normal orchestrator env active (ORCH_NEO4J_URI
 # etc. from .env):

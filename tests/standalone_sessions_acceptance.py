@@ -1,21 +1,22 @@
 """Ship-gate e2e — the self-contained-install invariants (foundation phase).
 
 Proves, against a real Neo4j, that the product runs on ANY user's machine:
-  1. DE-UMBILICAL PATHS: with a foreign HOME and no ORCH_* path overrides, the ledger and gate-repo
-     defaults follow that HOME / the install root — never the baked '/home/mira/...' literal.
+  1. DE-UMBILICAL PATHS: with a synthetic install root, a foreign HOME, and no ORCH_* path
+     overrides, the ledger and gate-repo defaults follow data_dir() / repo_root() dynamically.
   2. DYNAMIC SESSIONS: list_dashboard_sessions() / GET /api/sessions fail closed to the configured
      canonical supervisor allowlist, so data fixtures and peers do not leak as dashboard cards.
   3. LOOPBACK DEFAULT: the product launcher binds 127.0.0.1 by default (ORCH_HOST override).
 
 Env: ORCH_NEO4J_URI (default bolt://localhost:7687), ORCH_NEO4J_DB (default neo4j).
 Honest scope: integration e2e of the wiring, not a browser UI e2e.
-Run this in a clean/default environment. Operator `.env` overrides such as
-ORCH_GATE_REPO intentionally pin local paths and are not the default-install
-contract this test verifies.
+The path probe runs with `ORCH_DOTENV=empty`, so operator `.env` overrides such
+as ORCH_GATE_REPO cannot mask the default-install contract.
 """
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,9 +34,6 @@ CFG = OrchConfig()
 _PFX = f"sess-ci-{uuid.uuid4().hex[:8]}"
 _FAILURES: list[str] = []
 
-_OLD_LEDGER = "/home/mira/the-conductor/accountability/ledger.jsonl"
-_OLD_REPO = "/home/mira/claude-code-fleet-orchestrator"
-
 
 def _check(name: str, cond: bool) -> None:
     print(("  PASS " if cond else "  FAIL ") + name)
@@ -49,22 +47,36 @@ def _cleanup() -> None:
         s.run("MATCH (p:OrchProject) WHERE p.id STARTS WITH $p DETACH DELETE p", p=_PFX)
 
 
-def _resolve_paths_under_home(home: str) -> dict:
-    """Import the path-bearing modules in a clean subprocess with a foreign HOME, return defaults."""
+def _synthetic_install_root(parent: str) -> Path:
+    install = Path(parent) / "synthetic-orchestrator"
+    shutil.copytree(
+        Path(_REPO) / "fleet_orchestrator",
+        install / "fleet_orchestrator",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    Path(install, ".env").write_text(
+        "ORCH_GATE_REPO=/tmp/poison-gate-repo\n"
+        "ACCOUNTABILITY_LEDGER_PATH=/tmp/poison-ledger.jsonl\n"
+        "ORCH_DATA_DIR=/tmp/poison-data-dir\n",
+        encoding="utf-8",
+    )
+    return install
+
+
+def _resolve_paths_under_home(home: str, install_root: Path) -> dict:
+    """Import path-bearing modules from a synthetic install root with a foreign HOME."""
     env = dict(os.environ)
     for k in ("ACCOUNTABILITY_LEDGER_PATH", "ORCH_GATE_REPO", "ORCH_DATA_DIR", "XDG_DATA_HOME"):
         env.pop(k, None)
     env["HOME"] = home
-    env["PYTHONPATH"] = _REPO
+    env["PYTHONPATH"] = str(install_root)
+    env["ORCH_DOTENV"] = "empty"
     code = (
         "import json, fleet_orchestrator.accountability_ledger as L, fleet_orchestrator.gate_runner as G;"
         "from fleet_orchestrator.paths import data_dir, repo_root;"
         "print(json.dumps({'ledger': L.LEDGER_PATH, 'repo': G.DEFAULT_REPO, 'repo_root': str(repo_root()), 'data_dir': str(data_dir())}))"
     )
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8") as clean_env:
-        env["ORCH_DOTENV"] = clean_env.name
-        out = subprocess.check_output([sys.executable, "-c", code], env=env, text=True)
-    import json
+    out = subprocess.check_output([sys.executable, "-c", code], env=env, text=True, cwd=str(install_root))
     return json.loads(out.strip().splitlines()[-1])
 
 
@@ -72,15 +84,19 @@ def main() -> int:
     init_schema(config=CFG)
     _cleanup()
     try:
-        # --- 1. DE-UMBILICAL PATHS: paths follow a foreign HOME, never the baked literal ---
-        home = f"/tmp/{_PFX}-home"
-        paths = _resolve_paths_under_home(home)
-        _check("ledger path follows foreign HOME", paths["ledger"].startswith(home + "/"))
-        _check("ledger path is NOT the baked /home/mira literal", paths["ledger"] != _OLD_LEDGER)
-        _check("data_dir follows foreign HOME", paths["data_dir"].startswith(home + "/"))
-        gate_source = (Path(_REPO) / "fleet_orchestrator" / "gate_runner.py").read_text(encoding="utf-8")
-        _check("gate repo default follows install root", paths["repo"] == paths["repo_root"])
-        _check("gate repo source has no baked /home/mira literal", _OLD_REPO not in gate_source)
+        # --- 1. DE-UMBILICAL PATHS: defaults are derived from a synthetic install root ---
+        with tempfile.TemporaryDirectory(prefix=f"{_PFX}-install-") as tmp:
+            install_root = _synthetic_install_root(tmp)
+            home = str(Path(tmp) / "home")
+            paths = _resolve_paths_under_home(home, install_root)
+        data_dir = Path(paths["data_dir"])
+        ledger = Path(paths["ledger"])
+        repo = Path(paths["repo"])
+        repo_root = Path(paths["repo_root"])
+        _check("probe imported from synthetic install root", repo_root == install_root)
+        _check("data_dir follows foreign HOME", data_dir == Path(home) / ".local" / "share" / "claude-code-fleet-orchestrator")
+        _check("ledger path is derived from data_dir", ledger == data_dir / "accountability" / "ledger.jsonl")
+        _check("gate repo default follows repo_root()", repo == repo_root)
 
         # --- 2. DYNAMIC SESSIONS: fail-closed canonical supervisor allowlist ---
         sup_a, sup_b = f"{_PFX}-alpha", f"{_PFX}-beta"
