@@ -236,10 +236,11 @@ independent audit sign-off for the `audit` gate), then:
 
 ```bash
 curl -s -X GET  http://127.0.0.1:5002/api/projects/my-thing/shippability   # verdict dict
-curl -s -X POST http://127.0.0.1:5002/api/projects/my-thing/ship           # now succeeds
+curl -s -X POST http://127.0.0.1:5002/api/projects/my-thing/ship           # verdict-only POST
 ```
 
-**Expect:** `shippability` reports each gate satisfied; `ship` transitions the project. See
+**Expect:** `shippability` reports each gate satisfied; `ship` returns a self-describing verdict
+(`action:"verdict"`, `shipped:false`) and does not persist shipped state. See
 [docs/SHIPPABILITY.md](SHIPPABILITY.md) for the gate definition.
 
 > **Coming next release:** the gate is being extended so you *define the steps per project* in the

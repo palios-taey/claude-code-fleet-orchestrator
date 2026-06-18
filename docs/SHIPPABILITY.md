@@ -2,7 +2,7 @@
 
 **STATUS: LIVE & ENFORCED (2026-06-17).** The engine enforcement described under
 "Enforcement" is implemented in `fleet_orchestrator/shippability.py` and exposed
-through the project shippability endpoint in `fleet_orchestrator/tasks_api.py`.
+through verdict endpoints in `fleet_orchestrator/tasks_api.py`.
 This file defines the enforced reference standard and the operator-configurable
 gate names. It exists because the failure it prevents was: code marked
 "completed" on API-200s + a prose-only external audit, shipped broken.
@@ -17,7 +17,7 @@ your standard requires; a task is a gate iff its project-local name (the part af
 might use `ORCH_SHIP_GATES=ci,review1,review2`.
 
 It is **not optional**: the engine is **fail-closed** — a project whose plan
-declares NO matching ship-gate tasks can never be marked shippable. So any plan
+declares NO matching ship-gate tasks can never receive a successful ship verdict. So any plan
 that intends to ship must include its configured gate tasks (the project-template
 can auto-inject them; see PLAN_FORMAT). The *exact shape* lives in the plan as
 real `### Task:` gate entries, in the author's face.
@@ -55,12 +55,13 @@ Not unit tests. Not API `200`s. Real execution of the real feature on real data.
   is rejected — browser-bound reviewers cannot fetch a SHA or clone a repo.
 - Verdicts recorded. Any reviewer **BLOCK or refusal-to-certify HALTS** shippable.
 
-## Enforcement (target the engine must implement)
+## Enforcement
 
-The orchestrator refuses to transition anything to `shippable` unless both gates
-have evidence records that pass — the same shape as depends-gating, but for the
-ship transition. Declared per plan, enforced by the engine. No bypass, no
-approval override exists to route around it.
+The orchestrator refuses to return a successful ship verdict unless the configured
+gate tasks have evidence records that pass. `POST /api/projects/{id}/ship` is a
+verdict endpoint, not a lifecycle mutation: on success it returns `action:"verdict"`
+and `shipped:false`, and it does not persist shipped state. Declared per plan,
+enforced by the engine. No bypass, no approval override exists to route around it.
 
 ## Local pre-merge CONTROL gate
 

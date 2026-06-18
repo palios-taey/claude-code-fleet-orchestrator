@@ -99,7 +99,9 @@ def main() -> int:
     default_result = declare_loop(_base_loop())
     _check("ORCH_LOOPS_ENABLED defaults on", default_result.get("ok") is True and default_result.get("enabled") is True and default_result.get("loop", {}).get("id") == "acceptance-loop", default_result)
     os.environ["ORCH_LOOPS_ENABLED"] = "0"
-    _check("explicit ORCH_LOOPS_ENABLED=0 disables loop engine", declare_loop(_base_loop()) == {"ok": True, "enabled": False})
+    disabled_response = {"ok": False, "enabled": False, "reason": "loops disabled"}
+    _check("explicit ORCH_LOOPS_ENABLED=0 disables loop declaration without success-looking ok", declare_loop(_base_loop()) == disabled_response)
+    _check("explicit ORCH_LOOPS_ENABLED=0 disables loop advance without success-looking ok", advance_loop_step(_base_loop(), "observe") == disabled_response)
 
     adversarial = adversarial_meetable_cases()
     for name in ("external-approval-no-timeout", "increment-vs-floating", "var-no-step-writes"):

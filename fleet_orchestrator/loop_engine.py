@@ -463,9 +463,13 @@ def adversarial_meetable_cases() -> Dict[str, bool]:
     }
 
 
+def disabled_loop_response() -> Dict[str, Any]:
+    return {"ok": False, "enabled": False, "reason": "loops disabled"}
+
+
 def declare_loop(raw: Dict[str, Any], persistence: Optional[CycleStateStore] = None) -> Dict[str, Any]:
     if not loops_enabled():
-        return {"ok": True, "enabled": False}
+        return disabled_loop_response()
     loop = Loop.declare(raw)
     if persistence is not None:
         persistence.save(loop)
@@ -482,7 +486,7 @@ def advance_loop_step(
     notify_sender: Optional[NotifySender] = None,
 ) -> Dict[str, Any]:
     if not loops_enabled():
-        return {"ok": True, "enabled": False}
+        return disabled_loop_response()
     loop = loop_or_raw if isinstance(loop_or_raw, Loop) else Loop.declare(loop_or_raw)
     entry = loop.advance_step(step_name, artifact_store or ArtifactStore())
     if persistence is not None:
