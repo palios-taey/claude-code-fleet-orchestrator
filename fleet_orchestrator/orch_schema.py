@@ -3226,25 +3226,57 @@ def clear_project_stop_reason(project_id: str, cleared_by: str,
 
 def complete_project(project_id: str, *, force: bool = False,
                      completed_by: str = "unknown",
+                     closure_reason: Optional[str] = None,
                      config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    completed_actor = str(completed_by or "unknown").strip() or "unknown"
+    reason = str(closure_reason or "").strip()
+    if force and not reason:
+        raise ValueError("closure_reason is required when force=true")
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         record = session.run("""
             MATCH (p:OrchProject {id: $project_id})
-            WHERE $force OR NOT EXISTS {
-                MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
-                WHERE coalesce(t.status, 'pending') <> 'completed'
-            }
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WITH p, sum(CASE
+                WHEN t IS NOT NULL AND coalesce(t.status, 'pending') <> 'completed' THEN 1
+                ELSE 0
+            END) AS incomplete_tasks
+            WHERE $force OR incomplete_tasks = 0
             SET p.status = 'completed',
                 p.completed_at = datetime(),
+                p.completed_by = $completed_by,
+                p.forced_closure = CASE
+                    WHEN $force AND incomplete_tasks > 0 THEN true
+                    ELSE false
+                END,
+                p.closure_reason = CASE
+                    WHEN $force AND incomplete_tasks > 0 THEN $closure_reason
+                    ELSE NULL
+                END,
                 p.updated_at = datetime()
-            RETURN p.id AS id
-        """, project_id=project_id, force=bool(force)).single()
+            RETURN p.id AS id,
+                   p.forced_closure AS forced_closure,
+                   p.closure_reason AS closure_reason,
+                   p.completed_by AS completed_by
+        """,
+            project_id=project_id,
+            force=bool(force),
+            closure_reason=reason,
+            completed_by=completed_actor,
+        ).single()
         if not record:
             _project_record(project_id, cfg)
             raise ReadyWorkConflictError(f"project {project_id} has incomplete tasks")
-    return {"ok": True, "project_id": project_id, "status": "completed", "force": bool(force), "completed_by": completed_by}
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "status": "completed",
+        "force": bool(force),
+        "forced_closure": bool(record["forced_closure"]),
+        "closure_reason": record["closure_reason"],
+        "completed_by": record["completed_by"],
+    }
 
 
 def reset_project(project_id: str, *, reset_by: str = "unknown",
@@ -3257,6 +3289,9 @@ def reset_project(project_id: str, *, reset_by: str = "unknown",
             MATCH (p:OrchProject {id: $project_id})
             SET p.status = 'active',
                 p.completed_at = NULL,
+                p.completed_by = NULL,
+                p.forced_closure = false,
+                p.closure_reason = NULL,
                 p.in_progress_heartbeat_at = '',
                 p.stop_reason_current = '',
                 p.stop_reason_history = '[]',

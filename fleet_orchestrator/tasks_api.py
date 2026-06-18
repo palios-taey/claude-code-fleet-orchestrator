@@ -229,11 +229,15 @@ def _project_counts(project_id: str) -> Dict[str, int]:
 
 def _project_row(project: Dict[str, Any]) -> Dict[str, Any]:
     counts = _project_counts(project["id"])
+    forced_closure = bool(project.get("forced_closure"))
     return {
         "id": project.get("id"),
         "name": project.get("name"),
         "description": project.get("description"),
         "status": project.get("status"),
+        "forced_closure": forced_closure,
+        "closure_reason": project.get("closure_reason") if forced_closure else None,
+        "completed_by": project.get("completed_by"),
         "source_path": project.get("source_path"),
         "source_kind": project.get("source_kind"),
         "source_sha256": project.get("source_sha256"),
@@ -723,17 +727,24 @@ async def complete_project_endpoint(project_id: str, req: Request) -> Dict[str, 
     data = await req.json() if req.headers.get("content-type", "").startswith("application/json") else {}
     if not isinstance(data, dict):
         raise HTTPException(status_code=422, detail="request body must be a JSON object")
+    force = _strict_force_flag(data)
+    closure_reason = data.get("closure_reason")
+    if closure_reason is None:
+        closure_reason = data.get("reason")
     try:
         return complete_project(
             project_id,
-            force=_strict_force_flag(data),
+            force=force,
             completed_by=data.get("completed_by") or data.get("from") or "unknown",
+            closure_reason=closure_reason,
             config=_cfg(),
         )
     except ReadyWorkConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except ProjectNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 @app.get("/api/projects/{project_id}/shippability")
