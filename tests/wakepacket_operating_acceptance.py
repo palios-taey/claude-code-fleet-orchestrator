@@ -47,7 +47,7 @@ def _packet_for(resolved_work: dict[str, object]) -> str:
 
 def _operating_section(rendered: str) -> str:
     marker = "## Operating"
-    next_marker = "\n## Context Refs"
+    next_marker = "\n## Identity"
     if marker not in rendered or next_marker not in rendered:
         return ""
     return rendered.split(marker, 1)[1].split(next_marker, 1)[0].strip()
@@ -58,7 +58,7 @@ def _assert_first_and_bounded(label: str, rendered: str) -> str:
     _check(f"{label}: Operating section exists", bool(section), rendered)
     _check(
         f"{label}: Operating before Context Refs",
-        rendered.index("## Provenance") < rendered.index("## Operating") < rendered.index("## Context Refs"),
+        rendered.index("## Provenance") < rendered.index("## Operating") < rendered.index("## Identity") < rendered.index("## Context Refs"),
         rendered,
     )
     _check(

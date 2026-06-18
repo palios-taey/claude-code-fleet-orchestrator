@@ -18,7 +18,7 @@ You run several Claude Code or CLI sessions as a fleet. The orchestrator keeps t
 
 **Stop-discipline engine.** The hook path is designed so a session does not silently stop while it still has ready work. The Stop hook asks the orchestrator for a stop decision; if work remains and hooks are installed, the hook blocks the stop and feeds back the next action. Human-review gates are a first-class stop state: when work is waiting on a person, the session can stop cleanly instead of looping.
 
-**Dynamic context injection.** Plans and tasks can attach reference docs at overall, supervisor, project, phase, and task tiers. `GET /api/sessions/{session_id}/wake-packet` is enabled by default and assembles a task-scoped packet with refs, ranked memory, rules, provenance, and a size report. `ORCH_WAKE_PACKET_ENDPOINT_ENABLED=0` disables only that endpoint; the old `ORCH_WAKE_PACKET_ENABLED` name remains as a deprecated alias. This pairs with `/clear`: clear accumulated chat context, then re-inject the clean slice for the current task. Empty refs mean none were attached; that is valid.
+**Dynamic context injection.** Plans and tasks can attach reference docs at overall, supervisor, project, phase, and task tiers. `GET /api/sessions/{session_id}/wake-packet` is enabled by default and assembles a task-scoped packet with operating guidance, a per-role identity tier, refs, ranked memory, rules, provenance, and a size report. `ORCH_WAKE_PACKET_ENDPOINT_ENABLED=0` disables only that endpoint; the old `ORCH_WAKE_PACKET_ENABLED` name remains as a deprecated alias. This pairs with `/clear`: clear accumulated chat context, then re-inject the clean slice for the current task. Empty refs mean none were attached; that is valid.
 
 **Evidence-gated completion.** Terminal task updates are designed to require evidence. For normal task completion, provide a JSON object with real artifacts such as `commit_sha`, `gate`, and `production_observation`; the API rejects evidence-less terminal claims. Human-review gate tasks must be completed through the question/UI path, not by ordinary task status updates.
 
@@ -140,6 +140,8 @@ Fleet and context:
 - `ORCH_SESSION_ROOTS`: JSON or comma-separated `session=/repo/root` map used by the context assembler to find each session's `MEMORY.md` and repo rules. These repo roots are also auto-derived as allowed ref roots, so refs can work without `ORCH_REF_ALLOWED_ROOT` when session roots are configured.
 - `ORCH_WAKE_PACKET_ENDPOINT_ENABLED`: default `1`; set `0` to disable only the wake-packet API endpoint. Deprecated alias: `ORCH_WAKE_PACKET_ENABLED`.
 - `ORCH_RULES_ROOT`: optional rules directory used by the context assembler.
+- `ORCH_IDENTITY_ROOT`: optional trusted identity directory. Companion sessions load full operator-supplied identity from this root; engineering sessions use the built-in lean role core.
+- `ORCH_COMPANION_SESSIONS`: optional comma-separated companion session ids. Defaults to `taey,companion`.
 - `ORCH_SHIP_GATES`: comma-separated task-id suffixes that must be complete before a project can receive a successful ship verdict.
 
 ## What "taey" Means
@@ -254,7 +256,7 @@ That serves `fleet_orchestrator.public_readonly:app` on `127.0.0.1:5005`. It has
 
 ## Refs And Wake Packets
 
-Refs are structured pointers attached to the plan. They are not copied into Neo4j as permanent file contents. At runtime, the assembler reads allowed refs fresh and wraps untrusted content in nonce envelopes designed to keep file text from being interpreted as packet structure. See [Dynamic Context And Tiered Refs](docs/DYNAMIC_CONTEXT_REFS.md) for the five tiers, clear-then-reinject workflow, and empty-context framing.
+Refs are structured pointers attached to the plan. They are not copied into Neo4j as permanent file contents. At runtime, the assembler reads allowed refs fresh and wraps untrusted content in nonce envelopes designed to keep file text from being interpreted as packet structure. The packet also carries a trusted Identity section: companion sessions can receive full operator-supplied identity, while engineering sessions get a lean role core. See [Dynamic Context And Tiered Refs](docs/DYNAMIC_CONTEXT_REFS.md) for the five tiers, identity tier, clear-then-reinject workflow, and empty-context framing.
 
 Enable refs by setting `ORCH_REF_ALLOWED_ROOT` to trusted roots or by setting `ORCH_SESSION_ROOTS` so session repo roots are auto-derived as allowed ref roots. Without either source, ref use fails closed.
 

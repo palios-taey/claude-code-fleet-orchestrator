@@ -17,9 +17,24 @@ The normal usage pattern is:
 1. Clear accumulated chat history with the agent's normal clear command.
 2. Ask the orchestrator for the current wake packet.
 3. Paste or inject that packet into the cleared session.
-4. Continue the task with only the selected refs, memory, rules, provenance, cycle state, human state, and stop state.
+4. Continue the task with only the selected operating guidance, identity, refs, memory, rules, provenance, cycle state, human state, and stop state.
 
 This is a clear-then-reinject pattern, not hidden long-context magic. The packet is the current scoped slice.
+
+## Identity Tier
+
+Every wake packet renders `## Identity` after `## Operating` and before `## Context Refs`.
+
+- Engineering sessions receive a built-in lean role core: scoped implementation/review posture, evidence discipline, verification discipline, and reporting requirements.
+- Companion sessions receive full operator-supplied identity when `ORCH_IDENTITY_ROOT` is configured. The default companion ids are `taey` and `companion`; override with `ORCH_COMPANION_SESSIONS`.
+- CLI peer sessions ending in `-codex`, `-gemini`, or `-grok` always receive engineering identity, even when the normalized session name is listed as a companion.
+- Companion identity files are trusted local operator input and are rendered in nonce-scoped `<<TRUSTED-IDENTITY ...>>` blocks. Their path, size, mtime, and sha256 are recorded in the packet snapshot.
+
+Supported `ORCH_IDENTITY_ROOT` layouts are:
+
+- Markdown files under a companion or taey subdirectory; all Markdown files are loaded in sorted order.
+- A root-level companion, taey, IDENTITY, or PERSONALITY Markdown file.
+- A corpus-style layout with identity and layer_1 subdirectories.
 
 ## The Five Ref Tiers
 
