@@ -236,6 +236,17 @@ def _parse_meta(meta_blob: str) -> Dict[str, Any]:
     return meta
 
 
+def _status_meta_values(meta_blob: str) -> List[str]:
+    values: List[str] = []
+    for raw in META_RE.findall(meta_blob or ""):
+        if ":" not in raw:
+            continue
+        key, value = raw.split(":", 1)
+        if key.strip().lower() == "status":
+            values.append(value.strip())
+    return values
+
+
 def _bool_meta(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -470,11 +481,16 @@ def _parse_plan(md: str) -> Dict[str, Any]:
             if meta.get("_meta_error"):
                 warnings.append(f"line {line_no}: {meta['_meta_error']}")
                 continue
-            if "status" in meta:
-                raise PlanTerminalStatusError(
-                    f"line {line_no}: task status metadata is not accepted during plan ingest; "
-                    "create tasks as pending and complete them through the evidence-gated task API"
+            status_values = _status_meta_values(task_match["meta"])
+            if status_values:
+                rendered = ", ".join(f"[status:{value}]" if value else "[status:]" for value in status_values)
+                warnings.append(
+                    f"line {line_no}: ignored task status metadata {rendered}; "
+                    "plan ingest does not set task status; use the evidence-gated task API"
                 )
+                for key in list(meta):
+                    if key.strip().lower() == "status":
+                        meta.pop(key, None)
             current_task = {
                 "id": task_match["id"],
                 "description": task_match["name"],
