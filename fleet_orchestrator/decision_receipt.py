@@ -138,5 +138,56 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, default=str, separators=(",", ":"), ensure_ascii=True)
 
 
+def read_recent_receipts(
+    limit: int = 10,
+    *,
+    kind: Optional[str] = None,
+    config: Optional[OrchConfig] = None,
+    redis_client: Any = None,
+    newest_first: bool = True,
+) -> list[Dict[str, Any]]:
+    count = max(0, int(limit))
+    if count == 0:
+        return []
+    client = redis_client or get_redis_sync(config)
+    scan_count = count * 10 if kind else count
+    if newest_first:
+        entries = client.xrevrange(RECEIPT_STREAM, max="+", min="-", count=scan_count)
+    else:
+        entries = client.xrange(RECEIPT_STREAM, min="-", max="+", count=scan_count)
+    receipts = [parse_receipt_stream_entry(entry) for entry in entries]
+    if kind:
+        wanted = kind.strip()
+        receipts = [
+            receipt
+            for receipt in receipts
+            if receipt.get("kind") == wanted or receipt.get("_stream_kind") == wanted
+        ]
+    return receipts[:count]
+
+
+def parse_receipt_stream_entry(entry: Any) -> Dict[str, Any]:
+    stream_id, raw_fields = entry
+    fields = {_decode_redis_value(key): _decode_redis_value(value) for key, value in dict(raw_fields).items()}
+    raw_receipt = fields.get("receipt") or "{}"
+    try:
+        receipt = json.loads(raw_receipt)
+    except json.JSONDecodeError as exc:
+        receipt = {"receipt_parse_error": str(exc), "raw_receipt": raw_receipt}
+    if not isinstance(receipt, dict):
+        receipt = {"raw_receipt": receipt}
+    receipt["_stream"] = RECEIPT_STREAM
+    receipt["_stream_id"] = _decode_redis_value(stream_id)
+    receipt["_event_type"] = fields.get("type", "")
+    receipt["_stream_kind"] = fields.get("kind", "")
+    return receipt
+
+
+def _decode_redis_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 # TODO(dynctx-wiring::w2-build): emit STOP-event receipts after the peer-liveness
 # stop-engine work lands. This branch intentionally avoids fleet_orchestrator/orch_schema.py.

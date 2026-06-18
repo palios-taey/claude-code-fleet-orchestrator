@@ -69,6 +69,7 @@ jobs:
           orch-watch --help
           taey-plan --help
           taey-question --help
+          taey-receipts --help
           taey-task --help
           taey-dispatch --help
 

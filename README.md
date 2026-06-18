@@ -146,7 +146,7 @@ Fleet and context:
 
 ## What "taey" Means
 
-The `taey-*` commands are the agent-facing CLI tools installed by this package. "Taey" is the project codename used for the local fleet protocol: `taey-plan` works with projects and plans, `taey-task` works with task state, `taey-question` works with human-review gates, and `taey-dispatch` works with out-of-band runner liveness. `orch` is the operator lifecycle command for serving, enabling, disabling, and doctoring the local service.
+The `taey-*` commands are the agent-facing CLI tools installed by this package. "Taey" is the project codename used for the local fleet protocol: `taey-plan` works with projects and plans, `taey-task` works with task state, `taey-question` works with human-review gates, `taey-dispatch` works with out-of-band runner liveness, and `taey-receipts` reads decision-receipt explainability records. `orch` is the operator lifecycle command for serving, enabling, disabling, and doctoring the local service.
 
 ## How An AI Agent Uses This
 
@@ -196,6 +196,13 @@ For harness-driven work where the runner is not the agent session itself:
 taey-dispatch out-of-band register demo::build-1 --supervisor supervisor --owner worker-codex --runner acceptance-harness --ttl 300
 taey-dispatch out-of-band heartbeat demo::build-1
 taey-dispatch out-of-band complete demo::build-1 --status completed --supervisor supervisor --evidence '{"commit_sha":"abc123","gate":"production probe","production_observation":"verified live"}'
+```
+
+Decision receipts are default-on explainability records for wake, chat, and dispatch decisions. Read the latest receipts from the orchestrator Redis stream:
+
+```bash
+taey-receipts list --limit 5
+taey-receipts list --json --limit 5
 ```
 
 The hooks close the loop:
@@ -297,12 +304,14 @@ orch-cron --version
 orch-watch --version
 taey-dispatch --version
 taey-plan --version
+taey-receipts --version
 taey-question --version
 taey-task --version
 orch --help
 orch doctor --explain-scope
 taey-plan --help
 taey-task --help
+taey-receipts --help
 taey-question --help
 taey-dispatch --help
 curl -s http://127.0.0.1:5002/health

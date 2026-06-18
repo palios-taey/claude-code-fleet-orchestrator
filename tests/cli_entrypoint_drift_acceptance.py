@@ -21,6 +21,7 @@ ENTRYPOINT_CLIS = (
     "taey-dispatch",
     "taey-plan",
     "taey-question",
+    "taey-receipts",
     "taey-task",
 )
 

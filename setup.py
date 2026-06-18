@@ -38,6 +38,7 @@ setup(
             "taey-dispatch = fleet_orchestrator.script_entrypoints:taey_dispatch_main",
             "taey-plan = fleet_orchestrator.script_entrypoints:taey_plan_main",
             "taey-question = fleet_orchestrator.script_entrypoints:taey_question_main",
+            "taey-receipts = fleet_orchestrator.script_entrypoints:taey_receipts_main",
             "taey-task = fleet_orchestrator.script_entrypoints:taey_task_main",
         ],
     },
