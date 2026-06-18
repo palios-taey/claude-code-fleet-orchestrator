@@ -219,6 +219,8 @@ def _untrusted_envelope_contract() -> None:
 
 def _context_selection_error_contract() -> None:
     with mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
+         mock.patch.object(assembler, "get_session_current_work", return_value=None), \
+         mock.patch.object(assembler, "get_session_supervised_projects", return_value=[]), \
          mock.patch.object(assembler, "get_overall_refs", side_effect=RuntimeError("overall down")), \
          mock.patch.object(assembler, "get_supervisor_refs", side_effect=RuntimeError("supervisor down")):
         context = assembler.select_context("conductor-codex", cli="codex", session_roots={})
@@ -255,6 +257,8 @@ def _empty_work_context_contract() -> None:
         assembler.MEMORY_BASE = memory_root
         try:
             with mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
+                 mock.patch.object(assembler, "get_session_current_work", return_value=None), \
+                 mock.patch.object(assembler, "get_session_supervised_projects", return_value=[]), \
                  mock.patch.object(assembler, "get_overall_refs", return_value=overall), \
                  mock.patch.object(assembler, "get_supervisor_refs", return_value=supervisor):
                 context = assembler.select_context(

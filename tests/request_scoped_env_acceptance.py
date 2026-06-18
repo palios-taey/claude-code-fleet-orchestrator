@@ -44,6 +44,8 @@ def _preserved_env() -> Iterator[None]:
 def _context_mocks() -> Iterator[None]:
     empty_refs = {"ref_context": {"refs": []}}
     with mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
+         mock.patch.object(assembler, "get_session_current_work", return_value=None), \
+         mock.patch.object(assembler, "get_session_supervised_projects", return_value=[]), \
          mock.patch.object(assembler, "get_overall_refs", return_value=empty_refs), \
          mock.patch.object(assembler, "get_supervisor_refs", return_value=empty_refs):
         yield

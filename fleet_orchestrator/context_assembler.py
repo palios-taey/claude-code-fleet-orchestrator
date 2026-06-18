@@ -16,7 +16,11 @@ from fleet_orchestrator.accountability_ledger import LEDGER_PATH
 from fleet_orchestrator.orch_schema import (
     get_overall_refs,
     get_project_summary,
+    get_session_current_work,
     get_session_next_ready,
+    get_session_supervised_projects,
+    get_supervisor_dispatchable_peer_task,
+    get_supervisor_inflight_peer_task,
     get_supervisor_refs,
     get_task_project,
 )
@@ -212,8 +216,14 @@ def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
             for task in phase_item.get("tasks", []):
                 if task.get("id") == task_id:
                     return {
+                        "source": "explicit_task",
                         "task_id": task_id,
                         "description": task.get("description", ""),
+                        "status": task.get("status"),
+                        "owner": task.get("owner"),
+                        "dispatched_to": task.get("dispatched_to"),
+                        "task_type": task.get("task_type"),
+                        "blocked_on": task.get("blocked_on"),
                         "phase_id": phase_item.get("phase", {}).get("id"),
                         "phase_name": phase_item.get("phase", {}).get("name"),
                         "project_id": task_project["project_id"],
@@ -224,8 +234,66 @@ def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
 
     next_ready = get_session_next_ready(session)
     if next_ready:
-        return dict(next_ready)
-    return {"project_id": None, "description": "", "task_id": None}
+        row = dict(next_ready)
+        row["source"] = "pending"
+        row["status"] = "pending"
+        return row
+
+    supervised_projects = _live_supervised_projects(session)
+    for project in supervised_projects:
+        peer_task = get_supervisor_dispatchable_peer_task(session, str(project.get("id")))
+        if peer_task:
+            row = dict(peer_task)
+            row["source"] = "pending"
+            row["status"] = "pending"
+            row["project_name"] = project.get("name")
+            return row
+
+    for project in supervised_projects:
+        peer_task = get_supervisor_inflight_peer_task(session, str(project.get("id")))
+        if peer_task:
+            row = dict(peer_task)
+            row["source"] = "peer_reported_done"
+            row["status"] = "in_progress"
+            row["project_name"] = project.get("name")
+            return row
+
+    current_work = get_session_current_work(session)
+    if current_work:
+        row = dict(current_work)
+        row["source"] = "in_progress_own"
+        row["status"] = "in_progress"
+        row["task_id"] = row.get("top_task_id")
+        row["description"] = row.get("top_task_desc")
+        row["owner"] = session
+        return row
+
+    return {"source": "none", "project_id": None, "description": "", "task_id": None, "status": None}
+
+
+def _live_supervised_projects(session: str) -> List[Dict[str, Any]]:
+    projects = sorted(
+        get_session_supervised_projects(session),
+        key=lambda project: project.get("priority") if project.get("priority") is not None else 999999999,
+    )
+    return [
+        project for project in projects
+        if str(project.get("status") or "").strip().lower() in {"active", "in_progress"}
+    ]
+
+
+def _operating_source(work: Dict[str, Any], task_id: Optional[str]) -> str:
+    explicit_source = str(work.get("source") or "").strip()
+    if explicit_source and explicit_source != "explicit_task":
+        return explicit_source
+    status = str(work.get("status") or "").strip().lower()
+    if status == "pending":
+        return "pending"
+    if status == "in_progress":
+        return "in_progress_own" if explicit_source == "explicit_task" else str(work.get("source") or "in_progress_own")
+    if task_id:
+        return "explicit_task"
+    return "none"
 
 
 SESSION_ENV_ALLOWLIST = {"ORCH_RULES_ROOT", "ORCH_SESSION_ROOTS"}
@@ -501,10 +569,16 @@ def _build_snapshot(session: str, cli: str, task_id: Optional[str], work: Dict[s
         "cli": cli,
         "requested_task_id": task_id,
         "resolved_work": {
-            "source": "explicit_task" if task_id else ("session_next_ready" if resolved_task else "none"),
+            "source": _operating_source(work, task_id),
             "project_id": work.get("project_id"),
             "phase_id": work.get("phase_id"),
             "task_id": resolved_task,
+            "description": work.get("description") or work.get("top_task_desc"),
+            "status": work.get("status"),
+            "owner": work.get("owner"),
+            "dispatched_to": work.get("dispatched_to"),
+            "task_type": work.get("task_type"),
+            "blocked_on": work.get("blocked_on"),
         },
         "neo4j_summary_hash": _sha256_json(summary or {}),
         "memory_files": [
@@ -586,8 +660,13 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
         f"- provenance_hash: {packet.get('provenance_hash', '')}",
         f"- {UNTRUSTED_NONCE_FIELD}: {nonce}",
         "",
-        "## Context Refs",
+        "## Operating",
     ]
+    lines.extend(_render_operating_section(packet))
+    lines.extend([
+        "",
+        "## Context Refs",
+    ])
     for tier in ("overall", "supervisor", "project", "phase", "task"):
         lines.extend(_render_refs(tier, context.get(f"{tier}_refs") or [], max_refs_per_tier, nonce))
     lines.extend(["", "## Memory"])
@@ -623,6 +702,66 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
         "",
     ])
     return "\n".join(lines)
+
+
+def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
+    resolved = ((packet.get("snapshot") or {}).get("resolved_work") or {})
+    source = str(resolved.get("source") or "none").strip()
+    status = str(resolved.get("status") or "").strip().lower()
+    task_id = _operating_value(resolved.get("task_id") or "<task-id>", default="<task-id>")
+    owner = _operating_value(resolved.get("dispatched_to") or resolved.get("owner") or "<peer>", default="<peer>")
+    session = _operating_value(packet.get("generated_for") or "<you>", default="<you>")
+    blocked_on = _operating_value(resolved.get("blocked_on"), default="")
+
+    if source == "none" or not resolved.get("task_id"):
+        return [
+            f"- No task resolves for you. Get work: `taey-plan next {session}` or `taey-plan list`.",
+            "- Ingest a plan: `taey-plan ingest <file.md>`.",
+            "- `next` empty is not done if you supervise active peer work.",
+        ]
+
+    if blocked_on:
+        return [
+            f"- `{task_id}` is blocked on `{blocked_on}`.",
+            "- Dependency-gated downstream work releases only when deps are `completed`; `interrupted`/`failed` do not satisfy it.",
+        ]
+
+    if source in {"pending", "session_next_ready"} or status == "pending":
+        return [
+            f"- Next task is UNBOUND: `{task_id}`.",
+            "- Dispatch it: `taey-task dispatch <task-id> <peer>`; this BINDS owner+current_task and wakes the peer.",
+            "- Bare `taey-notify` does NOT bind; the engine flags it undispatched. One task per peer at a time.",
+        ]
+
+    if source == "peer_reported_done":
+        return [
+            f"- Peer {owner} is no longer actively working `{task_id}` (reported done or stalled).",
+            f"- verify their work; if complete, close it: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"production_observation\":\"<obs>\"}}'`.",
+            "- Peers cannot self-complete supervised tasks. Advance the chain.",
+        ]
+
+    if source == "in_progress_own" or status == "in_progress":
+        lines = [
+            f"- Drive `{task_id}` to terminal.",
+            f"- Close with evidence: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"production_observation\":\"<obs>\"}}'`.",
+            "- Evidence-less terminal writes are REJECTED. Don't stop while ready work exists.",
+            "- Human-review gate tasks complete via the question/UI path, not ordinary status update.",
+        ]
+        return lines
+
+    return [
+        f"- Resolved task `{task_id}`. Inspect it: `taey-task status {task_id}`.",
+        "- If it is ready, dispatch with `taey-task dispatch <task-id> <peer>`; if terminal, use `--evidence`.",
+    ]
+
+
+def _operating_value(value: Any, *, default: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = text.replace("`", "'")
+    return text[:120] or default
 
 
 def _ensure_untrusted_nonce(packet: Dict[str, Any]) -> str:
