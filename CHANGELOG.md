@@ -48,7 +48,7 @@ Honesty/transparency release — behavior-neutral (docs, examples, test hardenin
 
 ## v1.5.0 - 2026-06-02
 
-- Added plan refs using repeatable `[ref:<path>:<Lstart>-<Lend>]` metadata with runtime `ref_context` reads gated by `ORCH_REF_ALLOWED_ROOT`.
+- Added plan refs using repeatable `[ref:<path>:<Lstart>-<Lend>]` metadata with runtime `ref_context` reads gated by allowed roots from `ORCH_REF_ALLOWED_ROOT` and, on current main, auto-derived `ORCH_SESSION_ROOTS` repo roots.
 - Added project lifecycle API support, including project completion and reset flows.
 - Added the easy-setup entrypoints: `scripts/install`, `orch doctor`, `orch enable`, `orch disable`, and `orch uninstall`.
 - Closed the `AskUserQuestion` / `AskUserQuestion(*)` escape hatch through managed Claude settings integration.

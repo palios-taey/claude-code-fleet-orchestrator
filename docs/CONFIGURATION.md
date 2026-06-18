@@ -6,10 +6,10 @@ source** (`fleet_orchestrator/` + `scripts/` + `config.py` wrapper reads). The
 the code, the code wins; verify against the repo, do not trust this table alone.
 
 > This doc was rewritten on 2026-06-15 after an audit found the prior version
-> materially incomplete: it listed ~45 flags when the source references **67
-> distinct env names** (61 in the product, 6 test-only), omitted
-> `ACCOUNTABILITY_LEDGER_PATH`, hid a non-env runtime switch (below), and
-> mislabeled the auth posture. Honesty about the surface is the point.
+> materially incomplete: it listed ~45 flags while omitting many source-read
+> env names, including `ACCOUNTABILITY_LEDGER_PATH`; it also hid a non-env
+> runtime switch (below) and mislabeled the auth posture. Honesty about the
+> surface is the point.
 
 ## Security posture — read this first (no false claims)
 
@@ -39,7 +39,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ORCH_PORT` | `5002` | Mutable API/dashboard port. |
 | `ORCH_API_BASE` / `ORCH_DASHBOARD_URL` | `http://127.0.0.1:5002` | Base URL the CLIs call. |
 | `ORCH_NEO4J_URI` / `ORCH_NEO4J_DB` | (required) | Neo4j connection. **No auth** — the orchestrator connects with no credentials and does not support internal-service auth (run Neo4j with `NEO4J_AUTH=none`). Internal-service credentials are intentionally unsupported: the network is the boundary, and a credential dimension in the driver config caused a recurring outage. |
-| `ORCH_REDIS_HOST` / `ORCH_REDIS_PORT` (also bare `REDIS_HOST`/`REDIS_PORT` fallbacks) | `127.0.0.1` / `6379` | Redis connection. |
+| `ORCH_REDIS_HOST` / `ORCH_REDIS_PORT` | (required) | Redis connection. The core `OrchConfig` has no built-in default and no bare `REDIS_HOST`/`REDIS_PORT` fallback; set these explicitly, as in `.env.example`. |
 | `ORCH_REDIS_SENTINELS` / `ORCH_REDIS_SENTINEL_MASTER` | `""` / `orch-master` | Optional Redis Sentinel HA. |
 | `ORCH_DATA_DIR` / `ORCH_STATE_DIR` | platform dirs | Data / state directories. |
 | `ORCH_DOTENV` | auto-discover | Explicit dotenv path. |
@@ -51,9 +51,9 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | Flag | Default | Purpose |
 |---|---|---|
 | `ORCH_AUTH_TOKEN` | unset (tokenless mutable API) | Bearer token gating mutable methods — see posture above. |
-| `ORCH_REF_ALLOWED_ROOT` | unset | Filesystem sandbox root for `[ref:]` reads; reads outside are refused. |
+| `ORCH_REF_ALLOWED_ROOT` | unset | Explicit filesystem sandbox root(s) for `[ref:]` reads; reads outside allowed roots are refused. |
 | `ORCH_SESSION_IDS` | `""` | Optional per-target filter for the dashboard `/api/sessions` view AND the notify/wake endpoints. When **empty (default)** the filter is OFF (any target accepted — the API's real boundary is `ORCH_AUTH_TOKEN`/loopback); when **set**, an unlisted target raises 400. Does not affect task-completion enforcement. |
-| `ORCH_SESSION_ROOTS` | `""` | Maps sessions → repo roots for context. |
+| `ORCH_SESSION_ROOTS` | `""` | Maps sessions → repo roots for context; these roots are also auto-derived as allowed `[ref:]` roots. |
 | `ORCH_RULES_ROOT` | `""` | Directory of rule files surfaced in context. |
 
 ## 3. Public read-only dashboard (display only — cannot mutate or change enforcement)
@@ -73,7 +73,7 @@ force a pass), `ORCH_PRE_MERGE_REQUIRED_CHECKS` (consumed by the pre-merge gate)
 | Flag | Default | Enables |
 |---|---|---|
 | `ORCH_AWAIT_SIGNAL_GATES` | **ON** | Stop only on an exact `AWAIT:<kind>:<detail>` marker (prose waits rejected). OFF is *stricter*. |
-| `ORCH_WORKER_TASK_LIVENESS` (+`_TTL_SEC`) | **ON** | Advisory worker stall-detection / heartbeat (non-binding). |
+| `ORCH_WORKER_TASK_LIVENESS` / `ORCH_WORKER_TASK_LIVENESS_TTL_SEC` | **ON** / unset | Advisory worker stall-detection / heartbeat (non-binding). |
 | `ORCH_CHAT_ENABLED` | **ON** | Dashboard chat-to-session box. Chat is an injection vector; keep the mutable API loopback-only or protect non-loopback trusted-LAN deployments with `ORCH_AUTH_TOKEN`. Set `0`/`false` only to intentionally hide the chat route. |
 | `ORCH_WAKE_PACKET_ENDPOINT_ENABLED` (`ORCH_WAKE_PACKET_ENABLED` deprecated alias) | **ON** | Gates **only** the `/api/sessions/{id}/wake-packet` context endpoint. Session *waking* (`send_wake`) runs regardless. The old `ORCH_WAKE_PACKET_ENABLED` name is still read as a non-breaking alias but should not be used in new configs. |
 | `ORCH_DECISION_RECEIPTS_ENABLED` | **ON** | Fire-and-forget decision-receipt explainability records. They are emitted best-effort; no consumer is wired in this phase, and nothing blocks on them. |
@@ -84,13 +84,18 @@ force a pass), `ORCH_PRE_MERGE_REQUIRED_CHECKS` (consumed by the pre-merge gate)
 
 | Flag | Default | Effect |
 |---|---|---|
-| `CF_HANDOFF_PICKUP_POLL_BUDGET` / `CF_HANDOFF_VALIDATE_TIMEOUT_S` | `5` / `0.2` | Handoff helper tuning. The current stop-decision path does not call handoff validation. |
+| `CF_HANDOFF_PICKUP_POLL_BUDGET` | `5` | Handoff helper pickup polling. The current stop-decision path does not call handoff validation. |
 
 In-progress stop blocking is always active. Handoff validation helper code
 remains available for explicit handoff records/receipts, but pending/unacked
 handoffs are not a stop-decision blocker on current main. There is no
 per-session opt-in/opt-out path, no runtime flag file, and no Redis set that can
 disable in-progress stop blocking for selected sessions.
+
+Session pause is API/Redis state, not an environment flag: `POST /api/sessions/{session}/pause`
+sets `${NOTIFY_KEY_PREFIX:-taey}:<session>:pause`, with `pause_expires_at`
+creating a real expiring pause and no expiry creating an indefinite pause until
+`DELETE /api/sessions/{session}/pause`.
 
 > The in-progress stop-block is **soft**: a release valve force-allows the stop
 > after the same block is hit 3×, so a session cannot wedge permanently.

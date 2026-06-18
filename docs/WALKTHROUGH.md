@@ -16,7 +16,7 @@ so you can validate as you go. For reference detail see [README.md](../README.md
 ## Step 0 — Prerequisites
 
 - Python 3.10+ with the stdlib `venv` module (Debian/Ubuntu: `python3-venv`).
-- Redis and Neo4j reachable locally (defaults `127.0.0.1:6379` and `127.0.0.1:7687`), **or** let the
+- Redis and Neo4j reachable locally (the bundled local examples use `127.0.0.1:6379` and `127.0.0.1:7687`), **or** let the
   installer bring them up via Docker.
 - A sibling checkout of [`claude-code-fleet-notify`](https://github.com/palios-taey/claude-code-fleet-notify)
   (the hook/daemon/inbox layer), or `ORCH_NOTIFY_LIB_ROOT` pointing at one.
@@ -77,8 +77,10 @@ ORCH_DASHBOARD_URL=http://127.0.0.1:5002
 
 Enable the optional features you intend to use:
 
-- **Plan refs** (clickable file-slice pointers): `ORCH_REF_ALLOWED_ROOT=/abs/path/to/your/repos`
-  (one path, comma-list, or JSON list). Refs are *disabled* until this is set.
+- **Plan refs** (clickable file-slice pointers): set `ORCH_REF_ALLOWED_ROOT=/abs/path/to/your/repos`
+  (one path, comma-list, or JSON list), or set `ORCH_SESSION_ROOTS` so each session's
+  repo root is auto-derived as an allowed ref root. Refs are *disabled* until one of
+  those sources yields an allowed root.
 - **Dashboard network exposure**: default `ORCH_HOST=127.0.0.1` is the security boundary. Any
   non-loopback bind or LAN URL is an explicit, deliberate opt-in only for a trusted single-user
   network. There is no auth; do not accept untrusted callers.
@@ -126,7 +128,7 @@ behavior comes from. Full spec: [docs/PLAN_FORMAT.md](PLAN_FORMAT.md).
 | `[priority: <int>]` | optional | ranking among ready tasks (lower = higher) |
 | `[depends: a,b]` | optional | **the gate** — the task stays unready until `a` and `b` are `completed` |
 | `[tags: ...]` | optional | capability tags; gate tasks use `prodtest` / `audit` |
-| `[ref: path]` / `[ref: path:Lx-Ly]` | optional | clickable whole-file or file-slice pointer in the dashboard (needs `ORCH_REF_ALLOWED_ROOT`) |
+| `[ref: path]` / `[ref: path:Lx-Ly]` | optional | clickable whole-file or file-slice pointer in the dashboard (needs an allowed ref root from `ORCH_REF_ALLOWED_ROOT` or `ORCH_SESSION_ROOTS`) |
 
 **Design tip:** make the last tasks of a project its release gate (a `prodtest` task + an `audit`
 task) and wire everything else to `depends` into them. That is what makes "shippable" unreachable

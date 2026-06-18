@@ -42,6 +42,7 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
     resolve_ref_path,
 )
 from fleet_orchestrator.plan_loader import _META_BLOB_BYTE_CAP, _PLAN_LINE_BYTE_CAP, _WHOLE_FILE_REF_LINE_CAP, _parse_plan, _parse_ref  # noqa: E402
+from fleet_orchestrator.public_readonly import _pointer  # noqa: E402
 from fleet_orchestrator.tasks_api import app  # noqa: E402
 
 CFG = OrchConfig()
@@ -167,6 +168,20 @@ def main() -> int:
                 "bare-path-ref-parses-as-whole-file",
                 bare_ref == {"path": "whole.md", "l_start": 1, "l_end": _WHOLE_FILE_REF_LINE_CAP},
                 bare_ref,
+            )
+            l_range_ref = _parse_ref("src/module.py:L2-L3")
+            _assert(
+                "l-prefixed-range-ref-parses",
+                l_range_ref == {"path": "src/module.py", "l_start": 2, "l_end": 3},
+                l_range_ref,
+            )
+            rendered_pointer = _pointer({"path": "src/module.py", "l_start": 1, "l_end": 2})
+            rendered_ref = _parse_ref(rendered_pointer)
+            _assert(
+                "public-pointer-render-parse-roundtrip",
+                rendered_pointer == "module.py:L1-L2"
+                and rendered_ref == {"path": "module.py", "l_start": 1, "l_end": 2},
+                {"pointer": rendered_pointer, "parsed": rendered_ref},
             )
 
             bare_project_id = f"{PREFIX}-bare-ref"

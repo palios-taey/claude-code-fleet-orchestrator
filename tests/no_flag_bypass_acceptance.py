@@ -21,7 +21,6 @@ os.environ["CF_HANDOFF_ENFORCE"] = "0"
 os.environ["CF_HANDOFF_ENFORCE_SESSIONS"] = ""
 os.environ["CF_STOP_INPROGRESS"] = "0"
 os.environ["CF_STOP_INPROGRESS_SESSIONS"] = ""
-os.environ["CF_HANDOFF_VALIDATE_TIMEOUT_S"] = "1.0"
 if "ORCH_DOTENV" not in os.environ:
     for candidate in (
         ROOT / ".env",
