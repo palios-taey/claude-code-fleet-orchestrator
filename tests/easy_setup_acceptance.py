@@ -157,10 +157,15 @@ def main() -> int:
             stop_commands,
         )
 
-        expected_hooks = easy_setup._expected_hook_scripts(Path("/notify"))
+        expected_notify_root = tmp / "expected-notify"
+        (expected_notify_root / "hooks").mkdir(parents=True)
+        (expected_notify_root / "hooks" / "session_start.py").write_text("# ok\n", encoding="utf-8")
+        expected_hooks = easy_setup._expected_hook_scripts(expected_notify_root)
+        missing_session_start_hooks = easy_setup._expected_hook_scripts(tmp / "old-notify")
         _assert(
             "expected-hooks-include-session-start",
-            expected_hooks.get("SessionStart") == Path("/notify/hooks/session_start.py"),
+            expected_hooks.get("SessionStart") == (expected_notify_root / "hooks" / "session_start.py").resolve()
+            and "SessionStart" not in missing_session_start_hooks,
             expected_hooks,
         )
 

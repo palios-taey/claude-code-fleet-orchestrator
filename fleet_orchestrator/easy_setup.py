@@ -233,13 +233,16 @@ def _cleanup_managed_marker(settings: Dict[str, Any]) -> None:
 
 def _expected_hook_scripts(notify_root: Path) -> Dict[str, Path]:
     hooks_root = notify_root / "hooks"
-    return {
-        "SessionStart": (hooks_root / "session_start.py").resolve(),
+    expected = {
         "PreToolUse": (hooks_root / "pre_tool_activity.py").resolve(),
         "PostToolUse": (hooks_root / "check_notifications.py").resolve(),
         "Stop": (hooks_root / "stop_idle.py").resolve(),
         "UserPromptSubmit": (hooks_root / "prompt_activity.py").resolve(),
     }
+    session_start = hooks_root / "session_start.py"
+    if session_start.is_file():
+        expected = {"SessionStart": session_start.resolve(), **expected}
+    return expected
 
 
 def _remove_legacy_compact_hooks(settings: Dict[str, Any]) -> List[str]:
