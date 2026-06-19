@@ -22,6 +22,8 @@ You run several Claude Code or CLI sessions as a fleet. The orchestrator keeps t
 
 **Evidence-gated completion.** Terminal task updates are designed to require evidence. For normal task completion, provide a JSON object with real artifacts such as `commit_sha`, `gate`, and `production_observation`; the API rejects evidence-less terminal claims. Human-review gate tasks must be completed through the question/UI path, not by ordinary task status updates.
 
+**AI-Native / AI-First / AI-Speed.** The primary operator is an AI agent moving through local state at speed, so every surface should teach its own use in band. Errors, wake packets, CLI output, and API responses should say what the agent has, why it is blocked or ready, and what to do next. "See the docs" and "ask the operator" are bugs when the output could teach the next step directly. See [CONTRIBUTING.md](CONTRIBUTING.md#ai-native--ai-first--ai-speed) for the contributor rule and [PR #163](https://github.com/palios-taey/claude-code-fleet-orchestrator/pull/163) for the first worked example.
+
 ## Five-Minute Quickstart
 
 Prerequisites:
@@ -340,6 +342,7 @@ The authoritative list of acceptance scripts and the exact per-test environment 
 
 ## More Docs
 
+- [CONTRIBUTING.md](CONTRIBUTING.md): contributor design principle, including the AI-Native / AI-First / AI-Speed rule.
 - [SETUP.md](SETUP.md): operator install flow and lifecycle details.
 - [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md): guided first supervised loop.
 - [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md): markdown plan format.
