@@ -60,6 +60,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ORCH_RULES_ROOT` | `""` | Directory of rule files surfaced in context. |
 | `ORCH_IDENTITY_ROOT` | `""` | Optional trusted identity directory for wake packets. Companion sessions load full operator-supplied identity from this root; engineering sessions use the built-in lean role core. Supported layouts: Markdown files under companion or taey subdirectories, root-level companion/taey/IDENTITY/PERSONALITY Markdown files, or the corpus identity plus layer_1 layout. |
 | `ORCH_COMPANION_SESSIONS` | `taey,companion` | Comma-separated session ids that should receive companion identity instead of engineering identity. CLI peer suffixes (`-codex`, `-gemini`, `-grok`) remain engineering. |
+| `ORCH_ISMA_QUERY_API` / `ISMA_QUERY_API` | `http://127.0.0.1:8095` | Local ISMA API base used by the wake-packet memory ranker. The ranker calls `/v2/search` and fails back to term overlap if the service is unavailable. |
 
 ## 3. Public read-only dashboard (display only — cannot mutate or change enforcement)
 
@@ -81,6 +82,7 @@ force a pass), `ORCH_PRE_MERGE_REQUIRED_CHECKS` (consumed by the pre-merge gate)
 | `ORCH_WORKER_TASK_LIVENESS` / `ORCH_WORKER_TASK_LIVENESS_TTL_SEC` | **ON** / unset | Advisory worker stall-detection / heartbeat (non-binding). |
 | `ORCH_CHAT_ENABLED` | **ON** | Dashboard chat-to-session box. Chat is an injection vector; keep the mutable API loopback-only or protect non-loopback trusted-LAN deployments with `ORCH_AUTH_TOKEN`. Set `0`/`false` only to intentionally hide the chat route. |
 | `ORCH_WAKE_PACKET_ENDPOINT_ENABLED` (`ORCH_WAKE_PACKET_ENABLED` deprecated alias) | **ON** | Gates **only** the `/api/sessions/{id}/wake-packet` context endpoint. Session *waking* (`send_wake`) runs regardless. The old `ORCH_WAKE_PACKET_ENABLED` name is still read as a non-breaking alias but should not be used in new configs. |
+| `ORCH_ISMA_MEMORY_RANKER_ENABLED` / `ORCH_ISMA_MEMORY_RANKER_TOP_K` / `ORCH_ISMA_MEMORY_RANKER_TIMEOUT_SEC` | **ON** / `max(12, max_memory*4)` / `0.8` | Controls the wake-packet memory ranker. When enabled, local memory files are ranked with ISMA hybrid retrieval using rosetta summaries and motif overlap; failures fall back to deterministic term-overlap ranking. |
 | `ORCH_DECISION_RECEIPTS_ENABLED` | **ON** | Best-effort decision-receipt explainability records. They are written to Redis stream `orch:streams:decision_receipts` and surfaced by `taey-receipts list`; nothing blocks on them. |
 | `ORCH_LOOPS_ENABLED` | **ON** | The additive signal/clock/task-state loop API routes. When disabled, loop operations return `ok:false`, `enabled:false`, and `reason:"loops disabled"`; core stop/dispatch integration is deliberately not wired in this phase. |
 | `ORCH_GATE_TEMPLATE_ENABLED` | **ON** | Applies the forced sub-role gate template when a plan explicitly requests that template. |

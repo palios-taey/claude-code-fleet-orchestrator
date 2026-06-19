@@ -8,6 +8,8 @@ import os
 import re
 import secrets
 import subprocess
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -32,6 +34,9 @@ CORE_BUDGET_BYTES = 15 * 1024
 DEFAULT_MAX_MEMORY = 4
 DEFAULT_MAX_REFS_PER_TIER = 5
 MEMORY_BASE = Path.home() / ".claude" / "projects"
+DEFAULT_ISMA_QUERY_API = "http://127.0.0.1:8095"
+DEFAULT_ISMA_MEMORY_RANKER_TOP_K = 12
+DEFAULT_ISMA_MEMORY_RANKER_TIMEOUT_SEC = 0.8
 UNTRUSTED_NONCE_FIELD = "untrusted_data_nonce"
 DEFAULT_COMPANION_SESSIONS = ("taey", "companion")
 UNAVAILABLE_CONTEXT_MARKER = "UNAVAILABLE (context selection error)"
@@ -476,11 +481,20 @@ def _read_memory_files(memory_dirs: Iterable[Path]) -> List[Dict[str, Any]]:
             name = str(frontmatter.get("name") or path.stem)
             item_type = str(frontmatter.get("type") or metadata.get("type") or "reference")
             description = str(frontmatter.get("description") or "")
+            rosetta_summary = str(frontmatter.get("rosetta_summary") or metadata.get("rosetta_summary") or "")
+            motifs = _normalize_motifs(
+                frontmatter.get("dominant_motifs")
+                or frontmatter.get("motifs")
+                or metadata.get("dominant_motifs")
+                or metadata.get("motifs")
+            )
             stat = path.stat()
             items.append({
                 "name": name,
                 "type": item_type,
                 "description": description,
+                "rosetta_summary": rosetta_summary,
+                "dominant_motifs": sorted(motifs),
                 "content": body.strip(),
                 "path": str(path),
                 "sha256": _sha256_text(text),
@@ -529,23 +543,206 @@ def _unquote(value: str) -> str:
 
 
 def _rank_memory(items: List[Dict[str, Any]], task_text: str, max_memory: int) -> List[Dict[str, Any]]:
+    limit = max(0, max_memory)
+    if limit <= 0:
+        return []
     task_terms = _terms(task_text)
+    isma_hits = _fetch_isma_memory_hits(task_text, limit)
+    if isma_hits:
+        ranked = []
+        for item in items:
+            score, reason = _isma_memory_score(item, isma_hits, task_terms)
+            if score <= 0 and task_terms:
+                continue
+            ranker = "term_overlap" if reason == "term_overlap" else "isma_hybrid"
+            ranked.append((score, item.get("name", ""), _ranked_memory_item(item, ranker, score, reason)))
+        if ranked:
+            ranked.sort(key=lambda row: (-row[0], row[1]))
+            return [_public_memory_item(row[2]) for row in ranked[:limit]]
+
+    return _rank_memory_by_terms(items, task_terms, limit)
+
+
+def _rank_memory_by_terms(items: List[Dict[str, Any]], task_terms: set[str], limit: int) -> List[Dict[str, Any]]:
     ranked = []
     for item in items:
-        description_terms = _terms(f"{item.get('name', '')} {item.get('description', '')}")
-        score = len(task_terms & description_terms)
-        if item.get("name") == "MEMORY":
-            score += 1
+        score = _term_memory_score(item, task_terms)
         if score <= 0 and task_terms:
             continue
-        ranked.append((score, item.get("name", ""), item))
+        ranked.append((score, item.get("name", ""), _ranked_memory_item(item, "term_overlap", float(score), "name/description overlap")))
     ranked.sort(key=lambda row: (-row[0], row[1]))
-    selected = [row[2] for row in ranked[:max(0, max_memory)]]
+    selected = [row[2] for row in ranked[:limit]]
     return [_public_memory_item(item) for item in selected]
 
 
+def _term_memory_score(item: Dict[str, Any], task_terms: set[str]) -> int:
+    description_terms = _terms(f"{item.get('name', '')} {item.get('description', '')}")
+    score = len(task_terms & description_terms)
+    if item.get("name") == "MEMORY":
+        score += 1
+    return score
+
+
+def _fetch_isma_memory_hits(task_text: str, max_memory: int) -> List[Dict[str, Any]]:
+    if not task_text.strip() or not _isma_memory_ranker_enabled():
+        return []
+    endpoint = _isma_query_api_url().rstrip("/") + "/v2/search"
+    top_k = _isma_memory_ranker_top_k(max_memory)
+    timeout = _isma_memory_ranker_timeout()
+    payload = json.dumps({
+        "query": task_text[:4000],
+        "top_k": top_k,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            parsed = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (OSError, TimeoutError, ValueError, urllib.error.URLError):
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    hits = parsed.get("tiles") or parsed.get("results") or parsed.get("items") or []
+    if not isinstance(hits, list):
+        return []
+    return [hit for hit in hits if isinstance(hit, dict)]
+
+
+def _isma_query_api_url() -> str:
+    return (
+        os.environ.get("ORCH_ISMA_QUERY_API")
+        or os.environ.get("ISMA_QUERY_API")
+        or DEFAULT_ISMA_QUERY_API
+    )
+
+
+def _isma_memory_ranker_enabled() -> bool:
+    raw = os.environ.get("ORCH_ISMA_MEMORY_RANKER_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _isma_memory_ranker_top_k(max_memory: int) -> int:
+    default = max(DEFAULT_ISMA_MEMORY_RANKER_TOP_K, max_memory * 4)
+    try:
+        return max(1, int(os.environ.get("ORCH_ISMA_MEMORY_RANKER_TOP_K", "").strip() or default))
+    except ValueError:
+        return default
+
+
+def _isma_memory_ranker_timeout() -> float:
+    try:
+        timeout = float(os.environ.get("ORCH_ISMA_MEMORY_RANKER_TIMEOUT_SEC", "").strip() or DEFAULT_ISMA_MEMORY_RANKER_TIMEOUT_SEC)
+    except ValueError:
+        timeout = DEFAULT_ISMA_MEMORY_RANKER_TIMEOUT_SEC
+    return max(0.05, timeout)
+
+
+def _isma_memory_score(item: Dict[str, Any], hits: List[Dict[str, Any]], task_terms: set[str]) -> Tuple[float, str]:
+    item_terms = _memory_index_terms(item)
+    item_motifs = _memory_motifs(item)
+    best_score = 0.0
+    best_reason = ""
+    for hit in hits:
+        hit_terms = _terms(_hit_rosetta_text(hit))
+        hit_motifs = _hit_motifs(hit)
+        motif_overlap = item_motifs & hit_motifs
+        if item_motifs and hit_motifs and not motif_overlap:
+            continue
+        overlap = item_terms & hit_terms
+        path_score = 1 if _memory_hit_path_matches(item, hit) else 0
+        if not overlap and not motif_overlap and not path_score:
+            continue
+        hit_weight = 1.0 + _floatish(hit.get("score"), 0.0)
+        score = hit_weight * (len(overlap) + (3 * len(motif_overlap)) + (8 * path_score))
+        if score > best_score:
+            details = []
+            if overlap:
+                details.append(f"rosetta_terms={len(overlap)}")
+            if motif_overlap:
+                details.append(f"motifs={','.join(sorted(motif_overlap))}")
+            if path_score:
+                details.append("source_path")
+            best_score = score
+            best_reason = ";".join(details) or "isma_hit"
+    term_score = _term_memory_score(item, task_terms)
+    if best_score > 0:
+        return best_score + (term_score * 0.01), best_reason
+    if term_score > 0 or not task_terms:
+        return float(term_score), "term_overlap"
+    return 0.0, ""
+
+
+def _memory_index_terms(item: Dict[str, Any]) -> set[str]:
+    return _terms(" ".join([
+        str(item.get("name") or ""),
+        str(item.get("description") or ""),
+        str(item.get("rosetta_summary") or ""),
+        str(item.get("content") or "")[:2000],
+    ]))
+
+
+def _hit_rosetta_text(hit: Dict[str, Any]) -> str:
+    return " ".join([
+        str(hit.get("rosetta_summary") or ""),
+        str(hit.get("summary") or ""),
+        str(hit.get("content") or "")[:2000],
+    ])
+
+
+def _memory_motifs(item: Dict[str, Any]) -> set[str]:
+    return _normalize_motifs(item.get("dominant_motifs") or item.get("motifs"))
+
+
+def _hit_motifs(hit: Dict[str, Any]) -> set[str]:
+    return _normalize_motifs(hit.get("dominant_motifs") or hit.get("motifs"))
+
+
+def _normalize_motifs(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, dict):
+        values = list(value.keys())
+    elif isinstance(value, (list, tuple, set)):
+        values = list(value)
+    else:
+        values = re.split(r"[,;\s\[\]\"]+", str(value))
+    return {str(raw).strip().lower() for raw in values if str(raw).strip()}
+
+
+def _memory_hit_path_matches(item: Dict[str, Any], hit: Dict[str, Any]) -> bool:
+    memory_path = str(item.get("path") or "")
+    if not memory_path:
+        return False
+    for key in ("source_file", "path", "file_path"):
+        source = str(hit.get(key) or "")
+        if source and (source == memory_path or memory_path.endswith(source) or source.endswith(memory_path)):
+            return True
+    return False
+
+
+def _ranked_memory_item(item: Dict[str, Any], ranker: str, score: float, reason: str) -> Dict[str, Any]:
+    ranked = dict(item)
+    ranked["ranker"] = ranker
+    ranked["rank_score"] = round(float(score), 6)
+    ranked["rank_reason"] = reason
+    return ranked
+
+
+def _floatish(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _public_memory_item(item: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    public = {
         "name": item.get("name", ""),
         "type": item.get("type", "reference"),
         "description": item.get("description", ""),
@@ -554,8 +751,15 @@ def _public_memory_item(item: Dict[str, Any]) -> Dict[str, Any]:
         "sha256": item.get("sha256", ""),
         "mtime_ns": item.get("mtime_ns", 0),
         "size": item.get("size", 0),
+        "ranker": item.get("ranker", ""),
+        "rank_score": item.get("rank_score", 0),
+        "rank_reason": item.get("rank_reason", ""),
     }
-
+    if item.get("rosetta_summary"):
+        public["rosetta_summary"] = item.get("rosetta_summary", "")
+    if item.get("dominant_motifs"):
+        public["dominant_motifs"] = item.get("dominant_motifs", [])
+    return public
 
 def _select_rules(session: str, work: Dict[str, Any], summary: Optional[Dict[str, Any]],
                   task_text: str, scoped_env: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
@@ -720,6 +924,9 @@ def _build_snapshot(session: str, cli: str, task_id: Optional[str], work: Dict[s
                 "sha256": item.get("sha256", ""),
                 "mtime_ns": item.get("mtime_ns", 0),
                 "size": item.get("size", 0),
+                "ranker": item.get("ranker", ""),
+                "rank_score": item.get("rank_score", 0),
+                "rank_reason": item.get("rank_reason", ""),
             }
             for item in memory
         ],

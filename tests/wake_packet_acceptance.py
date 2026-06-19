@@ -389,6 +389,86 @@ def _memory_traversal_contract() -> None:
             assembler.MEMORY_BASE = old_memory_base
 
 
+def _isma_memory_ranker_contract() -> None:
+    class _FakeIsmaResponse:
+        def __init__(self, payload: bytes):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return self.payload
+
+    items = [
+        {
+            "name": "lexical trap",
+            "type": "reference",
+            "description": "dispatch handoff receipt",
+            "rosetta_summary": "dispatch handoff receipt requires scoped acknowledgement",
+            "dominant_motifs": ["public-release"],
+            "content": "This should only win when ISMA contributes no usable hit.",
+            "path": "/tmp/lexical.md",
+            "sha256": "lex",
+            "mtime_ns": 1,
+            "size": 10,
+        },
+        {
+            "name": "semantic memory",
+            "type": "reference",
+            "description": "standing context",
+            "rosetta_summary": "dispatch handoff receipt requires scoped acknowledgement",
+            "dominant_motifs": ["orchestration"],
+            "content": "This is the ISMA-selected memory.",
+            "path": "/tmp/semantic.md",
+            "sha256": "sem",
+            "mtime_ns": 2,
+            "size": 10,
+        },
+    ]
+    hits = [
+        {
+            "rosetta_summary": "dispatch handoff receipt requires scoped acknowledgement",
+            "dominant_motifs": ["orchestration"],
+            "score": 2.0,
+        }
+    ]
+
+    with mock.patch.object(assembler, "_fetch_isma_memory_hits", return_value=hits):
+        selected = assembler._rank_memory(items, "dispatch handoff receipt", max_memory=1)
+    _check(
+        "ISMA memory ranker uses rosetta summary plus motif filter",
+        selected and selected[0]["name"] == "semantic memory" and selected[0]["ranker"] == "isma_hybrid",
+        selected,
+    )
+    _check(
+        "ISMA memory ranker records rank provenance",
+        selected and "motifs=orchestration" in selected[0].get("rank_reason", ""),
+        selected,
+    )
+
+    with mock.patch.object(assembler, "_fetch_isma_memory_hits", return_value=[]):
+        fallback = assembler._rank_memory(items, "dispatch handoff receipt", max_memory=1)
+    _check(
+        "empty ISMA hits preserve previous term-overlap fallback",
+        fallback and fallback[0]["name"] == "lexical trap" and fallback[0]["ranker"] == "term_overlap",
+        fallback,
+    )
+    for label, payload in (("bare-list", b"[]"), ("null", b"null")):
+        with mock.patch.object(assembler.urllib.request, "urlopen", return_value=_FakeIsmaResponse(payload)):
+            malformed_fallback = assembler._rank_memory(items, "dispatch handoff receipt", max_memory=1)
+        _check(
+            f"non-dict ISMA {label} response preserves term-ranked fallback memory",
+            bool(malformed_fallback)
+            and malformed_fallback[0]["name"] == "lexical trap"
+            and malformed_fallback[0]["ranker"] == "term_overlap",
+            malformed_fallback,
+        )
+
+
 def main() -> int:
     _endpoint_contract()
     _assembler_contract()
@@ -397,6 +477,7 @@ def main() -> int:
     _context_selection_error_contract()
     _empty_work_context_contract()
     _memory_traversal_contract()
+    _isma_memory_ranker_contract()
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
         return 1

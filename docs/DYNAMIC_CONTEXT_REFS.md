@@ -23,6 +23,29 @@ This is a clear-then-reinject pattern, not hidden long-context magic. The packet
 
 The hook path uses the same endpoint. `SessionStart` and `UserPromptSubmit` emit the packet as additional hook context; `PostToolUse` appends it after drained notifications. Hook delivery is fail-open: if the local API is down or the endpoint is disabled, the hook emits no packet context rather than blocking the operator.
 
+## Memory Ranking
+
+Wake-packet memory is read from the selected session/project memory directories, then ranked before rendering. The primary ranker queries the local ISMA V2 search API (`/v2/search`) with the current task text and compares returned rosetta summaries, when present, against each local memory item's name, description, optional `rosetta_summary`, and body excerpt. If both the memory item and the ISMA hit declare motifs, the hit only contributes to that item when at least one motif overlaps. This keeps a semantically similar memory file from winning on the wrong operating motif. If a deployed ISMA index returns only content and source metadata for a hit, the ranker still uses that hit text and keeps motif filtering inactive for that hit.
+
+If ISMA is unavailable, disabled, times out, or returns no usable hits, the assembler falls back to the previous deterministic name/description term-overlap ranker. Selected memory items carry `ranker`, `rank_score`, and `rank_reason` metadata, and the packet snapshot records the same rank provenance beside each selected memory file fingerprint.
+
+Memory frontmatter can supply:
+
+```yaml
+---
+name: MEMORY
+description: standing orchestration context
+rosetta_summary: supervisor handoff receipts and scoped dispatch context
+dominant_motifs: orchestration, handoff
+---
+```
+
+Controls:
+
+- `ORCH_ISMA_MEMORY_RANKER_ENABLED=0` disables the ISMA ranker and uses term-overlap only.
+- `ORCH_ISMA_QUERY_API` overrides the ISMA API base URL; `ISMA_QUERY_API` is also honored. The default is `http://127.0.0.1:8095`.
+- `ORCH_ISMA_MEMORY_RANKER_TOP_K` and `ORCH_ISMA_MEMORY_RANKER_TIMEOUT_SEC` control query breadth and fail-open timeout.
+
 ## Identity Tier
 
 Every wake packet renders `## Identity` after `## Operating` and before `## Context Refs`.
