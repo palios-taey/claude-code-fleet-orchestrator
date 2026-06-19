@@ -176,7 +176,7 @@ def _api_required_field_contract(client: TestClient) -> None:
         )
     with mock.patch.object(tasks_api, "_ensure_registered_session", return_value=None):
         cases.append(
-            ("notify message", client.post("/api/sessions/conductor/notify", json={}), 400, ["message", "POST /api/sessions/conductor/notify", "taey-notify"])
+        ("notify message", client.post("/api/sessions/session-1/notify", json={}), 400, ["message", "POST /api/sessions/session-1/notify", "taey-notify"])
         )
     for label, response, status, needles in cases:
         _assert_detail(label, response, status, needles)

@@ -1150,7 +1150,7 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
             detail=_non_empty_path_detail(
                 "target",
                 endpoint="POST /api/sessions/{target}/notify",
-                example="POST /api/sessions/conductor/notify",
+                example="POST /api/sessions/session-1/notify",
             ),
         )
 
@@ -1299,7 +1299,7 @@ def session_wake_packet(
             detail=_non_empty_path_detail(
                 "session_id",
                 endpoint="GET /api/sessions/{session_id}/wake-packet?cli=codex",
-                example="GET /api/sessions/conductor-codex/wake-packet?cli=codex",
+                example="GET /api/sessions/session-1-codex/wake-packet?cli=codex",
             ),
         )
 
