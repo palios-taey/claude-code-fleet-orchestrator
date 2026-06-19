@@ -146,6 +146,56 @@ LOOP_DECLARATION_NEXT_STEP = (
     '"trigger":{"kind":"manual"},"cycle_state":{"current_step":"<step>"},'
     '"stop_condition":{"kind":"manual","description":"<when to stop>"}}.'
 )
+TASK_CREATE_NEXT_STEP = (
+    'Retry POST /api/task/create body {"description":"<task description>",'
+    '"from":"<session-id>","phase_id":"<phase-id>"}; use `taey-task create '
+    "'<task description>'` for default-project tasks."
+)
+PROJECT_CREATE_NEXT_STEP = (
+    'Retry POST /api/projects body {"id":"<project-id>","name":"<name>",'
+    '"supervisor":"<session-id>","priority":0}; or ingest markdown with '
+    "`taey-plan ingest <plan.md> --supervisor <session-id>`."
+)
+PROJECT_USER_STOP_CONDITIONS_NEXT_STEP = (
+    'Use POST /api/projects/{project_id}/user-stop-conditions body '
+    '{"conditions":["<stop condition>"]}; inspect with GET '
+    "/api/projects/{project_id}/user-stop-conditions."
+)
+PHASE_CREATE_NEXT_STEP = (
+    'Retry POST /api/projects/{project_id}/phases body {"id":"<plain-phase-id>",'
+    '"name":"<phase name>","order":0}; declared ids must be plain, not '
+    "project::phase."
+)
+PLAN_LOAD_NEXT_STEP = (
+    'Retry POST /api/projects/load-md body {"md_text":"# Project: <project-id> - '
+    '<name>\\n...","supervisor":"<session-id>","priority":0}; or run '
+    "`taey-plan ingest <plan.md> --supervisor <session-id>`."
+)
+PROJECT_STOP_REASON_NEXT_STEP = (
+    "Use `taey-stop-reason set <project-id> --condition <label> --detail <why> "
+    '--session <session-id>` or POST /api/projects/{project_id}/stop-reason body '
+    '{"condition_id":"<id>","condition_version":1,"detail":"<why>",'
+    '"set_by":"<session-id>"}; inspect stop conditions with '
+    "`taey-plan stop-conditions <project-id> get`."
+)
+PROJECT_CONDITION_EDIT_NEXT_STEP = (
+    'Use PATCH /api/projects/{project_id}/conditions/{condition_id} body '
+    '{"label":"<replacement stop condition label>","edited_by":"<session-id>"}; '
+    "inspect condition ids with `taey-plan stop-conditions <project-id> get`."
+)
+LOOP_LOOKUP_NEXT_STEP = (
+    'Declare a loop with POST /api/loops/declare body {"id":"<loop-id>",...}; '
+    "then retry the loop endpoint with that loop_id."
+)
+LOOP_ADVANCE_NEXT_STEP = (
+    'Record the required artifact for the loop step, then retry POST '
+    '/api/loops/{loop_id}/advance body {"step":"<step name>"}; inspect loop state '
+    "with GET /api/loops/{loop_id}/should-stop."
+)
+WAKE_PACKET_CLI_NEXT_STEP = (
+    "Use GET /api/sessions/{session_id}/wake-packet?cli=claude or "
+    "GET /api/sessions/{session_id}/wake-packet?cli=codex."
+)
 
 
 def _terminal_evidence_next_step(task_id: str, status: str) -> str:
@@ -482,7 +532,10 @@ async def create(req: Request) -> Dict[str, Any]:
     if priority < 0:
         raise HTTPException(
             status_code=400,
-            detail=f"priority must be >= 0 (got {priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
+            detail=(
+                f"priority must be >= 0 (got {priority}). Negative values were a 2026-05 "
+                f"migration artifact and are no longer accepted. Next step: {TASK_CREATE_NEXT_STEP}"
+            ),
         )
     sender = data.get("from", "unknown")
     # If owner not explicitly set, default to creator so the task is not orphaned.
@@ -513,13 +566,13 @@ async def create(req: Request) -> Dict[str, Any]:
             config=cfg,
         )
     except CompletionEvidenceError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=f"{exc} Next step: {TASK_CREATE_NEXT_STEP}")
     except TaskParentNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=404, detail=f"{exc} Next step: {TASK_CREATE_NEXT_STEP}")
     except TaskIdCollisionError as exc:
         # Fail-closed (bad/orphan/fused phase_id, or an owned id) -> 409, not a raw 500 (R5 audit:
         # match the /phases + /plan routes which already map this to 4xx).
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=f"{exc} Next step: {TASK_CREATE_NEXT_STEP}")
 
     return {"ok": True, "task_id": task_id, "from": sender, "owner": owner, "task_type": task_type}
 
@@ -842,13 +895,19 @@ async def create_project_endpoint(req: Request) -> Dict[str, Any]:
         )
     supervisor = (data.get("supervisor") or "").strip()
     if not supervisor or supervisor == "unassigned":
-        raise HTTPException(status_code=400, detail="supervisor must be non-empty and not 'unassigned'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"supervisor must be non-empty and not 'unassigned'. Next step: {PROJECT_CREATE_NEXT_STEP}",
+        )
     # External audit amendment #3: refuse negative project priority.
     project_priority = data.get("priority")
     if project_priority is not None and int(project_priority) < 0:
         raise HTTPException(
             status_code=400,
-            detail=f"priority must be >= 0 (got {project_priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
+            detail=(
+                f"priority must be >= 0 (got {project_priority}). Negative values were a "
+                f"2026-05 migration artifact and are no longer accepted. Next step: {PROJECT_CREATE_NEXT_STEP}"
+            ),
         )
     cfg = _cfg()
     refs = data.get("refs") if isinstance(data.get("refs"), list) else None
@@ -889,7 +948,10 @@ async def set_project_user_stop_conditions_endpoint(project_id: str, req: Reques
     data = await req.json()
     conditions = data.get("conditions")
     if not isinstance(conditions, list) or any(not isinstance(item, str) for item in conditions):
-        raise HTTPException(status_code=400, detail="conditions must be a list of strings")
+        raise HTTPException(
+            status_code=400,
+            detail=f"conditions must be a list of strings. Next step: {PROJECT_USER_STOP_CONDITIONS_NEXT_STEP}",
+        )
     try:
         saved = set_project_user_stop_conditions(
             project_id,
@@ -923,7 +985,7 @@ async def create_phase_endpoint(project_id: str, req: Request) -> Dict[str, Any]
     try:
         scoped_phase_id = scope_declared_id(project_id, phase_id)
     except PlanIdError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=f"{exc} Next step: {PHASE_CREATE_NEXT_STEP}")
     cfg = _cfg()
     refs = data.get("refs") if isinstance(data.get("refs"), list) else None
     source_path = _validated_source_path(
@@ -943,7 +1005,7 @@ async def create_phase_endpoint(project_id: str, req: Request) -> Dict[str, Any]
             config=cfg,
         )
     except TaskIdCollisionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=f"{exc} Next step: {PHASE_CREATE_NEXT_STEP}")
     return {"ok": True, "phase_id": pid}
 
 
@@ -967,13 +1029,22 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
         )
     supervisor = (data.get("supervisor") or "").strip()
     if supervisor in {"", "unassigned", "unknown"}:
-        raise HTTPException(status_code=400, detail="supervisor required for non-exempt project ingest (must not be unassigned or unknown)")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "supervisor required for non-exempt project ingest (must not be unassigned "
+                f"or unknown). Next step: {PLAN_LOAD_NEXT_STEP}"
+            ),
+        )
     # External audit amendment #3: refuse negative project priority on plan ingest.
     ingest_priority = data.get("priority")
     if ingest_priority is not None and int(ingest_priority) < 0:
         raise HTTPException(
             status_code=400,
-            detail=f"priority must be >= 0 (got {ingest_priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
+            detail=(
+                f"priority must be >= 0 (got {ingest_priority}). Negative values were a "
+                f"2026-05 migration artifact and are no longer accepted. Next step: {PLAN_LOAD_NEXT_STEP}"
+            ),
         )
     cfg = _cfg()
     try:
@@ -995,9 +1066,9 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
             config=cfg,
         )
     except (PlanIdError, PlanTerminalStatusError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=f"{exc} Next step: {PLAN_LOAD_NEXT_STEP}")
     except TaskIdCollisionError as exc:        # id owned by another project — refuse adoption
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=f"{exc} Next step: {PLAN_LOAD_NEXT_STEP}")
 
 
 @app.post("/api/projects/{project_id}/complete")
@@ -1164,9 +1235,9 @@ async def set_project_stop_reason_endpoint(project_id: str, req: Request) -> Dic
             config=_cfg(),
         )
     except ReadyWorkConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=f"{exc} Next step: {PROJECT_STOP_REASON_NEXT_STEP}")
     except (ConditionValidationError, TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=f"{exc} Next step: {PROJECT_STOP_REASON_NEXT_STEP}")
     except ProjectNotFoundError:
         raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
     return {
@@ -1251,7 +1322,7 @@ async def edit_project_condition_endpoint(project_id: str, condition_id: str, re
     try:
         condition = edit_project_condition(project_id, condition_id, label, edited_by=data.get("edited_by") or data.get("from") or "unknown", config=_cfg())
     except ConditionValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=f"{exc} Next step: {PROJECT_CONDITION_EDIT_NEXT_STEP}")
     except ProjectNotFoundError:
         raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
     return {"ok": True, "condition": condition}
@@ -1391,7 +1462,7 @@ async def loop_advance(loop_id: str, req: Request) -> Dict[str, Any]:
     store = Neo4jCycleStateStore(config=cfg)
     raw_loop = store.load(loop_id)
     if raw_loop is None:
-        raise HTTPException(status_code=404, detail=f"Loop {loop_id} not found")
+        raise HTTPException(status_code=404, detail=f"Loop {loop_id} not found. Next step: {LOOP_LOOKUP_NEXT_STEP}")
     try:
         return advance_loop_step(
             raw_loop,
@@ -1402,7 +1473,7 @@ async def loop_advance(loop_id: str, req: Request) -> Dict[str, Any]:
             wake_message=data.get("wake_message"),
         )
     except ArtifactNotObservedError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=f"{exc} Next step: {LOOP_ADVANCE_NEXT_STEP}")
     except LoopDeclarationError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc), "next_step": LOOP_DECLARATION_NEXT_STEP})
     except LoopPersistenceError as exc:
@@ -1415,7 +1486,7 @@ def loop_should_stop(loop_id: str) -> Dict[str, Any]:
         return disabled_loop_response()
     raw_loop = Neo4jCycleStateStore(config=_cfg()).load(loop_id)
     if raw_loop is None:
-        raise HTTPException(status_code=404, detail=f"Loop {loop_id} not found")
+        raise HTTPException(status_code=404, detail=f"Loop {loop_id} not found. Next step: {LOOP_LOOKUP_NEXT_STEP}")
     try:
         loop = Loop.declare(raw_loop)
     except LoopDeclarationError as exc:
@@ -1457,7 +1528,10 @@ def session_wake_packet(
 
     cli_key = cli.lower().strip()
     if cli_key not in VALID_CLIS:
-        raise HTTPException(status_code=400, detail=f"cli must be one of {', '.join(sorted(VALID_CLIS))}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"cli must be one of {', '.join(sorted(VALID_CLIS))}. Next step: {WAKE_PACKET_CLI_NEXT_STEP}",
+        )
     if not session_id.strip():
         raise HTTPException(
             status_code=400,
