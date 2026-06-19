@@ -2,6 +2,8 @@
 
 This file is for AI agents modifying or operating this repository. The README is the adopter-facing product guide; this file is the codebase working map and invariants checklist.
 
+Review agents auditing claims should read in this order: `AUDIT.md` -> `docs/CAPABILITIES.md` -> `docs/CONFIGURATION.md`. Treat those documents as claims to verify against source, not as proof.
+
 ## Product Shape
 
 `claude-code-fleet-orchestrator` is a local-first, single-user orchestrator for one operator running multiple Claude Code or CLI agent sessions. It is not a hosted service, not a multi-tenant system, and not a SaaS control plane.

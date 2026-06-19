@@ -1,3 +1,5 @@
+Auditing the claims? Start at AUDIT.md.
+
 # claude-code-fleet-orchestrator
 
 `claude-code-fleet-orchestrator` is a local-first, single-user orchestration layer for a fleet of Claude Code or CLI agent sessions running on one operator's machine. It is not a hosted service, not a multi-tenant team server, and not a SaaS control plane. The default posture is private: the mutable API and dashboard bind to `127.0.0.1` unless the operator explicitly sets `ORCH_HOST` to another interface.
@@ -278,7 +280,7 @@ curl -s "http://127.0.0.1:5002/api/sessions/worker-codex/wake-packet?cli=codex"
 
 The response includes `packet` plus `packet_meta` with a provenance hash, size report, snapshot fingerprints, and the generating commit.
 
-When `claude-code-fleet-notify` hooks are installed, the same packet is delivered as hook context on `SessionStart` and `UserPromptSubmit`; `PostToolUse` appends it after drained notifications. If the endpoint is disabled or unavailable, the hooks fail open and emit no wake-packet context.
+When `claude-code-fleet-notify` hooks are installed, the same packet is delivered as hook context on `SessionStart` and `UserPromptSubmit`; `PostToolUse` appends it after drained notifications. If the endpoint is disabled or unavailable, the hooks fail open and emit no wake-packet context. Consumers MUST check body[ok]; HTTP 200 alone does not imply context was assembled.
 
 ## Scope
 
@@ -348,4 +350,5 @@ The authoritative list of acceptance scripts and the exact per-test environment 
 - [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md): markdown plan format.
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every environment flag the orchestrator reads — default, what it gates, and its classification. Core accountability (completion-evidence, supervisor keep-going) is hardcoded with no disable flag.
 - [AUDIT.md](AUDIT.md): reviewer entry point — audit the code against its stated claims (for any code review of this repo).
+- [OPERATIONAL_DISCIPLINE.md](OPERATIONAL_DISCIPLINE.md): issue-handling posture for public-repo incident response and fleet-wide blocking.
 - [SECURITY.md](SECURITY.md): security posture and reporting.
