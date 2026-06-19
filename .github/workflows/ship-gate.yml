@@ -77,6 +77,10 @@ jobs:
         run: |
           python scripts/verify-exception-classification.py
           python tests/exception_classification_acceptance.py
+      - name: Ship-gate — AI-native agent-facing surfaces are registered
+        run: |
+          python scripts/verify-ai-native-coherence.py
+          python tests/ai_native_coherence_acceptance.py
       - name: Ship-gate — installed CLIs stay live-linked after editable install
         run: python tests/cli_entrypoint_drift_acceptance.py
       - name: Ship-gate — local bind is the mutable API security boundary

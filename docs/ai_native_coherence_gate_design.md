@@ -1,6 +1,6 @@
 # AI-Native Surface Coherence Gate Design
 
-Status: design only. This document specifies the gate that should be implemented by the follow-on `anc-implement` task. It does not add the verifier, migrate the registry, or wire CI.
+Status: implemented by `scripts/verify-ai-native-coherence.py` and wired into ship-gate. This document records the design contract for the verifier, registry, and acceptance teeth.
 
 ## Problem
 

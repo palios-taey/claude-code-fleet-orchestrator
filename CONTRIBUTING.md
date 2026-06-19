@@ -11,6 +11,7 @@ For contributors, that means:
 - Error messages, wake packets, CLI output, and API responses should say what the agent has, what state it is in, and what to do next.
 - "See the docs" and "ask the operator" are bugs when the product can provide the next action directly.
 - Teaching examples MUST use generic placeholders such as `session-1`, `session-1-codex`, and `reviewer-1`, never operator or fleet identities; run `python3 tests/fleet_identity_deumbilical_acceptance.py` before submitting any teaching PR because examples are the prime operator-literal regression vector.
+- Agent-facing error, wake, API, and CLI surfaces are registry-gated. Run `python scripts/verify-ai-native-coherence.py` and `python tests/ai_native_coherence_acceptance.py` before submitting a PR that changes those surfaces; new `needs-fix` rows are not allowed without explicit reviewed baseline movement.
 - The standing test is: if an AI hits this with no surrounding chat context, does the output itself say what it has and what to do next?
 - A legitimate participant must never be rejected from its own work. Supervisor-only capabilities can be gated, but self-service status surfaces such as current work and next-ready work must remain available to the participant.
 - The felt litmus is: designed for me, by me; fixes what frustrates my user about me; trivial to set up.
