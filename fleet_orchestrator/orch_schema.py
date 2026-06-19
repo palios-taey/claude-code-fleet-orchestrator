@@ -405,28 +405,38 @@ def _session_root_dirs() -> List[str]:
     return list(_session_root_map().values())
 
 
-def _session_root_aliases(session_id: str) -> List[str]:
-    raw = (session_id or "").strip()
-    normalized = _normalize_owner_session(raw)
-    aliases: List[str] = []
-    for value in (raw, normalized):
-        if value and value not in aliases:
-            aliases.append(value)
-    for suffix in ("-codex", "-gemini", "-grok", "-claude"):
-        if normalized:
-            value = f"{normalized}{suffix}"
-            if value not in aliases:
-                aliases.append(value)
-    return aliases
+def supervisor_access_resolution(
+    session_id: Optional[str],
+    *,
+    config: Optional[OrchConfig] = None,
+    registered_sessions: Optional[List[str]] = None,
+    session_roots: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    session = (session_id or "").strip()
+    registered = set(registered_sessions if registered_sessions is not None else (config or OrchConfig()).session_ids)
+    roots = session_roots if session_roots is not None else _session_root_map()
+    root = roots.get(session) if session in registered else None
+    return {
+        "session": session,
+        "registered": bool(session and session in registered),
+        "plan_ref_root": root or "",
+    }
 
 
-def session_ref_root(session_id: Optional[str]) -> Optional[str]:
-    roots = _session_root_map()
-    for alias in _session_root_aliases(session_id or ""):
-        root = roots.get(alias)
-        if root:
-            return root
-    return None
+def session_ref_root(
+    session_id: Optional[str],
+    *,
+    config: Optional[OrchConfig] = None,
+    registered_sessions: Optional[List[str]] = None,
+    session_roots: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    access = supervisor_access_resolution(
+        session_id,
+        config=config,
+        registered_sessions=registered_sessions,
+        session_roots=session_roots,
+    )
+    return access["plan_ref_root"] or None
 
 
 def _format_registered_sessions(sessions: List[str]) -> str:
@@ -443,19 +453,28 @@ def session_registration_error_detail(session_id: str, config: Optional[OrchConf
         f"registered: {_format_registered_sessions(registered)}; "
         "supervisors are identified by tmux session name. "
         "Rename this tmux session to a registered name, or update ORCH_SESSION_IDS "
-        "and ORCH_SESSION_ROOTS so the names match. You already have access when "
-        "the session name matches local registration."
+        "and ORCH_SESSION_ROOTS so the names match. No separate access request is "
+        "needed when the session name matches local registration."
     )
 
 
-def source_path_ref_root_error(raw_path: str, session_id: Optional[str]) -> str:
+def source_path_ref_root_error(
+    raw_path: str,
+    session_id: Optional[str],
+    config: Optional[OrchConfig] = None,
+) -> str:
     session = (session_id or "").strip() or "<unknown>"
-    root = session_ref_root(session)
-    if root:
+    access = supervisor_access_resolution(session, config=config)
+    if access["plan_ref_root"]:
         return (
-            f"You are session {session}; your plan/ref root is {root}; "
+            f"You are session {session}; your plan/ref root is {access['plan_ref_root']}; "
             f"put the file under it or pass a path there. You already have access - "
             f"you do not request it. Rejected source_path outside allowed ref roots: {raw_path}"
+        )
+    if not access["registered"]:
+        return (
+            f"{session_registration_error_detail(session, config)} "
+            f"Rejected source_path outside allowed ref roots: {raw_path}"
         )
     roots = _session_root_map()
     configured = _format_registered_sessions(list(roots.keys()))
@@ -518,6 +537,7 @@ def validate_source_path_for_refs(
     source_path: Optional[str],
     refs_present: bool,
     session_id: Optional[str] = None,
+    config: Optional[OrchConfig] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     raw_path = str(source_path or "").strip()
     if not refs_present:
@@ -537,7 +557,7 @@ def validate_source_path_for_refs(
     except Exception as exc:
         return None, f"invalid source_path ({exc.__class__.__name__})"
     if not _path_within_any_root(resolved_source, allowed_roots):
-        return None, source_path_ref_root_error(raw_path, session_id)
+        return None, source_path_ref_root_error(raw_path, session_id, config=config)
     return str(resolved_source), None
 
 

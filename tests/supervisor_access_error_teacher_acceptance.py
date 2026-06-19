@@ -69,8 +69,11 @@ def main() -> int:
             )
             _set_env("ORCH_REF_ALLOWED_ROOT", "", saved)
 
+            from fleet_orchestrator.config import OrchConfig
+            from fleet_orchestrator.orch_schema import session_ref_root, supervisor_access_resolution
             from fleet_orchestrator.tasks_api import app
 
+            cfg = OrchConfig()
             client = TestClient(app)
 
             md = """# Project: demo - Demo
@@ -95,6 +98,24 @@ Do it.
             _check("ingest error names session root", str(plan_root) in detail, detail)
             _check("ingest error says do not request access", "You already have access" in detail, detail)
             _check("ingest error keeps rejected path", str(bad_plan) in detail, detail)
+            _check("registered session resolves exact root", session_ref_root("registered-supervisor", config=cfg) == str(plan_root), session_ref_root("registered-supervisor", config=cfg))
+
+            peer_response = client.post(
+                "/api/projects/load-md",
+                json={
+                    "md_text": md,
+                    "source_path": str(bad_plan),
+                    "supervisor": "registered-supervisor-codex",
+                    "ingested_by": "registered-supervisor-codex",
+                },
+            )
+            peer_detail = peer_response.json().get("detail", "")
+            peer_access = supervisor_access_resolution("registered-supervisor-codex", config=cfg)
+            _check("unregistered peer ingest rejects", peer_response.status_code == 422, peer_response.text)
+            _check("unregistered peer has no supervisor access", not peer_access["registered"] and not peer_access["plan_ref_root"], peer_access)
+            _check("unregistered peer root does not alias base session", session_ref_root("registered-supervisor-codex", config=cfg) is None, session_ref_root("registered-supervisor-codex", config=cfg))
+            _check("unregistered peer ingest teaches registration", "tmux session registered-supervisor-codex is not a registered supervisor" in peer_detail, peer_detail)
+            _check("unregistered peer ingest does not promise access", "You already have access" not in peer_detail and str(plan_root) not in peer_detail, peer_detail)
 
             current_response = client.get("/api/sessions/not-registered/current")
             current_detail = current_response.json().get("detail", "")

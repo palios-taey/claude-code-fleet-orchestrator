@@ -22,7 +22,7 @@ from fleet_orchestrator.orch_schema import (
     get_supervisor_dispatchable_peer_task,
     get_supervisor_inflight_peer_task,
     get_supervisor_refs,
-    session_ref_root,
+    supervisor_access_resolution,
     get_task_project,
 )
 from fleet_orchestrator.paths import repo_root
@@ -90,6 +90,13 @@ def _load_session_roots(scoped_env: Optional[Dict[str, str]] = None) -> Dict[str
     return roots
 
 
+def _load_registered_sessions(scoped_env: Optional[Dict[str, str]] = None) -> List[str]:
+    raw = _scoped_env_value(scoped_env, "ORCH_SESSION_IDS").strip()
+    if not raw:
+        return []
+    return [item.strip() for item in raw.replace(";", ",").split(",") if item.strip()]
+
+
 VALID_CLIS = {"claude", "codex", "gemini", "grok"}
 
 
@@ -102,6 +109,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
     base_roots = session_roots if session_roots is not None else _load_session_roots()
     scoped_env = _read_session_env(aliases, base_roots)
     roots = _load_session_roots(scoped_env) if "ORCH_SESSION_ROOTS" in scoped_env else base_roots
+    registered_sessions = _load_registered_sessions(scoped_env)
     work = _resolve_work(session_key, task_id)
     summary = get_project_summary(work["project_id"]) if work.get("project_id") else None
 
@@ -111,7 +119,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
     selected_memory = _rank_memory(memory_files, task_text, max_memory=max_memory)
     rules = _select_rules(session_key, work, summary, task_text, scoped_env=scoped_env)
     identity = _select_identity(raw_session, session_key, cli)
-    supervisor_affordance = _supervisor_access_affordance(session_key, aliases, roots)
+    supervisor_affordance = _supervisor_access_affordance(raw_session, roots, registered_sessions)
 
     context = {
         "overall_refs": refs["overall"],
@@ -458,14 +466,19 @@ def _session_root(session_aliases: Iterable[str], session_roots: Dict[str, str])
 
 def _supervisor_access_affordance(
     session: str,
-    aliases: Iterable[str],
     session_roots: Dict[str, str],
+    registered_sessions: List[str],
 ) -> Dict[str, str]:
-    root = _session_root(aliases, session_roots) or session_ref_root(session)
-    if not root:
+    access = supervisor_access_resolution(
+        session,
+        registered_sessions=registered_sessions,
+        session_roots=session_roots,
+    )
+    root = access["plan_ref_root"]
+    if not access["registered"] or not root:
         return {}
     return {
-        "session": session,
+        "session": access["session"],
         "plan_ref_root": root,
     }
 
