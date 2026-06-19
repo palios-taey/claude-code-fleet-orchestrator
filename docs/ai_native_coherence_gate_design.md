@@ -17,6 +17,7 @@ The fix is an F9-style coherence gate: enumerate the actual code surfaces by AST
 Every agent-facing surface in the scoped source set must be either:
 
 - `teaches`: the emitted message carries an actionable next step.
+- `needs-fix`: known baseline debt that is intentionally carried into the gate so the registry can merge before the follow-on remediation pass.
 - `exempt`: the surface legitimately should not teach, with a required rationale.
 
 The gate must fail for:
@@ -25,20 +26,34 @@ The gate must fail for:
 - a registry row whose surface no longer exists.
 - a duplicate surface id.
 - a `teaches` row whose statically readable message has no actionable next step.
+- a `needs-fix` row added after the gate baseline rather than carried from the reviewed baseline debt list.
 - an `exempt` row without a rationale.
 - a next-step command that names a non-existent repo CLI.
+- a next-step endpoint that names a non-existent repo API route.
+- a future API module with agent-facing error sinks that is neither included nor explicitly excluded.
 
 ## Source Set
 
-The first implementation should enumerate these agent-facing surfaces:
+The first implementation should enumerate these agent-facing surfaces by sink reachability, not by a hand-picked file list:
 
 | Area | Files | Surface kind |
 | --- | --- | --- |
-| HTTP API rejections | `fleet_orchestrator/tasks_api.py` | `HTTPException` `detail` payloads. |
-| Domain validation errors | `fleet_orchestrator/orch_schema.py` | `return None, <message>` validation returns. |
+| API rejection sinks | every fleet orchestrator API module classified as in scope | `HTTPException` `detail` payloads and error `JSONResponse` payloads/statuses. |
+| API module guard | every fleet orchestrator module with `HTTPException`, `JSONResponse` status >= 400, `FastAPI`, `APIRouter`, or route decorators | module must be classified `in-scope` or `excluded` with rationale; unclassified modules fail. |
+| Domain validation errors | `fleet_orchestrator/orch_schema.py` | `return None, <message>` validation returns and `raise <Exception>(message)` surfaces. |
 | Stop and wake decision reasons | `fleet_orchestrator/orch_schema.py` | return payloads from `*_block_reason`, `*_stop_reason`, and explicit stop-decision reason builders. |
 | Wake packet Operating affordances | `fleet_orchestrator/context_assembler.py` | lines emitted by `_render_operating_section`. |
 | CLI failure messages | `fleet_orchestrator/cli_taey_plan.py`, `fleet_orchestrator/cli_taey_task.py`, and any future fleet orchestrator CLI module whose name starts with `cli_taey_` | failure output only, not ordinary success output. |
+
+The current API module classification starts with these decisions:
+
+| Module | Decision | Rationale |
+| --- | --- | --- |
+| `fleet_orchestrator/tasks_api.py` | in scope | Primary mutable Tasks API used by agents and CLIs. |
+| `fleet_orchestrator/chat_layer.py` | in scope | Chat routes are mounted under `/api/chat`; `_http_error` currently passes through `str(exc)`, which is an agent-facing raw exception surface. |
+| `fleet_orchestrator/public_readonly.py` | in scope | Public read-only API still emits HTTP/JSON error responses that an agent or browser automation session can hit; the 404/503 surfaces must teach or be explicitly exempted row by row. |
+
+No API module may be silently uncovered. A future router file that imports or calls `HTTPException`, returns `JSONResponse` with status >= 400, creates `FastAPI`/`APIRouter`, or defines route decorators must either be scanned for surfaces or added to an explicit module-exclusion registry with rationale.
 
 `docs/ai_native_surface_audit.md` currently includes a few dispatch rows. The implementation should either add explicit dispatch enumeration rules or migrate those rows into a separately named manual section that is not allowed to satisfy the scoped AST completeness invariant. The preferred follow-on is to include dispatch surfaces once there is a precise sink rule for prompt/completion text builders; do not silently let old dispatch rows count as current AST-covered surfaces.
 
@@ -51,29 +66,42 @@ Each discovered surface gets this identity:
 ```
 
 - `file`: repo-relative file path.
-- `enclosing_qualname`: nearest lexical function/class path, using the same parent-walk approach as `scripts/verify-exception-classification.py`.
+- `enclosing_qualname`: nearest lexical function/class path, using the same parent-walk approach as `scripts/verify-exception-classification.py`; module-level surfaces use `<module>`.
 - `kind`: one of the enumerated surface kinds, for example `http_exception_detail`, `orch_return_none_error`, `orch_block_reason`, `wake_operating_line`, or `cli_failure_message`.
 - `ordinal`: 1-based AST order among surfaces with the same `(file, enclosing_qualname, kind)`.
 
 Line number is only a diagnostic hint:
 
 ```text
-| Surface Id | File | Function | Kind | Ordinal | Line Hint | Classification | Teaching Evidence | Rationale |
+| Surface Id | File | Function | Kind | Ordinal | Line Hint | Fingerprint | Classification | Teaching Evidence | Rationale | Review |
 ```
 
 The verifier matches on `(File, Function, Kind, Ordinal)`, not on `Line Hint`. A pure line shift must pass. Adding or removing a surface in a same-function group can shift ordinals; that is acceptable because it forces review of that group, just like the F9 exception-handler registry.
 
+`Fingerprint` is a non-identity guard against dynamic-row misattribution. It is a stable hash of the normalized AST expression plus readable literal fragments, helper callee names, and sink kind, excluding line/column numbers. If two dynamic surfaces in the same function are reordered, the id set may remain the same but the fingerprint changes; the gate must fail until the registry is updated and the row is re-reviewed.
+
 ## Inclusion Rules
 
-### `tasks_api.py` HTTPException details
+### API rejection sinks
 
-Include every AST `Call` whose function is `HTTPException` and whose call appears in `fleet_orchestrator/tasks_api.py`.
+First classify API sink modules. Scan every Python file under `fleet_orchestrator/` and flag a module if it has any of:
+
+- `HTTPException` import or call.
+- `JSONResponse` call with a literal or statically readable `status_code` >= 400.
+- `FastAPI(` or `APIRouter(`.
+- route decorators such as `@app.get`, `@app.post`, `@router.get`, or `@router.post`.
+
+Every flagged module must be listed as in scope or explicitly excluded with rationale. The current implementation should include `fleet_orchestrator/tasks_api.py`, `fleet_orchestrator/chat_layer.py`, and `fleet_orchestrator/public_readonly.py`.
+
+For in-scope modules, include every AST `Call` whose function is `HTTPException`.
 
 - If a `detail=` keyword exists, that expression is the candidate message.
 - If `detail` is passed positionally, use the FastAPI constructor position for `detail` if present.
 - If no detail can be located, still enumerate the call as `http_exception_detail`; it must be classified `exempt` or fixed.
 - If `detail` calls a local helper such as `_project_not_found_detail(...)`, the call site is still the primary surface id. The static extractor may optionally resolve simple local helper returns, but an unresolved helper is not a pass; it requires registry teaching evidence.
 - If `detail` is a dict/list literal, recursively inspect string values and keys.
+
+Also include in-scope `JSONResponse` calls whose status is >= 400 or whose payload has `error`, `detail`, `reason`, `next_step`, `next_action`, or `enable_with` keys. This covers public read-only 503-style responses that are not raised as `HTTPException`.
 
 ### `orch_schema.py` validation returns
 
@@ -83,7 +111,14 @@ Include every `return` in `fleet_orchestrator/orch_schema.py` whose returned val
 - If the second element is a dict/list, recursively inspect it.
 - If the second element is a variable, function call, or dynamically built object that cannot be statically read, classify it through the registry rather than passing it silently.
 
-This rule intentionally starts with `return None, <message>` because those are the historical validation-error shape. If later code introduces `return False, <message>` as an agent-facing validation surface, the source set must be extended and existing rows migrated in the same PR.
+Also include every `raise` statement in `fleet_orchestrator/orch_schema.py` whose exception expression carries a message or can reach API/CLI callers as a validation error. Current covered examples include `PauseValidationError`, `CompletionEvidenceError`, `ConditionValidationError`, `ReadyWorkConflictError`, `PriorityAuditError`, `TaskParentNotFoundError`, `TaskIdCollisionError`, `ProjectNotFoundError`, and `ValueError` raises that are part of public task/project/chat/pause/question operations.
+
+- The first positional argument or formatted message expression is the candidate message.
+- If the raise has no message, enumerate it anyway; it must be classified `exempt` or fixed.
+- A new `CompletionEvidenceError("bad")` or `PauseValidationError("bad")` without the next-step constants must fail the teaching assertion.
+- If a raised message is caught and wrapped by an API route, keep the `orch_schema` raise site and the API wrap site as separate surfaces; each emission site has its own row.
+
+This rule intentionally starts with `return None, <message>` plus `raise ...(<message>)` because those are the current validation-error shapes. If later code introduces `return False, <message>` as an agent-facing validation surface, the source set must be extended and existing rows migrated in the same PR.
 
 ### Stop and wake reason builders
 
@@ -161,9 +196,9 @@ Detect endpoint tokens matching:
 \b(?:GET|POST|PATCH)\s+/api/[A-Za-z0-9_./{}<>:-]+
 ```
 
-Then validate the method/path against the FastAPI route table where feasible. Path parameters may use `{id}`, `{task_id}`, or `<task-id>` placeholders; the validator should normalize placeholder names before comparing to route templates.
+Then strictly validate the method/path against the FastAPI route table. Path parameters may use `{id}`, `{task_id}`, or `<task-id>` placeholders; the validator should normalize placeholder names before comparing to route templates.
 
-If a row relies on `DELETE /api/...` or another method, it should fail until the design is explicitly extended. The current requested assertion is GET/POST/PATCH.
+If the route table cannot be imported, the gate must fail closed rather than regex-pass a fake endpoint. If a row relies on `DELETE /api/...` or another method, it should fail until the design is explicitly extended. The current requested assertion is GET/POST/PATCH. A token such as `POST /api/does-not-exist` must fail.
 
 ### Structured field detection
 
@@ -173,7 +208,11 @@ For dict/list AST literals and JSON-like string payloads, recursively search for
 - `next_action`
 - `enable_with`
 
-If a structured field exists but its value is empty, null, or a generic phrase like `see docs`, the static assertion fails.
+If a structured field exists but its value is empty, null, or a generic phrase like `see docs`, the static assertion fails. If the field value contains a command token or endpoint token, the same strict CLI/endpoint existence validators apply to that token. A `next_step` value containing an invalid command-shaped token must fail; the acceptance fixture should include this literal in a non-invocation context:
+
+```text
+# taey-fake structured next_step must fail
+```
 
 ### Non-teaching examples
 
@@ -201,6 +240,7 @@ For a dynamic surface:
 - `Classification=teaches` requires `Teaching Evidence` that names the exact command, endpoint, or structured field expected at runtime.
 - `Classification=exempt` requires a rationale.
 - If the static extractor can read the whole message and prove it lacks a next step, `Classification=teaches` must fail even if the registry claims it teaches. Registry evidence is only for dynamic or helper-composed surfaces, not for overriding a readable bad message.
+- Dynamic rows must include the current `Fingerprint`. A changed fingerprint fails even when the structural id still exists, forcing re-review of helper-composed or runtime-only messages after reorder or rewrite.
 
 ## Machine Registry
 
@@ -212,15 +252,16 @@ The proposed companion is a future registry Markdown file under the docs directo
 
 ```markdown
 <!-- ai-native-surfaces:start -->
-| File | Function | Kind | Ordinal | Line Hint | Classification | Teaching Evidence | Rationale |
-| --- | --- | --- | ---: | ---: | --- | --- | --- |
-| fleet_orchestrator/tasks_api.py | session_current | http_exception_detail | 1 | 890 | teaches | GET /api/sessions/{session}/current; taey-plan current | Empty-current API response teaches the current and next-ready probes. |
+| File | Function | Kind | Ordinal | Line Hint | Fingerprint | Classification | Teaching Evidence | Rationale | Review |
+| --- | --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| fleet_orchestrator/tasks_api.py | session_current | http_exception_detail | 1 | 890 | abc123 | teaches | GET /api/sessions/{session}/current; taey-plan current | Empty-current API response teaches the current and next-ready probes. | PR review |
 <!-- ai-native-surfaces:end -->
 ```
 
 Allowed classifications:
 
 - `teaches`
+- `needs-fix`
 - `exempt`
 
 Registry rules:
@@ -228,9 +269,12 @@ Registry rules:
 - `actual - registered` fails as missing registry row.
 - `registered - actual` fails as stale registry row.
 - duplicate `(File, Function, Kind, Ordinal)` fails.
+- matching id with mismatched `Fingerprint` fails.
 - unknown classification fails.
 - empty `Rationale` fails for every row.
 - `exempt` requires rationale text that states why teaching would be wrong or impossible.
+- `exempt` requires non-empty `Review` naming the PR, audit, or reviewer that accepted the exemption; generated exemptions may not auto-green the initial registry.
+- `needs-fix` requires rationale text, non-empty `Review`, and a baseline-debt marker accepted during the gate introduction. It is not a teaching pass; the verifier should print the count of `needs-fix` rows. A future PR may not add a new `needs-fix` row to make a new non-teaching surface green.
 - `teaches` requires either a static pass or non-empty `Teaching Evidence` for a dynamic surface.
 - `Teaching Evidence` must itself contain a real CLI, real endpoint, or structured field name.
 
@@ -250,13 +294,17 @@ Invalid exemptions:
 - CLI empty-state messages.
 - any surface that can name a real `taey-*` command or `/api/...` endpoint.
 
-An exempt row must say what makes the surface non-teachable. "Not needed" is not a rationale.
+An exempt row must say what makes the surface non-teachable. "Not needed" is not a rationale. The initial migration must not auto-exempt rows to reach green; every initial exemption needs audit review recorded in the `Review` column. Existing non-teaching debt should be marked `needs-fix`, not `exempt`, unless the surface truly should never teach.
 
 ## Edge Cases
 
 ### Multiple messages in one function
 
 Use ordinals per `(file, function, kind)`. If a function has three `HTTPException` calls, they are `#1`, `#2`, and `#3`. If one is removed, the registry must be reviewed for the whole group.
+
+### Dynamic ordinal reorder
+
+Ordinals alone can silently swap rationale between two dynamic rows if the same number of surfaces remains in the same function. The `Fingerprint` column closes that gap. It is not part of the structural id, so line shifts still pass, but a source-expression rewrite or same-group reorder changes the fingerprint and fails until the registry row is re-derived.
 
 ### F-strings
 
@@ -269,6 +317,10 @@ The verifier can resolve simple local helpers later, but the safety rule does no
 ### Non-Exception surfaces
 
 This gate is not an exception-handler gate. It covers return payloads, rendered wake text, stderr prints, parser errors, and structured HTTP details. The `kind` field distinguishes these surfaces so they do not collide.
+
+### Module-level qualname
+
+When a surface is emitted at module scope, use `<module>` as its function name. Current module-level next-step constants in `fleet_orchestrator/orch_schema.py` are not standalone surfaces; the raise or return site that emits the constant is the surface. If a future module-level raise or error response is added, its qualname is `<module>`.
 
 ### Same text emitted through multiple endpoints
 
@@ -322,7 +374,12 @@ The follow-on implementation should prove:
 - A dynamic f-string with `Classification=teaches` and valid `Teaching Evidence` passes.
 - An `exempt` row without rationale fails.
 - A fake CLI command fails even if it matches `taey-*`.
+- A fake endpoint such as `POST /api/does-not-exist` fails even though it matches the endpoint regex.
+- A structured `next_step` value containing the deliberately invalid command token shown in the structured-field section fails.
+- A newly added non-teaching surface cannot be made green by adding a new `needs-fix` row outside the reviewed baseline debt set.
 - A real endpoint with placeholder spelling differences passes after route normalization.
+- A new `orch_schema` raise with no next-step evidence fails.
+- A new API router module with an error sink but no module classification fails.
 - A CLI empty-state message like `next: none` is included and cannot disappear from the registry.
 - Reverting to line-key matching fails the line-shift fixture.
 
@@ -331,7 +388,7 @@ The follow-on implementation should prove:
 1. Implement the AST enumerator and registry parser with the same line-hint-only matching discipline as `scripts/verify-exception-classification.py`.
 2. Generate an initial registry from `origin/main` and map each current `docs/ai_native_surface_audit.md` row to the structural surface id where possible.
 3. For any old ledger row that has no AST surface, either add an explicit enumeration rule or move it to a non-gated historical section. Do not let it remain in the machine registry.
-4. Run the verifier. Fix static non-teaching surfaces or classify true exemptions with rationale.
+4. Run the verifier. Mark static non-teaching surfaces as `teaches` only when the static assertion passes; otherwise classify them honestly as baseline `needs-fix` rows with rationale and review. The verifier may pass reviewed baseline debt so the gate can merge before the remediation pass, but it must report the `needs-fix` count and reject any newly added `needs-fix` row outside the reviewed baseline debt set. True exemptions require rationale plus audit review.
 5. Wire the new verifier script and acceptance test into ship-gate.
 6. Keep `docs/ai_native_surface_audit.md` as the narrative ledger, but treat the new companion registry as the source of truth for completeness/no-stale enforcement.
 
