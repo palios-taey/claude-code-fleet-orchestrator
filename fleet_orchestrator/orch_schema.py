@@ -370,6 +370,30 @@ def _has_control_chars(value: str) -> bool:
     return any(ord(ch) < 32 for ch in value)
 
 
+def _session_root_map() -> Dict[str, str]:
+    """Session -> repo-root values from ORCH_SESSION_ROOTS."""
+    raw = os.environ.get("ORCH_SESSION_ROOTS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return {
+                str(k).strip(): str(v).strip()
+                for k, v in parsed.items()
+                if str(k).strip() and str(v).strip()
+            }
+    except (ValueError, TypeError):
+        pass
+    roots: Dict[str, str] = {}
+    for pair in raw.split(","):
+        if "=" in pair:
+            key, _, value = pair.partition("=")
+            if key.strip() and value.strip():
+                roots[key.strip()] = value.strip()
+    return roots
+
+
 def _session_root_dirs() -> List[str]:
     """Directory values from ORCH_SESSION_ROOTS (JSON dict OR comma key=value).
 
@@ -378,22 +402,69 @@ def _session_root_dirs() -> List[str]:
     without separately maintaining ORCH_REF_ALLOWED_ROOT. (Local parser, mirroring
     context_assembler, to avoid an import cycle.)
     """
-    raw = os.environ.get("ORCH_SESSION_ROOTS", "").strip()
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return [str(v).strip() for v in parsed.values() if str(v).strip()]
-    except (ValueError, TypeError):
-        pass
-    dirs: List[str] = []
-    for pair in raw.split(","):
-        if "=" in pair:
-            _, _, value = pair.partition("=")
-            if value.strip():
-                dirs.append(value.strip())
-    return dirs
+    return list(_session_root_map().values())
+
+
+def _session_root_aliases(session_id: str) -> List[str]:
+    raw = (session_id or "").strip()
+    normalized = _normalize_owner_session(raw)
+    aliases: List[str] = []
+    for value in (raw, normalized):
+        if value and value not in aliases:
+            aliases.append(value)
+    for suffix in ("-codex", "-gemini", "-grok", "-claude"):
+        if normalized:
+            value = f"{normalized}{suffix}"
+            if value not in aliases:
+                aliases.append(value)
+    return aliases
+
+
+def session_ref_root(session_id: Optional[str]) -> Optional[str]:
+    roots = _session_root_map()
+    for alias in _session_root_aliases(session_id or ""):
+        root = roots.get(alias)
+        if root:
+            return root
+    return None
+
+
+def _format_registered_sessions(sessions: List[str]) -> str:
+    if not sessions:
+        return "<none>"
+    return ", ".join(sorted(sessions))
+
+
+def session_registration_error_detail(session_id: str, config: Optional[OrchConfig] = None) -> str:
+    cfg = config or OrchConfig()
+    registered = list(cfg.session_ids or [])
+    return (
+        f"tmux session {session_id} is not a registered supervisor; "
+        f"registered: {_format_registered_sessions(registered)}; "
+        "supervisors are identified by tmux session name. "
+        "Rename this tmux session to a registered name, or update ORCH_SESSION_IDS "
+        "and ORCH_SESSION_ROOTS so the names match. You already have access when "
+        "the session name matches local registration."
+    )
+
+
+def source_path_ref_root_error(raw_path: str, session_id: Optional[str]) -> str:
+    session = (session_id or "").strip() or "<unknown>"
+    root = session_ref_root(session)
+    if root:
+        return (
+            f"You are session {session}; your plan/ref root is {root}; "
+            f"put the file under it or pass a path there. You already have access - "
+            f"you do not request it. Rejected source_path outside allowed ref roots: {raw_path}"
+        )
+    roots = _session_root_map()
+    configured = _format_registered_sessions(list(roots.keys()))
+    return (
+        f"You are session {session}, but no ORCH_SESSION_ROOTS path is registered for that name. "
+        f"Registered session roots: {configured}. Supervisors are identified by tmux session name; "
+        f"fix the name or registration, then put the plan under that root. "
+        f"Rejected source_path outside allowed ref roots: {raw_path}"
+    )
 
 
 def _allowed_ref_roots() -> List[Path]:
@@ -443,7 +514,11 @@ def _ref_allowed_root(source_path: Optional[str]) -> Optional[Path]:
         return None
 
 
-def validate_source_path_for_refs(source_path: Optional[str], refs_present: bool) -> tuple[Optional[str], Optional[str]]:
+def validate_source_path_for_refs(
+    source_path: Optional[str],
+    refs_present: bool,
+    session_id: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
     raw_path = str(source_path or "").strip()
     if not refs_present:
         if not raw_path:
@@ -462,7 +537,7 @@ def validate_source_path_for_refs(source_path: Optional[str], refs_present: bool
     except Exception as exc:
         return None, f"invalid source_path ({exc.__class__.__name__})"
     if not _path_within_any_root(resolved_source, allowed_roots):
-        return None, f"source_path outside allowed ref roots: {raw_path}"
+        return None, source_path_ref_root_error(raw_path, session_id)
     return str(resolved_source), None
 
 
