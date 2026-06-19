@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
-from .config import OrchConfig, get_neo4j_driver
+from .config import OrchConfig, OrchConfigError, get_neo4j_driver
 from .feature_flags import gate_template_enabled
 from .orch_template import GATE_PHASE_ID, apply_gate_template
 from .orch_schema import (
@@ -30,14 +30,12 @@ PLAN_MODELING_CONTRACT_RULES = (
     "`owner` is the single session that executes the task, not who is accountable for the outcome; "
     "the stop-engine checks the owner's liveness heartbeat to decide if work is in-flight.",
     "Decompose multi-actor or multi-phase work into one task per executor, gated by `depends` "
-    "(rca[grok] -> fix[codex] -> gate[conductor] -> deploy[conductor]); never one task spanning several actors.",
+    "(rca[analyst] -> fix[builder] -> gate[reviewer] -> deploy[operator]); never one task spanning several actors.",
     "A supervisor-owned `in_progress` task is correct only while the supervisor is actively executing it; "
     "the supervisor gates by executing its own gate tasks.",
     "Dispatch (`taey-task dispatch` / `taey-plan assign`) binds the worker; bare `taey-notify` does not.",
 )
-SUPERVISOR_OWNER_IDS = {"conductor", "weaver", "tutor", "infra", "treasurer", "taeys-hands", "hunter"}
 PEER_ROLE_IDS = {"codex", "grok", "gemini"}
-SESSION_ROLE_IDS = SUPERVISOR_OWNER_IDS | PEER_ROLE_IDS
 PLAN_DELIVERABLE_TOKENS = {
     "audit",
     "build",
@@ -337,11 +335,38 @@ def _word_tokens(text: str) -> Set[str]:
     return set(re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).split())
 
 
-def _session_roles_in_text(text: str) -> Set[str]:
+def _configured_supervisor_owner_ids(config: OrchConfig) -> Set[str]:
+    configured = {
+        str(session_id or "").strip().lower()
+        for session_id in getattr(config, "session_ids", [])
+        if str(session_id or "").strip()
+    }
+    if not configured:
+        raise OrchConfigError(
+            "ORCH_SESSION_IDS must be set for plan modeling supervisor role detection; "
+            "populate it with the registered supervisor session names."
+        )
+    return configured
+
+
+def _session_role_ids(config: OrchConfig) -> Set[str]:
+    return _configured_supervisor_owner_ids(config) | PEER_ROLE_IDS
+
+
+def _session_roles_in_text(text: str, session_role_ids: Set[str]) -> Set[str]:
     tokens = _word_tokens(text)
-    roles = {role for role in SESSION_ROLE_IDS if role in tokens}
-    if "taeys" in tokens and "hands" in tokens:
-        roles.add("taeys-hands")
+    lowered = str(text or "").lower()
+    roles: Set[str] = set()
+    for role in session_role_ids:
+        if role in tokens:
+            roles.add(role)
+            continue
+        if re.search(rf"(?<![a-z0-9_-]){re.escape(role)}(?![a-z0-9_-])", lowered):
+            roles.add(role)
+            continue
+        parts = [part for part in role.split("-") if part]
+        if len(parts) > 1 and all(part in tokens for part in parts):
+            roles.add(role)
     return roles
 
 
@@ -349,9 +374,9 @@ def _deliverables_in_text(text: str) -> Set[str]:
     return PLAN_DELIVERABLE_TOKENS & _word_tokens(text)
 
 
-def _looks_like_multi_actor_task(task: Dict[str, Any]) -> bool:
+def _looks_like_multi_actor_task(task: Dict[str, Any], session_role_ids: Set[str]) -> bool:
     text = str(task.get("description") or "")
-    roles = _session_roles_in_text(text)
+    roles = _session_roles_in_text(text, session_role_ids)
     deliverables = _deliverables_in_text(text)
     has_joiner = " + " in text or ";" in text or " and " in f" {text.lower()} "
     return bool(
@@ -361,15 +386,16 @@ def _looks_like_multi_actor_task(task: Dict[str, Any]) -> bool:
     )
 
 
-def _plan_modeling_warnings(parsed: Dict[str, Any]) -> List[str]:
+def _plan_modeling_warnings(parsed: Dict[str, Any], config: OrchConfig) -> List[str]:
     warnings: List[str] = []
+    session_role_ids = _session_role_ids(config)
     for phase in parsed.get("phases", []):
         for task in phase.get("tasks", []):
             owner = str(task.get("owner") or "").strip().lower()
             if not owner:
                 continue
             task_id = str(task.get("id") or "?")
-            if _looks_like_multi_actor_task(task):
+            if _looks_like_multi_actor_task(task, session_role_ids):
                 warnings.append(
                     f"task {task_id} looks like multiple steps across actors; "
                     "decompose into one-task-per-executor gated by depends"
@@ -578,11 +604,12 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
                         migration_exempt: bool = False,
                         config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     parsed = _parse_plan(md)
+    cfg = config or OrchConfig()
     project = parsed["project"]
     errors = list(parsed["errors"])
     warnings = list(parsed.get("warnings", []))
     modeling_contract = plan_modeling_contract()
-    modeling_warnings = _plan_modeling_warnings(parsed)
+    modeling_warnings = _plan_modeling_warnings(parsed, cfg)
     if source_path:
         warnings.extend(_collect_ref_warnings(parsed, source_path))
     if project is None:
@@ -601,7 +628,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
         parsed = apply_gate_template(parsed)
         project = parsed["project"]
         warnings = list(parsed.get("warnings", warnings))
-        modeling_warnings = _plan_modeling_warnings(parsed)
+        modeling_warnings = _plan_modeling_warnings(parsed, cfg)
 
     # Project-scope every phase/task id (and intra-plan depends) to <project_id>::<bare_id> BEFORE any
     # existence check or write, so identity is project-local: two plans may reuse a generic id (audit,
@@ -623,7 +650,6 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
             _t["id"] = _ns_decl(_t["id"])
             _t["depends"] = [_ns_dep(d) for d in _t.get("depends", [])]
 
-    cfg = config or OrchConfig()
     existing = _existing_project_state(project["id"], cfg)
     existing_phase_ids: Set[str] = set(existing["phase_ids"])
     existing_tasks: Dict[str, Dict[str, Any]] = dict(existing["task_phase"])

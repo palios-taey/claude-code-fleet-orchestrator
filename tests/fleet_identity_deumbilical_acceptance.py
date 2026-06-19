@@ -56,6 +56,7 @@ SHIPPED_SURFACES = [
     "fleet_orchestrator/context_assembler.py",
     "fleet_orchestrator/dispatch.py",
     "fleet_orchestrator/loop_engine.py",
+    "fleet_orchestrator/plan_loader.py",
     "fleet_orchestrator/plan_readiness.py",
     "fleet_orchestrator/tasks_api.py",
     "scripts/orch-cron",

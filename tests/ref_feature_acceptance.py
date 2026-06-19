@@ -26,6 +26,7 @@ if "ORCH_DOTENV" not in os.environ:
             break
 os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
+os.environ.setdefault("ORCH_SESSION_IDS", "conductor")
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
 from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
