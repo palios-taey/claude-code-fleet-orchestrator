@@ -14,14 +14,24 @@
 ### Changed
 
 - Replaced the false empty Unreleased state with this v1.8.4 release record, covering the shipped changes since v1.8.3.
+- Removed unsupported internal Neo4j auth configuration from the orchestrator runtime and documented the supported no-internal-auth posture: Neo4j runs without application credentials behind the deployment network boundary. (#117)
+- Auto-derived allowed ref roots from configured supervisor session roots, so plan refs can be resolved from the same session-root configuration instead of requiring duplicate ref-root configuration. (#118)
 - Hardened the audit response documentation: corrected the C5 auth claim, named the mutable API exposure guard `_enforce_mutable_api_exposure`, made `AUDIT.md` the reviewer entry point, and added `OPERATIONAL_DISCIPLINE.md`. (#173)
+- Improved supervisor-access failures with inline, AI-native next steps so blocked sessions learn how to register or inspect supervisor access from the error surface itself. (#163)
 - Reworked AI-native baseline management: repaired real no-next-step and partial surfaces, taught API and recovery paths, removed baked supervisor-role assumptions from plan modeling, and triaged the remaining needs-fix baseline into explicit reviewed buckets. (#166, #168, #169, #170, #172)
 - Clarified mutable API exposure posture: non-loopback tokenless startup now requires an explicit exposure acknowledgement, and session `.env` context hints are request-scoped. (#151, #152)
 
 ### Fixed
 
+- Fixed a fleet-wide `:5002` outage class by making Neo4j and Redis lazy singleton initialization atomic under concurrent startup. (#104)
+- Fixed multi-dependency task under-gating by preserving every repeated `[depends:]` tag during plan ingest instead of dropping all but the last dependency declaration. (#106)
+- Fixed the recurring Neo4j config-tuple outage root cause by removing the internal-auth tuple path from config and driver setup. (#117)
 - Fixed supervisor forward-drive so peer done reports drive the supervisor back to gate and review instead of relying on manual polling. (#156)
 - Removed per-session stop-discipline flag bypasses and made promised feature flags active by default, preserving the no-bypass stop-control invariant. (#119, #123)
+- Fixed handoff validation indexing and cleanup behavior, removed handoff validation from the stop gate, and wired handoff GC ship-gate coverage so stale handoff records do not block stop discipline. (#120, #124, #130, #131)
+- Fixed plan ref and modeling ingestion gaps by accepting bare-path refs and injecting the plan-modeling contract during plan ingest. (#126, #127)
+- Fixed editable-install CLI drift by live-linking installed console entry points to the current checkout. (#128)
+- Fixed orch-watch wake gating and next-ready priority ordering so wakeups respect stop decisions and higher-priority ready tasks are surfaced first. (#129, #137)
 - Fixed current-task handoff liveness, dispatch current-task clobber protection, notify Redis state access, out-of-band supervisor liveness, and notify-Redis handoff-index backfill. (#136, #140, #142, #143, #155)
 - Fixed local ship-gate reproducibility, shippability evidence enforcement, forced closure metadata, ship-loop verdict semantics, plan status-token ingest, and supervisor peer-mention lint false positives. (#144, #145, #146, #147, #148, #149)
 - Fixed critical broad-exception classification coverage and closed the p7 capstone safety findings. (#134, #153)
