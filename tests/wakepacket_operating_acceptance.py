@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,6 +46,22 @@ def _packet_for(resolved_work: dict[str, object]) -> str:
     return assembler.assemble(packet, "codex")
 
 
+def _selected_packet_for(session: str, root: Path, cli: str = "codex") -> str:
+    supervisor = session
+    for suffix in ("-codex", "-gemini", "-grok"):
+        if supervisor.endswith(suffix):
+            supervisor = supervisor[: -len(suffix)]
+            break
+    roots = {supervisor: str(root)}
+    with mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
+         mock.patch.object(assembler, "get_session_current_work", return_value=None), \
+         mock.patch.object(assembler, "get_session_supervised_projects", return_value=[]), \
+         mock.patch.object(assembler, "get_overall_refs", return_value={"ref_context": {"refs": []}}), \
+         mock.patch.object(assembler, "get_supervisor_refs", return_value={"ref_context": {"refs": []}}):
+        context = assembler.select_context(session, cli=cli, session_roots=roots)
+    return assembler.assemble(assembler.build_packet(session, context), cli)
+
+
 def _operating_section(rendered: str) -> str:
     marker = "## Operating"
     next_marker = "\n## Identity"
@@ -74,6 +91,7 @@ def _rendering_contract() -> None:
     _check("none source names taey-plan next", "taey-plan next" in none_section, none_section)
     _check("none source names taey-plan ingest", "taey-plan ingest" in none_section, none_section)
     _check("none source does not dispatch", "taey-task dispatch" not in none_section, none_section)
+    _check("none source without root has no access affordance", "registered supervisor" not in none_section, none_section)
 
     pending_section = _assert_first_and_bounded(
         "pending",
@@ -219,11 +237,41 @@ def _snapshot_source_chain_contract() -> None:
     )
 
 
+def _supervisor_affordance_contract() -> None:
+    first_root = Path("/tmp/taeys-hands-root")
+    original_roots = os.environ.get("ORCH_SESSION_ROOTS")
+    try:
+        os.environ["ORCH_SESSION_ROOTS"] = '{"taeys-hands":"/tmp/wrong-global-root"}'
+        first_section = _assert_first_and_bounded(
+            "supervisor affordance first",
+            _selected_packet_for("taeys-hands-codex", first_root, cli="codex"),
+        )
+        _check("affordance names normalized supervisor", "You are `taeys-hands`, a registered supervisor" in first_section, first_section)
+        _check("affordance uses resolved scoped plan/ref root", f"plan/ref root is `{first_root}`" in first_section, first_section)
+        _check("affordance ignores stale global root", "wrong-global-root" not in first_section, first_section)
+        _check("affordance names exact ingest command", "`taey-plan ingest <file under it>`" in first_section, first_section)
+        _check("affordance says never request access", "you never request access" in first_section, first_section)
+    finally:
+        if original_roots is None:
+            os.environ.pop("ORCH_SESSION_ROOTS", None)
+        else:
+            os.environ["ORCH_SESSION_ROOTS"] = original_roots
+
+    second_root = Path("/tmp/weaver-root")
+    second_section = _assert_first_and_bounded(
+        "supervisor affordance second",
+        _selected_packet_for("weaver-grok", second_root, cli="grok"),
+    )
+    _check("second affordance names normalized supervisor", "You are `weaver`, a registered supervisor" in second_section, second_section)
+    _check("second affordance names plan/ref root", f"plan/ref root is `{second_root}`" in second_section, second_section)
+
+
 def main() -> int:
     _rendering_contract()
     _resolver_contract()
     _operating_source_contract()
     _snapshot_source_chain_contract()
+    _supervisor_affordance_contract()
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
         return 1
