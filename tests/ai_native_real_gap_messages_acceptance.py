@@ -182,6 +182,96 @@ def _api_required_field_contract(client: TestClient) -> None:
         _assert_detail(label, response, status, needles)
 
 
+def _api_not_found_contract(client: TestClient) -> None:
+    cfg = SimpleNamespace()
+    with mock.patch.object(tasks_api, "_cfg", return_value=cfg), \
+         mock.patch.object(tasks_api, "resolve_task_id", return_value="task-missing"), \
+         mock.patch.object(tasks_api, "load_task_record", return_value=None):
+        response = client.get("/api/tasks/task-missing")
+    _assert_detail(
+        "missing task",
+        response,
+        404,
+        ["taey-task list", "GET /api/tasks", "taey-task status task-missing", "taey-plan show <project-id>"],
+    )
+
+    with mock.patch.object(tasks_api, "_cfg", return_value=cfg), \
+         mock.patch.object(tasks_api, "get_project_summary", return_value=None):
+        response = client.get("/api/projects/proj-missing")
+    _assert_detail("missing project", response, 404, ["taey-plan list", "GET /api/projects", "taey-plan show proj-missing"])
+
+    with mock.patch.object(tasks_api, "_cfg", return_value=cfg), \
+         mock.patch.object(tasks_api, "answer_question", return_value={"ok": False}):
+        response = client.post("/api/questions/q-missing/answer", json={"answer": "done"})
+    _assert_detail(
+        "missing question",
+        response,
+        404,
+        ["GET /api/projects", "taey-plan show <project-id>", "POST /api/questions/q-missing/answer"],
+    )
+
+    with mock.patch.object(tasks_api, "_cfg", return_value=cfg), \
+         mock.patch.object(tasks_api, "_origin_allowed_for_ui", return_value=True), \
+         mock.patch.object(tasks_api, "complete_human_review_gate", return_value={"ok": False}):
+        response = client.post("/api/ui/questions/q-missing/answer", json={"answer": "done"})
+    _assert_detail("missing ui question", response, 404, ["/ui/", "POST /api/ui/questions/q-missing/answer"])
+
+
+def _wake_packet_no_next_step_contract(client: TestClient) -> None:
+    old_wake = os.environ.get("ORCH_WAKE_PACKET_ENDPOINT_ENABLED")
+    try:
+        os.environ["ORCH_WAKE_PACKET_ENDPOINT_ENABLED"] = "0"
+        with mock.patch.object(tasks_api, "select_wake_context", side_effect=RuntimeError("should not assemble")):
+            disabled = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
+        disabled_body = disabled.json()
+        _check(
+            "disabled wake packet names enable flag",
+            disabled.status_code == 200
+            and disabled_body.get("ok") is True
+            and disabled_body.get("enabled") is False
+            and disabled_body.get("reason") == "wake packet endpoint disabled"
+            and disabled_body.get("enable_with") == "ORCH_WAKE_PACKET_ENDPOINT_ENABLED=1"
+            and "GET /api/sessions/{session_id}/wake-packet" in disabled_body.get("next_step", ""),
+            disabled_body,
+        )
+
+        os.environ["ORCH_WAKE_PACKET_ENDPOINT_ENABLED"] = "1"
+        with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["conductor-codex"])), \
+             mock.patch.object(tasks_api, "select_wake_context", side_effect=RuntimeError("assembler boom")):
+            failed = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
+        failed_body = failed.json()
+        _check(
+            "wake assembler failure names operation and next step",
+            failed.status_code == 200
+            and failed_body.get("ok") is False
+            and failed_body.get("operation") == "wake_packet_assembly"
+            and "assembler boom" in failed_body.get("error", "")
+            and "Wake continues without a packet" in failed_body.get("next_step", ""),
+            failed_body,
+        )
+    finally:
+        if old_wake is None:
+            os.environ.pop("ORCH_WAKE_PACKET_ENDPOINT_ENABLED", None)
+        else:
+            os.environ["ORCH_WAKE_PACKET_ENDPOINT_ENABLED"] = old_wake
+
+
+def _health_failure_contract(client: TestClient) -> None:
+    with mock.patch.object(tasks_api, "get_ready_tasks", side_effect=RuntimeError("neo4j down")):
+        response = client.get("/health")
+    body = response.json()
+    _check(
+        "health failure names dependency and diagnostic",
+        response.status_code == 503
+        and body.get("ok") is False
+        and body.get("dependency") == "neo4j"
+        and body.get("operation") == "get_ready_tasks"
+        and "ORCH_NEO4J_URI" in body.get("next_step", "")
+        and "GET /health" in body.get("next_step", ""),
+        body,
+    )
+
+
 def main() -> int:
     old_auth = os.environ.get("ORCH_AUTH_TOKEN")
     old_loops = os.environ.get("ORCH_LOOPS_ENABLED")
@@ -195,6 +285,9 @@ def main() -> int:
         _stop_condition_contract(client)
         _api_auth_contract(client)
         _api_required_field_contract(client)
+        _api_not_found_contract(client)
+        _wake_packet_no_next_step_contract(client)
+        _health_failure_contract(client)
     finally:
         if old_auth is None:
             os.environ.pop("ORCH_AUTH_TOKEN", None)
