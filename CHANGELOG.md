@@ -2,7 +2,29 @@
 
 ## Unreleased
 
-- No unreleased changes recorded.
+## v1.8.4 - 2026-06-19
+
+### Added
+
+- Added the AI-native contribution principle, full agent-facing surface audit, and machine-checkable coherence gate so the registry is re-derived from code and fails on drift rather than trusting hand-maintained rows. (#164, #165, #171)
+- Added the identity-keyed exception-handler registry so classified broad exception handlers are tracked by stable handler identity instead of line-number position. (#167)
+- Added a decision-receipt consumer path so receipt events are not only emitted but also consumed by the orchestrator surface. (#159)
+- Added wake-packet operating and identity sections, including SessionStart wake-packet hook expectations and compact-hook preservation, so supervisors receive more usable operating context on wake. (#157, #158, #160, #161)
+
+### Changed
+
+- Replaced the false empty Unreleased state with this v1.8.4 release record, covering the shipped changes since v1.8.3.
+- Hardened the audit response documentation: corrected the C5 auth claim, named the mutable API exposure guard `_enforce_mutable_api_exposure`, made `AUDIT.md` the reviewer entry point, and added `OPERATIONAL_DISCIPLINE.md`. (#173)
+- Reworked AI-native baseline management: repaired real no-next-step and partial surfaces, taught API and recovery paths, removed baked supervisor-role assumptions from plan modeling, and triaged the remaining needs-fix baseline into explicit reviewed buckets. (#166, #168, #169, #170, #172)
+- Clarified mutable API exposure posture: non-loopback tokenless startup now requires an explicit exposure acknowledgement, and session `.env` context hints are request-scoped. (#151, #152)
+
+### Fixed
+
+- Fixed supervisor forward-drive so peer done reports drive the supervisor back to gate and review instead of relying on manual polling. (#156)
+- Removed per-session stop-discipline flag bypasses and made promised feature flags active by default, preserving the no-bypass stop-control invariant. (#119, #123)
+- Fixed current-task handoff liveness, dispatch current-task clobber protection, notify Redis state access, out-of-band supervisor liveness, and notify-Redis handoff-index backfill. (#136, #140, #142, #143, #155)
+- Fixed local ship-gate reproducibility, shippability evidence enforcement, forced closure metadata, ship-loop verdict semantics, plan status-token ingest, and supervisor peer-mention lint false positives. (#144, #145, #146, #147, #148, #149)
+- Fixed critical broad-exception classification coverage and closed the p7 capstone safety findings. (#134, #153)
 
 ## v1.8.3 - 2026-06-15
 
