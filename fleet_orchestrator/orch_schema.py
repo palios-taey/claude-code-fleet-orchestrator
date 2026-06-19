@@ -1357,7 +1357,7 @@ def _queue_block_reason(task_id: Optional[str], description: Optional[str]) -> s
     return (
         "You have ready work and must continue, not stop. "
         f"Next task: {task_id_value} — {task_title}. "
-        "Pick it up via taey-queue next / taey-plan next and do it. "
+        "Pick it up via `taey-plan next` and do it. "
         "Do NOT stop until all supervised projects are completed or have a valid "
         "stop_reason matching a user_stop_condition. Setting blocked-on / "
         "waiting-on-worker is NOT a stop reason if parallel ready work exists."
@@ -2065,11 +2065,26 @@ def get_session_stop_decision(session_id: str,
         _redis_marker_call(r.set, count_key, str(block_count), _STOP_BLOCK_TTL_SECS)
         decision["convergence_count"] = block_count
         if block_count >= _STOP_BLOCK_CONVERGENCE_LIMIT:
+            original_reason = decision.get("reason")
+            original_wake_type = decision.get("wake_type")
+            original_task_id = decision.get("task_id")
             decision["block"] = False
             decision["reason"] = None
             decision["wake_type"] = WAKE_ALLOW_STOP
             decision["task_id"] = None
             decision["converged_allow"] = True
+            decision["converged_reason"] = (
+                "Stop-hook convergence released a repeated identical block after "
+                f"{block_count} observations so the session cannot wedge permanently. "
+                f"Original block reason: {original_reason or '(none)'}. "
+                "Inspect the original task/project state, then resume with `taey-plan current` "
+                "or `taey-plan next` if work remains."
+            )
+            decision["converged_original"] = {
+                "wake_type": original_wake_type,
+                "task_id": original_task_id,
+                "reason": original_reason,
+            }
             _redis_marker_call(r.delete, marker_key, count_key)
     except Exception as exc:
         decision = dict(decision)
@@ -3084,7 +3099,10 @@ def set_project_user_stop_conditions(project_id: str, user_stop_conditions: List
             RETURN p.user_stop_conditions AS user_stop_conditions
         """, project_id=project_id, user_stop_conditions=_json_encode(normalized)).single()
         if not record:
-            raise ValueError(f"Project {project_id} not found")
+            raise ProjectNotFoundError(
+                f"Project {project_id} not found. List valid projects with `taey-plan list` "
+                "or GET /api/projects before writing stop conditions."
+            )
         return _normalize_user_stop_conditions(
             _decode_json_field(record["user_stop_conditions"], []),
             created_by="decoded",
@@ -3469,9 +3487,22 @@ def edit_project_condition(project_id: str, condition_id: str, label: str, edite
     cfg = config or OrchConfig()
     project = _project_record(project_id, cfg)
     conditions = list(project.get("user_stop_conditions") or [])
-    active = _condition_lookup(_active_conditions(conditions), condition_id)
+    active_conditions = _active_conditions(conditions)
+    active = _condition_lookup(active_conditions, condition_id)
     if not active:
-        raise ConditionValidationError("active condition not found")
+        if active_conditions:
+            choices = ", ".join(
+                f"{condition['id']} v{int(condition['version'])} ({condition['label']})"
+                for condition in active_conditions
+            )
+        else:
+            choices = "none"
+        raise ConditionValidationError(
+            f"active condition {condition_id!r} not found for project {project_id}; "
+            f"active conditions: {choices}. Inspect with "
+            f"`taey-plan stop-conditions {project_id} get` or "
+            f"GET /api/projects/{project_id}."
+        )
     updated_conditions: List[Dict[str, Any]] = []
     now_iso = _utc_now_iso()
     for condition in conditions:
