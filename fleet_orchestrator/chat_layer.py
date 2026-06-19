@@ -27,6 +27,12 @@ MAX_MESSAGE_LEN = 20000
 CLIENT_ROLES = {"user", "assistant"}
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+CHAT_POST_NEXT_STEP = (
+    'Use lineage matching [A-Za-z0-9._-]+ with no "..", for example session-1-codex. '
+    'POST /api/chat/<lineage> with body '
+    '{"text":"<message>","sender":"<session-id>","role":"user"}; '
+    'role must be user or assistant.'
+)
 
 
 def _now_iso() -> str:
@@ -36,18 +42,18 @@ def _now_iso() -> str:
 def _normalize_lineage(lineage: str) -> str:
     value = str(lineage or "").strip()
     if not value:
-        raise ValueError("lineage must be non-empty")
+        raise ValueError(f"lineage must be non-empty. {CHAT_POST_NEXT_STEP}")
     if len(value) > MAX_LINEAGE_LEN:
-        raise ValueError(f"lineage must be <= {MAX_LINEAGE_LEN} characters")
+        raise ValueError(f"lineage must be <= {MAX_LINEAGE_LEN} characters. {CHAT_POST_NEXT_STEP}")
     # CL-3 fix: lineage is a flat key used as a directory component in
     # promote_reply_to_memory. The old charset allowed '/', '.', '~' enabling
     # traversal ('../x'), absolute-reset ('/tmp/x') and home-ish paths. Strict
     # allowlist only; reject '..' explicitly. (promote_reply_to_memory also
     # asserts the resolved path stays under MEMORY_BASE — defense in depth.)
     if not re.fullmatch(r"[A-Za-z0-9._-]+", value):
-        raise ValueError("lineage contains unsupported characters")
+        raise ValueError(f"lineage contains unsupported characters. {CHAT_POST_NEXT_STEP}")
     if ".." in value:
-        raise ValueError("lineage must not contain '..'")
+        raise ValueError(f"lineage must not contain '..'. {CHAT_POST_NEXT_STEP}")
     return value
 
 
@@ -84,9 +90,9 @@ async def append_message(
     lineage_value = _normalize_lineage(lineage)
     body = str(text or "").strip()
     if not body:
-        raise ValueError("text must be non-empty")
+        raise ValueError(f"text must be non-empty. {CHAT_POST_NEXT_STEP}")
     if len(body) > MAX_MESSAGE_LEN:
-        raise ValueError(f"text must be <= {MAX_MESSAGE_LEN} characters")
+        raise ValueError(f"text must be <= {MAX_MESSAGE_LEN} characters. {CHAT_POST_NEXT_STEP}")
 
     record = {
         "id": uuid.uuid4().hex,
@@ -286,7 +292,7 @@ async def chat_post(lineage: str, req: Request) -> Dict[str, Any]:
     try:
         role = str(data.get("role") or "user").strip().lower() or "user"
         if role not in CLIENT_ROLES:
-            raise ValueError(f"role must be one of {sorted(CLIENT_ROLES)}")
+            raise ValueError(f"role must be one of {sorted(CLIENT_ROLES)}. {CHAT_POST_NEXT_STEP}")
         message = await append_message(
             lineage,
             sender=data.get("sender") or "operator",

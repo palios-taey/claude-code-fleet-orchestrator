@@ -123,6 +123,50 @@ AUTH_FAILURE_DETAIL = (
     "or `X-API-Key: $ORCH_AUTH_TOKEN`. Local loopback/no-token mode is only for local "
     "trusted runs when ORCH_AUTH_TOKEN is unset."
 )
+COMPLETED_TASK_NEXT_STEP = (
+    'Use `taey-task update %TASK_ID% completed --evidence '
+    '\'{"commit_sha":"<sha>","production_observation":"<what you verified>"}\'` '
+    'or PATCH /api/task/%TASK_ID% with body '
+    '{"status":"completed","evidence":{"commit_sha":"<sha>",'
+    '"production_observation":"<what you verified>"}}.'
+)
+FAILED_TASK_NEXT_STEP = (
+    'Use `taey-task update %TASK_ID% %STATUS% --evidence \'{"reason":"<why>"}\'` '
+    'or PATCH /api/task/%TASK_ID% with body '
+    '{"status":"%STATUS%","evidence":{"reason":"<why>"}}.'
+)
+PROJECT_FORCE_COMPLETE_BODY = '{"force":true,"closure_reason":"<why>","completed_by":"<session-id>"}'
+HUMAN_GATE_CREATE_BODY = (
+    '{"phase_id":"<phase-id>","task_id":"<task-id>","prompt":"<review question>",'
+    '"reviewer":"<session-id>"}'
+)
+LOOP_DECLARATION_NEXT_STEP = (
+    'Declare a loop with POST /api/loops/declare body {"id":"<loop-id>",'
+    '"owner":"<session-id>","step_bundle":[{"name":"<step>","definition":"<what to do>"}],'
+    '"trigger":{"kind":"manual"},"cycle_state":{"current_step":"<step>"},'
+    '"stop_condition":{"kind":"manual","description":"<when to stop>"}}.'
+)
+
+
+def _terminal_evidence_next_step(task_id: str, status: str) -> str:
+    if status == "completed":
+        return COMPLETED_TASK_NEXT_STEP.replace("%TASK_ID%", task_id)
+    if status in {"failed", "interrupted"}:
+        return FAILED_TASK_NEXT_STEP.replace("%TASK_ID%", task_id).replace("%STATUS%", status)
+    return (
+        f"Set status to completed, failed, or interrupted with matching evidence; for completed, "
+        f"{COMPLETED_TASK_NEXT_STEP.replace('%TASK_ID%', task_id)}"
+    )
+
+
+def _human_gate_next_step(question_id: str = "{question_id}") -> str:
+    return (
+        f"Create with POST /api/human-review-gates body {HUMAN_GATE_CREATE_BODY}; "
+        f"answer ordinary questions with POST /api/questions/{question_id}/answer body "
+        '{"answer":"<answer text>","answered_by":"<session-id>"}; '
+        f"complete human-review gates through `/ui/` or POST /api/ui/questions/{question_id}/answer body "
+        '{"answer":"<verdict>","answered_by":"<reviewer>"}.'
+    )
 
 
 def _required_body_detail(field: str, body: Dict[str, Any], *, endpoint: str,
@@ -329,7 +373,10 @@ def _strict_force_flag(data: Dict[str, Any]) -> bool:
     value = data["force"]
     if isinstance(value, bool):
         return value
-    raise HTTPException(status_code=422, detail="force must be a JSON boolean")
+    raise HTTPException(
+        status_code=422,
+        detail=f"force must be a JSON boolean. Minimal force-close body: {PROJECT_FORCE_COMPLETE_BODY}.",
+    )
 
 
 def _validated_source_path(
@@ -583,7 +630,11 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
     except CompletionEvidenceError as e:
         return JSONResponse(
             status_code=400,
-            content={"ok": False, "error": str(e)},
+            content={
+                "ok": False,
+                "error": str(e),
+                "next_step": _terminal_evidence_next_step(task_id, str(status or "").strip() or "completed"),
+            },
         )
     except HTTPException:
         raise
@@ -653,7 +704,10 @@ async def create_human_review_gate_endpoint(req: Request) -> Dict[str, Any]:
     except HTTPException:
         raise
     except (TaskParentNotFoundError, TaskIdCollisionError, CompletionEvidenceError, ValueError) as exc:
-        return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": str(exc), "next_step": _human_gate_next_step(question_id)},
+        )
     except Exception as exc:
         LOGGER.exception(
             "Unhandled human-review gate creation failed phase=%s task=%s question=%s",
@@ -692,7 +746,10 @@ async def answer_question_endpoint(question_id: str, req: Request) -> Dict[str, 
     except HTTPException:
         raise
     except (CompletionEvidenceError, ValueError) as exc:
-        return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": str(exc), "next_step": _human_gate_next_step(question_id)},
+        )
     except Exception as exc:
         LOGGER.exception("Unhandled question answer failed question=%s", question_id)
         return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
@@ -729,7 +786,10 @@ async def ui_answer_human_review_gate_endpoint(question_id: str, req: Request) -
     except HTTPException:
         raise
     except (CompletionEvidenceError, ValueError) as exc:
-        return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": str(exc), "next_step": _human_gate_next_step(question_id)},
+        )
     except Exception as exc:
         LOGGER.exception("Unhandled UI human-review answer failed question=%s", question_id)
         return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
@@ -944,7 +1004,10 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
 async def complete_project_endpoint(project_id: str, req: Request) -> Dict[str, Any]:
     data = await req.json() if req.headers.get("content-type", "").startswith("application/json") else {}
     if not isinstance(data, dict):
-        raise HTTPException(status_code=422, detail="request body must be a JSON object")
+        raise HTTPException(
+            status_code=422,
+            detail=f"request body must be a JSON object. Minimal force-close body: {PROJECT_FORCE_COMPLETE_BODY}.",
+        )
     force = _strict_force_flag(data)
     closure_reason = data.get("closure_reason")
     if closure_reason is None:
@@ -958,11 +1021,28 @@ async def complete_project_endpoint(project_id: str, req: Request) -> Dict[str, 
             config=_cfg(),
         )
     except ReadyWorkConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": str(exc),
+                "next_step": (
+                    f"Inspect remaining work with `taey-plan show {project_id}` or GET /api/projects/{project_id}; "
+                    "complete tasks with "
+                    + _terminal_evidence_next_step("<task-id>", "completed")
+                    + f" To force-close, POST /api/projects/{project_id}/complete with body {PROJECT_FORCE_COMPLETE_BODY}."
+                ),
+            },
+        )
     except ProjectNotFoundError:
         raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": str(exc),
+                "next_step": f"POST /api/projects/{project_id}/complete with body {PROJECT_FORCE_COMPLETE_BODY}.",
+            },
+        )
 
 
 @app.get("/api/projects/{project_id}/shippability")
@@ -1016,7 +1096,17 @@ def session_current(session_id: str) -> Dict[str, Any]:
     activity = get_session_liveness(session_id, config=cfg)
     work = get_session_current_work(session_id, config=cfg)
     if not work:
-        return {"session": session_id, "current": None, "activity": activity, "liveness": None}
+        return {
+            "session": session_id,
+            "current": None,
+            "activity": activity,
+            "liveness": None,
+            "next_action": (
+                f"No current task is bound for {session_id}. Run `taey-plan next {session_id}` "
+                f"or GET /api/sessions/{session_id}/next-ready to find ready work; inspect projects with "
+                f"GET /api/sessions/{session_id}/projects."
+            ),
+        }
     from fleet_orchestrator.current_liveness import safe_current_task_liveness
 
     liveness = safe_current_task_liveness(session_id, work, config=cfg)
@@ -1030,7 +1120,15 @@ def session_next_ready(session_id: str) -> Dict[str, Any]:
     cfg = _cfg()
     result = get_session_next_ready(session_id, config=cfg)
     if not result:
-        return {"session": session_id, "next": None}
+        return {
+            "session": session_id,
+            "next": None,
+            "next_action": (
+                f"No ready owned task for {session_id}. Run `taey-plan current {session_id}` "
+                f"and GET /api/sessions/{session_id}/stop-status to distinguish idle, paused, "
+                "awaiting human review, or stop-reason-required states."
+            ),
+        }
     return {"session": session_id, "next": result}
 
 
@@ -1200,7 +1298,15 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
     message = (data.get("message") or "").strip()
 
     if notify_type not in ALLOWED_NOTIFY_TYPES:
-        raise HTTPException(status_code=400, detail="type must be one of standard, escalation, command, response_ready")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "type must be one of standard, escalation, command, response_ready. "
+                f"Use `taey-notify {target} '<notification text>' --type standard` "
+                f"or POST /api/sessions/{target}/notify body "
+                '{"message":"<notification text>","type":"standard"}.'
+            ),
+        )
     if not message:
         raise HTTPException(
             status_code=400,
@@ -1221,9 +1327,17 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
         timeout=10,
     )
     if result.returncode != 0:
+        stderr = result.stderr.strip()
         raise HTTPException(
             status_code=502,
-            detail=result.stderr.strip() or "taey-notify failed",
+            detail={
+                "error": "taey-notify failed",
+                "notify_stderr": stderr,
+                "next_step": (
+                    f"Run `taey-notify {target} '<notification text>' --type {notify_type}` "
+                    "and inspect stderr; verify target session registration with GET /api/sessions."
+                ),
+            },
         )
     maybe_emit_decision_receipt(
         "wake",
@@ -1253,7 +1367,7 @@ async def loop_declare(req: Request) -> Dict[str, Any]:
     try:
         return declare_loop(raw_loop, persistence=Neo4jCycleStateStore(config=_cfg()))
     except LoopDeclarationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail={"error": str(exc), "next_step": LOOP_DECLARATION_NEXT_STEP})
     except LoopPersistenceError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
@@ -1290,7 +1404,7 @@ async def loop_advance(loop_id: str, req: Request) -> Dict[str, Any]:
     except ArtifactNotObservedError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except LoopDeclarationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail={"error": str(exc), "next_step": LOOP_DECLARATION_NEXT_STEP})
     except LoopPersistenceError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
@@ -1305,7 +1419,7 @@ def loop_should_stop(loop_id: str) -> Dict[str, Any]:
     try:
         loop = Loop.declare(raw_loop)
     except LoopDeclarationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail={"error": str(exc), "next_step": LOOP_DECLARATION_NEXT_STEP})
     return {"ok": True, "enabled": True, "loop_id": loop_id, "should_stop": loop.should_stop()}
 
 

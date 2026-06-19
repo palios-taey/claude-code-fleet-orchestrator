@@ -98,6 +98,41 @@ _VALID_TASK_STATUSES = frozenset({"pending", "in_progress", "completed", "failed
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "interrupted"})
 HUMAN_REVIEW_TASK_TYPE = "human-review"
 HUMAN_REVIEW_QUESTION_TYPE = "human_review_gate"
+COMPLETED_EVIDENCE_NEXT_STEP = (
+    'Use `taey-task update <task-id> completed --evidence '
+    '\'{"commit_sha":"<sha>","production_observation":"<what you verified>"}\'` '
+    'or PATCH /api/task/<task-id> with body '
+    '{"status":"completed","evidence":{"commit_sha":"<sha>",'
+    '"production_observation":"<what you verified>"}}.'
+)
+NON_SUCCESS_EVIDENCE_NEXT_STEP = (
+    'Use `taey-task update <task-id> %STATUS% --evidence '
+    '\'{"reason":"<why>"}\'` or PATCH /api/task/<task-id> with body '
+    '{"status":"%STATUS%","evidence":{"reason":"<why>"}}.'
+)
+PAUSE_NEXT_STEP = (
+    'Use body {"pause_source":"api","pause_reason":"<why>",'
+    '"pause_expires_at":"2026-06-19T20:00:00Z"}; '
+    'pause_source must be one of: api, cli, ui, user_command_explicit.'
+)
+CHAT_NEXT_STEP = (
+    'Use lineage matching [A-Za-z0-9._-]+ with no "..", for example session-1-codex. '
+    'For chat, POST /api/chat/<lineage> with body '
+    '{"text":"<message>","sender":"<session-id>","role":"user"}; '
+    'role must be user or assistant.'
+)
+
+
+def _non_success_evidence_next_step(status: str) -> str:
+    return NON_SUCCESS_EVIDENCE_NEXT_STEP.replace("%STATUS%", status)
+
+
+def _human_review_answer_next_step(question_id: str) -> str:
+    return (
+        f"Complete human-review gates in `/ui/` or POST /api/ui/questions/{question_id}/answer "
+        'with body {"answer":"<verdict>","answered_by":"<reviewer>"}; '
+        f"ordinary POST /api/questions/{question_id}/answer records an unverified answer only."
+    )
 
 
 def _utc_now_iso() -> str:
@@ -108,7 +143,7 @@ def _parse_pause_expires_at(value: Optional[str]) -> Optional[dt.datetime]:
     if value in (None, ""):
         return None
     if not isinstance(value, str):
-        raise PauseValidationError("pause_expires_at must be an ISO-8601 string")
+        raise PauseValidationError(f"pause_expires_at must be an ISO-8601 string. {PAUSE_NEXT_STEP}")
     text = value.strip()
     if not text:
         return None
@@ -117,7 +152,7 @@ def _parse_pause_expires_at(value: Optional[str]) -> Optional[dt.datetime]:
     try:
         expires_at = dt.datetime.fromisoformat(text)
     except ValueError as exc:
-        raise PauseValidationError("pause_expires_at must be an ISO-8601 timestamp") from exc
+        raise PauseValidationError(f"pause_expires_at must be an ISO-8601 timestamp. {PAUSE_NEXT_STEP}") from exc
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=dt.timezone.utc)
     return expires_at.astimezone(dt.timezone.utc)
@@ -154,7 +189,7 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
     if evidence is None:
         return None
     if not isinstance(evidence, dict):
-        raise CompletionEvidenceError("completion evidence must be a JSON object")
+        raise CompletionEvidenceError(f"completion evidence must be a JSON object. {COMPLETED_EVIDENCE_NEXT_STEP}")
     normalized: Dict[str, str] = {}
     for key in _COMPLETION_EVIDENCE_KEYS:
         value = evidence.get(key)
@@ -163,7 +198,8 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         # Must be a real non-empty string — not 0/False/[] coerced via str().
         if not isinstance(value, str):
             raise CompletionEvidenceError(
-                f"completion evidence {key!r} must be a string, got {type(value).__name__}"
+                f"completion evidence {key!r} must be a string, got {type(value).__name__}. "
+                f"{COMPLETED_EVIDENCE_NEXT_STEP}"
             )
         text = value.strip()
         if not text:
@@ -174,12 +210,14 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         if not _evidence_value_well_formed(key, text):
             raise CompletionEvidenceError(
                 f"completion evidence {key!r}={text!r} is not well-formed "
-                f"(commit_sha=4-64 hex, gate_run_id>=3 id-chars, production_observation>=8 chars)"
+                f"(commit_sha=4-64 hex, gate_run_id>=3 id-chars, production_observation>=8 chars). "
+                f"{COMPLETED_EVIDENCE_NEXT_STEP}"
             )
         normalized[key] = text
     if not normalized:
         raise CompletionEvidenceError(
-            "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
+            "completed status requires evidence with at least one of: "
+            f"commit_sha, gate_run_id, production_observation. {COMPLETED_EVIDENCE_NEXT_STEP}"
         )
     return normalized
 
@@ -197,10 +235,13 @@ def _normalize_non_success_terminal_evidence(
 ) -> Optional[Dict[str, str]]:
     if evidence is None:
         raise CompletionEvidenceError(
-            f"{status} status requires evidence with at least one of: reason, error, production_observation"
+            f"{status} status requires evidence with at least one of: "
+            f"reason, error, production_observation. {_non_success_evidence_next_step(status)}"
         )
     if not isinstance(evidence, dict):
-        raise CompletionEvidenceError("terminal evidence must be a JSON object")
+        raise CompletionEvidenceError(
+            f"terminal evidence must be a JSON object. {_non_success_evidence_next_step(status)}"
+        )
     normalized: Dict[str, str] = {}
     for key in _NON_SUCCESS_TERMINAL_EVIDENCE_KEYS:
         value = evidence.get(key)
@@ -208,7 +249,8 @@ def _normalize_non_success_terminal_evidence(
             continue
         if not isinstance(value, str):
             raise CompletionEvidenceError(
-                f"terminal evidence {key!r} must be a string, got {type(value).__name__}"
+                f"terminal evidence {key!r} must be a string, got {type(value).__name__}. "
+                f"{_non_success_evidence_next_step(status)}"
             )
         text = value.strip()
         if not text:
@@ -216,12 +258,13 @@ def _normalize_non_success_terminal_evidence(
         if key == "production_observation" and not _evidence_value_well_formed(key, text):
             raise CompletionEvidenceError(
                 f"terminal evidence {key!r}={text!r} is not well-formed "
-                "(production_observation>=8 chars)"
+                f"(production_observation>=8 chars). {_non_success_evidence_next_step(status)}"
             )
         normalized[key] = text
     if not normalized:
         raise CompletionEvidenceError(
-            f"{status} status requires evidence with at least one of: reason, error, production_observation"
+            f"{status} status requires evidence with at least one of: "
+            f"reason, error, production_observation. {_non_success_evidence_next_step(status)}"
         )
     return normalized
 
@@ -233,14 +276,18 @@ def _validate_terminal_status_write(status: str, evidence: Optional[Dict[str, An
         )
     if status == "completed" and evidence is None:
         raise CompletionEvidenceError(
-            "completed status requires evidence with at least one of: commit_sha, gate_run_id, production_observation"
+            "completed status requires evidence with at least one of: "
+            f"commit_sha, gate_run_id, production_observation. {COMPLETED_EVIDENCE_NEXT_STEP}"
         )
     if status == "completed":
         return _normalize_completion_evidence(evidence)
     if status in ("failed", "interrupted"):
         return _normalize_non_success_terminal_evidence(status, evidence)
     if evidence is not None:
-        raise CompletionEvidenceError("terminal evidence is only valid on a terminal transition")
+        raise CompletionEvidenceError(
+            "terminal evidence is only valid on a terminal transition. "
+            "Remove evidence or set status to completed/failed/interrupted with the matching evidence body."
+        )
     return None
 
 
@@ -1367,7 +1414,12 @@ def _queue_block_reason(task_id: Optional[str], description: Optional[str]) -> s
 def _in_progress_block_reason(task_id: Optional[str], description: Optional[str]) -> str:
     task_id_value = task_id or "unknown-task"
     task_title = (description or "untitled task")[:80]
-    return f"Finish in-progress task {task_id_value}: {task_title}."
+    return (
+        f"Finish in-progress task {task_id_value}: {task_title}. "
+        f"If this is dispatched peer work, call record_outcome('<session>', 'done', '<summary>'); "
+        f"if you own the tracker task directly, run `taey-task update {task_id_value} completed "
+        "--evidence '{\"commit_sha\":\"<sha>\",\"production_observation\":\"<what you verified>\"}'`."
+    )
 
 
 def _redis_marker_call(fn, *args):
@@ -1668,14 +1720,21 @@ def _supervisor_gate_block_reason(task_id: Optional[str], owner: Optional[str],
 
 def _awaiting_human_review_stop_reason(gates: List[Dict[str, Any]]) -> str:
     if not gates:
-        return "Awaiting human review surfaced on the dashboard."
+        return (
+            "Awaiting human review surfaced on the dashboard. Open `/ui/` or inspect "
+            "GET /api/projects to find the question, then complete it with "
+            'POST /api/ui/questions/{question_id}/answer body '
+            '{"answer":"<verdict>","answered_by":"<reviewer>"}.'
+        )
     first = gates[0]
     task_id = first.get("task_id") or "unknown-task"
     question_id = first.get("question_id") or "unknown-question"
     reviewer = first.get("reviewer") or "the human reviewer"
     return (
         "Awaiting human review surfaced on the dashboard: "
-        f"{task_id} / {question_id} for {reviewer}. No autonomous session work remains."
+        f"{task_id} / {question_id} for {reviewer}. No autonomous session work remains. "
+        f"Open `/ui/` or POST /api/ui/questions/{question_id}/answer with body "
+        '{"answer":"<verdict>","answered_by":"<reviewer>"} to complete the gate.'
     )
 
 
@@ -2091,6 +2150,14 @@ def get_session_stop_decision(session_id: str,
         decision["convergence_marker_fail_open"] = {
             "session": session_id,
             "exception_class": exc.__class__.__name__,
+            "reason": (
+                "Redis convergence marker write/read failed; the stop decision is still returned, "
+                "but repeated Stop hook bodies may repeat until notify Redis/fleet state Redis is healthy."
+            ),
+            "next_step": (
+                f"Inspect notify Redis/fleet state Redis connectivity for session {session_id}; "
+                f"retry GET /api/sessions/{session_id}/stop-decision?stop_hook_active=true after Redis recovers."
+            ),
         }
     return decision
 
@@ -2137,7 +2204,12 @@ def create_project(project_id: str, name: str, description: str = "",
     created_by = ingested_by or "unknown"
     supervisor_value = supervisor or _normalize_owner_session(created_by) or "unassigned"
     if (not migration_exempt) and supervisor_value == "unassigned":
-        raise ValueError("supervisor must be non-empty and not 'unassigned' unless migration_exempt=true")
+        raise ValueError(
+            "supervisor must be non-empty and not 'unassigned' unless migration_exempt=true. "
+            'Use POST /api/projects body {"id":"<project-id>","name":"<name>",'
+            '"supervisor":"<tmux-session>"} or run '
+            "`taey-plan ingest <plan.md> --supervisor <tmux-session>`."
+        )
     priority_value = int(priority if priority is not None else _next_project_priority(supervisor_value, cfg))
     conditions_value = _normalize_user_stop_conditions(user_stop_conditions, created_by)
     priority_history = [{
@@ -2558,7 +2630,8 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                 return False
             if existing.get("task_type") == "human-review":
                 raise CompletionEvidenceError(
-                    "human-review gate tasks must be completed through the dashboard UI review endpoint"
+                    "human-review gate tasks must be completed through the dashboard UI review endpoint. "
+                    + _human_review_answer_next_step("{question_id}")
                 )
         if result is None:
             rec = session.run("""
@@ -3344,7 +3417,11 @@ def complete_project(project_id: str, *, force: bool = False,
     completed_actor = str(completed_by or "unknown").strip() or "unknown"
     reason = str(closure_reason or "").strip()
     if force and not reason:
-        raise ValueError("closure_reason is required when force=true")
+        raise ValueError(
+            'closure_reason is required when force=true. Use body '
+            '{"force":true,"closure_reason":"<why>","completed_by":"<session-id>"} '
+            f"with POST /api/projects/{project_id}/complete."
+        )
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
@@ -3380,7 +3457,15 @@ def complete_project(project_id: str, *, force: bool = False,
         ).single()
         if not record:
             _project_record(project_id, cfg)
-            raise ReadyWorkConflictError(f"project {project_id} has incomplete tasks")
+            raise ReadyWorkConflictError(
+                f"project {project_id} has incomplete tasks. Inspect remaining work with "
+                f"`taey-plan show {project_id}` or GET /api/projects/{project_id}; complete tasks with "
+                "`taey-task update <task-id> completed --evidence "
+                '\'{"commit_sha":"<sha>","production_observation":"<what you verified>"}\'`, '
+                "or force close with body "
+                '{"force":true,"closure_reason":"<why>","completed_by":"<session-id>"} '
+                f"to POST /api/projects/{project_id}/complete."
+            )
     return {
         "ok": True,
         "project_id": project_id,
@@ -3440,7 +3525,12 @@ def update_project_priority(project_id: str, new_priority: int, set_by: str,
                             source_surface: str, reason: str,
                             config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     if not set_by or not source_surface or not reason.strip():
-        raise PriorityAuditError("set_by, source_surface, and reason are required")
+        raise PriorityAuditError(
+            "set_by, source_surface, and reason are required. Use PATCH "
+            f"/api/projects/{project_id} body "
+            '{"priority":10,"set_by":"<session-id>","source_surface":"api","reason":"<why>"}; '
+            "allowed source_surface values are the caller surface you are using, e.g. api, cli, or ui."
+        )
     cfg = config or OrchConfig()
     project = _project_record(project_id, cfg)
     old_priority = project.get("priority")
@@ -3545,7 +3635,10 @@ def get_session_stop_status(session_id: str,
     cfg = config or OrchConfig()
     projects = get_session_supervised_projects(session_id, config=cfg)
     project_statuses: List[Dict[str, Any]] = []
-    decision: Dict[str, Any] = {"can_stop": True}
+    decision: Dict[str, Any] = {
+        "can_stop": True,
+        "next_action": f"No ready work or required stop reason is pending for {session_id}.",
+    }
     for project in projects:
         stop_state = _project_stop_reason_state(project)
         ready_tasks = ready_work(project["id"], session_id=session_id, config=cfg)
@@ -3565,6 +3658,10 @@ def get_session_stop_status(session_id: str,
                 "can_stop": False,
                 "wake_type": "WAKE_WITH_QUEUE",
                 "wake_reason": f"ready_work:{project['id']}",
+                "next_action": (
+                    f"Run `taey-plan next {session_id}` or GET "
+                    f"/api/sessions/{session_id}/next-ready; then work or dispatch the returned task."
+                ),
             }
             break
         # Only an ACTIVE project with no ready work + no valid stop reason demands a
@@ -3584,6 +3681,12 @@ def get_session_stop_status(session_id: str,
             "can_stop": False,
             "wake_type": "WAKE_REASON_REQUIRED",
             "wake_reason": f"stop_reason_required:{project['id']}",
+            "next_action": (
+                f"Set a stop reason with POST /api/projects/{project['id']}/stop-reason body "
+                '{"condition_id":"<id>","condition_version":<version>,"detail":"<why>",'
+                '"set_by":"<session-id>"} or continue work with '
+                f"`taey-plan next {session_id}`."
+            ),
         }
         break
     return {"projects": project_statuses, "decision": decision}
@@ -3594,14 +3697,14 @@ def set_session_pause(session_id: str, pause_source: str, pause_reason: str,
                       paused_by: Optional[str] = None,
                       config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     if pause_source not in _PAUSE_SOURCES:
-        raise PauseValidationError("pause_source invalid")
+        raise PauseValidationError(f"pause_source invalid. {PAUSE_NEXT_STEP}")
     r = _fleet_state_redis()
     expires_at = _parse_pause_expires_at(pause_expires_at)
     ttl_seconds: Optional[int] = None
     if expires_at is not None:
         delta = (expires_at - dt.datetime.now(dt.timezone.utc)).total_seconds()
         if delta <= 0:
-            raise PauseValidationError("pause_expires_at must be in the future")
+            raise PauseValidationError(f"pause_expires_at must be in the future. {PAUSE_NEXT_STEP}")
         ttl_seconds = max(1, int(math.ceil(delta)))
     meta = {
         "paused_by": paused_by or session_id,
@@ -3655,11 +3758,11 @@ def get_agent_tasks(agent_id: str, config: Optional[OrchConfig] = None) -> List[
 def _chat_lineage(value: str) -> str:
     lineage = str(value or "").strip()
     if not lineage:
-        raise ValueError("lineage must be non-empty")
+        raise ValueError(f"lineage must be non-empty. {CHAT_NEXT_STEP}")
     if len(lineage) > 160:
-        raise ValueError("lineage must be <= 160 characters")
+        raise ValueError(f"lineage must be <= 160 characters. {CHAT_NEXT_STEP}")
     if not all(ch.isalnum() or ch in "._-" for ch in lineage) or ".." in lineage:
-        raise ValueError("lineage contains unsupported characters")
+        raise ValueError(f"lineage contains unsupported characters. {CHAT_NEXT_STEP}")
     return lineage
 
 
@@ -3675,7 +3778,11 @@ def _surface_question_to_chat(question: Dict[str, Any], *,
     lineage = _chat_lineage(str(question.get("lineage") or question.get("reviewer") or question.get("asked_by") or "supervisor"))
     reason = str(question.get("text") or "").strip()
     if not reason:
-        raise ValueError("question text must be non-empty")
+        raise ValueError(
+            "question text must be non-empty. Use POST /api/human-review-gates body "
+            '{"phase_id":"<phase-id>","task_id":"<task-id>","prompt":"<review question>",'
+            '"reviewer":"<session-id>"} or answer an existing gate through `/ui/`.'
+        )
     record = {
         "id": str(question["id"]),
         "lineage": lineage,
@@ -3795,7 +3902,13 @@ def create_question(question_id: str, text: str, context: str = "",
                 task_id=task_id,
             ).single()
             if task_record is None:
-                raise TaskParentNotFoundError(f"task '{task_id}' not found; cannot create question '{question_id}'")
+                raise TaskParentNotFoundError(
+                    f"task '{task_id}' not found; cannot create question '{question_id}'. "
+                    f"Inspect with `taey-task status {task_id}` or GET /api/tasks/{task_id}; "
+                    "create a human-review gate with POST /api/human-review-gates body "
+                    '{"phase_id":"<phase-id>","task_id":"<task-id>","prompt":"<review question>",'
+                    '"reviewer":"<session-id>"} after the task exists.'
+                )
             query = _BASE_Q + _LINK_TASK + "RETURN q.id AS id"
         else:
             query = _BASE_Q + "RETURN q.id AS id"
@@ -3807,7 +3920,13 @@ def create_question(question_id: str, text: str, context: str = "",
             gate_task_id=gate_task_id, refs=_encode_refs_or_none(refs))
         record = result.single()
         if record is None:
-            raise TaskParentNotFoundError(f"task '{task_id}' not found; cannot create question '{question_id}'")
+            raise TaskParentNotFoundError(
+                f"task '{task_id}' not found; cannot create question '{question_id}'. "
+                f"Inspect with `taey-task status {task_id}` or GET /api/tasks/{task_id}; "
+                "create a human-review gate with POST /api/human-review-gates body "
+                '{"phase_id":"<phase-id>","task_id":"<task-id>","prompt":"<review question>",'
+                '"reviewer":"<session-id>"} after the task exists.'
+            )
         if surface:
             _surface_question_to_chat({
                 "id": question_id,
@@ -3825,7 +3944,12 @@ def answer_question(question_id: str, answer: str, answered_by: str,
                     config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     """Provide an answer to an open question."""
     if not str(answer or "").strip():
-        raise ValueError("answer must be non-empty")
+        raise ValueError(
+            f"answer must be non-empty. POST /api/questions/{question_id}/answer with body "
+            '{"answer":"<answer text>","answered_by":"<session-id>"}; for human-review '
+            "gate completion use `/ui/` or "
+            f"POST /api/ui/questions/{question_id}/answer with the same body."
+        )
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
@@ -3872,6 +3996,7 @@ def answer_question(question_id: str, answer: str, answered_by: str,
                 "gate_completed": False,
                 "question_type": record.get("question_type"),
                 "gate_task_id": record.get("gate_task_id") or "",
+                "next_step": _human_review_answer_next_step(question_id),
             }
         result = session.run("""
             MATCH (q:OrchQuestion {id: $id})
@@ -3896,6 +4021,7 @@ def answer_question(question_id: str, answer: str, answered_by: str,
         "gate_completed": False,
         "question_type": record.get("question_type"),
         "gate_task_id": record.get("gate_task_id") or "",
+        "next_step": _human_review_answer_next_step(question_id),
     }
 
 
@@ -3909,7 +4035,10 @@ def complete_human_review_gate(question_id: str, answer: str, answered_by: str,
     answer_text = str(answer or "").strip()
     reviewer = str(answered_by or "").strip() or "dashboard-ui"
     if not answer_text:
-        raise ValueError("answer must be non-empty")
+        raise ValueError(
+            f"answer must be non-empty. POST /api/ui/questions/{question_id}/answer with body "
+            '{"answer":"<verdict>","answered_by":"<reviewer>"} or use `/ui/`.'
+        )
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     evidence = _normalize_completion_evidence({

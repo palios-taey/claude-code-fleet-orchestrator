@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import fleet_orchestrator.orch_schema as orch_schema  # noqa: E402
+import fleet_orchestrator.chat_layer as chat_layer  # noqa: E402
 import fleet_orchestrator.tasks_api as tasks_api  # noqa: E402
 
 FAILURES: list[str] = []
@@ -66,6 +67,43 @@ class _NoRecordDriver:
         return _NoRecordSession()
 
 
+class _SingleRecordResult:
+    def __init__(self, record=None) -> None:
+        self.record = record
+
+    def single(self):
+        return self.record
+
+
+class _HumanReviewAnswerSession:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def run(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return _SingleRecordResult({
+                "id": "q1",
+                "question_type": "human_review_gate",
+                "gate_task_id": "task-1",
+                "lineage": "session-1",
+                "reviewer": "reviewer-1",
+                "props": {},
+            })
+        return _SingleRecordResult()
+
+
+class _HumanReviewAnswerDriver:
+    def session(self, **_kwargs):
+        return _HumanReviewAnswerSession()
+
+
 def _client() -> TestClient:
     return TestClient(tasks_api.app, raise_server_exceptions=False)
 
@@ -101,7 +139,7 @@ def _stop_decision_contract() -> None:
     with mock.patch.object(orch_schema, "_fleet_state_redis", return_value=redis), \
          mock.patch.object(orch_schema, "_raw_stop_decision", return_value=dict(base_decision)):
         decisions = [
-            orch_schema.get_session_stop_decision("conductor-codex", stop_hook_active=True, config=cfg)
+            orch_schema.get_session_stop_decision("session-1-codex", stop_hook_active=True, config=cfg)
             for _ in range(3)
         ]
     converged = decisions[-1]
@@ -123,7 +161,7 @@ def _stop_condition_contract(client: TestClient) -> None:
             "label": "release only after r5",
             "version": 2,
             "created_at": "2026-06-19T00:00:00Z",
-            "created_by": "conductor",
+            "created_by": "session-1",
             "deprecated_at": None,
             "replaces_id": None,
         }
@@ -222,7 +260,7 @@ def _wake_packet_no_next_step_contract(client: TestClient) -> None:
     try:
         os.environ["ORCH_WAKE_PACKET_ENDPOINT_ENABLED"] = "0"
         with mock.patch.object(tasks_api, "select_wake_context", side_effect=RuntimeError("should not assemble")):
-            disabled = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
+            disabled = client.get("/api/sessions/session-1-codex/wake-packet?cli=codex")
         disabled_body = disabled.json()
         _check(
             "disabled wake packet names enable flag",
@@ -236,9 +274,9 @@ def _wake_packet_no_next_step_contract(client: TestClient) -> None:
         )
 
         os.environ["ORCH_WAKE_PACKET_ENDPOINT_ENABLED"] = "1"
-        with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["conductor-codex"])), \
+        with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["session-1-codex"])), \
              mock.patch.object(tasks_api, "select_wake_context", side_effect=RuntimeError("assembler boom")):
-            failed = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
+            failed = client.get("/api/sessions/session-1-codex/wake-packet?cli=codex")
         failed_body = failed.json()
         _check(
             "wake assembler failure names operation and next step",
@@ -272,6 +310,125 @@ def _health_failure_contract(client: TestClient) -> None:
     )
 
 
+def _partial_surface_contracts(client: TestClient) -> None:
+    direct_cases = [
+        (
+            "completed evidence object",
+            lambda: orch_schema._normalize_completion_evidence("bad"),
+            ["taey-task update <task-id> completed", "PATCH /api/task/<task-id>", "commit_sha"],
+        ),
+        (
+            "completed missing evidence",
+            lambda: orch_schema._validate_terminal_status_write("completed", None),
+            ["taey-task update <task-id> completed", "production_observation"],
+        ),
+        (
+            "failed evidence next step",
+            lambda: orch_schema._normalize_non_success_terminal_evidence("failed", None),
+            ["taey-task update <task-id> failed", '{"reason":"<why>"}'],
+        ),
+        (
+            "chat lineage pattern",
+            lambda: chat_layer._normalize_lineage("bad/lineage"),
+            ["[A-Za-z0-9._-]+", "POST /api/chat/<lineage>", '"role":"user"'],
+        ),
+    ]
+    for label, fn, needles in direct_cases:
+        try:
+            fn()
+        except (orch_schema.CompletionEvidenceError, ValueError) as exc:
+            detail = str(exc)
+        else:
+            detail = ""
+        for needle in needles:
+            _check(f"{label} includes {needle}", needle in detail, detail)
+
+    in_progress = orch_schema._in_progress_block_reason("task-123", "ship the fix")
+    _check("in-progress reason names record_outcome", "record_outcome('<session>', 'done'" in in_progress, in_progress)
+    _check("in-progress reason names taey-task evidence", "taey-task update task-123 completed" in in_progress, in_progress)
+
+    human_wait = orch_schema._awaiting_human_review_stop_reason([
+        {"task_id": "task-1", "question_id": "q1", "reviewer": "reviewer-1"}
+    ])
+    _check("human review stop names ui answer endpoint", "POST /api/ui/questions/q1/answer" in human_wait, human_wait)
+
+    with mock.patch.object(orch_schema, "get_neo4j_driver", return_value=_HumanReviewAnswerDriver()):
+        answer = orch_schema.answer_question("q1", "looks good", "session-1-codex", config=SimpleNamespace(neo4j_db="neo4j"))
+    _check("human-review API answer teaches UI verification", "POST /api/ui/questions/q1/answer" in answer.get("next_step", ""), answer)
+
+    marker_decision = {"block": True, "reason": "still blocked", "wake_type": "WAKE_WITH_QUEUE", "task_id": "task-1"}
+    with mock.patch.object(orch_schema, "_raw_stop_decision", return_value=dict(marker_decision)), \
+         mock.patch.object(orch_schema, "_fleet_state_redis", side_effect=RuntimeError("redis down")):
+        marker = orch_schema.get_session_stop_decision("session-1-codex", stop_hook_active=True, config=SimpleNamespace())
+    marker_detail = str(marker.get("convergence_marker_fail_open") or {})
+    _check("marker failure explains redis repeat", "Redis convergence marker" in marker_detail and "retry GET" in marker_detail, marker)
+
+    cfg = SimpleNamespace()
+    ready_task = {"id": "task-1", "description": "ready"}
+    with mock.patch.object(orch_schema, "get_session_supervised_projects", return_value=[{"id": "proj-1", "status": "active", "priority": 1}]), \
+         mock.patch.object(orch_schema, "ready_work", return_value=[ready_task]):
+        status = orch_schema.get_session_stop_status("session-1-codex", config=cfg)
+    _check("stop-status ready work names taey-plan next", "taey-plan next session-1-codex" in status["decision"].get("next_action", ""), status)
+
+    with mock.patch.object(tasks_api, "_cfg", return_value=cfg), \
+         mock.patch.object(tasks_api, "resolve_task_id", return_value="task-1"), \
+         mock.patch.object(tasks_api, "_load_task", return_value={"owner": "session-1-codex", "description": "demo"}), \
+         mock.patch("fleet_orchestrator.completion_guard.peer_self_completion_rejection", return_value=None), \
+         mock.patch.object(tasks_api, "update_task_status", side_effect=orch_schema.CompletionEvidenceError("missing evidence")):
+        response = client.patch("/api/task/task-1", json={"status": "completed", "from": "session-1-codex"})
+    body = response.json()
+    _check("task update evidence has next_step", response.status_code == 400 and "next_step" in body, body)
+    _check("task update next_step names command", "taey-task update task-1 completed" in str(body), body)
+
+    _assert_detail(
+        "project complete object body",
+        client.post("/api/projects/proj-1/complete", json=[]),
+        422,
+        ["force", "closure_reason", "completed_by"],
+    )
+    _assert_detail(
+        "project force type body",
+        client.post("/api/projects/proj-1/complete", json={"force": "yes"}),
+        422,
+        ["JSON boolean", "closure_reason"],
+    )
+
+    with mock.patch.object(tasks_api, "_cfg", return_value=cfg), \
+         mock.patch.object(tasks_api, "get_session_liveness", return_value={"status": "idle"}), \
+         mock.patch.object(tasks_api, "get_session_current_work", return_value=None):
+        current = client.get("/api/sessions/session-1-codex/current")
+    _check("empty current has next_action", "taey-plan next session-1-codex" in str(current.json()), current.text)
+
+    with mock.patch.object(tasks_api, "_cfg", return_value=cfg), \
+         mock.patch.object(tasks_api, "get_session_next_ready", return_value=None):
+        next_ready = client.get("/api/sessions/session-1-codex/next-ready")
+    _check("empty next-ready has next_action", "stop-status" in str(next_ready.json()), next_ready.text)
+
+    _assert_detail(
+        "notify type gives command",
+        client.post("/api/sessions/session-1/notify", json={"message": "hello", "type": "bad"}),
+        400,
+        ["taey-notify session-1", "response_ready"],
+    )
+    with mock.patch.object(tasks_api, "_cfg", return_value=cfg), \
+         mock.patch.object(tasks_api, "_ensure_registered_session", return_value=None), \
+         mock.patch.object(tasks_api.subprocess, "run", return_value=SimpleNamespace(returncode=1, stderr="notify exploded")):
+        notify = client.post("/api/sessions/session-1/notify", json={"message": "hello", "type": "standard"})
+    _check("notify failure preserves stderr", notify.status_code == 502 and "notify_stderr" in str(notify.json()), notify.text)
+
+    with mock.patch.object(tasks_api, "_cfg", return_value=cfg):
+        loop = client.post("/api/loops/declare", json={})
+    _check(
+        "loop declaration has required fields",
+        loop.status_code == 400
+        and all(token in str(loop.json()) for token in ["step_bundle", "trigger", "cycle_state", "stop_condition"]),
+        loop.text,
+    )
+
+    chat = client.post("/api/chat/session-1-codex", json={"text": "hello", "role": "system"})
+    _check("chat role error names allowed body", chat.status_code == 400 and "POST /api/chat/<lineage>" in str(chat.json()), chat.text)
+
+
 def main() -> int:
     old_auth = os.environ.get("ORCH_AUTH_TOKEN")
     old_loops = os.environ.get("ORCH_LOOPS_ENABLED")
@@ -288,6 +445,7 @@ def main() -> int:
         _api_not_found_contract(client)
         _wake_packet_no_next_step_contract(client)
         _health_failure_contract(client)
+        _partial_surface_contracts(client)
     finally:
         if old_auth is None:
             os.environ.pop("ORCH_AUTH_TOKEN", None)
