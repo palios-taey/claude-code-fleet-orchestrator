@@ -73,6 +73,13 @@ the ordinal tie-breaker:
 - `fleet_orchestrator/plan_readiness.py::check_readiness::Exception` lines 190, 214
 - `fleet_orchestrator/worker_liveness.py::register_worker_task_liveness::Exception` lines 97, 108
 
+Ordinals are positional within a same `(file, function, exception_type)` group.
+If a handler is added to or removed from one of these groups, the gate must fail
+until the registry is edited. During that edit, reviewers must re-verify every
+row in the affected group, not just the row that appears changed, because a
+remaining handler can inherit a previous sibling's ordinal and rationale text is
+not mechanically proven against behavior.
+
 ## Acceptance Shape
 
 Update `tests/exception_classification_acceptance.py` to prove the new invariant:
@@ -83,6 +90,8 @@ Update `tests/exception_classification_acceptance.py` to prove the new invariant
 - leaving a registry row for a removed handler fails as stale.
 - two `except Exception` handlers in one function are independently classified by
   ordinal.
+- removing one of multiple same-function handlers fails, forcing a group-level
+  registry review.
 - reverting to line-key matching fails the line-shift case.
 
 ## Migration Notes

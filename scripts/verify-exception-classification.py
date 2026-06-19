@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import re
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -37,26 +38,39 @@ LOGGING_CALL_RE = re.compile(r"\b(?:LOGGER|LOG|logger|log|_LOG)\.(?:exception|wa
 class Handler:
     file: str
     line: int
+    column: int
     function: str
+    exception_type: str
+    ordinal: int
     source: str
 
     @property
-    def key(self) -> tuple[str, int, str]:
-        return (self.file, self.line, self.function)
+    def key(self) -> tuple[str, str, str, int]:
+        return (self.file, self.function, self.exception_type, self.ordinal)
+
+    @property
+    def label(self) -> str:
+        return f"{self.file}:{self.line} {self.function} except {self.exception_type}#{self.ordinal}"
 
 
 @dataclass(frozen=True)
 class RegistryEntry:
     file: str
-    line: int
     function: str
+    exception_type: str
+    ordinal: int
+    line_hint: int
     category: str
     rationale: str
     remediation: str
 
     @property
-    def key(self) -> tuple[str, int, str]:
-        return (self.file, self.line, self.function)
+    def key(self) -> tuple[str, str, str, int]:
+        return (self.file, self.function, self.exception_type, self.ordinal)
+
+    @property
+    def label(self) -> str:
+        return f"{self.file}:{self.line_hint} {self.function} except {self.exception_type}#{self.ordinal}"
 
 
 def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
@@ -77,8 +91,20 @@ def _function_path(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
     return ".".join(reversed(names)) or "<module>"
 
 
+def _exception_type(node: ast.AST | None) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return ast.unparse(node)
+    if isinstance(node, ast.Tuple):
+        return ", ".join(_exception_type(item) for item in node.elts)
+    if node is None:
+        return "<bare>"
+    return ast.unparse(node)
+
+
 def discover_handlers(root: Path, critical_files: Iterable[str] = CRITICAL_FILES) -> list[Handler]:
-    handlers: list[Handler] = []
+    raw_handlers: list[tuple[str, int, int, str, str, str]] = []
     for file in critical_files:
         path = root / file
         source = path.read_text(encoding="utf-8")
@@ -90,14 +116,35 @@ def discover_handlers(root: Path, critical_files: Iterable[str] = CRITICAL_FILES
             if not isinstance(node.type, ast.Name) or node.type.id != "Exception":
                 continue
             segment = ast.get_source_segment(source, node) or ""
-            handlers.append(
-                Handler(
-                    file=file,
-                    line=int(node.lineno),
-                    function=_function_path(node, parents),
-                    source=segment,
+            raw_handlers.append(
+                (
+                    file,
+                    int(node.lineno),
+                    int(node.col_offset),
+                    _function_path(node, parents),
+                    _exception_type(node.type),
+                    segment,
                 )
             )
+    ordinals: defaultdict[tuple[str, str, str], int] = defaultdict(int)
+    handlers: list[Handler] = []
+    for file, line, column, function, exception_type, segment in sorted(
+        raw_handlers,
+        key=lambda item: (item[0], item[3], item[4], item[1], item[2]),
+    ):
+        group_key = (file, function, exception_type)
+        ordinals[group_key] += 1
+        handlers.append(
+            Handler(
+                file=file,
+                line=line,
+                column=column,
+                function=function,
+                exception_type=exception_type,
+                ordinal=ordinals[group_key],
+                source=segment,
+            )
+        )
     return sorted(handlers, key=lambda item: (item.file, item.line, item.function))
 
 
@@ -108,18 +155,24 @@ def parse_registry(path: Path) -> list[RegistryEntry]:
         if not line.startswith("| fleet_orchestrator/"):
             continue
         cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if len(cells) != 6:
-            raise ValueError(f"registry row must have 6 cells: {raw_line}")
-        file, line_no, function, category, rationale, remediation = cells
+        if len(cells) != 8:
+            raise ValueError(f"registry row must have 8 cells: {raw_line}")
+        file, function, exception_type, ordinal, line_hint, category, rationale, remediation = cells
         try:
-            parsed_line = int(line_no)
+            parsed_ordinal = int(ordinal)
         except ValueError as exc:
-            raise ValueError(f"registry line number is not an integer: {raw_line}") from exc
+            raise ValueError(f"registry ordinal is not an integer: {raw_line}") from exc
+        try:
+            parsed_line_hint = int(line_hint)
+        except ValueError as exc:
+            raise ValueError(f"registry line hint is not an integer: {raw_line}") from exc
         entries.append(
             RegistryEntry(
                 file=file,
-                line=parsed_line,
                 function=function,
+                exception_type=exception_type,
+                ordinal=parsed_ordinal,
+                line_hint=parsed_line_hint,
                 category=category,
                 rationale=rationale,
                 remediation=remediation,
@@ -140,29 +193,29 @@ def check(
     errors: list[str] = []
 
     handler_by_key = {handler.key: handler for handler in handlers}
-    entry_by_key: dict[tuple[str, int, str], RegistryEntry] = {}
+    entry_by_key: dict[tuple[str, str, str, int], RegistryEntry] = {}
     for entry in entries:
         if entry.category not in ALLOWED_CATEGORIES:
-            errors.append(f"{entry.file}:{entry.line} has invalid category {entry.category!r}")
+            errors.append(f"{entry.label} has invalid category {entry.category!r}")
         if entry.key in entry_by_key:
-            errors.append(f"{entry.file}:{entry.line} duplicates registry entry for {entry.function}")
+            errors.append(f"{entry.label} duplicates registry entry")
         entry_by_key[entry.key] = entry
 
     for handler in handlers:
         if handler.key not in entry_by_key:
-            errors.append(f"{handler.file}:{handler.line} {handler.function} is unclassified")
+            errors.append(f"{handler.label} is unclassified")
 
     for entry in entries:
         handler = handler_by_key.get(entry.key)
         if handler is None:
-            errors.append(f"{entry.file}:{entry.line} {entry.function} is classified but no matching handler exists")
+            errors.append(f"{entry.label} is classified but no matching handler exists")
             continue
         if entry.category == "defect" and not LOGGING_CALL_RE.search(handler.source):
-            errors.append(f"{entry.file}:{entry.line} {entry.function} defect handler lacks observable logging")
+            errors.append(f"{entry.label} defect handler lacks observable logging")
         if not entry.rationale:
-            errors.append(f"{entry.file}:{entry.line} {entry.function} missing rationale")
+            errors.append(f"{entry.label} missing rationale")
         if not entry.remediation:
-            errors.append(f"{entry.file}:{entry.line} {entry.function} missing remediation note")
+            errors.append(f"{entry.label} missing remediation note")
 
     return errors
 
