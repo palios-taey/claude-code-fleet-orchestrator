@@ -86,8 +86,8 @@ The gate is `scripts/verify-exception-classification.py`, wired through `tests/e
 | fleet_orchestrator/tasks_api.py | 579 | create_human_review_gate_endpoint | defect | Mutating gate creation 500s were returned without phase/task/question context in logs. | Added LOGGER.exception; response behavior unchanged. |
 | fleet_orchestrator/tasks_api.py | 605 | answer_question_endpoint | defect | Mutating question answer 500s were returned without question id in logs. | Added LOGGER.exception; response behavior unchanged. |
 | fleet_orchestrator/tasks_api.py | 628 | ui_answer_human_review_gate_endpoint | defect | UI human-review answer 500s were returned without question id in logs. | Added LOGGER.exception; response behavior unchanged. |
-| fleet_orchestrator/tasks_api.py | 1213 | session_wake_packet | intentional-fail-closed | Wake-packet assembly errors return ok:false to the caller. | Annotated in registry; no behavior change. |
-| fleet_orchestrator/tasks_api.py | 1234 | health | intentional-fail-closed | Health probe reports 503 when ready-task lookup fails. | Annotated in registry; no behavior change. |
+| fleet_orchestrator/tasks_api.py | 1211 | session_wake_packet | intentional-fail-closed | Wake-packet assembly errors return ok:false to the caller. | Annotated in registry; no behavior change. |
+| fleet_orchestrator/tasks_api.py | 1232 | health | intentional-fail-closed | Health probe reports 503 when ready-task lookup fails. | Annotated in registry; no behavior change. |
 | fleet_orchestrator/worker_liveness.py | 97 | register_worker_task_liveness | intentional-fail-closed | Neo4j registration failure means worker liveness was not registered. | Existing warning log; no behavior change. |
 | fleet_orchestrator/worker_liveness.py | 108 | register_worker_task_liveness | harmless-best-effort | Redis sidecar failure is logged after Neo4j liveness registration succeeds. | Existing warning log; no behavior change. |
 | fleet_orchestrator/worker_liveness.py | 119 | clear_worker_task_liveness | defect | Redis cleanup failure could leave stale liveness sidecar state with no production signal. | Added LOG.warning; return behavior unchanged. |

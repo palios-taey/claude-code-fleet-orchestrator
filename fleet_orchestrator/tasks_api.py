@@ -879,7 +879,6 @@ def sessions() -> Dict[str, Any]:
 def session_current(session_id: str) -> Dict[str, Any]:
     """What this session is currently executing — top in_progress task with project/phase context."""
     cfg = _cfg()
-    _ensure_registered_session(session_id, cfg)
     activity = get_session_liveness(session_id, config=cfg)
     work = get_session_current_work(session_id, config=cfg)
     if not work:
@@ -895,7 +894,6 @@ def session_current(session_id: str) -> Dict[str, Any]:
 def session_next_ready(session_id: str) -> Dict[str, Any]:
     """Top pending task owned-by this session only — under single-supervisor scope there is no claim-from-unowned-pool path."""
     cfg = _cfg()
-    _ensure_registered_session(session_id, cfg)
     result = get_session_next_ready(session_id, config=cfg)
     if not result:
         return {"session": session_id, "next": None}

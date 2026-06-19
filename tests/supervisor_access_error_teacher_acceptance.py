@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -71,10 +72,10 @@ def main() -> int:
 
             from fleet_orchestrator.config import OrchConfig
             from fleet_orchestrator.orch_schema import session_ref_root, supervisor_access_resolution
-            from fleet_orchestrator.tasks_api import app
+            import fleet_orchestrator.tasks_api as tasks_api
 
             cfg = OrchConfig()
-            client = TestClient(app)
+            client = TestClient(tasks_api.app)
 
             md = """# Project: demo - Demo
 
@@ -117,17 +118,20 @@ Do it.
             _check("unregistered peer ingest teaches registration", "tmux session registered-supervisor-codex is not a registered supervisor" in peer_detail, peer_detail)
             _check("unregistered peer ingest does not promise access", "You already have access" not in peer_detail and str(plan_root) not in peer_detail, peer_detail)
 
-            current_response = client.get("/api/sessions/not-registered/current")
-            current_detail = current_response.json().get("detail", "")
-            _check("unregistered current rejects", current_response.status_code == 400, current_response.text)
-            _check("unregistered error names tmux session", "tmux session not-registered" in current_detail, current_detail)
-            _check("unregistered error lists registered sessions", "registered-supervisor" in current_detail and "weaver" in current_detail, current_detail)
-            _check("unregistered error teaches tmux identity", "supervisors are identified by tmux session name" in current_detail, current_detail)
+            with mock.patch.object(tasks_api, "get_session_liveness", return_value={"state": "unknown"}), \
+                 mock.patch.object(tasks_api, "get_session_current_work", return_value=None), \
+                 mock.patch.object(tasks_api, "get_session_next_ready", return_value=None):
+                current_response = client.get("/api/sessions/conductor-codex/current")
+                current_body = current_response.json()
+                _check("unregistered peer current stays available", current_response.status_code == 200, current_response.text)
+                _check("unregistered peer current is scoped to requested session", current_body.get("session") == "conductor-codex", current_body)
+                _check("unregistered peer current may be empty", current_body.get("current") is None, current_body)
 
-            next_response = client.get("/api/sessions/not-registered/next-ready")
-            next_detail = next_response.json().get("detail", "")
-            _check("unregistered next-ready rejects", next_response.status_code == 400, next_response.text)
-            _check("next-ready carries same teaching", "tmux session not-registered" in next_detail, next_detail)
+                next_response = client.get("/api/sessions/conductor-codex/next-ready")
+                next_body = next_response.json()
+                _check("unregistered peer next-ready stays available", next_response.status_code == 200, next_response.text)
+                _check("unregistered peer next-ready is scoped to requested session", next_body.get("session") == "conductor-codex", next_body)
+                _check("unregistered peer next-ready may be empty", next_body.get("next") is None, next_body)
     finally:
         for key, value in saved.items():
             if value is None:
