@@ -38,7 +38,7 @@ The first implementation should enumerate these agent-facing surfaces:
 | Domain validation errors | `fleet_orchestrator/orch_schema.py` | `return None, <message>` validation returns. |
 | Stop and wake decision reasons | `fleet_orchestrator/orch_schema.py` | return payloads from `*_block_reason`, `*_stop_reason`, and explicit stop-decision reason builders. |
 | Wake packet Operating affordances | `fleet_orchestrator/context_assembler.py` | lines emitted by `_render_operating_section`. |
-| CLI failure messages | `fleet_orchestrator/cli_taey_plan.py`, `fleet_orchestrator/cli_taey_task.py`, and any future `fleet_orchestrator/cli_taey_*.py` module | failure output only, not ordinary success output. |
+| CLI failure messages | `fleet_orchestrator/cli_taey_plan.py`, `fleet_orchestrator/cli_taey_task.py`, and any future fleet orchestrator CLI module whose name starts with `cli_taey_` | failure output only, not ordinary success output. |
 
 `docs/ai_native_surface_audit.md` currently includes a few dispatch rows. The implementation should either add explicit dispatch enumeration rules or migrate those rows into a separately named manual section that is not allowed to satisfy the scoped AST completeness invariant. The preferred follow-on is to include dispatch surfaces once there is a precise sink rule for prompt/completion text builders; do not silently let old dispatch rows count as current AST-covered surfaces.
 
@@ -113,7 +113,7 @@ Only the `## Operating` section is in scope. Identity, refs, memory, rules, and 
 
 ### CLI failure messages
 
-In `fleet_orchestrator/cli_taey_plan.py`, `fleet_orchestrator/cli_taey_task.py`, and future `fleet_orchestrator/cli_taey_*.py` modules, include failure sinks:
+In `fleet_orchestrator/cli_taey_plan.py`, `fleet_orchestrator/cli_taey_task.py`, and future fleet orchestrator CLI modules whose names start with `cli_taey_`, include failure sinks:
 
 - `print(..., file=sys.stderr)`
 - `raise SystemExit(<message>)`
@@ -145,11 +145,11 @@ Detect command tokens matching:
 
 Then validate the command is real by checking at least one source of truth:
 
-- the `pyproject.toml` console scripts.
+- the `setup.py` console scripts.
 - executable scripts under `scripts/`.
 - installed repo CLI entrypoints if the verifier runs after editable install.
 
-This catches the exact class of bug where a message teaches a non-existent command. A literal `taey-queue` style command is not enough unless that command exists in one of the repo command sources.
+This catches the exact class of bug where a message teaches a non-existent command. A literal command-shaped token is not enough unless that command exists in one of the repo command sources.
 
 The implementation should seed tests with known commands including `taey-plan`, `taey-task`, `taey-receipts`, and `taey-notify`, but it should not hard-code only those four if the repo already exposes additional valid `taey-*` entrypoints.
 
@@ -206,9 +206,7 @@ For a dynamic surface:
 
 Use a parseable companion registry rather than overloading the current prose ledger:
 
-```text
-docs/ai_native_surface_registry.md
-```
+The proposed companion is a future registry Markdown file under the docs directory.
 
 `docs/ai_native_surface_audit.md` should link to the registry and remain the human audit narrative. The registry should have one table between marker comments:
 
@@ -286,12 +284,12 @@ Human labels such as `OS-03`, `API-14`, or `CLI-06` may remain as optional alias
 
 ## Implementation Shape
 
-Add:
+Add future artifacts:
 
-- `scripts/verify-ai-native-surface-coherence.py`
-- `tests/ai_native_surface_coherence_acceptance.py`
-- `docs/ai_native_surface_registry.md`
-- a ship-gate step after the existing doc/flag and exception-classification gates
+- a verifier script named verify-ai-native-surface-coherence.py under the repo's `scripts/` directory.
+- an acceptance test named ai_native_surface_coherence_acceptance.py under the repo's `tests/` directory.
+- the companion registry file described in the Machine Registry section.
+- a ship-gate step after the existing doc/flag and exception-classification gates.
 
 The verifier should expose reusable functions:
 
@@ -334,8 +332,8 @@ The follow-on implementation should prove:
 2. Generate an initial registry from `origin/main` and map each current `docs/ai_native_surface_audit.md` row to the structural surface id where possible.
 3. For any old ledger row that has no AST surface, either add an explicit enumeration rule or move it to a non-gated historical section. Do not let it remain in the machine registry.
 4. Run the verifier. Fix static non-teaching surfaces or classify true exemptions with rationale.
-5. Wire `python scripts/verify-ai-native-surface-coherence.py` and `python tests/ai_native_surface_coherence_acceptance.py` into ship-gate.
-6. Keep `docs/ai_native_surface_audit.md` as the narrative ledger, but treat `docs/ai_native_surface_registry.md` as the source of truth for completeness/no-stale enforcement.
+5. Wire the new verifier script and acceptance test into ship-gate.
+6. Keep `docs/ai_native_surface_audit.md` as the narrative ledger, but treat the new companion registry as the source of truth for completeness/no-stale enforcement.
 
 ## Non-Goals
 
