@@ -98,6 +98,8 @@ from fleet_orchestrator.orch_schema import (
     get_session_stop_decision,
     get_task_phase,
     reset_project,
+    supervisor_access_resolution,
+    session_registration_error_detail,
     set_project_stop_reason,
     set_session_pause,
     set_project_user_stop_conditions,
@@ -281,11 +283,30 @@ def _strict_force_flag(data: Dict[str, Any]) -> bool:
     raise HTTPException(status_code=422, detail="force must be a JSON boolean")
 
 
-def _validated_source_path(source_path: Optional[str], refs_present: bool) -> Optional[str]:
-    normalized, error = validate_source_path_for_refs(source_path, refs_present=refs_present)
+def _validated_source_path(
+    source_path: Optional[str],
+    refs_present: bool,
+    session_id: Optional[str] = None,
+    config: Optional[OrchConfig] = None,
+) -> Optional[str]:
+    normalized, error = validate_source_path_for_refs(
+        source_path,
+        refs_present=refs_present,
+        session_id=session_id,
+        config=config,
+    )
     if error:
         raise HTTPException(status_code=422, detail=error)
     return normalized
+
+
+def _ensure_registered_session(session_id: str, cfg: OrchConfig) -> None:
+    configured = set(cfg.session_ids)
+    if configured and not supervisor_access_resolution(session_id, config=cfg)["registered"]:
+        raise HTTPException(
+            status_code=400,
+            detail=session_registration_error_detail(session_id, cfg),
+        )
 
 
 @app.get("/api/tasks")
@@ -642,6 +663,7 @@ def get_project(project_id: str) -> Dict[str, Any]:
 async def create_project_endpoint(req: Request) -> Dict[str, Any]:
     """Create an OrchProject."""
     data = await req.json()
+    cfg = _cfg()
     project_id = data.get("id")
     name = data.get("name", project_id)
     if not project_id:
@@ -657,7 +679,12 @@ async def create_project_endpoint(req: Request) -> Dict[str, Any]:
             detail=f"priority must be >= 0 (got {project_priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
         )
     refs = data.get("refs") if isinstance(data.get("refs"), list) else None
-    source_path = _validated_source_path(data.get("source_path"), refs_present=bool(refs))
+    source_path = _validated_source_path(
+        data.get("source_path"),
+        refs_present=bool(refs),
+        session_id=data.get("supervisor") or data.get("from") or "",
+        config=cfg,
+    )
     pid = create_project(
         project_id=project_id,
         name=name,
@@ -670,7 +697,7 @@ async def create_project_endpoint(req: Request) -> Dict[str, Any]:
         source_sha256=data.get("source_sha256"),
         source_kind=data.get("source_kind"),
         ingested_by=data.get("ingested_by"),
-        config=_cfg(),
+        config=cfg,
     )
     return {"ok": True, "project_id": pid}
 
@@ -703,6 +730,7 @@ async def set_project_user_stop_conditions_endpoint(project_id: str, req: Reques
 async def create_phase_endpoint(project_id: str, req: Request) -> Dict[str, Any]:
     """Create an OrchPhase under a project."""
     data = await req.json()
+    cfg = _cfg()
     phase_id = data.get("id")
     name = data.get("name", phase_id)
     if not phase_id:
@@ -715,7 +743,12 @@ async def create_phase_endpoint(project_id: str, req: Request) -> Dict[str, Any]
     except PlanIdError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     refs = data.get("refs") if isinstance(data.get("refs"), list) else None
-    source_path = _validated_source_path(data.get("source_path"), refs_present=bool(refs))
+    source_path = _validated_source_path(
+        data.get("source_path"),
+        refs_present=bool(refs),
+        session_id=data.get("supervisor") or data.get("from") or "",
+        config=cfg,
+    )
     try:
         pid = create_phase(
             project_id=project_id,
@@ -724,7 +757,7 @@ async def create_phase_endpoint(project_id: str, req: Request) -> Dict[str, Any]
             order=int(data.get("order", 0)),
             refs=refs,
             source_path=source_path,
-            config=_cfg(),
+            config=cfg,
         )
     except TaskIdCollisionError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -735,6 +768,7 @@ async def create_phase_endpoint(project_id: str, req: Request) -> Dict[str, Any]
 async def load_plan_md(req: Request) -> Dict[str, Any]:
     """Ingest a markdown plan into Neo4j as OrchProject/Phase/Task nodes."""
     data = await req.json()
+    cfg = _cfg()
     md_text = data.get("md_text")
     if not md_text:
         raise HTTPException(status_code=400, detail="md_text required")
@@ -750,7 +784,12 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
         )
     try:
         refs_present = plan_declares_refs(md_text)
-        source_path = _validated_source_path(data.get("source_path", ""), refs_present=refs_present)
+        source_path = _validated_source_path(
+            data.get("source_path", ""),
+            refs_present=refs_present,
+            session_id=supervisor,
+            config=cfg,
+        )
         return load_plan_from_text(
             md=md_text,
             source_path=source_path or "",
@@ -759,6 +798,7 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
             supervisor=supervisor,
             priority=ingest_priority,
             migration_exempt=bool(data.get("migration_exempt", False)),
+            config=cfg,
         )
     except (PlanIdError, PlanTerminalStatusError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -853,7 +893,8 @@ def session_current(session_id: str) -> Dict[str, Any]:
 @app.get("/api/sessions/{session_id}/next-ready")
 def session_next_ready(session_id: str) -> Dict[str, Any]:
     """Top pending task owned-by this session only — under single-supervisor scope there is no claim-from-unowned-pool path."""
-    result = get_session_next_ready(session_id, config=_cfg())
+    cfg = _cfg()
+    result = get_session_next_ready(session_id, config=cfg)
     if not result:
         return {"session": session_id, "next": None}
     return {"session": session_id, "next": result}
@@ -988,9 +1029,8 @@ async def clear_pause_session_endpoint(session_id: str, req: Request) -> Dict[st
 
 @app.post("/api/sessions/{target}/notify")
 async def session_notify(target: str, req: Request) -> Dict[str, Any]:
-    configured_targets = set(_cfg().session_ids)
-    if configured_targets and target not in configured_targets:
-        raise HTTPException(status_code=400, detail="target must be listed in ORCH_SESSION_IDS")
+    cfg = _cfg()
+    _ensure_registered_session(target, cfg)
     if not target.strip():
         raise HTTPException(status_code=400, detail="target must be non-empty")
 
@@ -1120,9 +1160,8 @@ def session_wake_packet(
         raise HTTPException(status_code=400, detail="session_id must be non-empty")
 
     try:
-        configured_targets = set(_cfg().session_ids)
-        if configured_targets and session_id not in configured_targets:
-            raise HTTPException(status_code=400, detail="session_id must be listed in ORCH_SESSION_IDS")
+        cfg = _cfg()
+        _ensure_registered_session(session_id, cfg)
         context = select_wake_context(session_id, task_id=task_id, cli=cli_key)
         packet = build_wake_packet(session_id, context)
         rendered = assemble_wake_packet(packet, cli_key, budget_bytes=budget_bytes)

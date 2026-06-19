@@ -22,6 +22,7 @@ from fleet_orchestrator.orch_schema import (
     get_supervisor_dispatchable_peer_task,
     get_supervisor_inflight_peer_task,
     get_supervisor_refs,
+    supervisor_access_resolution,
     get_task_project,
 )
 from fleet_orchestrator.paths import repo_root
@@ -89,6 +90,13 @@ def _load_session_roots(scoped_env: Optional[Dict[str, str]] = None) -> Dict[str
     return roots
 
 
+def _load_registered_sessions(scoped_env: Optional[Dict[str, str]] = None) -> List[str]:
+    raw = _scoped_env_value(scoped_env, "ORCH_SESSION_IDS").strip()
+    if not raw:
+        return []
+    return [item.strip() for item in raw.replace(";", ",").split(",") if item.strip()]
+
+
 VALID_CLIS = {"claude", "codex", "gemini", "grok"}
 
 
@@ -101,6 +109,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
     base_roots = session_roots if session_roots is not None else _load_session_roots()
     scoped_env = _read_session_env(aliases, base_roots)
     roots = _load_session_roots(scoped_env) if "ORCH_SESSION_ROOTS" in scoped_env else base_roots
+    registered_sessions = _load_registered_sessions(scoped_env)
     work = _resolve_work(session_key, task_id)
     summary = get_project_summary(work["project_id"]) if work.get("project_id") else None
 
@@ -110,6 +119,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
     selected_memory = _rank_memory(memory_files, task_text, max_memory=max_memory)
     rules = _select_rules(session_key, work, summary, task_text, scoped_env=scoped_env)
     identity = _select_identity(raw_session, session_key, cli)
+    supervisor_affordance = _supervisor_access_affordance(raw_session, roots, registered_sessions)
 
     context = {
         "overall_refs": refs["overall"],
@@ -118,6 +128,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
         "phase_refs": refs["phase"],
         "task_refs": refs["task"],
         "identity": identity,
+        "supervisor_affordance": supervisor_affordance,
         "memory": selected_memory,
         "rules": rules,
         "budget_used": 0,
@@ -451,6 +462,25 @@ def _session_root(session_aliases: Iterable[str], session_roots: Dict[str, str])
         if root:
             return root
     return None
+
+
+def _supervisor_access_affordance(
+    session: str,
+    session_roots: Dict[str, str],
+    registered_sessions: List[str],
+) -> Dict[str, str]:
+    access = supervisor_access_resolution(
+        session,
+        registered_sessions=registered_sessions,
+        session_roots=session_roots,
+    )
+    root = access["plan_ref_root"]
+    if not access["registered"] or not root:
+        return {}
+    return {
+        "session": access["session"],
+        "plan_ref_root": root,
+    }
 
 
 def _safe_memory_key(value: str) -> str:
@@ -869,29 +899,30 @@ def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
     owner = _operating_value(resolved.get("dispatched_to") or resolved.get("owner") or "<peer>", default="<peer>")
     session = _operating_value(packet.get("generated_for") or "<you>", default="<you>")
     blocked_on = _operating_value(resolved.get("blocked_on"), default="")
+    access_lines = _render_supervisor_access_affordance(packet)
 
     if source == "none" or not resolved.get("task_id"):
-        return [
+        return access_lines + [
             f"- No task resolves for you. Get work: `taey-plan next {session}` or `taey-plan list`.",
             "- Ingest a plan: `taey-plan ingest <file.md>`.",
             "- `next` empty is not done if you supervise active peer work.",
         ]
 
     if blocked_on:
-        return [
+        return access_lines + [
             f"- `{task_id}` is blocked on `{blocked_on}`.",
             "- Dependency-gated downstream work releases only when deps are `completed`; `interrupted`/`failed` do not satisfy it.",
         ]
 
     if source in {"pending", "session_next_ready"} or status == "pending":
-        return [
+        return access_lines + [
             f"- Next task is UNBOUND: `{task_id}`.",
             "- Dispatch it: `taey-task dispatch <task-id> <peer>`; this BINDS owner+current_task and wakes the peer.",
             "- Bare `taey-notify` does NOT bind; the engine flags it undispatched. One task per peer at a time.",
         ]
 
     if source == "peer_reported_done":
-        return [
+        return access_lines + [
             f"- Peer {owner} is no longer actively working `{task_id}` (reported done or stalled).",
             f"- verify their work; if complete, close it: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"production_observation\":\"<obs>\"}}'`.",
             "- Peers cannot self-complete supervised tasks. Advance the chain.",
@@ -904,11 +935,26 @@ def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
             "- Evidence-less terminal writes are REJECTED. Don't stop while ready work exists.",
             "- Human-review gate tasks complete via the question/UI path, not ordinary status update.",
         ]
-        return lines
+        return access_lines + lines
 
-    return [
+    return access_lines + [
         f"- Resolved task `{task_id}`. Inspect it: `taey-task status {task_id}`.",
         "- If it is ready, dispatch with `taey-task dispatch <task-id> <peer>`; if terminal, use `--evidence`.",
+    ]
+
+
+def _render_supervisor_access_affordance(packet: Dict[str, Any]) -> List[str]:
+    affordance = ((packet.get("context") or {}).get("supervisor_affordance") or {})
+    root = _operating_value(affordance.get("plan_ref_root"), default="")
+    if not root:
+        return []
+    session = _operating_value(
+        affordance.get("session") or packet.get("generated_for") or "<you>",
+        default="<you>",
+    )
+    return [
+        f"- You are `{session}`, a registered supervisor; your plan/ref root is `{root}` - "
+        "add work with `taey-plan ingest <file under it>`; you never request access.",
     ]
 
 

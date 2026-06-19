@@ -370,6 +370,30 @@ def _has_control_chars(value: str) -> bool:
     return any(ord(ch) < 32 for ch in value)
 
 
+def _session_root_map() -> Dict[str, str]:
+    """Session -> repo-root values from ORCH_SESSION_ROOTS."""
+    raw = os.environ.get("ORCH_SESSION_ROOTS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return {
+                str(k).strip(): str(v).strip()
+                for k, v in parsed.items()
+                if str(k).strip() and str(v).strip()
+            }
+    except (ValueError, TypeError):
+        pass
+    roots: Dict[str, str] = {}
+    for pair in raw.split(","):
+        if "=" in pair:
+            key, _, value = pair.partition("=")
+            if key.strip() and value.strip():
+                roots[key.strip()] = value.strip()
+    return roots
+
+
 def _session_root_dirs() -> List[str]:
     """Directory values from ORCH_SESSION_ROOTS (JSON dict OR comma key=value).
 
@@ -378,22 +402,88 @@ def _session_root_dirs() -> List[str]:
     without separately maintaining ORCH_REF_ALLOWED_ROOT. (Local parser, mirroring
     context_assembler, to avoid an import cycle.)
     """
-    raw = os.environ.get("ORCH_SESSION_ROOTS", "").strip()
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return [str(v).strip() for v in parsed.values() if str(v).strip()]
-    except (ValueError, TypeError):
-        pass
-    dirs: List[str] = []
-    for pair in raw.split(","):
-        if "=" in pair:
-            _, _, value = pair.partition("=")
-            if value.strip():
-                dirs.append(value.strip())
-    return dirs
+    return list(_session_root_map().values())
+
+
+def supervisor_access_resolution(
+    session_id: Optional[str],
+    *,
+    config: Optional[OrchConfig] = None,
+    registered_sessions: Optional[List[str]] = None,
+    session_roots: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    session = (session_id or "").strip()
+    registered = set(registered_sessions if registered_sessions is not None else (config or OrchConfig()).session_ids)
+    roots = session_roots if session_roots is not None else _session_root_map()
+    root = roots.get(session) if session in registered else None
+    return {
+        "session": session,
+        "registered": bool(session and session in registered),
+        "plan_ref_root": root or "",
+    }
+
+
+def session_ref_root(
+    session_id: Optional[str],
+    *,
+    config: Optional[OrchConfig] = None,
+    registered_sessions: Optional[List[str]] = None,
+    session_roots: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    access = supervisor_access_resolution(
+        session_id,
+        config=config,
+        registered_sessions=registered_sessions,
+        session_roots=session_roots,
+    )
+    return access["plan_ref_root"] or None
+
+
+def _format_registered_sessions(sessions: List[str]) -> str:
+    if not sessions:
+        return "<none>"
+    return ", ".join(sorted(sessions))
+
+
+def session_registration_error_detail(session_id: str, config: Optional[OrchConfig] = None) -> str:
+    cfg = config or OrchConfig()
+    registered = list(cfg.session_ids or [])
+    return (
+        f"tmux session {session_id} is not a registered supervisor; "
+        f"registered: {_format_registered_sessions(registered)}; "
+        "supervisors are identified by tmux session name. "
+        "Rename this tmux session to a registered name, or update ORCH_SESSION_IDS "
+        "and ORCH_SESSION_ROOTS so the names match. No separate access request is "
+        "needed when the session name matches local registration."
+    )
+
+
+def source_path_ref_root_error(
+    raw_path: str,
+    session_id: Optional[str],
+    config: Optional[OrchConfig] = None,
+) -> str:
+    session = (session_id or "").strip() or "<unknown>"
+    access = supervisor_access_resolution(session, config=config)
+    if access["plan_ref_root"]:
+        return (
+            f"You are session {session}; your plan/ref root is {access['plan_ref_root']}; "
+            f"put the file under it or pass a path there. You already have access - "
+            f"you do not request it. Rejected source_path outside allowed ref roots: {raw_path}"
+        )
+    if not access["registered"]:
+        return (
+            f"{session_registration_error_detail(session, config)} "
+            f"Rejected source_path outside allowed ref roots: {raw_path}"
+        )
+    roots = _session_root_map()
+    configured = _format_registered_sessions(list(roots.keys()))
+    return (
+        f"You are session {session}, but no ORCH_SESSION_ROOTS path is registered for that name. "
+        f"Registered session roots: {configured}. Supervisors are identified by tmux session name; "
+        f"fix the name or registration, then put the plan under that root. "
+        f"Rejected source_path outside allowed ref roots: {raw_path}"
+    )
 
 
 def _allowed_ref_roots() -> List[Path]:
@@ -443,7 +533,12 @@ def _ref_allowed_root(source_path: Optional[str]) -> Optional[Path]:
         return None
 
 
-def validate_source_path_for_refs(source_path: Optional[str], refs_present: bool) -> tuple[Optional[str], Optional[str]]:
+def validate_source_path_for_refs(
+    source_path: Optional[str],
+    refs_present: bool,
+    session_id: Optional[str] = None,
+    config: Optional[OrchConfig] = None,
+) -> tuple[Optional[str], Optional[str]]:
     raw_path = str(source_path or "").strip()
     if not refs_present:
         if not raw_path:
@@ -462,7 +557,7 @@ def validate_source_path_for_refs(source_path: Optional[str], refs_present: bool
     except Exception as exc:
         return None, f"invalid source_path ({exc.__class__.__name__})"
     if not _path_within_any_root(resolved_source, allowed_roots):
-        return None, f"source_path outside allowed ref roots: {raw_path}"
+        return None, source_path_ref_root_error(raw_path, session_id, config=config)
     return str(resolved_source), None
 
 
