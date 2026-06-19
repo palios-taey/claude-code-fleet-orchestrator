@@ -40,6 +40,7 @@ setup(
             "taey-question = fleet_orchestrator.script_entrypoints:taey_question_main",
             "taey-receipts = fleet_orchestrator.script_entrypoints:taey_receipts_main",
             "taey-task = fleet_orchestrator.script_entrypoints:taey_task_main",
+            "taey-lane-usage = fleet_orchestrator.script_entrypoints:taey_lane_usage_main",
         ],
     },
     install_requires=load_requirements(),

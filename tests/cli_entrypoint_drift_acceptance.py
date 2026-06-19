@@ -23,6 +23,7 @@ ENTRYPOINT_CLIS = (
     "taey-question",
     "taey-receipts",
     "taey-task",
+    "taey-lane-usage",
 )
 
 
