@@ -139,6 +139,34 @@ def _required_body_detail(field: str, body: Dict[str, Any], *, endpoint: str,
 def _non_empty_path_detail(field: str, *, endpoint: str, example: str) -> str:
     return f"{field} must be non-empty. Use {endpoint}; example: {example}."
 
+
+def _task_not_found_detail(task_id: str) -> str:
+    return (
+        f"Task {task_id} not found. List candidate tasks with `taey-task list` "
+        "or `GET /api/tasks`; inspect a known task with "
+        f"`taey-task status {task_id}` or `GET /api/tasks/{task_id}`; inspect "
+        "project context with `taey-plan show <project-id>`."
+    )
+
+
+def _project_not_found_detail(project_id: str) -> str:
+    return (
+        f"Project {project_id} not found. List valid projects with "
+        "`taey-plan list` or `GET /api/projects`; inspect a known project with "
+        f"`taey-plan show {project_id}` or `GET /api/projects/{project_id}`."
+    )
+
+
+def _question_not_found_detail(question_id: str, *, endpoint: str, ui: bool = False) -> str:
+    surface = "dashboard `/ui/` human-review action" if ui else "owning project or task context"
+    return (
+        f"Question {question_id} not found. Inspect the {surface}, or inspect "
+        "candidate projects with `taey-plan list` / `GET /api/projects` and "
+        "`taey-plan show <project-id>` / `GET /api/projects/{project_id}`. "
+        f"Retry with `{endpoint}` and body "
+        "`{\"answer\":\"<answer text>\",\"answered_by\":\"<session-id>\"}`."
+    )
+
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
 # SECURITY: chat is an injection vector (posts become content an AI session reads). It defaults
 # ON because it is a promised local/trusted-LAN capability. Non-loopback mutable API startup
@@ -370,7 +398,7 @@ def _load_task(task_id: str, cfg: OrchConfig) -> Dict[str, Any]:
             tid=task_id,
         ).single()
     if not result:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        raise HTTPException(status_code=404, detail=_task_not_found_detail(task_id))
     return _serialize_node(result["t"])
 
 
@@ -380,7 +408,7 @@ def get_task(task_id: str) -> Dict[str, Any]:
     task_id = resolve_task_id(task_id, config=cfg)  # bare id -> canonical namespaced node
     task = load_task_record(task_id, config=cfg)
     if not task:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        raise HTTPException(status_code=404, detail=_task_not_found_detail(task_id))
     return task
 
 
@@ -653,7 +681,13 @@ async def answer_question_endpoint(question_id: str, req: Request) -> Dict[str, 
     try:
         result = answer_question(question_id, answer, answered_by, config=_cfg())
         if not result.get("ok"):
-            raise HTTPException(status_code=404, detail=f"Question {question_id} not found")
+            raise HTTPException(
+                status_code=404,
+                detail=_question_not_found_detail(
+                    question_id,
+                    endpoint=f"POST /api/questions/{question_id}/answer",
+                ),
+            )
         return result
     except HTTPException:
         raise
@@ -683,7 +717,14 @@ async def ui_answer_human_review_gate_endpoint(question_id: str, req: Request) -
     try:
         result = complete_human_review_gate(question_id, answer, answered_by, config=_cfg())
         if not result.get("ok"):
-            raise HTTPException(status_code=404, detail=f"Human-review gate question {question_id} not found")
+            raise HTTPException(
+                status_code=404,
+                detail=_question_not_found_detail(
+                    question_id,
+                    endpoint=f"POST /api/ui/questions/{question_id}/answer",
+                    ui=True,
+                ),
+            )
         return result
     except HTTPException:
         raise
@@ -718,7 +759,7 @@ def get_project(project_id: str) -> Dict[str, Any]:
     """Project summary with phase task counts."""
     summary = get_project_summary(project_id, config=_cfg())
     if not summary:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+        raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
     summary.update(_project_row(summary.get("project") or {}))
     return summary
 
@@ -779,7 +820,7 @@ def get_project_user_stop_conditions_endpoint(project_id: str) -> Dict[str, Any]
     """Backward-compatible surface returning active condition labels only."""
     conditions = get_project_user_stop_conditions(project_id, config=_cfg())
     if conditions is None:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+        raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
     return {"project_id": project_id, "conditions": [condition["label"] for condition in conditions if not condition.get("deprecated_at")]}
 
 
@@ -796,8 +837,8 @@ async def set_project_user_stop_conditions_endpoint(project_id: str, req: Reques
             config=_cfg(),
             created_by=data.get("from", "legacy-api"),
         )
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
     return {"ok": True, "project_id": project_id, "conditions": [condition["label"] for condition in saved if not condition.get("deprecated_at")]}
 
 
@@ -918,8 +959,8 @@ async def complete_project_endpoint(project_id: str, req: Request) -> Dict[str, 
         )
     except ReadyWorkConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -958,8 +999,8 @@ async def reset_project_endpoint(project_id: str, req: Request) -> Dict[str, Any
             reset_by=data.get("reset_by") or data.get("from") or "unknown",
             config=_cfg(),
         )
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
 
 
 @app.get("/api/sessions")
@@ -1028,8 +1069,8 @@ async def set_project_stop_reason_endpoint(project_id: str, req: Request) -> Dic
         raise HTTPException(status_code=409, detail=str(exc))
     except (ConditionValidationError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
     return {
         "ok": True,
         "cited_condition_label": current.get("label_snapshot"),
@@ -1042,8 +1083,8 @@ async def clear_project_stop_reason_endpoint(project_id: str, req: Request) -> D
     data = await req.json() if req.headers.get("content-type", "").startswith("application/json") else {}
     try:
         ok = clear_project_stop_reason(project_id, cleared_by=data.get("cleared_by") or data.get("from") or "unknown", config=_cfg())
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
     return {"ok": ok}
 
 
@@ -1070,8 +1111,8 @@ async def patch_project_endpoint(project_id: str, req: Request) -> Dict[str, Any
         )
     except PriorityAuditError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
     return {"ok": True, "project_id": project_id, **updated}
 
 
@@ -1090,8 +1131,8 @@ async def add_project_condition_endpoint(project_id: str, req: Request) -> Dict[
         )
     try:
         condition = add_project_condition(project_id, label, created_by=data.get("created_by") or data.get("from") or "unknown", config=_cfg())
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
     return {"ok": True, "condition": condition}
 
 
@@ -1113,8 +1154,8 @@ async def edit_project_condition_endpoint(project_id: str, condition_id: str, re
         condition = edit_project_condition(project_id, condition_id, label, edited_by=data.get("edited_by") or data.get("from") or "unknown", config=_cfg())
     except ConditionValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail=_project_not_found_detail(project_id))
     return {"ok": True, "condition": condition}
 
 
@@ -1280,15 +1321,25 @@ def session_wake_packet(
     CONTRACT — this endpoint is **fail-open by design**: a wake-state packet is
     OPTIONAL context, and an assembly error must never break or block a wake. So
     on any assembler exception it returns HTTP 200 with ``{"ok": false, "enabled":
-    true, "error": ...}`` rather than a 5xx, and this endpoint's disabled flag returns
-    ``{"ok": true, "enabled": false}``. **Consumers MUST gate on the body
+    true, "operation": "wake_packet_assembly", "error": ..., "next_step": ...}``
+    rather than a 5xx, and this endpoint's disabled flag returns ``{"ok": true,
+    "enabled": false, "reason": ..., "enable_with": ...}``. **Consumers MUST gate on the body
     (`ok` AND `enabled` AND a non-empty `packet`) — never on the HTTP status
     alone**, or they will inject an empty/error body as if it were context. The
     shipped consumer (`claude-code-fleet-notify` `_fetch_wake_packet`) does this
     correctly; any new consumer must too.
     """
     if not wake_packet_endpoint_enabled():
-        return {"ok": True, "enabled": False}
+        return {
+            "ok": True,
+            "enabled": False,
+            "reason": "wake packet endpoint disabled",
+            "enable_with": "ORCH_WAKE_PACKET_ENDPOINT_ENABLED=1",
+            "next_step": (
+                "Set ORCH_WAKE_PACKET_ENDPOINT_ENABLED=1 and restart the API, "
+                "then retry GET /api/sessions/{session_id}/wake-packet?cli=<claude|codex>."
+            ),
+        }
 
     cli_key = cli.lower().strip()
     if cli_key not in VALID_CLIS:
@@ -1358,7 +1409,13 @@ def session_wake_packet(
             "enabled": True,
             "session_id": session_id,
             "cli": cli_key,
+            "operation": "wake_packet_assembly",
             "error": str(exc),
+            "next_step": (
+                "Wake continues without a packet. Inspect orchestrator API logs for "
+                "wake_packet_assembly and validate context-assembler inputs for this "
+                f"session, then retry GET /api/sessions/{session_id}/wake-packet?cli={cli_key}."
+            ),
         }
 
 
@@ -1374,7 +1431,23 @@ def health() -> Dict[str, Any]:
             "ts": time.time(),
         }
     except Exception as e:
-        return JSONResponse(status_code=503, content={"ok": False, "error": str(e)})
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "service": "fleet-orchestrator-api",
+                "version": package_version(),
+                "api_base": os.environ.get("ORCH_API_BASE", "http://127.0.0.1:5002"),
+                "dependency": "neo4j",
+                "operation": "get_ready_tasks",
+                "error": str(e),
+                "next_step": (
+                    "Check ORCH_NEO4J_URI / ORCH_NEO4J_DB and that Neo4j is reachable, "
+                    "then retry GET /health."
+                ),
+                "ts": time.time(),
+            },
+        )
 
 
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)

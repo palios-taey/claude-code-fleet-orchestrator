@@ -64,13 +64,35 @@ def _endpoint_contract() -> None:
         os.environ.pop("ORCH_WAKE_PACKET_ENABLED", None)
         with mock.patch.object(tasks_api, "select_wake_context", side_effect=RuntimeError("should not assemble")):
             disabled = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
-        _check("explicitly disabled wake packet endpoint is a no-op", disabled.status_code == 200 and disabled.json() == {"ok": True, "enabled": False}, disabled.text)
+        disabled_body = disabled.json()
+        _check(
+            "explicitly disabled wake packet endpoint is a no-op",
+            disabled.status_code == 200
+            and disabled_body.get("ok") is True
+            and disabled_body.get("enabled") is False
+            and disabled_body.get("reason") == "wake packet endpoint disabled",
+            disabled_body,
+        )
+        _check(
+            "explicitly disabled wake packet endpoint says how to enable",
+            disabled_body.get("enable_with") == "ORCH_WAKE_PACKET_ENDPOINT_ENABLED=1"
+            and "GET /api/sessions/{session_id}/wake-packet" in disabled_body.get("next_step", ""),
+            disabled_body,
+        )
 
         os.environ.pop("ORCH_WAKE_PACKET_ENDPOINT_ENABLED", None)
         os.environ["ORCH_WAKE_PACKET_ENABLED"] = "0"
         with mock.patch.object(tasks_api, "select_wake_context", side_effect=RuntimeError("should not assemble")):
             legacy_disabled = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
-        _check("deprecated ORCH_WAKE_PACKET_ENABLED alias still disables endpoint", legacy_disabled.status_code == 200 and legacy_disabled.json() == {"ok": True, "enabled": False}, legacy_disabled.text)
+        legacy_body = legacy_disabled.json()
+        _check(
+            "deprecated ORCH_WAKE_PACKET_ENABLED alias still disables endpoint",
+            legacy_disabled.status_code == 200
+            and legacy_body.get("ok") is True
+            and legacy_body.get("enabled") is False
+            and legacy_body.get("enable_with") == "ORCH_WAKE_PACKET_ENDPOINT_ENABLED=1",
+            legacy_body,
+        )
 
         os.environ.pop("ORCH_WAKE_PACKET_ENABLED", None)
         with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["conductor-codex"])):
@@ -89,7 +111,8 @@ def _endpoint_contract() -> None:
             "budget_used": 0,
         }
         with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["conductor-codex"])), \
-             mock.patch.object(tasks_api, "select_wake_context", return_value=context):
+             mock.patch.object(tasks_api, "select_wake_context", return_value=context), \
+             mock.patch.object(tasks_api, "maybe_emit_decision_receipt", return_value=None):
             ok = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
         body = ok.json()
         _check("enabled wake packet returns rendered packet", ok.status_code == 200 and body.get("ok") is True and body.get("enabled") is True and bool(body.get("packet")), body)
@@ -98,7 +121,20 @@ def _endpoint_contract() -> None:
         with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["conductor-codex"])), \
              mock.patch.object(tasks_api, "select_wake_context", side_effect=RuntimeError("assembler boom")):
             failed = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
-        _check("assembler failure is fail-open JSON not 500", failed.status_code == 200 and failed.json().get("ok") is False and "assembler boom" in failed.json().get("error", ""), failed.text)
+        failed_body = failed.json()
+        _check(
+            "assembler failure is fail-open JSON not 500",
+            failed.status_code == 200
+            and failed_body.get("ok") is False
+            and "assembler boom" in failed_body.get("error", ""),
+            failed_body,
+        )
+        _check(
+            "assembler failure says wake continues and what to inspect",
+            failed_body.get("operation") == "wake_packet_assembly"
+            and "Wake continues without a packet" in failed_body.get("next_step", ""),
+            failed_body,
+        )
     finally:
         if old_endpoint is None:
             os.environ.pop("ORCH_WAKE_PACKET_ENDPOINT_ENABLED", None)
