@@ -118,6 +118,27 @@ from fleet_orchestrator.orch_schema import TaskIdCollisionError, TaskParentNotFo
 
 LOGGER = logging.getLogger("uvicorn.error")
 
+AUTH_FAILURE_DETAIL = (
+    "invalid or missing API credential. Send `Authorization: Bearer $ORCH_AUTH_TOKEN` "
+    "or `X-API-Key: $ORCH_AUTH_TOKEN`. Local loopback/no-token mode is only for local "
+    "trusted runs when ORCH_AUTH_TOKEN is unset."
+)
+
+
+def _required_body_detail(field: str, body: Dict[str, Any], *, endpoint: str,
+                          command: Optional[str] = None) -> str:
+    detail = (
+        f"{field} is required. Minimal accepted JSON body: "
+        f"{json.dumps(body, separators=(',', ':'), sort_keys=True)}. Endpoint: {endpoint}."
+    )
+    if command:
+        detail = f"{detail} CLI: {command}."
+    return detail
+
+
+def _non_empty_path_detail(field: str, *, endpoint: str, example: str) -> str:
+    return f"{field} must be non-empty. Use {endpoint}; example: {example}."
+
 app = FastAPI(title="Fleet Orchestrator API", version=package_version())
 # SECURITY: chat is an injection vector (posts become content an AI session reads). It defaults
 # ON because it is a promised local/trusted-LAN capability. Non-loopback mutable API startup
@@ -199,7 +220,7 @@ async def _optional_mutable_auth(request: Request, call_next):
     token = _auth_token()
     if token and request.method.upper() in MUTABLE_METHODS:
         if not _credential_matches(token, _request_credential(request)):
-            return JSONResponse(status_code=401, content={"detail": "invalid or missing API credential"})
+            return JSONResponse(status_code=401, content={"detail": AUTH_FAILURE_DETAIL})
     return await call_next(request)
 
 
@@ -368,7 +389,15 @@ async def create(req: Request) -> Dict[str, Any]:
     data = await req.json()
     description = data.get("description") or data.get("title")
     if not description:
-        raise HTTPException(status_code=400, detail="description required")
+        raise HTTPException(
+            status_code=400,
+            detail=_required_body_detail(
+                "description",
+                {"description": "<task description>", "from": "<session-id>"},
+                endpoint="POST /api/task/create",
+                command="taey-task create '<task description>'",
+            ),
+        )
 
     priority = int(data.get("priority", 50))
     # External audit amendment #3: refuse negative priority values.
@@ -554,11 +583,32 @@ async def create_human_review_gate_endpoint(req: Request) -> Dict[str, Any]:
         reviewer = str(data.get("reviewer") or data.get("human") or "operator").strip()
         requested_by = str(data.get("from") or data.get("requested_by") or "orch-human-review").strip()
         if not phase_id:
-            raise HTTPException(status_code=422, detail="phase_id is required")
+            raise HTTPException(
+                status_code=422,
+                detail=_required_body_detail(
+                    "phase_id",
+                    {"phase_id": "<phase-id>", "task_id": "<task-id>", "prompt": "<review question>"},
+                    endpoint="POST /api/human-review-gates",
+                ),
+            )
         if not task_id:
-            raise HTTPException(status_code=422, detail="task_id is required")
+            raise HTTPException(
+                status_code=422,
+                detail=_required_body_detail(
+                    "task_id",
+                    {"phase_id": "<phase-id>", "task_id": "<task-id>", "prompt": "<review question>"},
+                    endpoint="POST /api/human-review-gates",
+                ),
+            )
         if not prompt:
-            raise HTTPException(status_code=422, detail="prompt is required")
+            raise HTTPException(
+                status_code=422,
+                detail=_required_body_detail(
+                    "prompt",
+                    {"phase_id": "<phase-id>", "task_id": "<task-id>", "prompt": "<review question>"},
+                    endpoint="POST /api/human-review-gates",
+                ),
+            )
         result = create_human_review_gate(
             phase_id=phase_id,
             task_id=task_id,
@@ -592,7 +642,14 @@ async def answer_question_endpoint(question_id: str, req: Request) -> Dict[str, 
     answer = str(data.get("answer") or data.get("verdict") or "").strip()
     answered_by = str(data.get("answered_by") or data.get("from") or "unauthenticated-api").strip()
     if not answer:
-        raise HTTPException(status_code=422, detail="answer is required")
+        raise HTTPException(
+            status_code=422,
+            detail=_required_body_detail(
+                "answer",
+                {"answer": "<answer text>", "answered_by": "<session-id>"},
+                endpoint=f"POST /api/questions/{question_id}/answer",
+            ),
+        )
     try:
         result = answer_question(question_id, answer, answered_by, config=_cfg())
         if not result.get("ok"):
@@ -615,7 +672,14 @@ async def ui_answer_human_review_gate_endpoint(question_id: str, req: Request) -
     answer = str(data.get("answer") or data.get("verdict") or "").strip()
     answered_by = str(data.get("answered_by") or data.get("from") or "operator").strip()
     if not answer:
-        raise HTTPException(status_code=422, detail="answer is required")
+        raise HTTPException(
+            status_code=422,
+            detail=_required_body_detail(
+                "answer",
+                {"answer": "<answer text>", "answered_by": "<session-id>"},
+                endpoint=f"POST /api/ui/questions/{question_id}/answer",
+            ),
+        )
     try:
         result = complete_human_review_gate(question_id, answer, answered_by, config=_cfg())
         if not result.get("ok"):
@@ -663,11 +727,18 @@ def get_project(project_id: str) -> Dict[str, Any]:
 async def create_project_endpoint(req: Request) -> Dict[str, Any]:
     """Create an OrchProject."""
     data = await req.json()
-    cfg = _cfg()
     project_id = data.get("id")
     name = data.get("name", project_id)
     if not project_id:
-        raise HTTPException(status_code=400, detail="id required")
+        raise HTTPException(
+            status_code=400,
+            detail=_required_body_detail(
+                "id",
+                {"id": "<project-id>", "name": "<project name>", "supervisor": "<supervisor-session>"},
+                endpoint="POST /api/projects",
+                command="taey-plan ingest <plan.md> --supervisor <supervisor-session>",
+            ),
+        )
     supervisor = (data.get("supervisor") or "").strip()
     if not supervisor or supervisor == "unassigned":
         raise HTTPException(status_code=400, detail="supervisor must be non-empty and not 'unassigned'")
@@ -678,6 +749,7 @@ async def create_project_endpoint(req: Request) -> Dict[str, Any]:
             status_code=400,
             detail=f"priority must be >= 0 (got {project_priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
         )
+    cfg = _cfg()
     refs = data.get("refs") if isinstance(data.get("refs"), list) else None
     source_path = _validated_source_path(
         data.get("source_path"),
@@ -717,12 +789,15 @@ async def set_project_user_stop_conditions_endpoint(project_id: str, req: Reques
     conditions = data.get("conditions")
     if not isinstance(conditions, list) or any(not isinstance(item, str) for item in conditions):
         raise HTTPException(status_code=400, detail="conditions must be a list of strings")
-    saved = set_project_user_stop_conditions(
-        project_id,
-        conditions,
-        config=_cfg(),
-        created_by=data.get("from", "legacy-api"),
-    )
+    try:
+        saved = set_project_user_stop_conditions(
+            project_id,
+            conditions,
+            config=_cfg(),
+            created_by=data.get("from", "legacy-api"),
+        )
+    except ProjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     return {"ok": True, "project_id": project_id, "conditions": [condition["label"] for condition in saved if not condition.get("deprecated_at")]}
 
 
@@ -730,11 +805,17 @@ async def set_project_user_stop_conditions_endpoint(project_id: str, req: Reques
 async def create_phase_endpoint(project_id: str, req: Request) -> Dict[str, Any]:
     """Create an OrchPhase under a project."""
     data = await req.json()
-    cfg = _cfg()
     phase_id = data.get("id")
     name = data.get("name", phase_id)
     if not phase_id:
-        raise HTTPException(status_code=400, detail="id required")
+        raise HTTPException(
+            status_code=400,
+            detail=_required_body_detail(
+                "id",
+                {"id": "<phase-id>", "name": "<phase name>"},
+                endpoint=f"POST /api/projects/{project_id}/phases",
+            ),
+        )
     # Caller-supplied phase id MUST go through the same scoping chokepoint as plan ingest (R3 audit
     # CRITICAL: this route fed a bare phase_id straight to create_phase's MERGE). Scope to <project>::<id>
     # + reject a declared '::' / bad charset; the create_phase ownership guard is the second layer.
@@ -742,6 +823,7 @@ async def create_phase_endpoint(project_id: str, req: Request) -> Dict[str, Any]
         scoped_phase_id = scope_declared_id(project_id, phase_id)
     except PlanIdError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    cfg = _cfg()
     refs = data.get("refs") if isinstance(data.get("refs"), list) else None
     source_path = _validated_source_path(
         data.get("source_path"),
@@ -768,10 +850,20 @@ async def create_phase_endpoint(project_id: str, req: Request) -> Dict[str, Any]
 async def load_plan_md(req: Request) -> Dict[str, Any]:
     """Ingest a markdown plan into Neo4j as OrchProject/Phase/Task nodes."""
     data = await req.json()
-    cfg = _cfg()
     md_text = data.get("md_text")
     if not md_text:
-        raise HTTPException(status_code=400, detail="md_text required")
+        raise HTTPException(
+            status_code=400,
+            detail=_required_body_detail(
+                "md_text",
+                {
+                    "md_text": "# Project: <project-id> - <name>\n\n## Phase: <phase>\n- [ ] <task>",
+                    "supervisor": "<supervisor-session>",
+                },
+                endpoint="POST /api/projects/load-md",
+                command="taey-plan ingest <plan.md> --supervisor <supervisor-session>",
+            ),
+        )
     supervisor = (data.get("supervisor") or "").strip()
     if supervisor in {"", "unassigned", "unknown"}:
         raise HTTPException(status_code=400, detail="supervisor required for non-exempt project ingest (must not be unassigned or unknown)")
@@ -782,6 +874,7 @@ async def load_plan_md(req: Request) -> Dict[str, Any]:
             status_code=400,
             detail=f"priority must be >= 0 (got {ingest_priority}). Negative values were a 2026-05 migration artifact and are no longer accepted.",
         )
+    cfg = _cfg()
     try:
         refs_present = plan_declares_refs(md_text)
         source_path = _validated_source_path(
@@ -958,7 +1051,14 @@ async def clear_project_stop_reason_endpoint(project_id: str, req: Request) -> D
 async def patch_project_endpoint(project_id: str, req: Request) -> Dict[str, Any]:
     data = await req.json()
     if "priority" not in data:
-        raise HTTPException(status_code=400, detail="priority required")
+        raise HTTPException(
+            status_code=400,
+            detail=_required_body_detail(
+                "priority",
+                {"priority": 10, "reason": "<why>", "set_by": "<session-id>", "source_surface": "api"},
+                endpoint=f"PATCH /api/projects/{project_id}",
+            ),
+        )
     try:
         updated = update_project_priority(
             project_id,
@@ -980,7 +1080,14 @@ async def add_project_condition_endpoint(project_id: str, req: Request) -> Dict[
     data = await req.json()
     label = (data.get("label") or "").strip()
     if not label:
-        raise HTTPException(status_code=400, detail="label required")
+        raise HTTPException(
+            status_code=400,
+            detail=_required_body_detail(
+                "label",
+                {"created_by": "<session-id>", "label": "<stop condition label>"},
+                endpoint=f"POST /api/projects/{project_id}/conditions",
+            ),
+        )
     try:
         condition = add_project_condition(project_id, label, created_by=data.get("created_by") or data.get("from") or "unknown", config=_cfg())
     except ProjectNotFoundError as exc:
@@ -993,7 +1100,15 @@ async def edit_project_condition_endpoint(project_id: str, condition_id: str, re
     data = await req.json()
     label = (data.get("label") or "").strip()
     if not label:
-        raise HTTPException(status_code=400, detail="label required")
+        raise HTTPException(
+            status_code=400,
+            detail=_required_body_detail(
+                "label",
+                {"edited_by": "<session-id>", "label": "<replacement stop condition label>"},
+                endpoint=f"PATCH /api/projects/{project_id}/conditions/{condition_id}",
+                command=f"taey-plan stop-conditions {project_id} get",
+            ),
+        )
     try:
         condition = edit_project_condition(project_id, condition_id, label, edited_by=data.get("edited_by") or data.get("from") or "unknown", config=_cfg())
     except ConditionValidationError as exc:
@@ -1029,10 +1144,15 @@ async def clear_pause_session_endpoint(session_id: str, req: Request) -> Dict[st
 
 @app.post("/api/sessions/{target}/notify")
 async def session_notify(target: str, req: Request) -> Dict[str, Any]:
-    cfg = _cfg()
-    _ensure_registered_session(target, cfg)
     if not target.strip():
-        raise HTTPException(status_code=400, detail="target must be non-empty")
+        raise HTTPException(
+            status_code=400,
+            detail=_non_empty_path_detail(
+                "target",
+                endpoint="POST /api/sessions/{target}/notify",
+                example="POST /api/sessions/session-1/notify",
+            ),
+        )
 
     data = await req.json()
     notify_type = data.get("type", "standard")
@@ -1041,7 +1161,17 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
     if notify_type not in ALLOWED_NOTIFY_TYPES:
         raise HTTPException(status_code=400, detail="type must be one of standard, escalation, command, response_ready")
     if not message:
-        raise HTTPException(status_code=400, detail="message must be non-empty")
+        raise HTTPException(
+            status_code=400,
+            detail=_required_body_detail(
+                "message",
+                {"message": "<notification text>", "type": "standard"},
+                endpoint=f"POST /api/sessions/{target}/notify",
+                command="taey-notify <target> '<notification text>' --type standard",
+            ),
+        )
+    cfg = _cfg()
+    _ensure_registered_session(target, cfg)
 
     result = subprocess.run(
         ["taey-notify", target, message, "--type", ALLOWED_NOTIFY_TYPES[notify_type]],
@@ -1094,7 +1224,14 @@ async def loop_advance(loop_id: str, req: Request) -> Dict[str, Any]:
     data = await req.json()
     step_name = str(data.get("step") or "").strip()
     if not step_name:
-        raise HTTPException(status_code=400, detail="step is required")
+        raise HTTPException(
+            status_code=400,
+            detail=_required_body_detail(
+                "step",
+                {"step": "<step name>"},
+                endpoint=f"POST /api/loops/{loop_id}/advance",
+            ),
+        )
     cfg = _cfg()
     store = Neo4jCycleStateStore(config=cfg)
     raw_loop = store.load(loop_id)
@@ -1157,7 +1294,14 @@ def session_wake_packet(
     if cli_key not in VALID_CLIS:
         raise HTTPException(status_code=400, detail=f"cli must be one of {', '.join(sorted(VALID_CLIS))}")
     if not session_id.strip():
-        raise HTTPException(status_code=400, detail="session_id must be non-empty")
+        raise HTTPException(
+            status_code=400,
+            detail=_non_empty_path_detail(
+                "session_id",
+                endpoint="GET /api/sessions/{session_id}/wake-packet?cli=codex",
+                example="GET /api/sessions/session-1-codex/wake-packet?cli=codex",
+            ),
+        )
 
     try:
         cfg = _cfg()
