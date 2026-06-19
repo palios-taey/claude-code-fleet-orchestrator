@@ -28,6 +28,7 @@ def _require_test_namespace() -> str:
 
 PFX = f"{_require_test_namespace()}-status-token-{uuid.uuid4().hex[:8]}"
 os.environ["NOTIFY_KEY_PREFIX"] = PFX
+os.environ.setdefault("ORCH_SESSION_IDS", "conductor")
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
 from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402

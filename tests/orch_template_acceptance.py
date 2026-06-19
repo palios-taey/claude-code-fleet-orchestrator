@@ -12,6 +12,7 @@ from fleet_orchestrator.orch_schema import init_schema  # noqa: E402
 from fleet_orchestrator.plan_loader import load_plan_from_text  # noqa: E402
 
 
+os.environ.setdefault("ORCH_SESSION_IDS", "supervisor")
 CFG = OrchConfig()
 PFX = f"tmpl-{uuid.uuid4().hex[:8]}"
 FAILURES: list[str] = []

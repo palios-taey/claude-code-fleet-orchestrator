@@ -30,6 +30,9 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
 from fleet_orchestrator.plan_loader import load_plan_from_text  # noqa: E402
 
 
+os.environ.setdefault("ORCH_SESSION_IDS", "acceptance-supervisor")
+
+
 def _require_test_namespace() -> str:
     raw = (os.environ.get("ORCH_TEST_NAMESPACE") or "").strip()
     if not raw:

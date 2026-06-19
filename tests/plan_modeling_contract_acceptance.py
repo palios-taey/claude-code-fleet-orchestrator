@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from fleet_orchestrator.config import OrchConfigError  # noqa: E402
 from fleet_orchestrator import plan_loader  # noqa: E402
 
 FAILURES: list[str] = []
@@ -34,13 +35,13 @@ CLEAN_PLAN = """# Project: plan-modeling-clean - Clean Plan
 
 ## Phase: p1 - Work
 
-### Task: rca - RCA finding [owner: conductor-grok]
+### Task: rca - RCA finding [owner: reviewer-grok]
 - inspect the handoff and record root cause
 
-### Task: fix - Implement scoped fix [owner: conductor-codex] [depends: rca]
+### Task: fix - Implement scoped fix [owner: reviewer-codex] [depends: rca]
 - apply the code change
 
-### Task: gate - Gate result [owner: conductor] [depends: fix]
+### Task: gate - Gate result [owner: reviewer] [depends: fix]
 - verify evidence and decide merge
 """
 
@@ -49,8 +50,8 @@ SUPERVISOR_PEER_PROSE_PLAN = """# Project: plan-modeling-supervisor-peer-prose -
 
 ## Phase: p1 - Work
 
-### Task: r5-gate - Conductor peer-review decision [owner: conductor]
-- conductor reads grok's peer-review note and records the acceptance decision
+### Task: r5-gate - Reviewer peer-review decision [owner: reviewer]
+- reviewer reads grok's peer-review note and records the acceptance decision
 """
 
 OWNERLESS_PLAN = """# Project: plan-modeling-ownerless - Ownerless Plan
@@ -60,6 +61,15 @@ OWNERLESS_PLAN = """# Project: plan-modeling-ownerless - Ownerless Plan
 
 ### Task: claimable - Grok RCA + Codex fix + conductor gate and deploy
 - Grok runs RCA, Codex implements the fix, conductor gates and deploys live.
+"""
+
+CUSTOM_SUPERVISOR_PLAN = """# Project: plan-modeling-custom-supervisor - Custom Supervisor
+> configured session ids are the source of truth
+
+## Phase: p1 - Work
+
+### Task: custom-bundled - Grok RCA + Codex fix + review-lead gate and deploy [owner: review-lead]
+- Grok runs RCA, Codex implements the fix, review-lead gates and deploys live.
 """
 
 
@@ -99,17 +109,34 @@ def _mock_plan_storage():
         yield
 
 
-def _ingest(md: str) -> dict[str, object]:
+def _ingest(md: str, session_ids: list[str] | None = None) -> dict[str, object]:
     with _mock_plan_storage():
         return plan_loader.load_plan_from_text(
             md=md,
             source_path="",
             source_kind="markdown",
             ingested_by="plan-modeling-acceptance",
-            supervisor="conductor",
+            supervisor="reviewer",
             priority=50,
-            config=SimpleNamespace(),
+            config=SimpleNamespace(session_ids=session_ids or ["reviewer"]),
         )
+
+
+def _ingest_without_registered_sessions(md: str) -> str:
+    try:
+        with _mock_plan_storage():
+            plan_loader.load_plan_from_text(
+                md=md,
+                source_path="",
+                source_kind="markdown",
+                ingested_by="plan-modeling-acceptance",
+                supervisor="reviewer",
+                priority=50,
+                config=SimpleNamespace(session_ids=[]),
+            )
+    except OrchConfigError as exc:
+        return str(exc)
+    return ""
 
 
 def _contract_rules(result: dict[str, object]) -> list[str]:
@@ -133,7 +160,7 @@ def _cli_stdout(result: dict[str, object]) -> str:
         path = handle.name
     try:
         module.api_call = lambda method, endpoint, data=None: result
-        module.detect_session = lambda: "conductor-codex"
+        module.detect_session = lambda: "reviewer-codex"
         args = SimpleNamespace(path=path, supervisor=None, priority=None, migration_exempt=False)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -160,6 +187,25 @@ def main() -> int:
             for item in mega_warnings
         ),
         mega_warnings,
+    )
+
+    dynamic = _ingest(CUSTOM_SUPERVISOR_PLAN, session_ids=["review-lead"])
+    dynamic_warnings = dynamic.get("plan_modeling_warnings")
+    _check(
+        "configured ORCH_SESSION_IDS supervisor role drives plan modeling warning",
+        isinstance(dynamic_warnings, list)
+        and any(
+            "task custom-bundled looks like multiple steps across actors" in str(item)
+            for item in dynamic_warnings
+        ),
+        dynamic_warnings,
+    )
+
+    missing_config_error = _ingest_without_registered_sessions(MEGA_PLAN)
+    _check(
+        "missing ORCH_SESSION_IDS fails loud for plan modeling",
+        "ORCH_SESSION_IDS must be set" in missing_config_error,
+        missing_config_error,
     )
 
     clean = _ingest(CLEAN_PLAN)

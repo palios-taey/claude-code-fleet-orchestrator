@@ -151,10 +151,10 @@ OPTIONAL_ENV = (
     # var, default, supported-mode rationale
     ("ORCH_PRODUCT_OWNER_MAP", "{} (no remap)",
      "no product remap -> dispatch routes session->worker directly; the common single-fleet case"),
-    ("ORCH_SESSION_IDS", "[] (unrestricted — no per-target notify/wake filter)",
-     "OPTIONAL per-target filter for the notify/wake endpoints, behind the API's real "
-     "boundary (ORCH_AUTH_TOKEN / loopback). When SET, an unlisted target raises 400. "
-     "When EMPTY (default), the filter is OFF and any target is accepted — populate it to restrict."),
+    ("ORCH_SESSION_IDS", "[] (notify/wake unrestricted; plan ingest requires configured supervisors)",
+     "registered supervisor ids; source of truth for supervisor plan/root affordances and "
+     "plan-modeling role detection. Also an optional notify/wake target filter: when SET, "
+     "an unlisted target raises 400; when EMPTY, that filter is OFF."),
     ("NOTIFY_KEY_PREFIX", "taey",
      "canonical redis namespace; override only to run a second isolated fleet on one redis"),
     ("ORCH_NOTIFY_CLI", "taey-notify",
