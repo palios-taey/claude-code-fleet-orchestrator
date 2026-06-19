@@ -23,6 +23,8 @@ This is a clear-then-reinject pattern, not hidden long-context magic. The packet
 
 The hook path uses the same endpoint. `SessionStart` and `UserPromptSubmit` emit the packet as additional hook context; `PostToolUse` appends it after drained notifications. Hook delivery is fail-open: if the local API is down or the endpoint is disabled, the hook emits no packet context rather than blocking the operator.
 
+Consumer banner: consumers MUST check body[ok]; HTTP 200 alone does not imply context was assembled. Treat a wake-packet response as usable only when the response body reports `ok: true`, `enabled: true`, and includes a non-empty `packet`.
+
 ## Identity Tier
 
 Every wake packet renders `## Identity` after `## Operating` and before `## Context Refs`.
