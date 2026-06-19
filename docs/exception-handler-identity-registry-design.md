@@ -57,21 +57,21 @@ removed.
 critical handlers but only 56 unique keys without ordinal. These groups require
 the ordinal tie-breaker:
 
-- `fleet_orchestrator/cli_orch_watch.py::investigate::Exception` lines 747, 778, 782
-- `fleet_orchestrator/cli_orch_watch.py::main::Exception` lines 903, 924, 931, 948
-- `fleet_orchestrator/cli_orch_watch.py::notify_supervisor_of_stuck::Exception` lines 507, 513
-- `fleet_orchestrator/dispatch.py::_rollback_claim::Exception` lines 379, 423, 450
-- `fleet_orchestrator/dispatch.py::check_previous_task::Exception` lines 834, 840
-- `fleet_orchestrator/handoff_validation.py::_index_record::Exception` lines 80, 85
-- `fleet_orchestrator/inflight.py::active_inflight_signal::Exception` lines 81, 94, 98
-- `fleet_orchestrator/orch_schema.py::_dispatch_age_seconds::Exception` lines 1469, 1489
-- `fleet_orchestrator/orch_schema.py::_resolve_chat_question::Exception` lines 3723, 3737
-- `fleet_orchestrator/orch_schema.py::get_session_stop_decision::Exception` lines 1994, 2035, 2089
-- `fleet_orchestrator/orch_schema.py::init_schema::Exception` lines 2109, 2116
-- `fleet_orchestrator/orch_schema.py::resolve_ref_path::Exception` lines 592, 608
-- `fleet_orchestrator/orch_schema.py::validate_source_path_for_refs::Exception` lines 548, 557
-- `fleet_orchestrator/plan_readiness.py::check_readiness::Exception` lines 190, 214
-- `fleet_orchestrator/worker_liveness.py::register_worker_task_liveness::Exception` lines 97, 108
+- `fleet_orchestrator/cli_orch_watch.py`: `investigate` / `Exception` lines 747, 778, 782
+- `fleet_orchestrator/cli_orch_watch.py`: `main` / `Exception` lines 903, 924, 931, 948
+- `fleet_orchestrator/cli_orch_watch.py`: `notify_supervisor_of_stuck` / `Exception` lines 507, 513
+- `fleet_orchestrator/dispatch.py`: `_rollback_claim` / `Exception` lines 379, 423, 450
+- `fleet_orchestrator/dispatch.py`: `check_previous_task` / `Exception` lines 834, 840
+- `fleet_orchestrator/handoff_validation.py`: `_index_record` / `Exception` lines 80, 85
+- `fleet_orchestrator/inflight.py`: `active_inflight_signal` / `Exception` lines 81, 94, 98
+- `fleet_orchestrator/orch_schema.py`: `_dispatch_age_seconds` / `Exception` lines 1469, 1489
+- `fleet_orchestrator/orch_schema.py`: `_resolve_chat_question` / `Exception` lines 3723, 3737
+- `fleet_orchestrator/orch_schema.py`: `get_session_stop_decision` / `Exception` lines 1994, 2035, 2089
+- `fleet_orchestrator/orch_schema.py`: `init_schema` / `Exception` lines 2109, 2116
+- `fleet_orchestrator/orch_schema.py`: `resolve_ref_path` / `Exception` lines 592, 608
+- `fleet_orchestrator/orch_schema.py`: `validate_source_path_for_refs` / `Exception` lines 548, 557
+- `fleet_orchestrator/plan_readiness.py`: `check_readiness` / `Exception` lines 190, 214
+- `fleet_orchestrator/worker_liveness.py`: `register_worker_task_liveness` / `Exception` lines 97, 108
 
 Ordinals are positional within a same `(file, function, exception_type)` group.
 If a handler is added to or removed from one of these groups, the gate must fail
