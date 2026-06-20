@@ -14,6 +14,7 @@ This file is the single entry point for any code review of `claude-code-fleet-or
 - **Code map + invariants:** `CLAUDE.md` (Code Map, Working Rules, Verification).
 - **Feature claims + how to observe each:** `docs/CAPABILITIES.md` (live capability ledger — "if a row can't be observed by its named command/file, it's a bug").
 - **Every env flag (67), defaults, posture:** `docs/CONFIGURATION.md`.
+- **Operational issue discipline:** `OPERATIONAL_DISCIPLINE.md` (public-repo issues are treated as blocking incidents until closed, not ordinary backlog grooming).
 
 ## The invariant claims (verify each against source)
 
@@ -28,7 +29,7 @@ This file is the single entry point for any code review of `claude-code-fleet-or
 
 **Network / exposure posture (claimed, with its real limits stated):**
 - C4. **`ORCH_HOST` defaults to loopback (`127.0.0.1`).** Verify the default bind is private.
-- C5. **The mutable API is tokenless by default; auth is enforced only when `ORCH_AUTH_TOKEN` is set.** A non-loopback bind without a token is reachable unauthenticated and the server only **logs a warning** (does not refuse to start). This is intended for a single trusted machine/LAN. Verify this is exactly the behavior (no stronger, no weaker) — and flag if you think warn-only is wrong for the product's claims.
+- C5. **The mutable API is tokenless by default on loopback; auth is enforced only when `ORCH_AUTH_TOKEN` is set.** Startup refuses to serve the mutable API on a non-loopback bind without either `ORCH_AUTH_TOKEN` or `ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1`. Verify `fleet_orchestrator/tasks_api.py:_enforce_mutable_api_exposure`: loopback starts, non-loopback with a token starts, non-loopback with `ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1` starts with an explicit exposure acknowledgement log, and non-loopback without either raises `SystemExit` before serving. The override is an exposure-intent acknowledgement for a trusted single-user LAN, not authentication.
 - C6. **The public read-only surface (`:5005`, `scripts/orch-public`, `public_readonly.py`) is GET-only, fail-closed (shows nothing unless a session is explicitly allowlisted), and scrubs secrets/operator paths.** Verify there is no mutate/notify route and no leak path.
 
 **Integrity / honesty:**
