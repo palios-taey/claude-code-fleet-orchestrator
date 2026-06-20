@@ -38,7 +38,7 @@ _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _IPV6_RE = re.compile(r"\b(?:[0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4}\b")
 _SECRET_TOKEN_RE = re.compile(
     r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|"
-    r"[A-Za-z0-9_-]*(?:token|secret|apikey|api_key|password)[A-Za-z0-9_-]*=[^\s,;]+)",
+    r"[A-Za-z0-9_-]*(?:token|secret|apikey|api_key|password)[A-Za-z0-9_-]*\s*[:=]\s*[^\s,;]+)",
     re.IGNORECASE,
 )
 

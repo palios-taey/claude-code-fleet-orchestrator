@@ -124,32 +124,61 @@ def main() -> int:
         before = get_session_next_ready(SUP, project_id=PROJECT, config=CFG)
         _check("downstream blocked before human answer", not before or before.get("task_id") != DOWNSTREAM, before)
 
-        evidence = {"production_observation": "agent normal completion attempt"}
-        try:
-            update_task_status(
-                GATE,
-                "completed",
-                owner=SUP,
-                completion_evidence=evidence,
-                completed_by=SUP,
-                config=CFG,
+        terminal_attempts = {
+            "completed": {"production_observation": "agent normal completion attempt"},
+            "failed": {"reason": "agent attempted to bypass the human-review gate"},
+            "interrupted": {"reason": "agent attempted to interrupt the human-review gate"},
+        }
+        for status, evidence in terminal_attempts.items():
+            try:
+                update_task_status(
+                    GATE,
+                    status,
+                    owner=SUP,
+                    completion_evidence=evidence,
+                    completed_by=SUP,
+                    config=CFG,
+                )
+                direct_error = ""
+            except CompletionEvidenceError as exc:
+                direct_error = str(exc)
+            _check(
+                f"direct update_task_status rejects human-review {status}",
+                "dashboard UI review endpoint" in direct_error and "terminal status" in direct_error,
+                direct_error or get_task(GATE, config=CFG),
             )
-            direct_rejected = False
-        except CompletionEvidenceError as exc:
-            direct_rejected = "dashboard UI review endpoint" in str(exc)
-        _check("direct update_task_status rejects human-review completion", direct_rejected, get_task(GATE, config=CFG))
-        _check("direct update_task_status leaves gate open", get_task(GATE, config=CFG).get("status") != "completed", get_task(GATE, config=CFG))
+            _check(
+                f"direct update_task_status leaves gate open after {status}",
+                get_task(GATE, config=CFG).get("status") not in terminal_attempts,
+                get_task(GATE, config=CFG),
+            )
 
-        patch_response = client.patch(
-            f"/api/task/{GATE}",
-            json={
-                "status": "completed",
-                "from": SUP,
-                "evidence": evidence,
-            },
-        )
-        _check("PATCH /api/task (taey-task update path) rejects human-review completion", patch_response.status_code == 400, patch_response.text)
-        _check("PATCH / taey-task path leaves gate open", get_task(GATE, config=CFG).get("status") != "completed", get_task(GATE, config=CFG))
+        for status, evidence in terminal_attempts.items():
+            patch_response = client.patch(
+                f"/api/task/{GATE}",
+                json={
+                    "status": status,
+                    "from": SUP,
+                    "evidence": evidence,
+                },
+            )
+            patch_error = patch_response.text
+            try:
+                patch_error = patch_response.json().get("error") or patch_error
+            except Exception:
+                pass
+            _check(
+                f"PATCH /api/task rejects human-review {status}",
+                patch_response.status_code == 400
+                and "dashboard UI review endpoint" in patch_error
+                and "terminal status" in patch_error,
+                patch_response.text,
+            )
+            _check(
+                f"PATCH / taey-task path leaves gate open after {status}",
+                get_task(GATE, config=CFG).get("status") not in terminal_attempts,
+                get_task(GATE, config=CFG),
+            )
 
         answer_response = client.post(
             f"/api/questions/{QUESTION}/answer",

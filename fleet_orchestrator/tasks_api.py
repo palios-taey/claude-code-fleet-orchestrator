@@ -209,6 +209,13 @@ def _terminal_evidence_next_step(task_id: str, status: str) -> str:
     )
 
 
+def _task_update_body_next_step(task_id: str) -> str:
+    return (
+        f"Send PATCH /api/task/{task_id} with a JSON object body, for example "
+        '{"status":"in_progress","from":"<session-id>"}; terminal statuses require evidence.'
+    )
+
+
 def _human_gate_next_step(question_id: str = "{question_id}") -> str:
     return (
         f"Create with POST /api/human-review-gates body {HUMAN_GATE_CREATE_BODY}; "
@@ -611,12 +618,33 @@ def _origin_allowed_for_ui(req: Request) -> bool:
 
 @app.patch("/api/task/{task_id}")
 async def update(task_id: str, req: Request) -> Dict[str, Any]:
-    data = await req.json()
-    status = data.get("status", "pending")
-    sender = data.get("from", "")
-    result = data.get("result", "")
-
+    status = "pending"
+    sender = ""
     try:
+        try:
+            data = await req.json()
+        except Exception as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": f"request body must be valid JSON: {exc}",
+                    "next_step": _task_update_body_next_step(task_id),
+                },
+            )
+        if not isinstance(data, dict):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "error": f"request body must be a JSON object, got {type(data).__name__}",
+                    "next_step": _task_update_body_next_step(task_id),
+                },
+            )
+        status = data.get("status", "pending")
+        sender = data.get("from", "")
+        result = data.get("result", "")
+
         cfg = _cfg()
         task_id = resolve_task_id(task_id, config=cfg)  # bare id -> canonical namespaced node
         task_before = _load_task(task_id, cfg)

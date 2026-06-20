@@ -18,7 +18,14 @@ ui/*.html
 .github/workflows/*.yml
 .github/r5-risky-paths
 scripts/r5-risk-classifier
+# Gate verifier scripts, acceptance tests, and migrations are the merge oracle;
+# weakening them is equivalent to weakening the gate itself.
+scripts/verify-*.py
+tests/*.py
+migrations/*.py
 # Packaging / entrypoint + the installed CLIs:
 setup.py
+scripts/orch
 scripts/orch-*
+scripts/install
 scripts/taey-*

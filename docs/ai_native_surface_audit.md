@@ -14,8 +14,8 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 205.
-- Teaches: 77.
+- Enumerated surfaces: 207.
+- Teaches: 79.
 - Needs-fix baseline debt: 62.
 - Exempt reviewed baseline rows: 66.
 
@@ -138,7 +138,7 @@ Summary:
 | fleet_orchestrator/orch_schema.py | set_session_pause | orch_raise_error | 2 | 3707 | 333a0224c8269efd | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/orch_schema.py | set_supervisor_refs | orch_raise_error | 1 | 2486 | e4efc41d4fcc04d3 | exempt |  | Core helper error is caught or enriched by the API-facing caller, or is not currently exposed as an autonomous workflow surface. | anbr-fix-exempt:internal-only-helper |
 | fleet_orchestrator/orch_schema.py | update_project_priority | orch_raise_error | 1 | 3528 | cbfb142442cacd0c | teaches | PATCH /api/projects/{} | Static teaching assertion passes. | baseline-pr171 |
-| fleet_orchestrator/orch_schema.py | update_task_status | orch_raise_error | 1 | 2632 | 43a9c8d10a7b4a4a | teaches | POST /api/ui/questions/{}/answer | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/orch_schema.py | update_task_status | orch_raise_error | 1 | 2629 | 268ece876fa26b41 | teaches | POST /api/ui/questions/{}/answer | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/orch_schema.py | validate_source_path_for_refs | orch_return_none_error | 1 | 592 | 2fa8eabf2359aa69 | exempt |  | Static extractor treated an exit wrapper or non-error tuple as a user-facing message; the row is not an independent runtime surface. | anbr-fix-exempt:analyzer-artifact |
 | fleet_orchestrator/orch_schema.py | validate_source_path_for_refs | orch_return_none_error | 2 | 596 | 489823ea7b06396f | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/orch_schema.py | validate_source_path_for_refs | orch_return_none_error | 3 | 598 | 5e504430131fcf5e | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
@@ -224,7 +224,9 @@ Summary:
 | fleet_orchestrator/tasks_api.py | ui_answer_human_review_gate_endpoint | http_exception_detail | 3 | 830 | 8ef39f3dd36572d9 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | ui_answer_human_review_gate_endpoint | json_response_error | 1 | 842 | af945b0e31ca4a15 | teaches | POST /api/human-review-gates | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | ui_answer_human_review_gate_endpoint | json_response_error | 2 | 848 | a40ba0877882c1b9 | exempt |  | Raw subprocess/persistence/unhandled server failure is an operator/logging concern, not a client-correctable AI workflow surface. | anbr-fix-exempt:internal-transport-or-500 |
-| fleet_orchestrator/tasks_api.py | update | json_response_error | 1 | 638 | d6c61be575531467 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
-| fleet_orchestrator/tasks_api.py | update | json_response_error | 2 | 684 | 90ccf2be5ade8d12 | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
-| fleet_orchestrator/tasks_api.py | update | json_response_error | 3 | 701 | ace60ea8e3e7a0f5 | exempt |  | Raw subprocess/persistence/unhandled server failure is an operator/logging concern, not a client-correctable AI workflow surface. | anbr-fix-exempt:internal-transport-or-500 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 1 | 627 | f64c93f2129a0ecd | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 2 | 636 | a7e4e83c6bf59785 | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 3 | 666 | d6c61be575531467 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 4 | 712 | 90ccf2be5ade8d12 | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 5 | 729 | ace60ea8e3e7a0f5 | exempt |  | Raw subprocess/persistence/unhandled server failure is an operator/logging concern, not a client-correctable AI workflow surface. | anbr-fix-exempt:internal-transport-or-500 |
 <!-- ai-native-surfaces:end -->
