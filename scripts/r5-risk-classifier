@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import subprocess
+import sys
+from pathlib import Path
+
+
+REGISTRY_OVERRIDE_PATH_GLOBS = (
+    "docs/ai_native_surface_audit.md",
+    "docs/*_surface_audit.md",
+    "docs/*registry*.md",
+    "docs/*_registry.md",
+)
+
+
+def _git(*args: str) -> str:
+    return subprocess.check_output(["git", *args], text=True)
+
+
+def _risk_path_patterns(path: Path) -> list[str]:
+    patterns: list[str] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw.strip()
+        if stripped and not stripped.startswith("#"):
+            patterns.append(stripped)
+    return patterns
+
+
+def _changed_files(base: str, head: str) -> list[str]:
+    return [
+        line
+        for line in _git("diff", "--name-only", f"{base}...{head}").splitlines()
+        if line
+    ]
+
+
+def _matches_any(path: str, patterns: list[str] | tuple[str, ...]) -> str | None:
+    for pattern in patterns:
+        if fnmatch.fnmatchcase(path, pattern):
+            return pattern
+    return None
+
+
+def _added_lines(base: str, head: str, path: str) -> list[str]:
+    diff = _git("diff", "--unified=0", "--no-ext-diff", f"{base}...{head}", "--", path)
+    lines: list[str] = []
+    for raw in diff.splitlines():
+        if raw.startswith("+") and not raw.startswith("+++"):
+            lines.append(raw[1:])
+    return lines
+
+
+def _table_cells(line: str) -> list[str]:
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return []
+    return [cell.strip().lower() for cell in stripped.strip("|").split("|")]
+
+
+def _adds_or_modifies_exempt_row(base: str, head: str, path: str) -> bool:
+    for line in _added_lines(base, head, path):
+        if "exempt" in _table_cells(line):
+            return True
+    return False
+
+
+def classify(base: str, head: str, risk_paths: Path) -> tuple[list[str], list[str]]:
+    changed = _changed_files(base, head)
+    reasons: list[str] = []
+    path_patterns = _risk_path_patterns(risk_paths)
+
+    for path in changed:
+        pattern = _matches_any(path, path_patterns)
+        if pattern:
+            reasons.append(f"{path} matches risky path glob {pattern}")
+
+        registry_pattern = _matches_any(path, REGISTRY_OVERRIDE_PATH_GLOBS)
+        if registry_pattern and _adds_or_modifies_exempt_row(base, head, path):
+            reasons.append(
+                f"{path} adds or modifies an exempt row in gate-override registry {registry_pattern}"
+            )
+
+    return changed, reasons
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Classify whether a PR diff must pass the R5 adversarial-audit gate."
+    )
+    parser.add_argument("base")
+    parser.add_argument("head")
+    parser.add_argument(
+        "--risk-paths",
+        default=".github/r5-risky-paths",
+        type=Path,
+        help="Path to newline-separated risky glob rules.",
+    )
+    args = parser.parse_args(argv)
+
+    changed, reasons = classify(args.base, args.head, args.risk_paths)
+    print("changed files:")
+    for path in changed:
+        print(f"  {path}")
+
+    if reasons:
+        print("risky reasons:")
+        for reason in reasons:
+            print(f"  RISKY: {reason}")
+        print("RISKY=1")
+    else:
+        print("risky reasons: none")
+        print("RISKY=0")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
