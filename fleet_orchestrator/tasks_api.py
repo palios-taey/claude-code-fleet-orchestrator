@@ -312,7 +312,7 @@ def _allow_unauth_non_loopback() -> bool:
     return os.environ.get("ORCH_ALLOW_UNAUTH_NON_LOOPBACK", "").strip().lower() in TRUE_ENV_VALUES
 
 
-def _warn_if_mutable_api_exposed() -> None:
+def _enforce_mutable_api_exposure() -> None:
     host = api_host()
     if _is_loopback_host(host) or _auth_token():
         return
@@ -348,7 +348,7 @@ async def _optional_mutable_auth(request: Request, call_next):
 
 @app.on_event("startup")
 def _init_schema_on_startup() -> None:
-    _warn_if_mutable_api_exposed()
+    _enforce_mutable_api_exposure()
     result = init_schema(config=_cfg())
     errors = result.get("errors") or []
     if errors:
@@ -1502,6 +1502,9 @@ def session_wake_packet(
     budget_bytes: int = Query(CORE_BUDGET_BYTES, ge=1024, le=128 * 1024),
 ) -> Dict[str, Any]:
     """Assemble a session's wake-state packet.
+
+    CONSUMER BANNER: consumers MUST check body[ok]; HTTP 200 alone does not
+    imply context was assembled.
 
     CONTRACT — this endpoint is **fail-open by design**: a wake-state packet is
     OPTIONAL context, and an assembly error must never break or block a wake. So

@@ -1,3 +1,5 @@
+Auditing the claims? Start at AUDIT.md.
+
 # claude-code-fleet-orchestrator
 
 `claude-code-fleet-orchestrator` is a local-first, single-user orchestration layer for a fleet of Claude Code or CLI agent sessions running on one operator's machine. It is not a hosted service, not a multi-tenant team server, and not a SaaS control plane. The default posture is private: the mutable API and dashboard bind to `127.0.0.1` unless the operator explicitly sets `ORCH_HOST` to another interface.
@@ -148,7 +150,7 @@ Fleet and context:
 
 ## What "taey" Means
 
-The `taey-*` commands are the agent-facing CLI tools installed by this package. "Taey" is the project codename used for the local fleet protocol: `taey-plan` works with projects and plans, `taey-task` works with task state, `taey-question` works with human-review gates, `taey-dispatch` works with out-of-band runner liveness, and `taey-receipts` reads decision-receipt explainability records. `orch` is the operator lifecycle command for serving, enabling, disabling, and doctoring the local service.
+The `taey-*` commands are the agent-facing CLI tools installed by this package. "Taey" is the project codename used for the local fleet protocol: `taey-plan` works with projects and plans, `taey-task` works with task state, `taey-question` works with human-review gates, `taey-dispatch` works with out-of-band runner liveness, `taey-receipts` reads decision-receipt explainability records, and `taey-lane-usage` records passive CLI token/rate-limit observations. `orch` is the operator lifecycle command for serving, enabling, disabling, and doctoring the local service.
 
 ## How An AI Agent Uses This
 
@@ -205,6 +207,18 @@ Decision receipts are default-on explainability records for wake, chat, and disp
 ```bash
 taey-receipts list --limit 5
 taey-receipts list --json --limit 5
+```
+
+Passive CLI usage measurement reads native local token/rate-limit logs from
+Claude Code (`~/.claude/projects/*/{session}.jsonl`), Gemini
+(`~/.gemini/tmp/*/chats/*.jsonl`), Grok (`~/.grok/logs/unified.jsonl`), and
+Codex rollouts (`~/.codex/sessions/**/rollout-*.jsonl`). With `--record`, it
+appends normalized `LaneUsage` records to the passive lane calibration stream.
+This is measurement only; it does not change routing policy.
+
+```bash
+taey-lane-usage --json --limit-per-cli 3
+taey-lane-usage --record --prefix usage-probe --limit-per-cli 1
 ```
 
 The hooks close the loop:
@@ -278,7 +292,7 @@ curl -s "http://127.0.0.1:5002/api/sessions/worker-codex/wake-packet?cli=codex"
 
 The response includes `packet` plus `packet_meta` with a provenance hash, size report, snapshot fingerprints, and the generating commit.
 
-When `claude-code-fleet-notify` hooks are installed, the same packet is delivered as hook context on `SessionStart` and `UserPromptSubmit`; `PostToolUse` appends it after drained notifications. If the endpoint is disabled or unavailable, the hooks fail open and emit no wake-packet context.
+When `claude-code-fleet-notify` hooks are installed, the same packet is delivered as hook context on `SessionStart` and `UserPromptSubmit`; `PostToolUse` appends it after drained notifications. If the endpoint is disabled or unavailable, the hooks fail open and emit no wake-packet context. Consumers MUST check body[ok]; HTTP 200 alone does not imply context was assembled.
 
 ## Scope
 
@@ -312,6 +326,7 @@ taey-plan --version
 taey-receipts --version
 taey-question --version
 taey-task --version
+taey-lane-usage --version
 orch --help
 orch doctor --explain-scope
 taey-plan --help
@@ -319,6 +334,7 @@ taey-task --help
 taey-receipts --help
 taey-question --help
 taey-dispatch --help
+taey-lane-usage --help
 curl -s http://127.0.0.1:5002/health
 ```
 
@@ -348,4 +364,5 @@ The authoritative list of acceptance scripts and the exact per-test environment 
 - [docs/PLAN_FORMAT.md](docs/PLAN_FORMAT.md): markdown plan format.
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every environment flag the orchestrator reads — default, what it gates, and its classification. Core accountability (completion-evidence, supervisor keep-going) is hardcoded with no disable flag.
 - [AUDIT.md](AUDIT.md): reviewer entry point — audit the code against its stated claims (for any code review of this repo).
+- [OPERATIONAL_DISCIPLINE.md](OPERATIONAL_DISCIPLINE.md): issue-handling posture for public-repo incident response and fleet-wide blocking.
 - [SECURITY.md](SECURITY.md): security posture and reporting.
