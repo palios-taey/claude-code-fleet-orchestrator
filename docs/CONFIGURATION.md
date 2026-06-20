@@ -16,6 +16,10 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 - **`ORCH_AUTH_TOKEN` is OPTIONAL and unset by default.** When **unset**, the
   mutable API (POST/PUT/PATCH/DELETE — create/dispatch/**complete** tasks) is
   reachable **with no credential**. When set, those methods require the token.
+- `ORCH_AUTH_TOKEN` gates mutation only. Read endpoints remain open by design,
+  including `GET /api/sessions/{id}/wake-packet`, which can return task/file
+  context. On a non-loopback bind, treat read confidentiality as a network-boundary
+  concern: bind loopback, or restrict access at the network. The token does not make read APIs private.
 - **`ORCH_HOST` defaults to `127.0.0.1`** (loopback/private). If you bind a
   non-loopback interface (`0.0.0.0`, a LAN IP) **without** a token, the mutable
   API would be reachable unauthenticated from that network, so startup **fails

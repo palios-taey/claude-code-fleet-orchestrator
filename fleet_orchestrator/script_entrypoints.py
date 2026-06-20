@@ -10,6 +10,10 @@ def _version_requested() -> bool:
     return sys.argv[1:] in (["--version"], ["-V"])
 
 
+def _api_help_requested() -> bool:
+    return sys.argv[1:] in (["--help"], ["-h"])
+
+
 def _coerce_exit_code(code: Any) -> Any:
     if code is None:
         return 0
@@ -28,6 +32,17 @@ def _run_callable(import_path: str) -> Any:
 
 
 def fleet_orchestrator_api_main() -> Any:
+    if _api_help_requested():
+        print(
+            "Usage: fleet-orchestrator-api [--version]\n"
+            "\n"
+            "Run the Fleet Orchestrator FastAPI server.\n"
+            "Configuration is read from ORCH_* environment variables and .env files;\n"
+            "the default bind is 127.0.0.1:5002.\n"
+            "Use --version to print the installed package version.\n"
+            "See README.md Five-Minute Quickstart for the normal first-run path."
+        )
+        return 0
     return _run_callable("fleet_orchestrator.cli:main")
 
 

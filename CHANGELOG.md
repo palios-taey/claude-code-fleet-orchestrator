@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## v1.8.5 - 2026-06-20
+
+### Changed
+
+- Documented that `ORCH_AUTH_TOKEN` gates mutation only: read endpoints, including wake-packet context reads, remain open by design and require loopback or network-boundary protection for confidentiality.
+
+### Fixed
+
+- Fixed `orch serve` first-run port conflicts so it probes the configured bind address before printing the dashboard banner and fails with an actionable error instead of advertising a stale or conflicting service.
+- Fixed `fleet-orchestrator-api --help` so it prints usage text without attempting to start the server or read runtime connection config.
+
 ## v1.8.4 - 2026-06-20
 
 ### Added
