@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v1.8.6 - 2026-06-20
+
+### Fixed
+
+- Fixed the R5 risky-path registry so gate verifiers, acceptance tests, migrations, and dashless install/orch scripts are covered by adversarial audit requirements instead of letting gate-oracle changes fail open.
+- Fixed human-review gate tasks so ordinary task status updates cannot terminalize them with `completed`, `failed`, or `interrupted`; they must resolve through the dedicated human-review gate path.
+- Fixed malformed or non-object task update bodies so they return actionable 4xx teaching errors instead of generic handler failures.
+- Fixed public-dashboard secret scrubbing so colon-delimited labels such as `password: ...`, `token: ...`, and `secret: ...` are redacted along with `key=value` forms.
+
 ## v1.8.5 - 2026-06-20
 
 ### Changed

@@ -83,6 +83,8 @@ jobs:
           python tests/ai_native_coherence_acceptance.py
       - name: Ship-gate — R5 classifier gates registry exemption overrides
         run: python tests/r5_risk_classifier_acceptance.py
+      - name: Ship-gate — R5 risky paths cover the gate oracle
+        run: python tests/r5_risky_paths_completeness_acceptance.py
       - name: Ship-gate — installed CLIs stay live-linked after editable install
         run: python tests/cli_entrypoint_drift_acceptance.py
       - name: Ship-gate — first-run CLI failures teach without false-success banners
@@ -95,6 +97,8 @@ jobs:
         run: python tests/request_scoped_env_acceptance.py
       - name: Ship-gate — gate runner shell trust boundary is explicit
         run: python tests/gate_runner_trust_boundary_acceptance.py
+      - name: Ship-gate — public readonly redacts colon-delimited secrets
+        run: python tests/public_secret_scrub_acceptance.py
       - name: Ship-gate — shipped surfaces contain no private fleet identity
         run: python tests/fleet_identity_deumbilical_acceptance.py
       - name: Ship-gate — easy setup is install-safe and version-aligned
@@ -137,6 +141,8 @@ jobs:
           ORCH_REDIS_PORT: "6379"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
         run: python tests/task_completion_evidence_acceptance.py
+      - name: Ship-gate — malformed task update bodies teach 4xx
+        run: python tests/task_update_body_acceptance.py
       - name: Ship-gate — shippability requires completed gate evidence
         env:
           ORCH_NEO4J_URI: bolt://localhost:7687

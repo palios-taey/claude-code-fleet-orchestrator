@@ -64,6 +64,11 @@ def _base_repo() -> tuple[Path, str]:
         .github/workflows/*.yml
         .github/r5-risky-paths
         scripts/r5-risk-classifier
+        scripts/verify-*.py
+        tests/*.py
+        migrations/*.py
+        scripts/orch
+        scripts/install
         """,
     )
     _write(
@@ -135,6 +140,36 @@ def main() -> int:
         head = _commit(repo, "risky code")
         result = _classifier(repo, base, head)
         check("existing risky path globs still require R5", "RISKY=1" in result.stdout, result.stdout)
+
+        _must_run(["git", "reset", "--hard", base], repo)
+        _write(repo / "tests" / "gate_acceptance.py", "VALUE = 1\n")
+        head = _commit(repo, "gate oracle test")
+        result = _classifier(repo, base, head)
+        check("acceptance-test oracle changes require R5", "RISKY=1" in result.stdout and "tests/*.py" in result.stdout, result.stdout)
+
+        _must_run(["git", "reset", "--hard", base], repo)
+        _write(repo / "scripts" / "verify-docs.py", "VALUE = 1\n")
+        head = _commit(repo, "gate verifier")
+        result = _classifier(repo, base, head)
+        check("verify script changes require R5", "RISKY=1" in result.stdout and "scripts/verify-*.py" in result.stdout, result.stdout)
+
+        _must_run(["git", "reset", "--hard", base], repo)
+        _write(repo / "migrations" / "v1" / "run_acceptance.py", "VALUE = 1\n")
+        head = _commit(repo, "migration acceptance")
+        result = _classifier(repo, base, head)
+        check("migration changes require R5", "RISKY=1" in result.stdout and "migrations/*.py" in result.stdout, result.stdout)
+
+        _must_run(["git", "reset", "--hard", base], repo)
+        _write(repo / "scripts" / "orch", "VALUE = 1\n")
+        head = _commit(repo, "dashless orch")
+        result = _classifier(repo, base, head)
+        check("dashless orch script requires R5", "RISKY=1" in result.stdout and "scripts/orch" in result.stdout, result.stdout)
+
+        _must_run(["git", "reset", "--hard", base], repo)
+        _write(repo / "scripts" / "install", "VALUE = 1\n")
+        head = _commit(repo, "dashless install")
+        result = _classifier(repo, base, head)
+        check("dashless install script requires R5", "RISKY=1" in result.stdout and "scripts/install" in result.stdout, result.stdout)
 
         if failures:
             print(f"\nFAIL - {len(failures)} assertion(s): {failures}")

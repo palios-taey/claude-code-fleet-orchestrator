@@ -2618,21 +2618,20 @@ def update_task_status(task_id: str, status: str, owner: str = "",
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     blocked_on_value = "__KEEP__" if blocked_on is None else blocked_on
-    completion_evidence_value = _validate_terminal_status_write(status, completion_evidence)
     terminal_status = status in _TERMINAL_TASK_STATUSES
     with driver.session(database=cfg.neo4j_db) as session:
-        if status == "completed":
+        if terminal_status:
             existing = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
                 RETURN t.task_type AS task_type
             """, task_id=task_id).single()
-            if existing is None:
-                return False
-            if existing.get("task_type") == "human-review":
+            if existing is not None and existing.get("task_type") == "human-review":
                 raise CompletionEvidenceError(
-                    "human-review gate tasks must be completed through the dashboard UI review endpoint. "
+                    f"human-review gate tasks must be resolved through the dashboard UI review endpoint, "
+                    f"not by setting terminal status {status!r} through the task status API. "
                     + _human_review_answer_next_step("{question_id}")
                 )
+        completion_evidence_value = _validate_terminal_status_write(status, completion_evidence)
         if result is None:
             rec = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
