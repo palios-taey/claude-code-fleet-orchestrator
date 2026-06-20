@@ -85,6 +85,8 @@ jobs:
         run: python tests/r5_risk_classifier_acceptance.py
       - name: Ship-gate — installed CLIs stay live-linked after editable install
         run: python tests/cli_entrypoint_drift_acceptance.py
+      - name: Ship-gate — first-run CLI failures teach without false-success banners
+        run: python tests/firstrun_hardening_acceptance.py
       - name: Ship-gate — local bind is the mutable API security boundary
         run: python tests/localbind_acceptance.py
       - name: Ship-gate — non-loopback tokenless mutable API requires explicit override

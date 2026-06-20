@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -26,12 +27,31 @@ from fleet_orchestrator.easy_setup import (  # noqa: E402
 )
 
 
+def _probe_bind_error(host: str, port: int) -> OSError | None:
+    family = socket.AF_INET6 if ":" in host and host != "0.0.0.0" else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((host, port))
+        except OSError as exc:
+            return exc
+    return None
+
+
 def cmd_serve(_: argparse.Namespace) -> int:
     from fleet_orchestrator.easy_setup import api_host, api_port
     from fleet_orchestrator.feature_flags import chat_enabled
 
     host = api_host()
     port = api_port()
+    bind_error = _probe_bind_error(host, port)
+    if bind_error is not None:
+        print(
+            f"ERROR: cannot start orch serve - {host}:{port} is already in use. "
+            "Stop the conflicting process or set ORCH_PORT to a free port, then re-run 'orch serve'.",
+            file=sys.stderr,
+        )
+        return 1
+
     chat_on = chat_enabled()
     reach = "this machine only" if host == "127.0.0.1" else f"your network — open http://{host}:{port}/ui/ from any device on it"
     print(f"Orchestrator UI -> http://{host}:{port}/ui/  ({reach})")
