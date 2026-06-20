@@ -17,6 +17,7 @@ ui/*.html
 # CI/gate config itself (self-protecting — a PR weakening the gate is gated):
 .github/workflows/*.yml
 .github/r5-risky-paths
+scripts/r5-risk-classifier
 # Packaging / entrypoint + the installed CLIs:
 setup.py
 scripts/orch-*

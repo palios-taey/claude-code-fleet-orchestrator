@@ -76,19 +76,9 @@ jobs:
 
           # Changed files vs base.
           git fetch -q origin "$BASE_REF"
-          CHANGED="$(git diff --name-only "origin/$BASE_REF...$HEAD_SHA")"
-          echo "changed files:"; echo "$CHANGED" | sed 's/^/  /'
-
-          # Does any changed file match a risky glob?
-          RISKY=0
-          while IFS= read -r pat; do
-            [ -z "$pat" ] && continue
-            case "$pat" in \#*) continue;; esac
-            while IFS= read -r f; do
-              [ -z "$f" ] && continue
-              case "$f" in $pat) RISKY=1; echo "  RISKY: $f matches $pat";; esac
-            done <<< "$CHANGED"
-          done < .github/r5-risky-paths
+          python3 scripts/r5-risk-classifier "origin/$BASE_REF" "$HEAD_SHA" \
+            --risk-paths .github/r5-risky-paths | tee /tmp/r5-risk.txt
+          RISKY="$(awk -F= '$1 == "RISKY" {print $2}' /tmp/r5-risk.txt | tail -n 1)"
 
           if [ "$RISKY" -eq 0 ]; then
             set_status success "no R5 risky surface touched"

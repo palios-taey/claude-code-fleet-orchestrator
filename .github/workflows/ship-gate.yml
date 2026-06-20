@@ -81,6 +81,8 @@ jobs:
         run: |
           python scripts/verify-ai-native-coherence.py
           python tests/ai_native_coherence_acceptance.py
+      - name: Ship-gate — R5 classifier gates registry exemption overrides
+        run: python tests/r5_risk_classifier_acceptance.py
       - name: Ship-gate — installed CLIs stay live-linked after editable install
         run: python tests/cli_entrypoint_drift_acceptance.py
       - name: Ship-gate — local bind is the mutable API security boundary

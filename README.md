@@ -150,7 +150,7 @@ Fleet and context:
 
 ## What "taey" Means
 
-The `taey-*` commands are the agent-facing CLI tools installed by this package. "Taey" is the project codename used for the local fleet protocol: `taey-plan` works with projects and plans, `taey-task` works with task state, `taey-question` works with human-review gates, `taey-dispatch` works with out-of-band runner liveness, and `taey-receipts` reads decision-receipt explainability records. `orch` is the operator lifecycle command for serving, enabling, disabling, and doctoring the local service.
+The `taey-*` commands are the agent-facing CLI tools installed by this package. "Taey" is the project codename used for the local fleet protocol: `taey-plan` works with projects and plans, `taey-task` works with task state, `taey-question` works with human-review gates, `taey-dispatch` works with out-of-band runner liveness, `taey-receipts` reads decision-receipt explainability records, and `taey-lane-usage` records passive CLI token/rate-limit observations. `orch` is the operator lifecycle command for serving, enabling, disabling, and doctoring the local service.
 
 ## How An AI Agent Uses This
 
@@ -207,6 +207,18 @@ Decision receipts are default-on explainability records for wake, chat, and disp
 ```bash
 taey-receipts list --limit 5
 taey-receipts list --json --limit 5
+```
+
+Passive CLI usage measurement reads native local token/rate-limit logs from
+Claude Code (`~/.claude/projects/*/{session}.jsonl`), Gemini
+(`~/.gemini/tmp/*/chats/*.jsonl`), Grok (`~/.grok/logs/unified.jsonl`), and
+Codex rollouts (`~/.codex/sessions/**/rollout-*.jsonl`). With `--record`, it
+appends normalized `LaneUsage` records to the passive lane calibration stream.
+This is measurement only; it does not change routing policy.
+
+```bash
+taey-lane-usage --json --limit-per-cli 3
+taey-lane-usage --record --prefix usage-probe --limit-per-cli 1
 ```
 
 The hooks close the loop:
@@ -314,6 +326,7 @@ taey-plan --version
 taey-receipts --version
 taey-question --version
 taey-task --version
+taey-lane-usage --version
 orch --help
 orch doctor --explain-scope
 taey-plan --help
@@ -321,6 +334,7 @@ taey-task --help
 taey-receipts --help
 taey-question --help
 taey-dispatch --help
+taey-lane-usage --help
 curl -s http://127.0.0.1:5002/health
 ```
 
