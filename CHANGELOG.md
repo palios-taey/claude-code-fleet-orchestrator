@@ -2,10 +2,11 @@
 
 ## Unreleased
 
-## v1.8.4 - 2026-06-19
+## v1.8.4 - 2026-06-20
 
 ### Added
 
+- Added native per-CLI usage adapters that read each CLI's own usage signal (Claude Code, Gemini, grok, Codex) and emit a common LaneUsage schema for lane calibration, replacing UI-scraping. (#178)
 - Added the AI-native contribution principle, full agent-facing surface audit, and machine-checkable coherence gate so the registry is re-derived from code and fails on drift rather than trusting hand-maintained rows. (#164, #165, #171)
 - Added the identity-keyed exception-handler registry so classified broad exception handlers are tracked by stable handler identity instead of line-number position. (#167)
 - Added a decision-receipt consumer path so receipt events are not only emitted but also consumed by the orchestrator surface. (#159)
@@ -17,6 +18,8 @@
 - Removed unsupported internal Neo4j auth configuration from the orchestrator runtime and documented the supported no-internal-auth posture: Neo4j runs without application credentials behind the deployment network boundary. (#117)
 - Auto-derived allowed ref roots from configured supervisor session roots, so plan refs can be resolved from the same session-root configuration instead of requiring duplicate ref-root configuration. (#118)
 - Hardened the audit response documentation: corrected the C5 auth claim, named the mutable API exposure guard `_enforce_mutable_api_exposure`, made `AUDIT.md` the reviewer entry point, and added `OPERATIONAL_DISCIPLINE.md`. (#173)
+- Taught the tasks API rejection surfaces so evidence-less or invalid terminal updates explain what is missing and the next step instead of returning a bare error. (#175)
+- Extended the R5 audit gate to fire on registry exemption-override changes, so flipping a risky-surface exemption requires a fresh adversarial re-audit. (#176)
 - Improved supervisor-access failures with inline, AI-native next steps so blocked sessions learn how to register or inspect supervisor access from the error surface itself. (#163)
 - Reworked AI-native baseline management: repaired real no-next-step and partial surfaces, taught API and recovery paths, removed baked supervisor-role assumptions from plan modeling, and triaged the remaining needs-fix baseline into explicit reviewed buckets. (#166, #168, #169, #170, #172)
 - Clarified mutable API exposure posture: non-loopback tokenless startup now requires an explicit exposure acknowledgement, and session `.env` context hints are request-scoped. (#151, #152)
