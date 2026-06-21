@@ -187,7 +187,7 @@ Summary:
 | fleet_orchestrator/tasks_api.py | get_project | http_exception_detail | 1 | 875 | c7abf8c1de4052d5 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | get_project_user_stop_conditions_endpoint | http_exception_detail | 1 | 942 | c7abf8c1de4052d5 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | get_task | http_exception_detail | 1 | 508 | 22c8c2430788ed07 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
-| fleet_orchestrator/tasks_api.py | health | json_response_error | 1 | 1622 | fa47b402180b7541 | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/tasks_api.py | health | json_response_error | 1 | 1654 | 8df1950eddf0c720 | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | load_plan_md | http_exception_detail | 1 | 1018 | 7d7613f0006ef1d4 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | load_plan_md | http_exception_detail | 2 | 1032 | 014c566583ebef00 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | load_plan_md | http_exception_detail | 3 | 1042 | 299e300652a10a72 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |

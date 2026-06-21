@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v1.8.7 - 2026-06-21
+
+### Fixed
+
+- Fixed mutable API `/health` and the FastAPI app version so they report the import-time running-process version (`RUNNING_VERSION`) instead of re-reading `version.py` at request time, keeping the reported version tied to the running build.
+
 ## v1.8.6 - 2026-06-20
 
 ### Fixed
