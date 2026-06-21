@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v1.8.7 - 2026-06-21
+
+### Fixed
+
+- Fixed mutable API `/health` version reporting so it reflects the loaded running process version instead of re-reading `version.py` from disk at request time, and refreshed the AI-native surface registry for the changed health error payload.
+
 ## v1.8.6 - 2026-06-20
 
 ### Fixed
