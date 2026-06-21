@@ -41,7 +41,8 @@ from fleet_orchestrator.context_assembler import (
     size_report as wake_size_report,
 )
 from fleet_orchestrator.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
-from fleet_orchestrator.easy_setup import api_host, package_version
+from fleet_orchestrator.easy_setup import api_host
+from fleet_orchestrator.version import __version__ as RUNNING_VERSION
 from fleet_orchestrator.evidence_contract import REQUEST_TERMINAL_EVIDENCE_KEYS, TERMINAL_STATUSES
 from fleet_orchestrator.feature_flags import TRUE_ENV_VALUES, chat_enabled, wake_packet_endpoint_enabled
 from fleet_orchestrator.handoff_validation import ensure_handoff_index_backfilled
@@ -268,7 +269,7 @@ def _question_not_found_detail(question_id: str, *, endpoint: str, ui: bool = Fa
         "`{\"answer\":\"<answer text>\",\"answered_by\":\"<session-id>\"}`."
     )
 
-app = FastAPI(title="Fleet Orchestrator API", version=package_version())
+app = FastAPI(title="Fleet Orchestrator API", version=RUNNING_VERSION)
 # SECURITY: chat is an injection vector (posts become content an AI session reads). It defaults
 # ON because it is a promised local/trusted-LAN capability. Non-loopback mutable API startup
 # fails closed unless ORCH_AUTH_TOKEN is set or ORCH_ALLOW_UNAUTH_NON_LOOPBACK acknowledges
@@ -1645,7 +1646,7 @@ def health() -> Dict[str, Any]:
         return {
             "ok": True,
             "service": "fleet-orchestrator-api",
-            "version": package_version(),
+            "version": RUNNING_VERSION,
             "api_base": os.environ.get("ORCH_API_BASE", "http://127.0.0.1:5002"),
             "ts": time.time(),
         }
@@ -1655,7 +1656,7 @@ def health() -> Dict[str, Any]:
             content={
                 "ok": False,
                 "service": "fleet-orchestrator-api",
-                "version": package_version(),
+                "version": RUNNING_VERSION,
                 "api_base": os.environ.get("ORCH_API_BASE", "http://127.0.0.1:5002"),
                 "dependency": "neo4j",
                 "operation": "get_ready_tasks",
