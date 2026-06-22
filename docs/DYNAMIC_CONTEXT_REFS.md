@@ -25,6 +25,10 @@ The hook path uses the same endpoint. `SessionStart` and `UserPromptSubmit` emit
 
 Consumer banner: consumers MUST check body[ok]; HTTP 200 alone does not imply context was assembled. Treat a wake-packet response as usable only when the response body reports `ok: true`, `enabled: true`, and includes a non-empty `packet`.
 
+## Budget Behavior
+
+Required operating context, identity, refs, and rules are not partially truncated to satisfy the wake-packet budget. The assembler keeps those sections whole; when budget pressure requires dropping content, it drops whole ranked-memory items instead. A packet should therefore contain the complete selected required section or omit lower-priority memory entries, not emit half a ref, rule, identity block, or operating section.
+
 ## Identity Tier
 
 Every wake packet renders `## Identity` after `## Operating` and before `## Context Refs`.

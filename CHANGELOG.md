@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased
+## v1.9.0 - 2026-06-22
+
+### Added
+
+- Added a consolidated public dashboard UI that keeps the scrubbed read-only surface easier to operate without adding mutable routes. (#183)
+- Added a default-on `orch-watch` notify-daemon watchdog that checks the delegated notify router service, heartbeat freshness, and stuck-inbox delivery SLO, then alerts out-of-band when notification delivery is at risk. (#188)
+
+### Changed
+
+- Wake packets now keep required operating refs, identity, and rules whole under budget pressure; lower-priority ranked memory entries are dropped as whole items instead of truncating required context. (#185)
+- Handoff state is now surfaced in task status output, including executor binding and warnings for dispatch/assign double-binding. (#187)
+
+### Fixed
+
+- Fixed plan re-ingest dependency reconciliation so `DEPENDS_ON` edges are reconciled to the source plan instead of leaving stale or missing dependency state after re-ingest. (#184)
+- Fixed the notify watchdog out-of-band submit path so critical tmux alerts submit through the correct send-keys sequence with line-buffered stderr. (#189)
 
 ## v1.8.7 - 2026-06-21
 

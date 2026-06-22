@@ -13,7 +13,7 @@ This file is the single entry point for any code review of `claude-code-fleet-or
 ## The map (where things live)
 - **Code map + invariants:** `CLAUDE.md` (Code Map, Working Rules, Verification).
 - **Feature claims + how to observe each:** `docs/CAPABILITIES.md` (live capability ledger — "if a row can't be observed by its named command/file, it's a bug").
-- **Every env flag (67), defaults, posture:** `docs/CONFIGURATION.md`.
+- **Every env flag, defaults, posture:** `docs/CONFIGURATION.md`.
 - **Operational issue discipline:** `OPERATIONAL_DISCIPLINE.md` (public-repo issues are treated as blocking incidents until closed, not ordinary backlog grooming).
 
 ## The invariant claims (verify each against source)
@@ -36,6 +36,7 @@ This file is the single entry point for any code review of `claude-code-fleet-or
 - C7. **Ship gates are fail-closed** — no declared gate tasks ⇒ not shippable; the config cannot be emptied/gamed to force a pass (`shippability.py`).
 - C8. **No operator-specific identity or paths are baked in as defaults** — names/paths/IPs come from config/env; missing config fails loud, not a silent operator default. (Enforced by `tests/standalone_sessions_acceptance.py`, `tests/lane_state_acceptance.py`.)
 - C9. **`version.py` is the single source of truth for the version**, and a release tag that disagrees with it fails CI (`.github/workflows/version-tag-consistency.yml`).
+- C10. **`orch-watch` independently monitors notification-delivery liveness by default.** Verify `fleet_orchestrator/cli_orch_watch.py`: `ORCH_NOTIFY_DAEMON_WATCHDOG` defaults on, `check_notify_daemon_liveness` checks the delegated router service and `taey:_notify_daemon:heartbeat` freshness, `check_stuck_inbox_delivery` checks old `${NOTIFY_KEY_PREFIX:-taey}:*:inbox` messages, and watchdog failures alert out-of-band through direct tmux submission rather than depending on `taey-notify`.
 
 ## Known gaps the code does NOT hide (verify these are still only-this-bad)
 - G1. **Wake-packet gating is endpoint-scoped.** The canonical flag is now `ORCH_WAKE_PACKET_ENDPOINT_ENABLED`; the deprecated `ORCH_WAKE_PACKET_ENABLED` alias remains for old `.env` files. Either flag gates only the `/wake-packet` context endpoint, not session waking (`send_wake`).
@@ -44,4 +45,4 @@ This file is the single entry point for any code review of `claude-code-fleet-or
 - R1. Stop-on-in-progress is no longer per-session opt-in. Handoff validation helpers remain present, but pending/unacked handoff records are **not** a stop-decision blocker on current main. There should be no live `CF_HANDOFF_ENFORCE`, `CF_HANDOFF_SESSION_FLAGS_FILE`, `CF_STOP_INPROGRESS`, `flags_for_session`, or Redis `{prefix}:stop_inprogress_enabled` bypass in runtime code; pending handoff records should not produce a stop block. (`tests/no_flag_bypass_acceptance.py`.)
 
 ## Deliverable
-Per claim (C1–C9), live gap (G1), and regression target (R1): CONFIRMED / GAP (with `file:line`). Plus: any unclaimed security/accountability-relevant behavior you found by reading the source. Then a top-level verdict: ENDORSE (code matches its stated claims; gaps are only as bad as stated) or BLOCK (named claim is false, or an unclaimed bypass exists).
+Per claim (C1–C10), live gap (G1), and regression target (R1): CONFIRMED / GAP (with `file:line`). Plus: any unclaimed security/accountability-relevant behavior you found by reading the source. Then a top-level verdict: ENDORSE (code matches its stated claims; gaps are only as bad as stated) or BLOCK (named claim is false, or an unclaimed bypass exists).

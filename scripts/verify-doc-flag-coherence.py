@@ -26,6 +26,7 @@ ENV_EXACT = {"DISPLAY", "PATH"}
 DOC_ENV_RE = re.compile(r"`([A-Z][A-Z0-9_]*(?:_[A-Z0-9]+)*)`")
 HELPER_ENV_READERS = {
     "_dotenv_lookup",
+    "_bool_env",
     "_int_env",
     "_optional_env",
     "_require_env",

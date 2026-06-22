@@ -88,6 +88,7 @@ force a pass), `ORCH_PRE_MERGE_REQUIRED_CHECKS` (consumed by the pre-merge gate)
 | `ORCH_DECISION_RECEIPTS_ENABLED` | **ON** | Best-effort decision-receipt explainability records. They are written to Redis stream `orch:streams:decision_receipts` and surfaced by `taey-receipts list`; nothing blocks on them. |
 | `ORCH_LOOPS_ENABLED` | **ON** | The additive signal/clock/task-state loop API routes. When disabled, loop operations return `ok:false`, `enabled:false`, and `reason:"loops disabled"`; core stop/dispatch integration is deliberately not wired in this phase. |
 | `ORCH_GATE_TEMPLATE_ENABLED` | **ON** | Applies the forced sub-role gate template when a plan explicitly requests that template. |
+| `ORCH_NOTIFY_DAEMON_WATCHDOG` | **ON** | Enables the `orch-watch` notify-daemon watchdog: delegated service liveness, heartbeat freshness, and stuck-inbox delivery SLO checks with direct out-of-band alerts. |
 
 ## 6. Handoff / stop discipline
 
