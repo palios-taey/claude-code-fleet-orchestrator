@@ -91,8 +91,8 @@ def _existing_project_state(_: str, __: object) -> dict[str, object]:
     return {"phase_ids": set(), "task_phase": {}}
 
 
-def _add_dependency(_: str, __: str, **___: object) -> bool:
-    return True
+def _reconcile_task_dependencies(_: str, __: list[str], **___: object) -> dict[str, object]:
+    return {"task_exists": True, "missing": []}
 
 
 @contextlib.contextmanager
@@ -105,7 +105,7 @@ def _mock_plan_storage():
         stack.enter_context(patch.object(plan_loader, "assign_task_to_phase", _noop))
         stack.enter_context(patch.object(plan_loader, "_set_task_metadata", _noop))
         stack.enter_context(patch.object(plan_loader, "_release_ingest_holds", _noop))
-        stack.enter_context(patch.object(plan_loader, "add_dependency", _add_dependency))
+        stack.enter_context(patch.object(plan_loader, "_reconcile_task_dependencies", _reconcile_task_dependencies))
         yield
 
 

@@ -11,7 +11,6 @@ from .feature_flags import gate_template_enabled
 from .orch_template import GATE_PHASE_ID, apply_gate_template
 from .orch_schema import (
     _has_control_chars,
-    add_dependency,
     assign_task_to_phase,
     create_phase,
     create_project,
@@ -309,6 +308,36 @@ def _release_ingest_holds(task_ids: Set[str], cfg: OrchConfig) -> None:
             SET t.status = 'pending',
                 t.updated_at = datetime()
         """, task_ids=sorted(task_ids))
+
+
+def _reconcile_task_dependencies(task_id: str, depends_on_ids: List[str],
+                                 config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    cfg = config or OrchConfig()
+    wanted = list(dict.fromkeys(depends_on_ids))
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run("""
+            OPTIONAL MATCH (t:OrchTask {id: $task_id})
+            OPTIONAL MATCH (dep:OrchTask)
+            WHERE dep.id IN $depends_on_ids
+            RETURN (t IS NOT NULL) AS task_exists,
+                   collect(dep.id) AS found_dep_ids
+        """, task_id=task_id, depends_on_ids=wanted).single()
+        task_exists = bool(record and record["task_exists"])
+        found = set(record["found_dep_ids"] if record else [])
+        missing = [dep_id for dep_id in wanted if dep_id not in found]
+        if not task_exists or missing:
+            return {"task_exists": task_exists, "missing": missing}
+        session.run("""
+            MATCH (t:OrchTask {id: $task_id})
+            OPTIONAL MATCH (t)-[old:DEPENDS_ON]->(:OrchTask)
+            DELETE old
+            WITH t
+            UNWIND $depends_on_ids AS depends_on_id
+            MATCH (dep:OrchTask {id: depends_on_id})
+            MERGE (t)-[:DEPENDS_ON]->(dep)
+        """, task_id=task_id, depends_on_ids=wanted).consume()
+    return {"task_exists": True, "missing": []}
 
 
 def _collect_ref_warnings(parsed: Dict[str, Any], source_path: str) -> List[str]:
@@ -678,7 +707,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
     phases_created = 0
     tasks_created = 0
     tasks_updated = 0
-    dependency_pairs: List[tuple[str, str]] = []
+    dependency_map: Dict[str, List[str]] = {}
     held_task_ids: Set[str] = set()
 
     for phase in parsed["phases"]:
@@ -724,11 +753,17 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
                 tasks_created += 1
                 held_task_ids.add(task["id"])
 
-            for depends_on in task.get("depends", []):
-                dependency_pairs.append((task["id"], depends_on))
+            dependency_map[task["id"]] = list(task.get("depends", []))
 
-    for task_id, depends_on in dependency_pairs:
-        if not add_dependency(task_id, depends_on, config=cfg):
+    for task_id, depends_on_ids in dependency_map.items():
+        reconcile = _reconcile_task_dependencies(task_id, depends_on_ids, config=cfg)
+        if not reconcile.get("task_exists"):
+            held_task_ids.discard(task_id)
+            errors.append(
+                f"task '{task_id}' missing during dependency reconciliation -- dependencies NOT created"
+            )
+            continue
+        for depends_on in reconcile.get("missing", []):
             held_task_ids.discard(task_id)
             errors.append(
                 f"task '{task_id}' depends on missing task '{depends_on}' -- dependency NOT created (would be ungated)"
