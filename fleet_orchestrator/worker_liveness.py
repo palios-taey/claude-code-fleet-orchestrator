@@ -241,6 +241,7 @@ def _escalate_task(task: Dict[str, Any], now: float,
     result = dict(record)
     result["worker"] = worker
     result["stale_for_sec"] = int(max(0.0, now - float(task.get("heartbeat_at") or now)))
+    result["expired_blocked_on"] = str(task.get("blocked_on") or "").strip()
     return result
 
 

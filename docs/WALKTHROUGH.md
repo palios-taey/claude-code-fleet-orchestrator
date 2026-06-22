@@ -197,8 +197,11 @@ exercise the cycle manually; it does not create an autonomous always-running sup
 3. **Wake** — when the worker stops, its Stop hook notifies the supervisor; the daemon injects the
    result when the supervisor is idle. With hooks and the daemon healthy, no manual relay is needed
    for that wake.
-4. **Stop-discipline** — a session must not stop while ready work exists. The only legitimate wait is
-   `blocked_on`; a stop must cite a `user_stop_condition`.
+4. **Stop-discipline** — a session must not stop while ready work exists. Intentional waits must use
+   the structured `blocked_on` form `AWAIT:<kind>:<detail>` with kind `human-review`, `family-consent`,
+   or `external-signal`; free-text `blocked_on` is informational only and worker-liveness may expire it
+   back to pending. For cross-session cascades, use `AWAIT:external-signal:<id>` and clear it when the
+   external executor lands.
 5. **Watcher** — run `orch-watch --redis-host 127.0.0.1 --readiness-checker fleet_orchestrator.plan_readiness:check_readiness`
    so a supervisor is paged the moment a worker's completion unblocks its work, or a task goes stuck.
 

@@ -914,12 +914,21 @@ def _process_worker_liveness_expirations(
             continue
         if _target_stop_decision_allows_stop(str(supervisor), "WORKER_LIVENESS_EXPIRED", str(task_id)):
             continue
+        expired_blocked_on = str(task.get("expired_blocked_on") or "").strip()
         body = (
             f"[WORKER_LIVENESS_EXPIRED] task={task_id} assigned to {worker} "
             f"had no task-keyed heartbeat for {task.get('stale_for_sec', '?')}s. "
             "It has been returned to pending with needs_attention=true so it can be "
             "redispatched or investigated; it is no longer an indefinite in_progress stall."
         )
+        if expired_blocked_on:
+            body += (
+                f" The cleared blocked_on value was free text: {expired_blocked_on!r}. "
+                "Free-text blocked_on is informational only and does NOT exempt worker-liveness. "
+                "Model an intentional cross-session or external wait with "
+                "`--blocked-on AWAIT:external-signal:<detail>`; that structured marker is "
+                "machine-resolvable and the executor/supervisor clears it when the external work lands."
+            )
         if _send_wake(
             r,
             str(supervisor),

@@ -68,6 +68,7 @@ FIRST = f"{PROJECT}::first"
 SECOND = f"{PROJECT}::second"
 STALL = f"{PROJECT}::stall"
 AWAIT = f"{PROJECT}::await"
+FREE_TEXT_WAIT = f"{PROJECT}::free-text-wait"
 HUMAN_REVIEW = f"{PROJECT}::human-review"
 QUESTION = f"{PFX}-question"
 REVIEWER = f"{PFX}-reviewer"
@@ -119,7 +120,7 @@ def _setup() -> None:
     init_schema(config=CFG)
     create_project(project_id=PROJECT, name=PROJECT, supervisor=SUP, priority=1, config=CFG)
     create_phase(project_id=PROJECT, phase_id=PHASE, name="phase", config=CFG)
-    for task_id in (FIRST, SECOND, STALL, AWAIT):
+    for task_id in (FIRST, SECOND, STALL, AWAIT, FREE_TEXT_WAIT):
         create_task(
             phase_id=PHASE,
             task_id=task_id,
@@ -248,7 +249,7 @@ def main() -> int:
             AWAIT,
             "in_progress",
             owner=WORKER,
-            blocked_on="AWAIT:family-consent:liveness acceptance",
+            blocked_on="AWAIT:external-signal:liveness acceptance",
             config=CFG,
         )
         time.sleep(1.2)
@@ -256,9 +257,36 @@ def main() -> int:
         count = _run_liveness_once(sent)
         await_task = get_task(AWAIT, config=CFG)
         _check(
-            "AWAIT-gated task past TTL is not escalated",
-            count == 0 and await_task.get("status") == "in_progress" and await_task.get("blocked_on") == "AWAIT:family-consent:liveness acceptance",
+            "AWAIT external-signal task past TTL is not escalated",
+            count == 0 and await_task.get("status") == "in_progress" and await_task.get("blocked_on") == "AWAIT:external-signal:liveness acceptance",
             {"count": count, "task": await_task, "sent": sent},
+        )
+
+        _dispatch(FREE_TEXT_WAIT)
+        update_task_status(
+            FREE_TEXT_WAIT,
+            "in_progress",
+            owner=WORKER,
+            blocked_on="taeys-hands cascade in flight; cross-session, not heartbeatable",
+            config=CFG,
+        )
+        time.sleep(1.2)
+        sent.clear()
+        count = _run_liveness_once(sent)
+        free_text_task = get_task(FREE_TEXT_WAIT, config=CFG)
+        wake_body = sent[0][1] if sent else ""
+        _check(
+            "free-text blocked_on past TTL is escalated",
+            count == 1 and free_text_task.get("status") == "pending" and free_text_task.get("needs_attention") is True and not free_text_task.get("blocked_on"),
+            {"count": count, "task": free_text_task, "sent": sent},
+        )
+        _check(
+            "free-text blocked_on escalation teaches structured await",
+            "taeys-hands cascade in flight" in wake_body
+            and "Free-text blocked_on is informational only and does NOT exempt worker-liveness" in wake_body
+            and "--blocked-on AWAIT:external-signal:<detail>" in wake_body
+            and "machine-resolvable" in wake_body,
+            wake_body,
         )
 
         _dispatch(HUMAN_REVIEW)
