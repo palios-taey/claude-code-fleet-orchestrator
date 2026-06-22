@@ -1049,56 +1049,16 @@ def _render_refs(tier: str, refs: List[Dict[str, Any]], max_refs: int, nonce: st
 def _trim_packet(packet: Dict[str, Any], cli: str, budget_bytes: int, max_refs_per_tier: int) -> Dict[str, Any]:
     trimmed = json.loads(json.dumps(packet))
     context = trimmed.setdefault("context", {})
-    prev_size = None
     while True:
         size = len(_render_packet(trimmed, cli, max_refs_per_tier).encode("utf-8"))
         if size <= budget_bytes:
             break
-        # CA-4 fix: terminate when a trim pass yields no size reduction (halving has
-        # floored out / scaffolding dominates) instead of looping forever.
-        if prev_size is not None and size >= prev_size:
-            break
-        prev_size = size
         memory = context.get("memory") or []
-        if memory:
-            memory[-1]["content"] = _halve(memory[-1].get("content", ""))
-            if len(memory[-1].get("content", "")) < 400:
-                memory.pop()
-            context["memory"] = memory
-            continue
-        shortened = False
-        for tier in ("task", "phase", "project", "supervisor", "overall"):
-            refs = context.get(f"{tier}_refs") or []
-            for ref in reversed(refs):
-                if ref.get("content"):
-                    ref["content"] = _halve(str(ref["content"]))
-                    shortened = True
-                    break
-            if shortened:
-                break
-        if shortened:
-            continue
-        for rule in reversed(context.get("rules") or []):
-            if rule.get("text"):
-                rule["text"] = _halve(str(rule["text"]))
-                shortened = True
-                break
-        if shortened:
-            continue
-        identity = context.get("identity") or {}
-        if identity.get("role") != "companion" and identity.get("content"):
-            identity["content"] = _halve(str(identity["content"]))
-            context["identity"] = identity
-            shortened = True
-        if not shortened:
+        if not memory:
             break
+        memory.pop()
+        context["memory"] = memory
     return trimmed
-
-
-def _halve(text: str) -> str:
-    if len(text) <= 400:
-        return ""
-    return text[: max(0, len(text) // 2)].rstrip() + "\n[truncated]"
 
 
 def _packet_with_provenance(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> Dict[str, Any]:
