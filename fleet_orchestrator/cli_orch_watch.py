@@ -106,6 +106,19 @@ from fleet_orchestrator.notify_state import (
 
 import redis as redis_lib
 
+
+def _configure_realtime_stderr(stream=sys.stderr) -> bool:
+    reconfigure = getattr(stream, "reconfigure", None)
+    if not callable(reconfigure):
+        return False
+    try:
+        reconfigure(line_buffering=True)
+    except (TypeError, ValueError, OSError):
+        return False
+    return True
+
+
+_configure_realtime_stderr()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [orch-watch] %(levelname)s %(message)s",
@@ -317,23 +330,33 @@ def _notify_router_service_status(service_name: str) -> tuple[bool, str]:
 
 
 def _send_notify_daemon_tmux_alert(target_session: str, body: str) -> bool:
-    try:
-        result = subprocess.run(
-            ["tmux", "send-keys", "-t", target_session, "--", body, "Enter"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        log.critical("notify-daemon watchdog tmux alert failed for %s: %s", target_session, exc)
-        return False
-    if result.returncode != 0:
-        log.critical(
-            "notify-daemon watchdog tmux alert failed for %s: %s",
-            target_session,
-            (result.stderr or result.stdout or f"exit={result.returncode}").strip(),
-        )
-        return False
+    steps = (
+        ("clear input", ["C-u"]),
+        ("write alert body", ["-l", body]),
+        ("submit alert", ["Enter"]),
+    )
+    for label, keys in steps:
+        if label == "submit alert":
+            time.sleep(0.3)
+        try:
+            result = subprocess.run(
+                ["tmux", "send-keys", "-t", target_session, *keys],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.critical("notify-daemon watchdog tmux alert failed for %s during %s: %s",
+                         target_session, label, exc)
+            return False
+        if result.returncode != 0:
+            log.critical(
+                "notify-daemon watchdog tmux alert failed for %s during %s: %s",
+                target_session,
+                label,
+                (result.stderr or result.stdout or f"exit={result.returncode}").strip(),
+            )
+            return False
     return True
 
 

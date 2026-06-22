@@ -73,6 +73,7 @@ def _check(label: str, condition: bool, detail: object = "") -> None:
 
 def _run_with_service(service_status: str, callback):
     commands: list[list[str]] = []
+    delays: list[float] = []
 
     def fake_run(cmd, **kwargs):
         del kwargs
@@ -90,15 +91,52 @@ def _run_with_service(service_status: str, callback):
 
     with mock.patch.object(watch.subprocess, "run", side_effect=fake_run):
         with mock.patch.object(watch.shutil, "which", return_value=None):
-            result = callback()
-    return result, commands
+            with mock.patch.object(watch.time, "sleep", side_effect=lambda seconds: delays.append(seconds)):
+                result = callback()
+    return result, commands, delays
+
+
+def _tmux_commands(commands: list[list[str]]) -> list[list[str]]:
+    return [cmd for cmd in commands if cmd[:1] == ["tmux"]]
+
+
+def _assert_oob_submit_sequence(label: str, commands: list[list[str]], delays: list[float]) -> None:
+    tmux_commands = _tmux_commands(commands)
+    _check(f"{label}: tmux has clear/write/submit steps", len(tmux_commands) == 3, tmux_commands)
+    if len(tmux_commands) != 3:
+        return
+    _check(f"{label}: clear input first",
+           tmux_commands[0] == ["tmux", "send-keys", "-t", "conductor", "C-u"],
+           tmux_commands)
+    _check(f"{label}: write body as literal text",
+           tmux_commands[1][:5] == ["tmux", "send-keys", "-t", "conductor", "-l"]
+           and "CRITICAL" in tmux_commands[1][5],
+           tmux_commands)
+    _check(f"{label}: submit with separate Enter",
+           tmux_commands[2] == ["tmux", "send-keys", "-t", "conductor", "Enter"],
+           tmux_commands)
+    _check(f"{label}: delay before Enter", delays == [0.3], delays)
+
+
+def test_stderr_logging_is_line_buffered() -> None:
+    class FakeStderr:
+        def __init__(self):
+            self.kwargs: dict[str, object] | None = None
+
+        def reconfigure(self, **kwargs):
+            self.kwargs = kwargs
+
+    fake = FakeStderr()
+    _check("orch-watch configures stderr line buffering",
+           watch._configure_realtime_stderr(fake) is True and fake.kwargs == {"line_buffering": True},
+           fake.kwargs)
 
 
 def test_killed_service_alerts() -> None:
     r = FakeRedis()
     r.set(watch.notify_daemon_heartbeat_key(), "995.000000+notify-host")
 
-    result, commands = _run_with_service(
+    result, commands, delays = _run_with_service(
         "failed",
         lambda: watch.check_notify_daemon_liveness(
             r,
@@ -110,7 +148,7 @@ def test_killed_service_alerts() -> None:
     )
 
     _check("killed service fires OOB alert", result["alerted"] is True, result)
-    _check("alert uses direct tmux injection", any(cmd[:3] == ["tmux", "send-keys", "-t"] for cmd in commands), commands)
+    _assert_oob_submit_sequence("killed service alert", commands, delays)
     _check("alert does not route through taey-notify", not any("taey-notify" in cmd[0] for cmd in commands), commands)
 
 
@@ -118,7 +156,7 @@ def test_stale_heartbeat_alerts() -> None:
     r = FakeRedis()
     r.set(watch.notify_daemon_heartbeat_key(), "900.000000+notify-host")
 
-    result, commands = _run_with_service(
+    result, commands, delays = _run_with_service(
         "active",
         lambda: watch.check_notify_daemon_liveness(
             r,
@@ -131,14 +169,14 @@ def test_stale_heartbeat_alerts() -> None:
 
     _check("stale heartbeat fires OOB alert", result["alerted"] is True, result)
     _check("stale heartbeat names heartbeat key", watch.notify_daemon_heartbeat_key() in result["reason"], result)
-    _check("stale heartbeat uses direct tmux injection", any(cmd[:1] == ["tmux"] for cmd in commands), commands)
+    _assert_oob_submit_sequence("stale heartbeat alert", commands, delays)
 
 
 def test_healthy_daemon_no_alert() -> None:
     r = FakeRedis()
     r.set(watch.notify_daemon_heartbeat_key(), "997.000000+notify-host")
 
-    result, commands = _run_with_service(
+    result, commands, delays = _run_with_service(
         "active",
         lambda: watch.check_notify_daemon_liveness(
             r,
@@ -150,7 +188,8 @@ def test_healthy_daemon_no_alert() -> None:
     )
 
     _check("healthy service and fresh heartbeat is OK", result["ok"] is True and result["alerted"] is False, result)
-    _check("healthy check does not tmux-inject", not any(cmd[:1] == ["tmux"] for cmd in commands), commands)
+    _check("healthy check does not tmux-inject", not _tmux_commands(commands), commands)
+    _check("healthy check does not sleep for alert submit", delays == [], delays)
 
 
 def test_stale_inbox_delivery_alerts_even_when_daemon_healthy() -> None:
@@ -166,7 +205,7 @@ def test_stale_inbox_delivery_alerts_even_when_daemon_healthy() -> None:
         }),
     )
 
-    result, commands = _run_with_service(
+    result, commands, delays = _run_with_service(
         "active",
         lambda: watch.check_stuck_inbox_delivery(
             r,
@@ -179,10 +218,11 @@ def test_stale_inbox_delivery_alerts_even_when_daemon_healthy() -> None:
 
     _check("old queued inbox message fires OOB alert", result["alerted"] is True, result)
     _check("stuck handoff alert names recipient inbox", f"{watch.NOTIFY_KEY_PREFIX}:infra:inbox" in result["reason"], result)
-    _check("stuck handoff alert uses direct tmux injection", any(cmd[:1] == ["tmux"] for cmd in commands), commands)
+    _assert_oob_submit_sequence("stuck handoff alert", commands, delays)
 
 
 def main() -> None:
+    test_stderr_logging_is_line_buffered()
     test_killed_service_alerts()
     test_stale_heartbeat_alerts()
     test_healthy_daemon_no_alert()
