@@ -351,6 +351,60 @@ def _context_selection_error_contract() -> None:
            rendered)
 
 
+def _required_context_never_truncated_contract() -> None:
+    ref_a = "REF_A_START\n" + ("A" * 9000) + "\nREF_A_END"
+    ref_b = "REF_B_START\n" + ("B" * 9000) + "\nREF_B_END"
+    rule = "RULE_START\nKeep all operator rules whole.\nRULE_END"
+    identity = "IDENTITY_START\nKeep all identity text whole.\nIDENTITY_END"
+    packet = {
+        "packet_id": "packet-large-ref-no-truncate",
+        "generated_for": "conductor-codex",
+        "generated_at_commit": "test",
+        "provenance_hash": "",
+        "context": {
+            "overall_refs": [],
+            "supervisor_refs": [],
+            "project_refs": [],
+            "phase_refs": [],
+            "task_refs": [
+                {"path": "a.md", "label": "large ref a", "content": ref_a},
+                {"path": "b.md", "label": "large ref b", "content": ref_b},
+            ],
+            "identity": {
+                "role": "engineering",
+                "mode": "lean_role_core",
+                "source": "acceptance",
+                "content": identity,
+            },
+            "memory": [
+                {
+                    "name": "LOW_RANKED_MEMORY",
+                    "type": "reference",
+                    "description": "must yield before required context",
+                    "content": "MEMORY_CONTENT_SHOULD_DROP",
+                }
+            ],
+            "rules": [{"scope": "supervisor", "text": rule}],
+            "budget_used": 0,
+        },
+        "cycle": {},
+        "human": {},
+        "stop": {},
+    }
+
+    rendered = assembler.assemble(packet, "codex", budget_bytes=assembler.CORE_BUDGET_BYTES)
+    report = assembler.size_report(rendered, packet)
+
+    _check("oversized required refs may render over budget", report["under_budget"] is False, report)
+    _check("low-ranked memory was dropped whole", packet["context"].get("memory") == [], packet["context"].get("memory"))
+    _check("memory content is absent from rendered packet", "MEMORY_CONTENT_SHOULD_DROP" not in rendered, rendered)
+    _check("required ref A renders whole", ref_a in rendered and "REF_A_END" in rendered, "ref A missing")
+    _check("required ref B renders whole", ref_b in rendered and "REF_B_END" in rendered, "ref B missing")
+    _check("required rules render whole", rule in rendered and "RULE_END" in rendered, "rule missing")
+    _check("required identity renders whole", identity in rendered and "IDENTITY_END" in rendered, "identity missing")
+    _check("required context has no truncation marker", "[truncated]" not in rendered, "found truncation marker")
+
+
 def _empty_work_context_contract() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -431,6 +485,7 @@ def main() -> int:
     _identity_section_contract()
     _untrusted_envelope_contract()
     _context_selection_error_contract()
+    _required_context_never_truncated_contract()
     _empty_work_context_contract()
     _memory_traversal_contract()
     if FAILURES:
