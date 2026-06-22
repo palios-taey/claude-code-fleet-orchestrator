@@ -89,6 +89,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from typing import Dict, Optional
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -115,6 +116,14 @@ log = logging.getLogger(__name__)
 # Stop hook never disagree about who to address.
 SUFFIX_SUPERVISOR_RULES = ("-codex", "-gemini", "-grok")
 NOTIFY_KEY_PREFIX = notify_key_prefix()
+NOTIFY_DAEMON_HEARTBEAT_NODE = "_notify_daemon"
+NOTIFY_DAEMON_HEARTBEAT_SUFFIX = "heartbeat"
+DEFAULT_NOTIFY_DAEMON_WATCH_INTERVAL_SEC = 30
+DEFAULT_NOTIFY_DAEMON_HEARTBEAT_MAX_AGE_SEC = 15
+DEFAULT_NOTIFY_DAEMON_ALERT_DEDUP_TTL_SEC = 300
+DEFAULT_STUCK_INBOX_MAX_AGE_SEC = 600
+DEFAULT_NOTIFY_ROUTER_SERVICE = "conductor-notify-router"
+DEFAULT_NOTIFY_DAEMON_ALERT_TARGET = "conductor"
 
 
 def state_key(node_id: str, suffix: str) -> str:
@@ -129,9 +138,21 @@ def current_task_scan_pattern() -> str:
     return notify_key("*:current_task", prefix=NOTIFY_KEY_PREFIX)
 
 
+def inbox_scan_pattern() -> str:
+    return notify_key("*:inbox", prefix=NOTIFY_KEY_PREFIX)
+
+
 def node_from_current_task_key(key: str) -> Optional[str]:
     prefix = f"{NOTIFY_KEY_PREFIX}:"
     suffix = ":current_task"
+    if not key.startswith(prefix) or not key.endswith(suffix):
+        return None
+    return key[len(prefix):-len(suffix)]
+
+
+def node_from_inbox_key(key: str) -> Optional[str]:
+    prefix = f"{NOTIFY_KEY_PREFIX}:"
+    suffix = ":inbox"
     if not key.startswith(prefix) or not key.endswith(suffix):
         return None
     return key[len(prefix):-len(suffix)]
@@ -237,6 +258,288 @@ def _send_wake(r, target: str, body: str, priority: str, msg_id: str) -> bool:
         log.error("taey-notify failed for %s: %s", target, result.stderr.strip())
         return False
     return True
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _int_env(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        return max(minimum, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def notify_daemon_heartbeat_key() -> str:
+    return state_key(NOTIFY_DAEMON_HEARTBEAT_NODE, NOTIFY_DAEMON_HEARTBEAT_SUFFIX)
+
+
+def _parse_notify_daemon_heartbeat(raw: object) -> tuple[Optional[float], Optional[str]]:
+    if raw is None:
+        return None, None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    text = str(raw).strip()
+    if not text:
+        return None, None
+    if text.startswith("{"):
+        try:
+            payload = json.loads(text)
+            ts = payload.get("ts") or payload.get("timestamp") or payload.get("time")
+            host = payload.get("host") or payload.get("machine")
+            return float(ts), str(host) if host else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None, None
+    ts_text, sep, host = text.partition("+")
+    try:
+        return float(ts_text), host if sep and host else None
+    except (TypeError, ValueError):
+        return None, None
+
+
+def _notify_router_service_status(service_name: str) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", service_name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"systemctl exception: {exc}"
+    detail = (result.stdout or result.stderr or f"exit={result.returncode}").strip()
+    return result.returncode == 0 and detail == "active", detail or f"exit={result.returncode}"
+
+
+def _send_notify_daemon_tmux_alert(target_session: str, body: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["tmux", "send-keys", "-t", target_session, "--", body, "Enter"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.critical("notify-daemon watchdog tmux alert failed for %s: %s", target_session, exc)
+        return False
+    if result.returncode != 0:
+        log.critical(
+            "notify-daemon watchdog tmux alert failed for %s: %s",
+            target_session,
+            (result.stderr or result.stdout or f"exit={result.returncode}").strip(),
+        )
+        return False
+    return True
+
+
+def _send_notify_daemon_desktop_alert(
+    reason: str,
+    title: str = "CRITICAL: notify daemon liveness failed",
+) -> None:
+    notify_send = shutil.which("notify-send")
+    if not notify_send:
+        return
+    try:
+        subprocess.run(
+            [
+                notify_send,
+                "-u",
+                "critical",
+                title,
+                reason[:500],
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.error("notify-send failed for notify-daemon watchdog alert: %s", exc)
+
+
+def check_notify_daemon_liveness(
+    r,
+    *,
+    now: Optional[float] = None,
+    heartbeat_max_age_sec: int = DEFAULT_NOTIFY_DAEMON_HEARTBEAT_MAX_AGE_SEC,
+    service_name: str = DEFAULT_NOTIFY_ROUTER_SERVICE,
+    alert_target: str = DEFAULT_NOTIFY_DAEMON_ALERT_TARGET,
+    dedup_ttl_sec: int = DEFAULT_NOTIFY_DAEMON_ALERT_DEDUP_TTL_SEC,
+) -> dict[str, object]:
+    current_time = _redis_now(r) if now is None else float(now)
+    service_active, service_detail = _notify_router_service_status(service_name)
+    raw_heartbeat = r.get(notify_daemon_heartbeat_key())
+    heartbeat_ts, heartbeat_host = _parse_notify_daemon_heartbeat(raw_heartbeat)
+    heartbeat_age = None if heartbeat_ts is None else current_time - heartbeat_ts
+    heartbeat_fresh = heartbeat_ts is not None and heartbeat_age <= heartbeat_max_age_sec
+
+    if service_active and heartbeat_fresh:
+        try:
+            r.delete(orch_key("notify-daemon-watchdog", "alert"))
+        except redis_lib.RedisError:
+            pass
+        return {
+            "ok": True,
+            "alerted": False,
+            "service_status": service_detail,
+            "heartbeat_age_sec": heartbeat_age,
+            "heartbeat_host": heartbeat_host,
+        }
+
+    reasons: list[str] = []
+    if not service_active:
+        reasons.append(f"{service_name} systemd status={service_detail!r}")
+    if heartbeat_ts is None:
+        reasons.append(f"{notify_daemon_heartbeat_key()} missing or malformed")
+    elif not heartbeat_fresh:
+        reasons.append(
+            f"{notify_daemon_heartbeat_key()} stale age={heartbeat_age:.1f}s "
+            f"host={heartbeat_host or 'unknown'}"
+        )
+    reason = "; ".join(reasons)
+    banner = (
+        "CRITICAL NOTIFY DAEMON LIVENESS FAILURE: "
+        f"{reason}. Notification delivery may be collapsed. "
+        f"Inspect `systemctl --user status {service_name}` and Redis key "
+        f"`{notify_daemon_heartbeat_key()}`."
+    )
+    log.critical("%s", banner)
+
+    dedup_key = orch_key("notify-daemon-watchdog", "alert")
+    if dedup_ttl_sec > 0 and r.exists(dedup_key):
+        return {
+            "ok": False,
+            "alerted": False,
+            "deduped": True,
+            "reason": reason,
+            "service_status": service_detail,
+            "heartbeat_age_sec": heartbeat_age,
+            "heartbeat_host": heartbeat_host,
+        }
+
+    tmux_alerted = _send_notify_daemon_tmux_alert(alert_target, banner)
+    _send_notify_daemon_desktop_alert(reason)
+    try:
+        r.set(dedup_key, "1", ex=dedup_ttl_sec)
+    except redis_lib.RedisError as exc:
+        log.error("notify-daemon watchdog dedup write failed: %s", exc)
+    return {
+        "ok": False,
+        "alerted": tmux_alerted,
+        "reason": reason,
+        "service_status": service_detail,
+        "heartbeat_age_sec": heartbeat_age,
+        "heartbeat_host": heartbeat_host,
+    }
+
+
+def _coerce_message_timestamp(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _decode_queued_message(raw: object) -> dict[str, object]:
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(raw)
+        return payload if isinstance(payload, dict) else {"raw": raw}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {"raw": str(raw)}
+
+
+def _message_created_at(payload: dict[str, object]) -> Optional[float]:
+    for key in ("timestamp", "created_at", "ts", "time", "sent_at"):
+        ts = _coerce_message_timestamp(payload.get(key))
+        if ts is not None:
+            return ts
+    return None
+
+
+def _oldest_queued_inbox_message(r, *, now: float) -> Optional[dict[str, object]]:
+    oldest: Optional[dict[str, object]] = None
+    for inbox_key_name in r.scan_iter(match=inbox_scan_pattern()):
+        key = str(inbox_key_name)
+        node_id = node_from_inbox_key(key) or "unknown"
+        try:
+            raw_items = r.lrange(key, 0, -1)
+        except redis_lib.RedisError as exc:
+            log.error("stuck inbox scan failed for %s: %s", key, exc)
+            continue
+        for raw in raw_items:
+            payload = _decode_queued_message(raw)
+            created_at = _message_created_at(payload)
+            if created_at is None:
+                continue
+            age = now - created_at
+            if oldest is None or age > float(oldest["age_sec"]):
+                oldest = {
+                    "key": key,
+                    "node_id": node_id,
+                    "age_sec": age,
+                    "created_at": created_at,
+                    "from": payload.get("from") or payload.get("platform") or "unknown",
+                    "type": payload.get("type") or payload.get("status") or "message",
+                    "msg_id": payload.get("msg_id") or payload.get("id") or "unknown",
+                }
+    return oldest
+
+
+def check_stuck_inbox_delivery(
+    r,
+    *,
+    now: Optional[float] = None,
+    max_age_sec: int = DEFAULT_STUCK_INBOX_MAX_AGE_SEC,
+    alert_target: str = DEFAULT_NOTIFY_DAEMON_ALERT_TARGET,
+    dedup_ttl_sec: int = DEFAULT_NOTIFY_DAEMON_ALERT_DEDUP_TTL_SEC,
+) -> dict[str, object]:
+    current_time = _redis_now(r) if now is None else float(now)
+    oldest = _oldest_queued_inbox_message(r, now=current_time)
+    if not oldest or float(oldest["age_sec"]) <= max_age_sec:
+        return {"ok": True, "alerted": False, "oldest": oldest}
+
+    dedup_key = orch_key("notify-daemon-watchdog-stuck-inbox", str(oldest["node_id"]))
+    reason = (
+        f"{oldest['key']} has undelivered message age={float(oldest['age_sec']):.1f}s "
+        f"from={oldest['from']} type={oldest['type']} msg_id={oldest['msg_id']}"
+    )
+    banner = (
+        "CRITICAL NOTIFY DELIVERY SLO FAILURE: "
+        f"{reason}. The notify daemon may be alive while delivery is stuck; "
+        "investigate the recipient idle flag, hooks, and inbox drain path."
+    )
+    log.critical("%s", banner)
+
+    if dedup_ttl_sec > 0 and r.exists(dedup_key):
+        return {"ok": False, "alerted": False, "deduped": True, "reason": reason, "oldest": oldest}
+
+    tmux_alerted = _send_notify_daemon_tmux_alert(alert_target, banner)
+    _send_notify_daemon_desktop_alert(
+        reason,
+        title="CRITICAL: notify delivery SLO failed",
+    )
+    try:
+        r.set(dedup_key, "1", ex=dedup_ttl_sec)
+    except redis_lib.RedisError as exc:
+        log.error("stuck inbox watchdog dedup write failed: %s", exc)
+    return {"ok": False, "alerted": tmux_alerted, "reason": reason, "oldest": oldest}
 
 
 def _target_stop_decision_allows_stop(target: str, wake_reason: str,
@@ -838,6 +1141,29 @@ def main():
                              "Spec format: '/path/to/file.py:check_readiness' or "
                              "'package.module:check_readiness'. If unset, done-DEL "
                              "events are logged and skipped.")
+    parser.add_argument("--notify-daemon-watchdog", dest="notify_daemon_watchdog",
+                        action=argparse.BooleanOptionalAction,
+                        default=_bool_env("ORCH_NOTIFY_DAEMON_WATCHDOG", True),
+                        help="Watch conductor-notify-router plus fleet-notify heartbeat and delivery SLO.")
+    parser.add_argument("--notify-daemon-watch-interval-sec", type=int,
+                        default=_int_env("ORCH_NOTIFY_DAEMON_WATCH_INTERVAL_SEC",
+                                         DEFAULT_NOTIFY_DAEMON_WATCH_INTERVAL_SEC),
+                        help="Notify-daemon watchdog cadence.")
+    parser.add_argument("--notify-daemon-heartbeat-max-age-sec", type=int,
+                        default=_int_env("ORCH_NOTIFY_DAEMON_HEARTBEAT_MAX_AGE_SEC",
+                                         DEFAULT_NOTIFY_DAEMON_HEARTBEAT_MAX_AGE_SEC),
+                        help="Maximum acceptable age for the fleet-notify daemon heartbeat.")
+    parser.add_argument("--notify-daemon-stuck-inbox-max-age-sec", type=int,
+                        default=_int_env("ORCH_NOTIFY_DAEMON_STUCK_INBOX_MAX_AGE_SEC",
+                                         DEFAULT_STUCK_INBOX_MAX_AGE_SEC),
+                        help="Maximum acceptable age for queued notify inbox messages.")
+    parser.add_argument("--notify-router-service",
+                        default=os.environ.get("ORCH_NOTIFY_ROUTER_SERVICE", DEFAULT_NOTIFY_ROUTER_SERVICE),
+                        help="systemd --user service name for the notify router.")
+    parser.add_argument("--notify-daemon-alert-target",
+                        default=os.environ.get("ORCH_NOTIFY_DAEMON_ALERT_TARGET",
+                                               DEFAULT_NOTIFY_DAEMON_ALERT_TARGET),
+                        help="tmux session that receives direct OOB critical alerts.")
     args = parser.parse_args()
 
     r = redis_lib.Redis(host=args.redis_host, port=args.redis_port,
@@ -894,6 +1220,12 @@ def main():
     # Poll interval bounded by min(60s, sweep/4) so even rapid sweep
     # configs see the loop tick fast enough.
     poll_timeout = min(60.0, max(5.0, args.sweep_interval_sec / 4))
+    if args.notify_daemon_watchdog:
+        poll_timeout = min(
+            poll_timeout,
+            max(1.0, args.notify_daemon_watch_interval_sec / 4),
+        )
+    last_notify_daemon_watch = 0.0
 
     while True:
         try:
@@ -906,6 +1238,24 @@ def main():
             continue
 
         now = time.time()
+        if (args.notify_daemon_watchdog
+                and now - last_notify_daemon_watch >= args.notify_daemon_watch_interval_sec):
+            last_notify_daemon_watch = now
+            try:
+                check_notify_daemon_liveness(
+                    r,
+                    heartbeat_max_age_sec=args.notify_daemon_heartbeat_max_age_sec,
+                    service_name=args.notify_router_service,
+                    alert_target=args.notify_daemon_alert_target,
+                )
+                check_stuck_inbox_delivery(
+                    r,
+                    max_age_sec=args.notify_daemon_stuck_inbox_max_age_sec,
+                    alert_target=args.notify_daemon_alert_target,
+                )
+            except (redis_lib.RedisError, OSError, subprocess.SubprocessError, TypeError, ValueError) as exc:
+                log.error("notify-daemon watchdog check failed: %s", exc)
+
         if now - last_sweep > args.sweep_interval_sec:
             last_sweep = now
             sweep_count = 0

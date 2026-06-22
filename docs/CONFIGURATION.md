@@ -94,6 +94,11 @@ force a pass), `ORCH_PRE_MERGE_REQUIRED_CHECKS` (consumed by the pre-merge gate)
 | Flag | Default | Effect |
 |---|---|---|
 | `CF_HANDOFF_PICKUP_POLL_BUDGET` | `5` | Handoff helper pickup polling. The current stop-decision path does not call handoff validation. |
+| `ORCH_NOTIFY_DAEMON_WATCH_INTERVAL_SEC` | `30` | `orch-watch` notify-daemon watchdog cadence, in seconds. |
+| `ORCH_NOTIFY_DAEMON_HEARTBEAT_MAX_AGE_SEC` | `15` | Maximum accepted age for `taey:_notify_daemon:heartbeat` before `orch-watch` treats the notify daemon as wedged. |
+| `ORCH_NOTIFY_DAEMON_STUCK_INBOX_MAX_AGE_SEC` | `600` | Maximum accepted age for a queued `${NOTIFY_KEY_PREFIX}:*:inbox` message before `orch-watch` raises the stuck-delivery SLO alert. |
+| `ORCH_NOTIFY_ROUTER_SERVICE` | `conductor-notify-router` | `systemctl --user is-active` service name checked by the notify-daemon watchdog. |
+| `ORCH_NOTIFY_DAEMON_ALERT_TARGET` | `conductor` | tmux session that receives direct out-of-band critical watchdog alerts. |
 
 In-progress stop blocking is always active. Handoff validation helper code
 remains available for explicit handoff records/receipts, but pending/unacked
