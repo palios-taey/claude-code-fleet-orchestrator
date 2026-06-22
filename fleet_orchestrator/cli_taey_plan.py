@@ -21,10 +21,11 @@ import os
 import socket
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
+
+from fleet_orchestrator.cli_handoff_state import conflicting_binding, format_binding
+from fleet_orchestrator.cli_http import api_json_or_exit
 
 
 API_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002")
@@ -49,26 +50,7 @@ def detect_session() -> str:
 
 
 def api_call(method: str, endpoint: str, data: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    url = f"{API_URL}{endpoint}"
-    if data is None:
-        request = urllib.request.Request(url, method=method)
-    else:
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(data).encode(),
-            headers={"Content-Type": "application/json"},
-            method=method,
-        )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            return json.loads(response.read().decode())
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode()[:800]
-        print(f"ERROR: HTTP {exc.code}: {body}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(1)
+    return api_json_or_exit(method, API_URL, endpoint, data=data, timeout=20)
 
 
 def truncate(text: str, width: int) -> str:
@@ -262,6 +244,21 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
 def cmd_assign(args: argparse.Namespace) -> None:
     task = api_call("GET", f"/api/tasks/{args.task_id}")
+    conflict = conflicting_binding(task, args.session, api_call)
+    if conflict and not args.force:
+        print(
+            f"ERROR: task {args.task_id} already has live executor binding "
+            f"{format_binding(conflict)}; re-run `taey-plan assign {args.task_id} {args.session} --force` "
+            "only if you intend to replace it.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if conflict and args.force:
+        print(
+            f"WARNING: replacing live executor binding {format_binding(conflict)}; "
+            f"verify with `taey-task status {args.task_id}`.",
+            file=sys.stderr,
+        )
     status = task.get("status", "pending")
     payload = {
         "owner": args.session,
@@ -269,7 +266,11 @@ def cmd_assign(args: argparse.Namespace) -> None:
     }
     result = api_call("PATCH", f"/api/task/{args.task_id}", payload)
     if not result.get("ok"):
-        print(f"ERROR: {result.get('error', 'unknown error')}", file=sys.stderr)
+        print(
+            f"ERROR: {result.get('error', 'unknown error')}. "
+            f"Inspect with `taey-task status {args.task_id}` or retry `taey-plan assign {args.task_id} {args.session}`.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     print(f"OK: {args.task_id} assigned to {args.session} [{status}]")
 
@@ -327,6 +328,8 @@ def build_parser() -> argparse.ArgumentParser:
     assign = sub.add_parser("assign", help="Assign a task to a session")
     assign.add_argument("task_id", help="Task ID")
     assign.add_argument("session", help="Session ID")
+    assign.add_argument("--force", action="store_true",
+                        help="Allow reassignment when another session has a live executor binding")
 
     stop_conditions = sub.add_parser("stop-conditions", help="Read or set plan-level user stop conditions")
     stop_conditions.add_argument("project_id", help="Project ID")

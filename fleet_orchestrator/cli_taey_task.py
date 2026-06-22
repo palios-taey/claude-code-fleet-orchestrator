@@ -21,11 +21,11 @@ import json
 import os
 import subprocess
 import sys
-import urllib.request
-import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from fleet_orchestrator.cli_handoff_state import conflicting_binding, executor_bindings, format_binding
+from fleet_orchestrator.cli_http import api_json_or_exit
 from fleet_orchestrator.evidence_contract import TERMINAL_STATUSES
 
 DASHBOARD_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002")
@@ -52,26 +52,7 @@ def detect_from_node():
 
 def api_call(method, endpoint, data=None):
     """Make an API call to the dashboard."""
-    url = f"{DASHBOARD_URL}{endpoint}"
-    if data is not None:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(data).encode(),
-            headers={"Content-Type": "application/json"},
-            method=method,
-        )
-    else:
-        req = urllib.request.Request(url, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode()[:500]
-        print(f"ERROR: HTTP {e.code}: {body}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+    return api_json_or_exit(method, DASHBOARD_URL, endpoint, data=data, timeout=10)
 
 
 def parse_evidence_arg(raw):
@@ -128,6 +109,13 @@ def cmd_status(args):
     print(f"Task: {t.get('id', args.task_id)}")
     print(f"  Status: {t.get('status', '?')}")
     print(f"  Owner: {t.get('owner', 'unassigned')}")
+    bindings = executor_bindings(t, api_call)
+    if bindings:
+        print("  Executor binding:")
+        for binding in bindings:
+            print(f"    - {format_binding(binding)}")
+    else:
+        print("  Executor binding: -")
     print(f"  Blocked on: {t.get('blocked_on') or '-'}")
     print(f"  Priority: {t.get('priority', '?')}")
     if t.get("completed_by"):
@@ -153,6 +141,22 @@ def cmd_dispatch(args):
         print(f"ERROR: task {task_id} has no description to dispatch", file=sys.stderr)
         sys.exit(1)
 
+    conflict = conflicting_binding(task, args.peer, api_call)
+    if conflict and not args.force:
+        print(
+            f"ERROR: task {task_id} already has live executor binding "
+            f"{format_binding(conflict)}; re-run `taey-task dispatch {task_id} {args.peer} --force` "
+            "only if you intend to replace it.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if conflict and args.force:
+        print(
+            f"WARNING: replacing live executor binding {format_binding(conflict)}; "
+            f"verify with `taey-task status {task_id}`.",
+            file=sys.stderr,
+        )
+
     from fleet_orchestrator.dispatch import (
         BugLockActive,
         OrchTaskNotReady,
@@ -170,7 +174,11 @@ def cmd_dispatch(args):
             force=bool(args.force),
         )
     except (BugLockActive, OrchTaskNotReady, WorkerBusy, RuntimeError) as exc:
-        print(f"ERROR: dispatch failed: {exc}", file=sys.stderr)
+        print(
+            f"ERROR: dispatch failed: {exc}. "
+            f"Inspect with `taey-task status {task_id}` or retry `taey-task dispatch {task_id} {args.peer}`.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     print(f"OK: dispatched {task_id} -> {args.peer} (by {sender})")
