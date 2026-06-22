@@ -26,7 +26,7 @@ os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
 from fleet_orchestrator.orch_schema import create_phase, create_project, create_task  # noqa: E402
-from fleet_orchestrator.public_readonly import _hidden_sessions, _public_sessions  # noqa: E402
+from fleet_orchestrator.public_readonly import _hidden_sessions, _public_ref_context, _public_sessions  # noqa: E402
 
 
 PREFIX = f"publicro-{int(time.time())}"
@@ -108,7 +108,11 @@ def _seed_pointer_fixture(prefix: str, root: Path) -> Tuple[str, str]:
     plan_path.write_text("# stub\n", encoding="utf-8")
     src_dir = plan_dir / "src"
     src_dir.mkdir(exist_ok=True)
-    (src_dir / "module.py").write_text("line1\nline2\n", encoding="utf-8")
+    (src_dir / "module.py").write_text(
+        "line1 /home/alice/private token: shhh 10.0.0.1\n"
+        "line2 C:/Users/alice/secret password=hidden\n",
+        encoding="utf-8",
+    )
     project_id = f"{prefix}-public-project"
     phase_id = f"{prefix}-public-phase"
     task_id = f"{prefix}-public-task"
@@ -219,20 +223,57 @@ def main() -> int:
         summary_status, summary_body = _request("GET", f"{base_url}/api/projects/{pointer_project_id}")
         assert summary_status == 200, summary_body
         summary = json.loads(summary_body)
-        task_ref = summary["phases"][0]["tasks"][0]["refs"][0]
-        assert task_ref == "module.py:L1-L2", task_ref
-        print("PASS ref-pointer-only")
+        task_ref = summary["phases"][0]["tasks"][0]["ref_context"]["refs"][0]
+        task_section = task_ref["sections"][0]
+        assert "content" not in task_ref, task_ref
+        assert "content_url" not in task_ref, task_ref
+        assert "content" not in task_section, task_section
+        assert "content_url" not in task_section, task_section
+        print("PASS ref-metadata-only")
+
+        scrubbed_ref_context = _public_ref_context({
+            "refs": [{
+                "path": "/home/alice/private.md",
+                "label": "operator token: shhh 10.0.0.1",
+                "sections": [{
+                    "l_start": 1,
+                    "l_end": 2,
+                    "content": "private body must never be public",
+                    "warning": "see /home/alice/private.md token: shhh 10.0.0.1",
+                }],
+            }],
+            "warnings": ["C:/Users/alice/secret password=hidden"],
+            "line_cap": 80,
+        }, pointer_project_id)
+        scrubbed_blob = json.dumps(scrubbed_ref_context)
+        assert "[path]" in scrubbed_blob, scrubbed_ref_context
+        assert "[host]" in scrubbed_blob, scrubbed_ref_context
+        assert "[secret]" in scrubbed_blob, scrubbed_ref_context
+        assert "/home/alice" not in scrubbed_blob, scrubbed_ref_context
+        assert "10.0.0.1" not in scrubbed_blob, scrubbed_ref_context
+        assert "shhh" not in scrubbed_blob, scrubbed_ref_context
+        assert "hidden" not in scrubbed_blob, scrubbed_ref_context
+        assert "private body" not in scrubbed_blob, scrubbed_ref_context
+        print("PASS ref-metadata-scrubbed")
+
+        ref_route_status, _ = _request("GET", f"{base_url}/api/projects/{pointer_project_id}/refs/not-public")
+        assert ref_route_status == 404, ref_route_status
+        print("PASS ref-content-route-absent")
 
         ui_status, ui_body = _request("GET", f"{base_url}/ui/")
         assert ui_status == 200, ui_body
-        assert "notify-form" not in ui_body, ui_body
+        assert "window.ORCH_PUBLIC_MODE = true" in ui_body, ui_body
+        assert '<body class="public-mode">' in ui_body, ui_body
         for hidden in HIDDEN:
             assert f'"{hidden}"' not in ui_body, ui_body
-        print("PASS ui-no-notify-form")
+        print("PASS ui-public-mode-boot")
 
-        private_js_status, _ = _request("GET", f"{base_url}/ui/static/app.js")
-        assert private_js_status == 404, private_js_status
-        print("PASS private-app-js-hidden")
+        shared_js_status, shared_js_body = _request("GET", f"{base_url}/ui/static/app.js")
+        assert shared_js_status == 200, shared_js_body
+        assert "ORCH_PUBLIC_MODE" in shared_js_body, shared_js_body
+        public_js_status, _ = _request("GET", f"{base_url}/ui/static/public-app.js")
+        assert public_js_status == 404, public_js_status
+        print("PASS shared-app-js-served")
 
         visible_session = _visible_session()
         session_projects_status, _ = _request("GET", f"{base_url}/api/sessions/{visible_session}/projects")

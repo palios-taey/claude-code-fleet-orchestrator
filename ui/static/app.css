@@ -44,6 +44,10 @@ code {
   padding-bottom: 140px;
 }
 
+.public-mode .shell {
+  padding-bottom: 24px;
+}
+
 .topbar,
 .panel {
   background: var(--panel);
@@ -101,6 +105,10 @@ code {
   grid-template-columns: 330px minmax(0, 1fr);
   gap: 18px;
   min-height: 65vh;
+}
+
+.workspace > * {
+  min-width: 0;
 }
 
 .panel {
@@ -162,6 +170,8 @@ code {
 .project-card h3 {
   margin: 0;
   font-size: 1rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .project-slug {
@@ -187,6 +197,7 @@ code {
   padding: 14px;
   display: grid;
   gap: 10px;
+  min-width: 0;
 }
 
 .project-stats {
@@ -195,6 +206,12 @@ code {
   gap: 8px;
   font-size: 0.83rem;
   color: var(--muted);
+}
+
+.project-stats span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .status-row {
@@ -337,6 +354,11 @@ code {
   opacity: 0.45;
 }
 
+.public-mode .question-answer,
+.public-mode .chat-bar {
+  display: none !important;
+}
+
 .phase-card {
   padding: 16px;
   display: grid;
@@ -418,6 +440,18 @@ code {
 .blocked-pill {
   background: rgba(124, 58, 237, 0.12);
   color: var(--blocked);
+}
+
+.ref-pointer {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.ref-pointer-static {
+  cursor: default;
 }
 
 .chat-bar {

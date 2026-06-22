@@ -14,7 +14,7 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 207.
+- Enumerated surfaces: 209.
 - Teaches: 79.
 - Needs-fix baseline debt: 62.
 - Exempt reviewed baseline rows: 66.
@@ -145,10 +145,12 @@ Summary:
 | fleet_orchestrator/orch_schema.py | validate_source_path_for_refs | orch_return_none_error | 4 | 601 | aa8f71d24ad5ef6b | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
 | fleet_orchestrator/orch_schema.py | validate_source_path_for_refs | orch_return_none_error | 5 | 605 | 489823ea7b06396f | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/orch_schema.py | validate_source_path_for_refs | orch_return_none_error | 6 | 607 | 794a5041d3dcf60d | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
-| fleet_orchestrator/public_readonly.py | _public_summary_or_404 | http_exception_detail | 1 | 337 | e01225fda10e5dc0 | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
-| fleet_orchestrator/public_readonly.py | _public_summary_or_404 | http_exception_detail | 2 | 340 | e01225fda10e5dc0 | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
-| fleet_orchestrator/public_readonly.py | _require_visible_session | http_exception_detail | 1 | 104 | 458ac6f0f55b5967 | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
-| fleet_orchestrator/public_readonly.py | health | json_response_error | 1 | 404 | 0f9cb10f6ef4b99f | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
+| fleet_orchestrator/public_readonly.py | _require_visible_session | http_exception_detail | 1 | 106 | 458ac6f0f55b5967 | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
+| fleet_orchestrator/public_readonly.py | _visible_summary_or_404 | http_exception_detail | 1 | 454 | e01225fda10e5dc0 | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
+| fleet_orchestrator/public_readonly.py | _visible_summary_or_404 | http_exception_detail | 2 | 457 | e01225fda10e5dc0 | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
+| fleet_orchestrator/public_readonly.py | health | json_response_error | 1 | 538 | 0f9cb10f6ef4b99f | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
+| fleet_orchestrator/public_readonly.py | project_user_stop_conditions | http_exception_detail | 1 | 559 | e01225fda10e5dc0 | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
+| fleet_orchestrator/public_readonly.py | project_user_stop_conditions | http_exception_detail | 2 | 562 | e01225fda10e5dc0 | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
 | fleet_orchestrator/tasks_api.py | _ensure_registered_session | http_exception_detail | 1 | 452 | 2e82c2d3e7d60d71 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | _load_task | http_exception_detail | 1 | 498 | 22c8c2430788ed07 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | _optional_mutable_auth | json_response_error | 1 | 345 | 2f857139ba14bcbe | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
