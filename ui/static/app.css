@@ -44,6 +44,10 @@ code {
   padding-bottom: 140px;
 }
 
+.public-mode .shell {
+  padding-bottom: 24px;
+}
+
 .topbar,
 .panel {
   background: var(--panel);
@@ -350,6 +354,11 @@ code {
   opacity: 0.45;
 }
 
+.public-mode .question-answer,
+.public-mode .chat-bar {
+  display: none !important;
+}
+
 .phase-card {
   padding: 16px;
   display: grid;
@@ -431,6 +440,18 @@ code {
 .blocked-pill {
   background: rgba(124, 58, 237, 0.12);
   color: var(--blocked);
+}
+
+.ref-pointer {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.ref-pointer-static {
+  cursor: default;
 }
 
 .chat-bar {

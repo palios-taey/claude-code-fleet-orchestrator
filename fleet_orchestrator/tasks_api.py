@@ -12,6 +12,7 @@ Run:
 """
 from __future__ import annotations
 
+import datetime as dt
 import hmac
 import hashlib
 import json
@@ -416,6 +417,7 @@ def _project_row(project: Dict[str, Any]) -> Dict[str, Any]:
         "user_stop_conditions": project.get("user_stop_conditions", []),
         "supervisor": project.get("supervisor"),
         "priority": project.get("priority"),
+        "created_at": project.get("created_at"),
         "migration_exempt": bool(project.get("migration_exempt")),
         "stop_reason_current": project.get("stop_reason_current"),
         "stop_reason_history": project.get("stop_reason_history", []),
@@ -423,6 +425,43 @@ def _project_row(project: Dict[str, Any]) -> Dict[str, Any]:
         "stop_reason_orphaned": bool(project.get("stop_reason_orphaned")),
         **counts,
     }
+
+
+def _created_at_epoch(project: Dict[str, Any]) -> Optional[float]:
+    raw = project.get("created_at")
+    if raw in (None, ""):
+        return None
+    to_native = getattr(raw, "to_native", None)
+    if callable(to_native):
+        raw = to_native()
+    if isinstance(raw, dt.datetime):
+        value = raw
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            value = dt.datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=dt.timezone.utc)
+    return value.timestamp()
+
+
+def _newest_project_sort_key(project: Dict[str, Any]) -> tuple[int, float]:
+    epoch = _created_at_epoch(project)
+    if epoch is None:
+        return (1, 0.0)
+    return (0, -epoch)
+
+
+def _newest_project_rows(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [_project_row(project) for project in sorted(projects, key=_newest_project_sort_key)]
 
 
 def _strict_force_flag(data: Dict[str, Any]) -> bool:
@@ -883,7 +922,14 @@ def list_projects() -> Dict[str, Any]:
     cfg = _cfg()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
-        result = session.run("MATCH (p:OrchProject) RETURN p ORDER BY p.id")
+        result = session.run(
+            """
+            MATCH (p:OrchProject)
+            RETURN p
+            ORDER BY CASE WHEN p.created_at IS NULL THEN 1 ELSE 0 END ASC,
+                     p.created_at DESC
+            """
+        )
         projects = []
         for record in result:
             project = _serialize_node(record["p"])
@@ -892,8 +938,8 @@ def list_projects() -> Dict[str, Any]:
             project["stop_reason_history"] = _decode_json(project.get("stop_reason_history"), [])
             project["priority_history"] = _decode_json(project.get("priority_history"), [])
             project["stop_reason_orphaned"] = False
-            projects.append(_project_row(project))
-    return {"projects": projects}
+            projects.append(project)
+    return {"projects": _newest_project_rows(projects)}
 
 
 @app.get("/api/projects/{project_id}")
@@ -1235,7 +1281,7 @@ def session_next_ready(session_id: str) -> Dict[str, Any]:
 @app.get("/api/sessions/{session_id}/projects")
 def session_projects(session_id: str) -> Dict[str, Any]:
     """Supervisor-based listing; replaces the earlier task-owner-based semantics."""
-    projects = [_project_row(project) for project in get_session_supervised_projects(session_id, config=_cfg())]
+    projects = _newest_project_rows(get_session_supervised_projects(session_id, config=_cfg()))
     return {"session": session_id, "projects": projects}
 
 

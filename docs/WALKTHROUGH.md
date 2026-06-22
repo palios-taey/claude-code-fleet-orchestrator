@@ -178,8 +178,8 @@ phases + a task table (status / owner / priority / blocked-on); `[ref:]` pointer
 drill down to live file lines. The **pause** checkbox only freezes the UI refresh — it does *not*
 pause sessions or the stop engine.
 
-> Note: the visible session strip is currently hardcoded in `ui/static/app.js`. If your session
-> names differ from the defaults, edit that list. (Tracked as a rough edge to make configurable.)
+> Note: the visible session strip is loaded from `GET /api/sessions`. For the public read-only
+> surface, `ORCH_PUBLIC_SHOW_SESSIONS` controls the allowlist.
 
 ---
 

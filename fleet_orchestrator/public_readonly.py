@@ -16,6 +16,7 @@ from fleet_orchestrator.easy_setup import package_version
 from fleet_orchestrator.orch_schema import (
     get_neo4j_driver,
     get_project_summary,
+    get_project_user_stop_conditions,
     get_ready_tasks,
     get_session_current_work,
     get_session_next_ready,
@@ -25,9 +26,9 @@ from fleet_orchestrator.orch_schema import (
 from fleet_orchestrator.paths import data_dir, repo_root
 
 _UI_ROOT = Path(__file__).resolve().parent.parent / "ui"
-_PUBLIC_INDEX = _UI_ROOT / "public_index.html"
+_INDEX = _UI_ROOT / "index.html"
 _PUBLIC_CSS = _UI_ROOT / "static" / "app.css"
-_PUBLIC_JS = _UI_ROOT / "static" / "public-app.js"
+_APP_JS = _UI_ROOT / "static" / "app.js"
 # Cross-platform operator-path redaction (gemini p0-foundation R2 #1): the old regex was Linux-only
 # (`/home/...`), so on macOS (`/Users/...`) or Windows (`C:\Users\...`) the public dashboard leaked the
 # operator's username + dir layout — directly contradicting the "runs on ANY machine" goal of this PR.
@@ -258,6 +259,52 @@ def _pointer(ref: Dict[str, Any]) -> str:
     return f"{basename}:L{ref.get('l_start', '?')}-L{ref.get('l_end', '?')}"
 
 
+def _public_ref_context(ref_context: Any, project_id: str) -> Dict[str, Any]:
+    if not isinstance(ref_context, dict):
+        return {"refs": [], "warnings": [], "line_cap": 0}
+    public_refs = []
+    for ref in ref_context.get("refs") or []:
+        if not isinstance(ref, dict):
+            continue
+        raw_path = str(ref.get("path") or "")
+        public_path = _scrub_public_text(raw_path)
+        ref_l_start = ref.get("l_start")
+        ref_l_end = ref.get("l_end")
+        public_ref = {
+            "path": public_path,
+            "title": _pointer({"path": public_path, "l_start": ref_l_start, "l_end": ref_l_end}),
+            "sections": [],
+            "l_start": ref_l_start,
+            "l_end": ref_l_end,
+        }
+        for key in ("label", "level", "provenance_hash"):
+            if ref.get(key):
+                public_ref[key] = _scrub_public_text(ref.get(key)) if key != "provenance_hash" else ref.get(key)
+        if ref.get("warning"):
+            public_ref["warning"] = _scrub_public_text(ref.get("warning"))
+        for section in ref.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            l_start = section.get("l_start")
+            l_end = section.get("l_end")
+            section_entry: Dict[str, Any] = {
+                "title": _pointer({"path": public_path, "l_start": l_start, "l_end": l_end}),
+                "l_start": l_start,
+                "l_end": l_end,
+            }
+            if section.get("warning"):
+                section_entry["warning"] = _scrub_public_text(section.get("warning"))
+            if section.get("truncated") is not None:
+                section_entry["truncated"] = bool(section.get("truncated"))
+            public_ref["sections"].append(section_entry)
+        public_refs.append(public_ref)
+    return {
+        "refs": public_refs,
+        "warnings": [_scrub_public_text(item) for item in ref_context.get("warnings") or []],
+        "line_cap": ref_context.get("line_cap", 0),
+    }
+
+
 def _public_ref_pointers(record: Dict[str, Any], key: str = "refs") -> List[str]:
     refs = record.get(key) or []
     if not isinstance(refs, list):
@@ -281,45 +328,52 @@ def _public_stop_conditions(raw_conditions: Any) -> List[Dict[str, Any]]:
 
 
 def _public_project(project: Dict[str, Any], counts: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    project_id = str(project.get("id") or "")
     public_project = {
-        "id": project.get("id"),
+        "id": project_id,
         "name": _scrub_public_text(project.get("name")),
         "description": _scrub_public_text(project.get("description")),
         "status": project.get("status"),
         "supervisor": project.get("supervisor"),
         "priority": project.get("priority"),
+        "source_path": _scrub_public_text(project.get("source_path")),
+        "source_kind": project.get("source_kind"),
+        "source_sha256": project.get("source_sha256"),
         "migration_exempt": bool(project.get("migration_exempt")),
         "stop_reason_orphaned": bool(project.get("stop_reason_orphaned")),
         "user_stop_conditions": _public_stop_conditions(project.get("user_stop_conditions", [])),
+        "ref_context": _public_ref_context(project.get("ref_context"), project_id),
     }
     if counts:
         public_project.update(counts)
     return public_project
 
 
-def _public_phase(phase: Dict[str, Any]) -> Dict[str, Any]:
+def _public_phase(phase: Dict[str, Any], project_id: str) -> Dict[str, Any]:
     return {
         "id": phase.get("id"),
         "name": _scrub_public_text(phase.get("name")),
         "order": phase.get("order"),
+        "ref_context": _public_ref_context(phase.get("ref_context"), project_id),
     }
 
 
-def _public_task(task: Dict[str, Any]) -> Dict[str, Any]:
+def _public_task(task: Dict[str, Any], project_id: str) -> Dict[str, Any]:
     return {
         "id": task.get("id"),
         "description": _scrub_public_text(task.get("description")),
         "status": task.get("status"),
         "owner": task.get("owner"),
         "priority": task.get("priority"),
-        "refs": _public_ref_pointers(task),
-        "is_blocked": bool(task.get("blocked_on")),
+        "blocked_on": _scrub_public_text(task.get("blocked_on")) if task.get("blocked_on") else None,
+        "ref_context": _public_ref_context(task.get("ref_context"), project_id),
     }
 
 
 def _public_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
     phases = []
     counts = {"phase_count": 0, "task_total": 0, "pending": 0, "in_progress": 0, "completed": 0, "failed": 0}
+    project_id = str((summary.get("project") or {}).get("id") or "")
     for item in summary.get("phases", []):
         if not isinstance(item, dict):
             continue
@@ -331,12 +385,30 @@ def _public_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
         counts["completed"] += int(task_counts.get("completed", 0) or 0)
         counts["failed"] += int(task_counts.get("failed", 0) or 0)
         phases.append({
-            "phase": _public_phase(item.get("phase", {})),
+            "phase": _public_phase(item.get("phase", {}), project_id),
             "task_counts": task_counts,
-            "tasks": [_public_task(task) for task in item.get("tasks", []) if isinstance(task, dict)],
+            "tasks": [_public_task(task, project_id) for task in item.get("tasks", []) if isinstance(task, dict)],
         })
     project = _public_project(summary.get("project", {}), counts)
-    return {"project": project, "phases": phases}
+    tiers = summary.get("ref_tiers") or {}
+    return {
+        "project": project,
+        "phases": phases,
+        "ref_tiers": {
+            "overall": {
+                "level": "overall",
+                "ref_context": _public_ref_context((tiers.get("overall") or {}).get("ref_context"), project_id),
+            },
+            "supervisor": {
+                "level": "supervisor",
+                "ref_context": _public_ref_context((tiers.get("supervisor") or {}).get("ref_context"), project_id),
+            },
+            "project": {
+                "level": "project",
+                "ref_context": project.get("ref_context", {"refs": [], "warnings": [], "line_cap": 0}),
+            },
+        },
+    }
 
 
 def _public_current_work(work: Dict[str, Any]) -> Dict[str, Any]:
@@ -377,12 +449,17 @@ def _project_visible(project_id: str) -> bool:
     return False
 
 
-def _public_summary_or_404(project_id: str) -> Dict[str, Any]:
+def _visible_summary_or_404(project_id: str) -> Dict[str, Any]:
     if not _project_visible(project_id):
         raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
     summary = get_project_summary(project_id, config=_cfg())
     if not summary:
         raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    return summary
+
+
+def _public_summary_or_404(project_id: str) -> Dict[str, Any]:
+    summary = _visible_summary_or_404(project_id)
     return _public_summary(summary)
 
 
@@ -436,8 +513,19 @@ def _script_safe_json(obj: Any) -> str:
 
 
 def _public_index_html() -> str:
-    template = _PUBLIC_INDEX.read_text(encoding="utf-8")
-    template = template.replace("__PUBLIC_SESSIONS__", _script_safe_json(_public_sessions()))
+    template = _INDEX.read_text(encoding="utf-8")
+    template = template.replace("<body>", '<body class="public-mode">', 1)
+    boot = (
+        "<script>\n"
+        "    window.ORCH_PUBLIC_MODE = true;\n"
+        f"    window.ORCH_PUBLIC_SESSIONS = {_script_safe_json(_public_sessions())};\n"
+        "  </script>"
+    )
+    template = template.replace(
+        '  <script src="/ui/static/app.js?v=5"></script>',
+        f"  {boot}\n  <script src=\"/ui/static/app.js?v=5\"></script>",
+        1,
+    )
     return template
 
 
@@ -455,9 +543,29 @@ def list_projects() -> Dict[str, Any]:
     return {"projects": _all_project_rows()}
 
 
+@app.get("/api/sessions")
+def sessions() -> Dict[str, Any]:
+    return {"sessions": _public_sessions()}
+
+
 @app.get("/api/projects/{project_id}")
 def get_project(project_id: str) -> Dict[str, Any]:
     return _public_summary_or_404(project_id)
+
+
+@app.get("/api/projects/{project_id}/user-stop-conditions")
+def project_user_stop_conditions(project_id: str) -> Dict[str, Any]:
+    if not _project_visible(project_id):
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    conditions = get_project_user_stop_conditions(project_id, config=_cfg())
+    if conditions is None:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    labels = [
+        _scrub_public_text(condition.get("label"))
+        for condition in conditions
+        if isinstance(condition, dict) and not condition.get("deprecated_at")
+    ]
+    return {"project_id": project_id, "conditions": labels}
 
 
 @app.get("/api/sessions/{session_id}/projects")
@@ -490,6 +598,6 @@ def public_ui_css() -> FileResponse:
     return FileResponse(_PUBLIC_CSS)
 
 
-@app.get("/ui/static/public-app.js", include_in_schema=False)
+@app.get("/ui/static/app.js", include_in_schema=False)
 def public_ui_js() -> FileResponse:
-    return FileResponse(_PUBLIC_JS, media_type="application/javascript")
+    return FileResponse(_APP_JS, media_type="application/javascript")

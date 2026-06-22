@@ -9,8 +9,9 @@ const CHAT_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}`;
 const CHAT_PROMOTE_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}/promote`;
 const UI_QUESTION_ANSWER_ENDPOINT = (questionId) => `/api/ui/questions/${encodeURIComponent(questionId)}/answer`;
 const POLL_INTERVAL_MS = 5000;
+const IS_PUBLIC_MODE = window.ORCH_PUBLIC_MODE === true;
 // Populated at runtime from GET /api/sessions (data-derived; no hardcoded operator fleet).
-let SESSIONS = [];
+let SESSIONS = Array.isArray(window.ORCH_PUBLIC_SESSIONS) ? window.ORCH_PUBLIC_SESSIONS : [];
 
 const state = {
   paused: false,
@@ -110,7 +111,10 @@ function registerRefDrilldown(payload) {
 function renderRefSectionButton(ref, section) {
   const start = section.l_start ?? ref.l_start ?? "?";
   const end = section.l_end ?? ref.l_end ?? "?";
-  const pointer = `${basename(ref.path)}:L${start}-L${end}`;
+  const pointer = section.title || ref.title || `${basename(ref.path)}:L${start}-L${end}`;
+  if (IS_PUBLIC_MODE) {
+    return `<span class="ref-pointer ref-pointer-static">${escapeHtml(pointer)}</span>`;
+  }
   const id = registerRefDrilldown({
     title: pointer,
     path: ref.path || "",
@@ -244,7 +248,7 @@ function renderSessionCards() {
     const nextReady = session.next?.next;
     const activeClass = sessionId === state.selectedSessionId ? "active" : "";
     const chat = state.chatByLineage.get(sessionId) || {};
-    const needsYou = chat.needs_you || (chat.open_questions || []).length;
+    const needsYou = IS_PUBLIC_MODE ? false : (chat.needs_you || (chat.open_questions || []).length);
 
     const card = document.createElement("article");
     card.className = `session-card ${activeClass}`.trim();
@@ -278,6 +282,9 @@ function renderSessionCards() {
 }
 
 function renderOpenQuestions(openQuestions) {
+  if (IS_PUBLIC_MODE) {
+    return "";
+  }
   if (!openQuestions.length) {
     return '<p class="muted">(no open questions)</p>';
   }
@@ -303,6 +310,9 @@ function renderOpenQuestions(openQuestions) {
 }
 
 function renderChatMessages(messages) {
+  if (IS_PUBLIC_MODE) {
+    return "";
+  }
   if (!messages.length) {
     return '<p class="empty-hint">(no chat messages yet)</p>';
   }
@@ -319,6 +329,9 @@ function renderChatMessages(messages) {
 }
 
 function renderChatPanel() {
+  if (IS_PUBLIC_MODE) {
+    return;
+  }
   const chat = state.chatByLineage.get(selectedLineage()) || {};
   const needsYou = chat.needs_you || (chat.open_questions || []).length;
   elements.chatNeedsYou.hidden = !needsYou;
@@ -482,6 +495,9 @@ function renderProjectLoading(projectId) {
 }
 
 function syncChatTarget() {
+  if (IS_PUBLIC_MODE) {
+    return;
+  }
   const target = selectedLineage();
   elements.chatTarget.textContent = target || "selected session";
   elements.chatInput.placeholder = target ? `Message to ${target}...` : "Message...";
@@ -560,6 +576,10 @@ async function loadSessions() {
 }
 
 async function loadChat() {
+  if (IS_PUBLIC_MODE) {
+    state.chatByLineage.clear();
+    return;
+  }
   await Promise.all(SESSIONS.map(async (sessionId) => {
     try {
       const result = await fetchJson(CHAT_ENDPOINT(sessionId));
@@ -600,11 +620,13 @@ async function refresh() {
   _refreshing = true;
   try {
     await loadSessionList();
-    await Promise.all([loadSessions(), loadSessionProjects(), loadChat()]);
+    await Promise.all([loadSessions(), loadSessionProjects(), IS_PUBLIC_MODE ? Promise.resolve() : loadChat()]);
     ensureSelectedProject();
     renderSessionCards();
     renderProjectList();
-    renderChatPanel();
+    if (!IS_PUBLIC_MODE) {
+      renderChatPanel();
+    }
     await loadSelectedProject();
     elements.lastUpdated.textContent = new Date().toLocaleTimeString();
   } finally {
@@ -616,7 +638,9 @@ elements.pauseToggle.addEventListener("change", (event) => {
   state.paused = event.target.checked;
 });
 
-elements.chatInput.addEventListener("input", updateChatButtonState);
+if (!IS_PUBLIC_MODE) {
+  elements.chatInput.addEventListener("input", updateChatButtonState);
+}
 
 function setChatExpanded(open) {
   elements.chatHistoryWrap.hidden = !open;
@@ -627,9 +651,11 @@ function setChatExpanded(open) {
   }
 }
 
-elements.chatExpandToggle.addEventListener("click", () => {
-  setChatExpanded(elements.chatHistoryWrap.hidden);
-});
+if (!IS_PUBLIC_MODE) {
+  elements.chatExpandToggle.addEventListener("click", () => {
+    setChatExpanded(elements.chatHistoryWrap.hidden);
+  });
+}
 
 elements.projectDetail.addEventListener("click", (event) => {
   const target = event.target.closest("[data-ref-id]");
@@ -645,112 +671,125 @@ if (elements.refDialogClose) {
   });
 }
 
-elements.chatHistory.addEventListener("click", async (event) => {
-  const target = event.target.closest("[data-promote-reply]");
-  if (!target) {
-    return;
-  }
-  const chat = state.chatByLineage.get(selectedLineage()) || {};
-  const message = (chat.messages || []).find((item) => item.id === target.dataset.promoteReply);
-  if (!message) {
-    return;
-  }
-  setChatStatus("Promoting...", "pending", 0);
-  try {
-    await fetchJson(CHAT_PROMOTE_ENDPOINT(selectedLineage()), {
-      method: "POST",
-      body: JSON.stringify({
-        sender: message.sender || "operator",
-        reply: message.text || "",
-      }),
-    });
-    setChatStatus("Promoted to MEMORY", "success", 5000);
-  } catch (error) {
-    setChatStatus(error.message, "error", 8000);
-  }
-});
+if (!IS_PUBLIC_MODE) {
+  elements.chatHistory.addEventListener("click", async (event) => {
+    const target = event.target.closest("[data-promote-reply]");
+    if (!target) {
+      return;
+    }
+    const chat = state.chatByLineage.get(selectedLineage()) || {};
+    const message = (chat.messages || []).find((item) => item.id === target.dataset.promoteReply);
+    if (!message) {
+      return;
+    }
+    setChatStatus("Promoting...", "pending", 0);
+    try {
+      await fetchJson(CHAT_PROMOTE_ENDPOINT(selectedLineage()), {
+        method: "POST",
+        body: JSON.stringify({
+          sender: message.sender || "operator",
+          reply: message.text || "",
+        }),
+      });
+      setChatStatus("Promoted to MEMORY", "success", 5000);
+    } catch (error) {
+      setChatStatus(error.message, "error", 8000);
+    }
+  });
+}
 
-elements.chatOpenQuestions.addEventListener("click", async (event) => {
-  const target = event.target.closest("[data-answer-question]");
-  if (!target) {
-    return;
-  }
-  const questionId = target.dataset.answerQuestion;
-  const container = target.closest("[data-question-id]");
-  const answer = container?.querySelector("textarea")?.value.trim() || "";
-  if (!questionId || !answer) {
-    setChatStatus("Verdict required", "error", 5000);
-    return;
-  }
-  target.disabled = true;
-  setChatStatus("Recording verdict...", "pending", 0);
-  try {
-    await fetchJson(UI_QUESTION_ANSWER_ENDPOINT(questionId), {
-      method: "POST",
-      body: JSON.stringify({ answer, answered_by: "operator" }),
-    });
-    await Promise.all([loadChat(), loadSessions(), loadSessionProjects()]);
-    ensureSelectedProject();
-    renderSessionCards();
-    renderProjectList();
-    renderChatPanel();
-    await loadSelectedProject();
-    setChatStatus("Verdict recorded", "success", 5000);
-  } catch (error) {
-    target.disabled = false;
-    setChatStatus(error.message, "error", 8000);
-  }
-});
+if (!IS_PUBLIC_MODE) {
+  elements.chatOpenQuestions.addEventListener("click", async (event) => {
+    const target = event.target.closest("[data-answer-question]");
+    if (!target) {
+      return;
+    }
+    const questionId = target.dataset.answerQuestion;
+    const container = target.closest("[data-question-id]");
+    const answer = container?.querySelector("textarea")?.value.trim() || "";
+    if (!questionId || !answer) {
+      setChatStatus("Verdict required", "error", 5000);
+      return;
+    }
+    target.disabled = true;
+    setChatStatus("Recording verdict...", "pending", 0);
+    try {
+      await fetchJson(UI_QUESTION_ANSWER_ENDPOINT(questionId), {
+        method: "POST",
+        body: JSON.stringify({ answer, answered_by: "operator" }),
+      });
+      await Promise.all([loadChat(), loadSessions(), loadSessionProjects()]);
+      ensureSelectedProject();
+      renderSessionCards();
+      renderProjectList();
+      renderChatPanel();
+      await loadSelectedProject();
+      setChatStatus("Verdict recorded", "success", 5000);
+    } catch (error) {
+      target.disabled = false;
+      setChatStatus(error.message, "error", 8000);
+    }
+  });
+}
 
-elements.chatForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const text = elements.chatInput.value.trim();
-  if (!text) {
-    return;
-  }
-  const target = selectedLineage();
+if (!IS_PUBLIC_MODE) {
+  elements.chatForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = elements.chatInput.value.trim();
+    if (!text) {
+      return;
+    }
+    const target = selectedLineage();
 
-  elements.chatSubmit.disabled = true;
-  // Optimistic echo: show the message in the thread immediately (like a normal
-  // AI chat), expand the panel if collapsed, then reconcile against the server.
-  const chat = state.chatByLineage.get(target) || { lineage: target, messages: [], open_questions: [] };
-  chat.messages = [...(chat.messages || []), { id: `local-${Date.now()}`, sender: "operator", role: "user", text, ts: "sending…" }];
-  state.chatByLineage.set(target, chat);
-  elements.chatInput.value = "";
-  updateChatButtonState();
-  setChatExpanded(true);
-  renderChatPanel();
-  setChatStatus("Sending…", "pending", 0);
-  try {
-    // 1) persist to the two-way history stream, 2) deliver to the session inbox.
-    // The chat endpoint only stores; delivery to the live session is the notify path.
-    await fetchJson(CHAT_ENDPOINT(target), {
-      method: "POST",
-      body: JSON.stringify({ sender: "operator", role: "user", text }),
-    });
-    await fetchJson(SESSION_NOTIFY_ENDPOINT(target), {
-      method: "POST",
-      body: JSON.stringify({ type: elements.notifyType.value, message: text }),
-    });
-    await loadChat();
-    renderChatPanel();
-    renderSessionCards();
-    setChatStatus("Sent ✓", "success", 5000);
-  } catch (error) {
-    // restore the message so it is not lost, drop the optimistic echo
-    elements.chatInput.value = text;
+    elements.chatSubmit.disabled = true;
+    // Optimistic echo: show the message in the thread immediately (like a normal
+    // AI chat), expand the panel if collapsed, then reconcile against the server.
+    const chat = state.chatByLineage.get(target) || { lineage: target, messages: [], open_questions: [] };
+    chat.messages = [...(chat.messages || []), { id: `local-${Date.now()}`, sender: "operator", role: "user", text, ts: "sending…" }];
+    state.chatByLineage.set(target, chat);
+    elements.chatInput.value = "";
     updateChatButtonState();
-    await loadChat();
+    setChatExpanded(true);
     renderChatPanel();
-    setChatStatus(error.message, "error", 8000);
-  }
-});
+    setChatStatus("Sending…", "pending", 0);
+    try {
+      // 1) persist to the two-way history stream, 2) deliver to the session inbox.
+      // The chat endpoint only stores; delivery to the live session is the notify path.
+      await fetchJson(CHAT_ENDPOINT(target), {
+        method: "POST",
+        body: JSON.stringify({ sender: "operator", role: "user", text }),
+      });
+      await fetchJson(SESSION_NOTIFY_ENDPOINT(target), {
+        method: "POST",
+        body: JSON.stringify({ type: elements.notifyType.value, message: text }),
+      });
+      await loadChat();
+      renderChatPanel();
+      renderSessionCards();
+      setChatStatus("Sent ✓", "success", 5000);
+    } catch (error) {
+      // restore the message so it is not lost, drop the optimistic echo
+      elements.chatInput.value = text;
+      updateChatButtonState();
+      await loadChat();
+      renderChatPanel();
+      setChatStatus(error.message, "error", 8000);
+    }
+  });
+}
 
 (async () => {
   await loadSessionList();
   syncChatTarget();
-  setChatExpanded(true);
-  updateChatButtonState();
+  if (IS_PUBLIC_MODE) {
+    document.body.classList.add("public-mode");
+    if (elements.chatBar) {
+      elements.chatBar.hidden = true;
+    }
+  } else {
+    setChatExpanded(true);
+    updateChatButtonState();
+  }
   await refresh();
   window.setInterval(refresh, POLL_INTERVAL_MS);
 })();
