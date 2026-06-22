@@ -226,7 +226,7 @@ The hooks close the loop:
 - `SessionStart` and `UserPromptSubmit` hooks fetch the current wake packet so sessions arrive with scoped state.
 - `PreToolUse` / `PostToolUse` activity hooks keep liveness fresh.
 - The Stop hook asks the orchestrator whether the session may stop.
-- `orch-watch` listens for Redis state transitions and wakes supervisors when a stopped or idle session has actionable work.
+- `orch-watch` listens for Redis state transitions and wakes supervisors when a stopped or idle session has actionable work. It also watches delegated notification delivery: the notify router service, daemon heartbeat freshness, and stuck-inbox SLO, with direct out-of-band tmux alerts when delivery is at risk.
 
 ## API And Dashboard
 
