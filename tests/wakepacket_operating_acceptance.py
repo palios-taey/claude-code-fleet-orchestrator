@@ -104,6 +104,21 @@ def _rendering_contract() -> None:
     _check("own in_progress requires evidence", "--evidence" in own_section, own_section)
     _check("own in_progress warns evidence-less rejected", "Evidence-less terminal writes are REJECTED" in own_section, own_section)
 
+    dispatched_section = _assert_first_and_bounded(
+        "dispatched in_progress",
+        _packet_for({
+            "source": "in_progress_own",
+            "status": "in_progress",
+            "task_id": "demo::build",
+            "owner": "sup",
+            "dispatched_to": "sup-codex",
+        }),
+    )
+    _check("dispatched in_progress says RESPONSE_READY", "RESPONSE_READY" in dispatched_section, dispatched_section)
+    _check("dispatched in_progress says record_outcome", "record_outcome" in dispatched_section, dispatched_section)
+    _check("dispatched in_progress forbids terminal tracker write", "Do NOT run `taey-task update demo::build completed`" in dispatched_section, dispatched_section)
+    _check("dispatched in_progress does not say drive terminal", "Drive `demo::build` to terminal" not in dispatched_section, dispatched_section)
+
     peer_section = _assert_first_and_bounded(
         "peer reported done",
         _packet_for({

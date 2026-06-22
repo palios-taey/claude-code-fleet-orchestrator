@@ -1103,6 +1103,36 @@ def _observed_stop_task_id(session_id: str, config: Optional[OrchConfig] = None)
     return str(task_id) if task_id else None
 
 
+def _done_outcome_for_current_task(session_id: str, task_id: str) -> Optional[Dict[str, Any]]:
+    from redis import RedisError
+
+    try:
+        r = _fleet_state_redis()
+        current_raw = r.get(_state_key(session_id, "current_task"))
+        outcome_raw = r.get(_state_key(session_id, "last_outcome"))
+    except RedisError:
+        return None
+    if not current_raw or not outcome_raw:
+        return None
+    try:
+        current = json.loads(current_raw)
+        outcome = json.loads(outcome_raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(current, dict) or not isinstance(outcome, dict):
+        return None
+    if str(current.get("task_id") or "").strip() != str(task_id or "").strip():
+        return None
+    dispatcher = str(current.get("dispatcher") or current.get("supervisor") or "").strip()
+    if not dispatcher or dispatcher == str(session_id or "").strip():
+        return None
+    if str(outcome.get("outcome") or "").strip().lower() != "done":
+        return None
+    if str(outcome.get("task_id") or "").strip() != str(task_id or "").strip():
+        return None
+    return outcome
+
+
 def _safe_observed_stop_task_id(session_id: str, config: Optional[OrchConfig] = None) -> Optional[str]:
     """Best-effort observed-stop-task lookup that never raises -- for use inside the keystone
     fail-CLOSED exception handler, where the original decision already errored and we only
@@ -1785,6 +1815,13 @@ def _raw_stop_decision(session_id: str,
                 "task_title_short": (str(next_ready.get("description") or "")[:80] or None),
             }
 
+    observed_done_task_id = _observed_stop_task_id(session_id, config=cfg)
+    observed_done_outcome = (
+        _done_outcome_for_current_task(session_id, observed_done_task_id)
+        if observed_done_task_id
+        else None
+    )
+
     # Supervisor keep-going (DEFAULT-ON, no flag). The own-ready loop above only
     # surfaces work the supervisor owns ITSELF. A supervisor is ALSO not finished while
     # a supervised active project has peer-owned work that NEEDS THE SUPERVISOR TO ACT:
@@ -1799,51 +1836,69 @@ def _raw_stop_decision(session_id: str,
     # supervisor for HOURS; that case still BLOCKs. There is NO off-switch -- the only
     # release is the wrapper convergence valve (force-allow after N stop-hook attempts),
     # which exists solely to prevent a permanent wedge on genuinely-stuck state.
-    for project in projects:
-        status = str(project.get("status") or "").strip().lower()
-        if status not in ("active", "in_progress"):
-            continue
-        peer_task = get_supervisor_dispatchable_peer_task(
-            supervisor, str(project.get("id")), config=cfg)
-        if peer_task:
-            task_id = peer_task.get("task_id")
-            return {
-                "block": True,
-                "reason": _supervisor_dispatch_block_reason(
-                    task_id, peer_task.get("owner"), peer_task.get("description")),
-                "wake_type": "WAKE_WITH_QUEUE",
-                "task_id": task_id,
-                "project_id": peer_task.get("project_id"),
-                "phase_id": peer_task.get("phase_id"),
-                "task_priority": peer_task.get("priority"),
-                "task_title_short": (str(peer_task.get("description") or "")[:80] or None),
-                "dispatch_to": peer_task.get("owner"),
-            }
-    for project in projects:
-        status = str(project.get("status") or "").strip().lower()
-        if status not in ("active", "in_progress"):
-            continue
-        inflight = get_supervisor_inflight_peer_task(
-            supervisor, str(project.get("id")), config=cfg)
-        if inflight:
-            task_id = inflight.get("task_id")
-            return {
-                "block": True,
-                "reason": _supervisor_gate_block_reason(
-                    task_id, inflight.get("owner"), inflight.get("description")),
-                "wake_type": "WAKE_WITH_QUEUE",
-                "task_id": task_id,
-                "project_id": inflight.get("project_id"),
-                "phase_id": inflight.get("phase_id"),
-                "task_priority": inflight.get("priority"),
-                "task_title_short": (str(inflight.get("description") or "")[:80] or None),
-                "gate_for": inflight.get("owner"),
-            }
+    if not observed_done_outcome:
+        for project in projects:
+            status = str(project.get("status") or "").strip().lower()
+            if status not in ("active", "in_progress"):
+                continue
+            peer_task = get_supervisor_dispatchable_peer_task(
+                supervisor, str(project.get("id")), config=cfg)
+            if peer_task:
+                task_id = peer_task.get("task_id")
+                return {
+                    "block": True,
+                    "reason": _supervisor_dispatch_block_reason(
+                        task_id, peer_task.get("owner"), peer_task.get("description")),
+                    "wake_type": "WAKE_WITH_QUEUE",
+                    "task_id": task_id,
+                    "project_id": peer_task.get("project_id"),
+                    "phase_id": peer_task.get("phase_id"),
+                    "task_priority": peer_task.get("priority"),
+                    "task_title_short": (str(peer_task.get("description") or "")[:80] or None),
+                    "dispatch_to": peer_task.get("owner"),
+                }
+        for project in projects:
+            status = str(project.get("status") or "").strip().lower()
+            if status not in ("active", "in_progress"):
+                continue
+            inflight = get_supervisor_inflight_peer_task(
+                supervisor, str(project.get("id")), config=cfg)
+            if inflight:
+                task_id = inflight.get("task_id")
+                return {
+                    "block": True,
+                    "reason": _supervisor_gate_block_reason(
+                        task_id, inflight.get("owner"), inflight.get("description")),
+                    "wake_type": "WAKE_WITH_QUEUE",
+                    "task_id": task_id,
+                    "project_id": inflight.get("project_id"),
+                    "phase_id": inflight.get("phase_id"),
+                    "task_priority": inflight.get("priority"),
+                    "task_title_short": (str(inflight.get("description") or "")[:80] or None),
+                    "gate_for": inflight.get("owner"),
+                }
 
     current_work = get_session_current_work(session_id, config=cfg)
     current_task_id = current_work.get("top_task_id") if current_work else None
     blocked_on = _task_blocked_on(current_task_id, config=cfg)
     if current_task_id and not blocked_on:
+        done_outcome = (
+            observed_done_outcome
+            if current_task_id == observed_done_task_id
+            else _done_outcome_for_current_task(session_id, current_task_id)
+        )
+        if done_outcome:
+            decision = {
+                "block": False,
+                "reason": (
+                    "ALLOW_STOP: dispatched peer reported record_outcome(done); "
+                    "CONTROL owns r5/merge/close."
+                ),
+                "wake_type": WAKE_ALLOW_STOP,
+                "task_id": None,
+                "completed_current_outcome": done_outcome,
+            }
+            return decision
         if task_actively_in_flight(
             current_task_id,
             workers=[session_id, supervisor],
@@ -3032,6 +3087,10 @@ def get_session_current_work(session_id: str,
                    ph.refs AS phase_refs,
                    t.id AS top_task_id,
                    t.description AS top_task_desc,
+                   t.owner AS owner,
+                   t.dispatched_to AS dispatched_to,
+                   t.status AS status,
+                   t.blocked_on AS blocked_on,
                    t.source_path AS task_source_path,
                    t.refs AS task_refs
             ORDER BY CASE WHEN $observed_task_id IS NOT NULL AND t.id = $observed_task_id THEN 0 ELSE 1 END ASC,

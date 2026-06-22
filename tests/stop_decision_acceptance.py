@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -28,8 +29,11 @@ os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
+import fleet_orchestrator.dispatch as dispatch_mod  # noqa: E402
 from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
+from fleet_orchestrator.notify_state import state_key  # noqa: E402
 from fleet_orchestrator.orch_schema import create_phase, create_project, create_task, get_session_next_ready, get_session_stop_decision, update_task_status  # noqa: E402
+from fleet_orchestrator.dispatch import record_outcome  # noqa: E402
 
 CFG = OrchConfig()
 
@@ -68,6 +72,19 @@ def _make_in_progress_fixture(*, owner: str = WORKER, blocked_on: str | None = N
     create_task(phase_id, task_id, "owned in-progress task", owner=owner, priority=5, wake_owner_if_ready=False, config=CFG)
     update_task_status(task_id, "in_progress", owner=owner, blocked_on=blocked_on, config=CFG)
     return task_id
+
+
+def _bind_current_task(worker: str, task_id: str) -> None:
+    notify_redis_connect().set(
+        state_key(worker, "current_task"),
+        json.dumps({
+            "task_id": task_id,
+            "description": "owned in-progress task",
+            "supervisor": SUPERVISOR,
+            "dispatcher": SUPERVISOR,
+            "started_at": time.time() - 60,
+        }, separators=(",", ":")),
+    )
 
 
 def main() -> int:
@@ -115,6 +132,28 @@ def main() -> int:
             "PASS peer-in-progress-blocks"
             if in_progress_block.get("block") is True and in_progress_block.get("task_id") == task_id and in_progress_block.get("gate_for") == WORKER and in_progress_block.get("wake_type") == "WAKE_WITH_QUEUE"
             else f"FAIL peer-in-progress-blocks {in_progress_block}"
+        )
+
+        _cleanup(PREFIX)
+        task_id = _make_in_progress_fixture(blocked_on=None)
+        _bind_current_task(WORKER, task_id)
+        with mock.patch.object(dispatch_mod, "_notify_supervisor_response_ready", return_value=None):
+            record_outcome(WORKER, "done", "ready for r5 gate")
+        peer_done_decision = get_session_stop_decision(WORKER, config=CFG)
+        print(
+            "PASS dispatched-peer-done-outcome-allows-stop"
+            if peer_done_decision.get("block") is False
+            and peer_done_decision.get("wake_type") == "ALLOW_STOP"
+            and peer_done_decision.get("completed_current_outcome", {}).get("task_id") == task_id
+            else f"FAIL dispatched-peer-done-outcome-allows-stop {peer_done_decision}"
+        )
+        supervisor_gate = get_session_stop_decision(SUPERVISOR, config=CFG)
+        print(
+            "PASS supervisor-still-gates-peer-done-outcome"
+            if supervisor_gate.get("block") is True
+            and supervisor_gate.get("task_id") == task_id
+            and supervisor_gate.get("gate_for") == WORKER
+            else f"FAIL supervisor-still-gates-peer-done-outcome {supervisor_gate}"
         )
 
         _cleanup(PREFIX)

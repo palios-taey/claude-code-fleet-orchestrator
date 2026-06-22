@@ -296,7 +296,7 @@ def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
         row["status"] = "in_progress"
         row["task_id"] = row.get("top_task_id")
         row["description"] = row.get("top_task_desc")
-        row["owner"] = session
+        row["owner"] = row.get("owner") or session
         return row
 
     return {"source": "none", "project_id": None, "description": "", "task_id": None, "status": None}
@@ -929,11 +929,19 @@ def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
         ]
 
     if source == "in_progress_own" or status == "in_progress":
+        if resolved.get("dispatched_to"):
+            supervisor = _operating_value(resolved.get("owner") or "<supervisor>", default="<supervisor>")
+            return access_lines + [
+                f"- You are executing dispatched task `{task_id}` for `{supervisor}`; inspect it with `taey-task status {task_id}`.",
+                f"- When ready for review, run `taey-notify {supervisor} \"RESPONSE_READY: branch=<branch> sha=<sha> verify=<cmd>\" --type response_ready`.",
+                f"- Then call `record_outcome('<your-session>', 'done', '<short summary>')`; verify clean handoff with `taey-task status {task_id}`.",
+                f"- Do NOT run `taey-task update {task_id} completed`; CONTROL closes it after r5/merge/deploy.",
+            ]
         lines = [
-            f"- Drive `{task_id}` to terminal.",
+            f"- Drive `{task_id}` to terminal; inspect current state with `taey-task status {task_id}`.",
             f"- Close with evidence: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"production_observation\":\"<obs>\"}}'`.",
-            "- Evidence-less terminal writes are REJECTED. Don't stop while ready work exists.",
-            "- Human-review gate tasks complete via the question/UI path, not ordinary status update.",
+            f"- Evidence-less terminal writes are REJECTED; use `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"production_observation\":\"<obs>\"}}'`.",
+            f"- Human-review gate tasks complete via the question/UI path; inspect `{task_id}` with `taey-task status {task_id}`.",
         ]
         return access_lines + lines
 
