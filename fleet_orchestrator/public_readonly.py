@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -185,13 +186,57 @@ def _project_row(project: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _created_at_epoch(project: Dict[str, Any]) -> Optional[float]:
+    raw = project.get("created_at")
+    if raw in (None, ""):
+        return None
+    to_native = getattr(raw, "to_native", None)
+    if callable(to_native):
+        raw = to_native()
+    if isinstance(raw, dt.datetime):
+        value = raw
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            value = dt.datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=dt.timezone.utc)
+    return value.timestamp()
+
+
+def _newest_project_sort_key(project: Dict[str, Any]) -> tuple[int, float]:
+    epoch = _created_at_epoch(project)
+    if epoch is None:
+        return (1, 0.0)
+    return (0, -epoch)
+
+
+def _newest_project_rows(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [_project_row(project) for project in sorted(projects, key=_newest_project_sort_key)]
+
+
 def _all_project_rows() -> List[Dict[str, Any]]:
     cfg = _cfg()
     driver = get_neo4j_driver(cfg)
     shown = _shown_sessions()
     hidden_project_ids = _hidden_project_ids()
     with driver.session(database=cfg.neo4j_db) as session:
-        result = session.run("MATCH (p:OrchProject) RETURN p ORDER BY p.id")
+        result = session.run(
+            """
+            MATCH (p:OrchProject)
+            RETURN p
+            ORDER BY CASE WHEN p.created_at IS NULL THEN 1 ELSE 0 END ASC,
+                     p.created_at DESC
+            """
+        )
         projects = []
         for record in result:
             project = _serialize_node(record["p"])
@@ -204,8 +249,8 @@ def _all_project_rows() -> List[Dict[str, Any]]:
                 continue
             if str(project.get("supervisor") or "") not in shown:
                 continue
-            projects.append(_project_row(project))
-    return projects
+            projects.append(project)
+    return _newest_project_rows(projects)
 
 
 def _pointer(ref: Dict[str, Any]) -> str:
@@ -367,11 +412,12 @@ def _next_visible(session_id: str) -> Dict[str, Any]:
 def _session_projects_visible(session_id: str) -> Dict[str, Any]:
     _require_visible_session(session_id)
     visible_project_ids = {str(project.get("id") or "") for project in _all_project_rows()}
-    projects = [
-        _project_row(project)
+    raw_projects = [
+        project
         for project in get_session_supervised_projects(session_id, config=_cfg())
         if str(project.get("id") or "") in visible_project_ids
     ]
+    projects = _newest_project_rows(raw_projects)
     return {"session": session_id, "projects": projects}
 
 

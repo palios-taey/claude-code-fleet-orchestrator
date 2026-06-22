@@ -103,6 +103,10 @@ code {
   min-height: 65vh;
 }
 
+.workspace > * {
+  min-width: 0;
+}
+
 .panel {
   padding: 18px;
 }
@@ -162,6 +166,8 @@ code {
 .project-card h3 {
   margin: 0;
   font-size: 1rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .project-slug {
@@ -187,6 +193,7 @@ code {
   padding: 14px;
   display: grid;
   gap: 10px;
+  min-width: 0;
 }
 
 .project-stats {
@@ -195,6 +202,12 @@ code {
   gap: 8px;
   font-size: 0.83rem;
   color: var(--muted);
+}
+
+.project-stats span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .status-row {
