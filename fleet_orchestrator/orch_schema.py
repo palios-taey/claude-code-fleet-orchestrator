@@ -1013,6 +1013,10 @@ def _resolve_supervisor_session(session_id: str, config: Optional[OrchConfig] = 
     return session_id
 
 
+def _session_is_supervisor_context(session_id: str, supervisor: str) -> bool:
+    return str(session_id or "").strip() == str(supervisor or "").strip()
+
+
 def _configured_dashboard_supervisors(config: Optional[OrchConfig] = None) -> set[str]:
     cfg = config or OrchConfig()
     supervisors: set[str] = set()
@@ -1669,6 +1673,7 @@ def get_supervisor_inflight_peer_task(supervisor: str, project_id: str,
               AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
             RETURN t.id AS task_id, t.description AS description, t.owner AS owner,
                    t.dispatched_to AS dispatched_to,
+                   t.blocked_on AS blocked_on,
                    t.priority AS priority, ph.id AS phase_id, proj.id AS project_id
             ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, t.created_at ASC
             LIMIT 25
@@ -1678,6 +1683,8 @@ def get_supervisor_inflight_peer_task(supervisor: str, project_id: str,
             human_review_question_type=HUMAN_REVIEW_QUESTION_TYPE,
         )]
     for row in rows:
+        if is_declared_await_signal(row.get("blocked_on")):
+            continue
         workers = [w for w in (row.get("owner"), row.get("dispatched_to"))
                    if w in peer_owners]
         if _peer_actively_working_task(workers, row.get("task_id"), config=cfg):
@@ -1786,10 +1793,22 @@ def _raw_stop_decision(session_id: str,
     if _session_pause_active(supervisor, config=cfg):
         return {"block": False, "reason": None, "wake_type": WAKE_ALLOW_STOP, "task_id": None}
 
-    projects = sorted(
-        get_session_supervised_projects(supervisor, config=cfg),
+    supervised_projects = sorted(
+        get_session_supervised_projects(session_id, config=cfg),
         key=lambda project: project.get("priority") if project.get("priority") is not None else 999999999,
     )
+    projects = list(supervised_projects)
+    if not _session_is_supervisor_context(session_id, supervisor):
+        seen_project_ids = {str(project.get("id")) for project in projects}
+        parent_projects = sorted(
+            get_session_supervised_projects(supervisor, config=cfg),
+            key=lambda project: project.get("priority") if project.get("priority") is not None else 999999999,
+        )
+        for project in parent_projects:
+            project_id = str(project.get("id"))
+            if project_id not in seen_project_ids:
+                projects.append(project)
+                seen_project_ids.add(project_id)
 
     for project in projects:
         status = str(project.get("status") or "").strip().lower()
@@ -1837,7 +1856,7 @@ def _raw_stop_decision(session_id: str,
     # release is the wrapper convergence valve (force-allow after N stop-hook attempts),
     # which exists solely to prevent a permanent wedge on genuinely-stuck state.
     if not observed_done_outcome:
-        for project in projects:
+        for project in supervised_projects:
             status = str(project.get("status") or "").strip().lower()
             if status not in ("active", "in_progress"):
                 continue
@@ -1857,7 +1876,7 @@ def _raw_stop_decision(session_id: str,
                     "task_title_short": (str(peer_task.get("description") or "")[:80] or None),
                     "dispatch_to": peer_task.get("owner"),
                 }
-        for project in projects:
+        for project in supervised_projects:
             status = str(project.get("status") or "").strip().lower()
             if status not in ("active", "in_progress"):
                 continue
@@ -2011,14 +2030,14 @@ def _raw_stop_decision(session_id: str,
             "non_convergable": True,
         }
 
-    for project in projects:
+    for project in supervised_projects:
         status = str(project.get("status") or "").strip().lower()
         if status not in ("active", "in_progress"):
             continue
-        if has_active_inflight_peer_task(supervisor, str(project.get("id")), config=cfg):
+        if has_active_inflight_peer_task(session_id, str(project.get("id")), config=cfg):
             return {"block": False, "reason": None, "wake_type": WAKE_ALLOW_STOP, "task_id": None}
 
-    for project in projects:
+    for project in supervised_projects:
         status = str(project.get("status") or "").strip().lower()
         if status not in ("active", "in_progress"):
             continue
@@ -2037,7 +2056,7 @@ def _raw_stop_decision(session_id: str,
             }
 
     awaiting_human_gates: List[Dict[str, Any]] = []
-    for project in projects:
+    for project in supervised_projects:
         status = str(project.get("status") or "").strip().lower()
         if status not in ("active", "in_progress"):
             continue
@@ -2057,7 +2076,7 @@ def _raw_stop_decision(session_id: str,
         }
 
     reason_required: Optional[Dict[str, Any]] = None
-    for project in projects:
+    for project in supervised_projects:
         status = str(project.get("status") or "").strip().lower()
         # Readiness/wake surfaces work ONLY from live projects. Status is normalized
         # (strip+lower) so 'Active'/'ACTIVE ' still ADMIT (case/whitespace must
