@@ -1861,7 +1861,7 @@ def _raw_stop_decision(session_id: str,
             if status not in ("active", "in_progress"):
                 continue
             peer_task = get_supervisor_dispatchable_peer_task(
-                supervisor, str(project.get("id")), config=cfg)
+                session_id, str(project.get("id")), config=cfg)
             if peer_task:
                 task_id = peer_task.get("task_id")
                 return {
@@ -1881,7 +1881,7 @@ def _raw_stop_decision(session_id: str,
             if status not in ("active", "in_progress"):
                 continue
             inflight = get_supervisor_inflight_peer_task(
-                supervisor, str(project.get("id")), config=cfg)
+                session_id, str(project.get("id")), config=cfg)
             if inflight:
                 task_id = inflight.get("task_id")
                 return {

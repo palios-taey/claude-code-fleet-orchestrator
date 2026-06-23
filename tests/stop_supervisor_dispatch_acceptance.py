@@ -60,6 +60,7 @@ _PFX = f"{_NAMESPACE}-supkeep-{uuid.uuid4().hex[:8]}"
 _SUP = f"{_PFX}-sup"
 _PEER = f"{_SUP}-codex"
 _UNRELATED = f"{_PFX}-hands"
+_UNRELATED_PEER = f"{_UNRELATED}-codex"
 _FAILURES: list[str] = []
 
 
@@ -126,6 +127,7 @@ def _decide():
 def _cleanup(drv) -> None:
     _clear_peer(_PEER)
     _clear_peer(_UNRELATED)
+    _clear_peer(_UNRELATED_PEER)
     with drv.session(database=CFG.neo4j_db) as s:
         s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
 
@@ -244,6 +246,22 @@ def main() -> int:
                d.get("block") is True and d.get("task_id") == owned, str(d))
         update_task_status(owned, "completed", owner=_UNRELATED,
                            completion_evidence={"production_observation": "child-owned work preserved"}, config=CFG)
+
+        C = f"{_PFX}-child-supervised"
+        create_project(project_id=C, name=C, supervisor=_UNRELATED, config=CFG)
+        create_phase(project_id=C, phase_id=f"{C}::ph", name="ph", config=CFG)
+        setp(C)
+        child_peer = mktask(C, "child-peer", _UNRELATED_PEER)
+        d = _raw_stop_decision(_UNRELATED, config=CFG)
+        _check("child supervisor with parent key DISPATCHES its own peer work",
+               d.get("block") is True and d.get("task_id") == child_peer and d.get("dispatch_to") == _UNRELATED_PEER, str(d))
+        update_task_status(child_peer, "in_progress", owner=_UNRELATED_PEER, config=CFG)
+        _clear_peer(_UNRELATED_PEER)
+        d = _raw_stop_decision(_UNRELATED, config=CFG)
+        _check("child supervisor with parent key GATES its own stalled peer work",
+               d.get("block") is True and d.get("task_id") == child_peer and d.get("gate_for") == _UNRELATED_PEER, str(d))
+        update_task_status(child_peer, "completed", owner=_UNRELATED_PEER,
+                           completion_evidence={"production_observation": "child-supervised peer gate preserved"}, config=CFG)
         d = _decide()
         _check("supervisor still gates its own un-gated peer work",
                d.get("block") is True and d.get("task_id") == scoped and d.get("gate_for") == _PEER, str(d))
