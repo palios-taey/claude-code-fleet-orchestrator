@@ -59,6 +59,8 @@ _R = notify_redis_connect()
 _PFX = f"{_NAMESPACE}-supkeep-{uuid.uuid4().hex[:8]}"
 _SUP = f"{_PFX}-sup"
 _PEER = f"{_SUP}-codex"
+_UNRELATED = f"{_PFX}-hands"
+_UNRELATED_PEER = f"{_UNRELATED}-codex"
 _FAILURES: list[str] = []
 
 
@@ -124,6 +126,8 @@ def _decide():
 
 def _cleanup(drv) -> None:
     _clear_peer(_PEER)
+    _clear_peer(_UNRELATED)
+    _clear_peer(_UNRELATED_PEER)
     with drv.session(database=CFG.neo4j_db) as s:
         s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
 
@@ -209,6 +213,60 @@ def main() -> int:
         stranger = mktask(P, "stranger", "someoneelse-codex")
         update_task_status(stranger, "in_progress", owner="someoneelse-codex", config=CFG)
         _check("non-peer in-flight work -> NOT blocked (isolation)", _decide().get("wake_type") == "ALLOW_STOP")
+
+        # 5b. structured AWAIT peer work is a legitimate external wait, not a gate/stall.
+        awaiting = mktask(P, "awaiting", _PEER)
+        update_task_status(
+            awaiting,
+            "in_progress",
+            owner=_PEER,
+            blocked_on="AWAIT:external-signal:bg fetch harness",
+            config=CFG,
+        )
+        _clear_peer(_PEER)
+        d = _decide()
+        _check("in-flight + structured AWAIT peer work -> ALLOW_STOP",
+               d.get("wake_type") == "ALLOW_STOP" and d.get("task_id") is None, str(d))
+        update_task_status(awaiting, "completed", owner=_PEER,
+                           completion_evidence={"production_observation": "structured await honored"}, config=CFG)
+
+        # 5c. a child/worker session with an explicit parent must not inherit the
+        # supervisor's peer-work gate; it owns only its own ready/current bindings.
+        scoped = mktask(P, "scoped", _PEER)
+        update_task_status(scoped, "in_progress", owner=_PEER, config=CFG)
+        _clear_peer(_PEER)
+        _clear_peer(_UNRELATED)
+        _R.set(_state_key(_UNRELATED, "parent"), _SUP)
+        d = _raw_stop_decision(_UNRELATED, config=CFG)
+        _check("child session does NOT gate parent peer work",
+               d.get("wake_type") == "ALLOW_STOP" and d.get("task_id") is None, str(d))
+        owned = mktask(P, "owned-by-child", _UNRELATED)
+        d = _raw_stop_decision(_UNRELATED, config=CFG)
+        _check("child session still surfaces its own ready work",
+               d.get("block") is True and d.get("task_id") == owned, str(d))
+        update_task_status(owned, "completed", owner=_UNRELATED,
+                           completion_evidence={"production_observation": "child-owned work preserved"}, config=CFG)
+
+        C = f"{_PFX}-child-supervised"
+        create_project(project_id=C, name=C, supervisor=_UNRELATED, config=CFG)
+        create_phase(project_id=C, phase_id=f"{C}::ph", name="ph", config=CFG)
+        setp(C)
+        child_peer = mktask(C, "child-peer", _UNRELATED_PEER)
+        d = _raw_stop_decision(_UNRELATED, config=CFG)
+        _check("child supervisor with parent key DISPATCHES its own peer work",
+               d.get("block") is True and d.get("task_id") == child_peer and d.get("dispatch_to") == _UNRELATED_PEER, str(d))
+        update_task_status(child_peer, "in_progress", owner=_UNRELATED_PEER, config=CFG)
+        _clear_peer(_UNRELATED_PEER)
+        d = _raw_stop_decision(_UNRELATED, config=CFG)
+        _check("child supervisor with parent key GATES its own stalled peer work",
+               d.get("block") is True and d.get("task_id") == child_peer and d.get("gate_for") == _UNRELATED_PEER, str(d))
+        update_task_status(child_peer, "completed", owner=_UNRELATED_PEER,
+                           completion_evidence={"production_observation": "child-supervised peer gate preserved"}, config=CFG)
+        d = _decide()
+        _check("supervisor still gates its own un-gated peer work",
+               d.get("block") is True and d.get("task_id") == scoped and d.get("gate_for") == _PEER, str(d))
+        update_task_status(scoped, "completed", owner=_PEER,
+                           completion_evidence={"production_observation": "scoping gate preserved"}, config=CFG)
 
         # 6. stopped project -> peer work does not keep the supervisor up
         live = mktask(P, "live", _PEER)  # pending peer work
