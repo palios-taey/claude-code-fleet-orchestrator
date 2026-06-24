@@ -19,10 +19,13 @@ import os
 import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fleet_orchestrator.config as config_module  # noqa: E402
+import fleet_orchestrator.dispatch as dispatch_module  # noqa: E402
 from fleet_orchestrator.config import OrchConfig, OrchConfigError  # noqa: E402
 from fleet_orchestrator.dispatch import (  # noqa: E402
     _claim_ready_orch_task,
@@ -174,7 +177,15 @@ def _exercise_f13_and_f12() -> None:
     bind_current_task(WORKER, f12, "f12 divergence", supervisor=SUPERVISOR, set_parent=False)
     row = _task_row(f12)
     _check("F12 bind marks Neo4j in_progress", row.get("status") == "in_progress", row)
-    record_outcome(WORKER, "error", "state integrity acceptance error")
+    notify_calls: list[list[str]] = []
+    ok = SimpleNamespace(returncode=0, stdout="OK", stderr="")
+
+    def fake_run(args, **_kwargs):
+        notify_calls.append(list(args))
+        return ok
+
+    with mock.patch.object(dispatch_module.subprocess, "run", side_effect=fake_run):
+        record_outcome(WORKER, "error", "state integrity acceptance error")
     row = _task_row(f12)
     _check("F12 error outcome reverts Neo4j task to pending", row.get("status") == "pending", row)
     _check("F12 error outcome clears dispatched_to", row.get("dispatched_to") is None, row)
@@ -186,6 +197,18 @@ def _exercise_f13_and_f12() -> None:
     outcome = json.loads(outcome_raw) if outcome_raw else {}
     _check("F12 Redis last_outcome records error", outcome.get("outcome") == "error", outcome)
     _check("F12 current_task persists for supervisor inspection", bool(current_raw), current_raw)
+    _check("F12 error outcome notifies supervisor response_ready",
+           any(
+               len(call) >= 2
+               and call[1] == SUPERVISOR
+               and "--from" in call
+               and call[call.index("--from") + 1] == WORKER
+               and "--type" in call
+               and call[call.index("--type") + 1] == "response_ready"
+               and "error" in call[2]
+               for call in notify_calls
+           ),
+           notify_calls)
 
 
 def _exercise_f15() -> None:
