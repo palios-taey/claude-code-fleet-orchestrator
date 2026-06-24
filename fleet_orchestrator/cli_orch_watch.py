@@ -646,6 +646,24 @@ def _resolve_affected_product(node_id: str, project_id: Optional[str]) -> Option
     return None
 
 
+def _supervisor_peer_work_requires_action(node_id: str,
+                                          project_context: Optional[Dict[str, object]]) -> bool:
+    project_id = (project_context or {}).get("project_id")
+    if not isinstance(project_id, str) or not project_id:
+        return False
+    from fleet_orchestrator.config import OrchConfig
+    from fleet_orchestrator.orch_schema import (
+        get_supervisor_dispatchable_peer_task,
+        get_supervisor_inflight_peer_task,
+    )
+
+    cfg = OrchConfig()
+    return bool(
+        get_supervisor_dispatchable_peer_task(node_id, project_id, config=cfg)
+        or get_supervisor_inflight_peer_task(node_id, project_id, config=cfg)
+    )
+
+
 def _evaluate_user_stop_conditions(r, node_id: str, task_state: dict,
                                    project_context: Optional[Dict[str, object]]) -> tuple[Optional[str], Optional[dict]]:
     from fleet_orchestrator.plan_readiness import next_ready_for_session
@@ -661,7 +679,7 @@ def _evaluate_user_stop_conditions(r, node_id: str, task_state: dict,
 
     for condition in stop_conditions:
         if condition == "stop_when_all_ready_tasks_dispatched":
-            if next_ready is None:
+            if next_ready is None and not _supervisor_peer_work_requires_action(node_id, project_context):
                 return condition, next_ready
         elif condition == "stop_when_user_explicit_decision_required_and_pending":
             if r.get(state_key(node_id, "awaiting_user_decision")):

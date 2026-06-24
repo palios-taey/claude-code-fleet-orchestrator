@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import subprocess
 import time
@@ -61,7 +62,14 @@ from fleet_orchestrator.loop_engine import (
     loops_enabled,
 )
 from fleet_orchestrator.shippability import evaluate_shippability
-from fleet_orchestrator.dispatch import bind_current_task, record_outcome
+from fleet_orchestrator.dispatch import (
+    BugLockActive,
+    OrchTaskNotReady,
+    WorkerBusy,
+    bind_current_task,
+    dispatch as dispatch_task,
+    record_outcome,
+)
 from fleet_orchestrator.orch_schema import (
     CompletionEvidenceError,
     ConditionValidationError,
@@ -284,6 +292,9 @@ ALLOWED_NOTIFY_TYPES = {
     "command": "command",
     "response_ready": "response_ready",
 }
+_COMMAND_DISPATCH_RE = re.compile(
+    r"(?im)(?:^|\s)DISPATCH\s+(?:task\s*[=:]\s*)?(?P<task_id>[A-Za-z0-9][A-Za-z0-9_.:-]*)"
+)
 MUTABLE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -500,6 +511,36 @@ def _ensure_registered_session(session_id: str, cfg: OrchConfig) -> None:
             status_code=400,
             detail=session_registration_error_detail(session_id, cfg),
         )
+
+
+def _command_dispatch_task_id(message: str) -> Optional[str]:
+    match = _COMMAND_DISPATCH_RE.search(message or "")
+    if not match:
+        return None
+    task_id = match.group("task_id").strip()
+    return task_id if task_id and task_id != "task" else None
+
+
+def _infer_dispatch_supervisor(target: str, data: Dict[str, Any]) -> Optional[str]:
+    for key in ("from", "sender", "supervisor", "dispatcher"):
+        value = str(data.get(key) or "").strip()
+        if value:
+            return value
+    for suffix in ("-codex", "-gemini", "-grok", "-claude"):
+        if target.endswith(suffix):
+            return target[: -len(suffix)]
+    return None
+
+
+def _dispatch_description(task_id: str, message: str, cfg: OrchConfig) -> str:
+    task = load_task_record(task_id, config=cfg)
+    if task and task.get("description"):
+        return str(task.get("description"))
+    first_line = (message or "").splitlines()[0] if message else ""
+    marker = task_id
+    _, _, after = first_line.partition(marker)
+    fallback = after.strip(" \t-:").lstrip("\u2014").strip()
+    return fallback or task_id
 
 
 @app.get("/api/tasks")
@@ -1465,6 +1506,51 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
         )
     cfg = _cfg()
     _ensure_registered_session(target, cfg)
+
+    command_task_id = (
+        _command_dispatch_task_id(message)
+        if notify_type == "command"
+        else None
+    )
+    if command_task_id:
+        supervisor = _infer_dispatch_supervisor(target, data)
+        description = _dispatch_description(command_task_id, message, cfg)
+        try:
+            dispatch_task(
+                target,
+                command_task_id,
+                description,
+                supervisor=supervisor,
+                prompt_body=message,
+                priority=str(data.get("priority") or "normal"),
+                force=bool(data.get("force")),
+            )
+        except (BugLockActive, OrchTaskNotReady, WorkerBusy) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "dispatch command rejected",
+                    "reason": str(exc),
+                    "task_id": command_task_id,
+                    "next_step": (
+                        "Inspect task readiness with GET /api/tasks/{task_id} or "
+                        f"`taey-task status {command_task_id}` before retrying dispatch."
+                    ),
+                },
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "taey-notify failed",
+                    "notify_stderr": str(exc),
+                    "next_step": (
+                        f"Run `taey-notify {target} '<notification text>' --type command` "
+                        "and inspect stderr; verify target session registration with GET /api/sessions."
+                    ),
+                },
+            )
+        return {"ok": True, "dispatch_registered": True, "task_id": command_task_id}
 
     result = subprocess.run(
         ["taey-notify", target, message, "--type", ALLOWED_NOTIFY_TYPES[notify_type]],
