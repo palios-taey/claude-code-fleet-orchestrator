@@ -14,8 +14,8 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 213.
-- Teaches: 92.
+- Enumerated surfaces: 215.
+- Teaches: 94.
 - Needs-fix baseline debt: 53.
 - Exempt reviewed baseline rows: 68.
 
@@ -213,10 +213,12 @@ Summary:
 | fleet_orchestrator/tasks_api.py | patch_project_endpoint | http_exception_detail | 3 | 1359 | c7abf8c1de4052d5 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | pause_session_endpoint | http_exception_detail | 1 | 1419 | c76409965486615c | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | reset_project_endpoint | http_exception_detail | 1 | 1229 | c7abf8c1de4052d5 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
-| fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 1 | 1433 | 10789411811a64cf | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
-| fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 2 | 1447 | 2a638aa2f069ce00 | teaches | taey-notify | Static teaching assertion passes. | baseline-pr171 |
-| fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 3 | 1457 | d235f23d0cd8ae89 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
-| fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 4 | 1477 | ea16455f43767dc4 | teaches | taey-notify | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 1 | 1474 | 10789411811a64cf | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
+| fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 2 | 1488 | 2a638aa2f069ce00 | teaches | taey-notify | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 3 | 1498 | d235f23d0cd8ae89 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
+| fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 4 | 1529 | 3262aa0c8965f5cd | teaches | taey-task | Static teaching assertion passes. | task-53b428df |
+| fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 5 | 1542 | 19c67a0e5601b0f3 | teaches | taey-notify | Static teaching assertion passes. | task-53b428df |
+| fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 6 | 1563 | ea16455f43767dc4 | teaches | taey-notify | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | session_wake_packet | http_exception_detail | 1 | 1609 | b5149cdb01925464 | teaches | GET /api/sessions/{}/wake-packet | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | session_wake_packet | http_exception_detail | 2 | 1614 | c3b52d7c1280774e | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | set_project_stop_reason_endpoint | http_exception_detail | 1 | 1313 | e580830222b55f0c | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
