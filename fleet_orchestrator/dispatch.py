@@ -678,9 +678,10 @@ def _notify_supervisor_response_ready(worker: str,
         return
     task_id = str(current_task.get("task_id") or "").strip()
     description = str(current_task.get("description") or "").strip()
+    outcome = str(payload.get("outcome") or "unknown").strip().lower() or "unknown"
     details = str(payload.get("details") or "").strip()
     body = (
-        f"{worker} reported done"
+        f"{worker} reported {outcome}"
         f"{f' for {task_id}' if task_id else ''}"
         f"{f': {description}' if description else ''}"
         f"{f' - {details}' if details else ''}"
@@ -750,11 +751,12 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
     """Worker-side helper: record the task outcome before stopping.
 
     ``outcome`` MUST be one of ``done``, ``error``, ``interrupted``. Any
-    other value raises ``ValueError`` — the enum is load-bearing per the
-    the Stop hook clears the worker's current_task ONLY when outcome == ``done``. Any other
-    outcome (or absent record_outcome call entirely) leaves current_task
-    persisting as the "previous dispatch did not complete cleanly"
-    signal for the next dispatcher.
+    other value raises ``ValueError``. The enum is load-bearing: every
+    terminal outcome records ``last_outcome`` and immediately wakes the
+    binding supervisor. The Stop hook clears the worker's current_task ONLY
+    when outcome == ``done``. Any other outcome (or absent record_outcome
+    call entirely) leaves current_task persisting as the "previous dispatch
+    did not complete cleanly" signal for the next dispatcher.
 
     Semantics:
     - ``done`` — task completed successfully. Supervisor can move on.
@@ -775,34 +777,44 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
     r = _redis_connect()
     last_outcome_key = _state_key(worker, "last_outcome")
     current_task_key = _state_key(worker, "current_task")
+    current_task: Optional[dict[str, Any]] = None
+    current_task_id: Optional[str] = None
+    payload: dict[str, Any] = {"outcome": outcome}
+    stored = False
     if outcome == "done":
-        current_task = _decode_current_task(r.get(current_task_key))
+        current_task_raw = r.get(current_task_key)
+        current_task = _decode_current_task(current_task_raw)
+        current_task_id = _current_task_id(current_task_raw)
         payload = _outcome_payload(outcome, details, current_task)
         r.set(last_outcome_key, json.dumps(payload))
-        _notify_supervisor_response_ready(worker, current_task, payload)
-        return
+        stored = True
+    else:
+        from redis import WatchError
 
-    from redis import WatchError
-
-    current_task_id: Optional[str] = None
-    for _attempt in range(_WATCH_MAX_ATTEMPTS):
-        with r.pipeline() as pipe:
-            try:
-                pipe.watch(current_task_key)
-                current_task_raw = pipe.get(current_task_key)
-                current_task_id = _current_task_id(current_task_raw)
-                payload = _outcome_payload(outcome, details, _decode_current_task(current_task_raw))
-                pipe.multi()
-                pipe.set(last_outcome_key, json.dumps(payload))
-                pipe.execute()
-                break
-            except WatchError:
-                # Bounded retry + small backoff so a hot current_task key cannot
-                # livelock this loop (grok ws2-state WATCH-livelock note).
-                time.sleep(_WATCH_BACKOFF_S * (_attempt + 1))
-                continue
-    if current_task_id:
-        _revert_outcome_claim(worker, current_task_id)
+        for _attempt in range(_WATCH_MAX_ATTEMPTS):
+            with r.pipeline() as pipe:
+                try:
+                    pipe.watch(current_task_key)
+                    current_task_raw = pipe.get(current_task_key)
+                    current_task = _decode_current_task(current_task_raw)
+                    current_task_id = _current_task_id(current_task_raw)
+                    payload = _outcome_payload(outcome, details, current_task)
+                    pipe.multi()
+                    pipe.set(last_outcome_key, json.dumps(payload))
+                    pipe.execute()
+                    stored = True
+                    break
+                except WatchError:
+                    # Bounded retry + small backoff so a hot current_task key cannot
+                    # livelock this loop (grok ws2-state WATCH-livelock note).
+                    time.sleep(_WATCH_BACKOFF_S * (_attempt + 1))
+                    continue
+    if stored:
+        try:
+            if current_task_id and outcome != "done":
+                _revert_outcome_claim(worker, current_task_id)
+        finally:
+            _notify_supervisor_response_ready(worker, current_task, payload)
 
 
 def check_previous_task(worker: str) -> Optional[dict]:
