@@ -27,11 +27,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
   `ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1` as an explicit exposure acknowledgement.
   Prefer `ORCH_AUTH_TOKEN` for any non-loopback deployment that can receive
   untrusted callers.
-- The completion-evidence gate checks evidence **shape, not truth** (it has no git
-  access to verify a SHA exists). It stops accidental evidence-less completions; it
-  does not stop a deliberate caller who can reach the port from submitting a
-  well-formed but fabricated `commit_sha`. The token is the control for *who can
-  reach the port*.
+- The completion-evidence check is a shape/plausibility filter. It rejects lazy false-done (empty / trivial / malformed) but does NOT verify the evidence is true (the runtime has no git access; SHA-existence and gate-run truth are out of scope). A task marked completed with evidence is a SELF-REPORTED claim that passed a plausibility filter - not a verified result. The trust-bearing gate is independent re-verification by a DIFFERENT instance (verifier != producer): r5-audit-gate / ship-gate / a sibling re-running by execution. (ORCHESTRATION_INTEGRITY already states the automated completion-gate was deliberately shelved for this reason - a local system cannot bind a builder who holds the pen.) It stops accidental evidence-less completions; it does not stop a deliberate caller who can reach the port from submitting a well-formed but fabricated `commit_sha`. The token is the control for *who can reach the port*.
 - The **public read-only** surface (`scripts/orch-public`, `:5005`) is separate,
   GET-only, fail-closed (shows nothing unless a session is explicitly allowlisted),
   and scrubs secrets/operator paths. It is the only surface intended for exposure.
@@ -133,4 +129,4 @@ test scaffolding), `ORCH_NOTIFY_CLI` (also overridable in tests), `PATH`.
 
 **Not hardcoded-toggleable (no off-switch — verified):** the completion-evidence
 gate and supervisor keep-going are enforced unconditionally in code; no env flag
-disables them, and no DB write path bypasses the evidence gate.
+disables them, and no DB write path bypasses the evidence gate. (The completion-evidence check is a shape/plausibility filter only; see full honest framing above.)
