@@ -14,5 +14,12 @@ AGENTS.md
 .env.*.local
 audit_logs/
 
+# Local operator rules. Keep global.md and README.md tracked; per-session and
+# per-project rule overlays belong to the local operator.
+rules/supervisors/
+rules/supervisor/
+rules/projects/
+rules/project/
+
 # dead/parked code kept locally as .bak, never tracked (main stays clean)
 *.bak

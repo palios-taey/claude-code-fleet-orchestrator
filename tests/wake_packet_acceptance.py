@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -49,6 +50,21 @@ def _outside_boundary_lines(rendered: str, boundaries: list[tuple[str, str]]) ->
         if not started:
             outside.append(line)
     return outside
+
+
+def _section(rendered: str, heading: str) -> str:
+    lines = rendered.splitlines()
+    selected: list[str] = []
+    active = False
+    for line in lines:
+        if line == f"## {heading}":
+            active = True
+            continue
+        if active and line.startswith("## "):
+            break
+        if active:
+            selected.append(line)
+    return "\n".join(selected)
 
 
 def _client() -> TestClient:
@@ -146,6 +162,141 @@ def _endpoint_contract() -> None:
             os.environ["ORCH_WAKE_PACKET_ENABLED"] = old_legacy
 
 
+def _rules_delivery_endpoint_contract() -> None:
+    client = _client()
+    old_endpoint = os.environ.get("ORCH_WAKE_PACKET_ENDPOINT_ENABLED")
+    old_rules_root = os.environ.get("ORCH_RULES_ROOT")
+    logger = assembler.LOG
+    old_level = logger.level
+    old_propagate = logger.propagate
+
+    try:
+        os.environ["ORCH_WAKE_PACKET_ENDPOINT_ENABLED"] = "1"
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            populated = tmp / "populated-rules"
+            populated.mkdir()
+            (populated / "supervisors").mkdir()
+            (populated / "global.md").write_text("GLOBAL_ENDPOINT_RULE_TEXT", encoding="utf-8")
+            (populated / "supervisors" / "conductor.md").write_text("SUPERVISOR_ENDPOINT_RULE_TEXT", encoding="utf-8")
+
+            os.environ["ORCH_RULES_ROOT"] = str(populated)
+            with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["conductor-codex", "worker-codex"])), \
+                 mock.patch.object(tasks_api, "maybe_emit_decision_receipt", return_value=None), \
+                 mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
+                 mock.patch.object(assembler, "get_session_current_work", return_value=None), \
+                 mock.patch.object(assembler, "get_session_supervised_projects", return_value=[]), \
+                 mock.patch.object(assembler, "get_overall_refs", return_value={"ref_context": {"refs": []}}), \
+                 mock.patch.object(assembler, "get_supervisor_refs", return_value={"ref_context": {"refs": []}}):
+                delivered = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
+                global_only = client.get("/api/sessions/worker-codex/wake-packet?cli=codex")
+
+            delivered_body = delivered.json()
+            delivered_packet = delivered_body.get("packet", "")
+            delivered_rules = _section(delivered_packet, "Rules")
+            global_body = global_only.json()
+            global_packet = global_body.get("packet", "")
+            global_rules = _section(global_packet, "Rules")
+
+            _check(
+                "delivery path renders actual global and supervisor rule text",
+                delivered.status_code == 200
+                and delivered_body.get("ok") is True
+                and "GLOBAL_ENDPOINT_RULE_TEXT" in delivered_rules
+                and "SUPERVISOR_ENDPOINT_RULE_TEXT" in delivered_rules,
+                delivered_body,
+            )
+            _check(
+                "global rule renders before supervisor rule",
+                delivered_rules.find("GLOBAL_ENDPOINT_RULE_TEXT") >= 0
+                and delivered_rules.find("GLOBAL_ENDPOINT_RULE_TEXT") < delivered_rules.find("SUPERVISOR_ENDPOINT_RULE_TEXT"),
+                delivered_rules,
+            )
+            _check(
+                "global rule injects for any session without a supervisor file",
+                global_only.status_code == 200
+                and global_body.get("ok") is True
+                and "GLOBAL_ENDPOINT_RULE_TEXT" in global_rules
+                and "SUPERVISOR_ENDPOINT_RULE_TEXT" not in global_rules
+                and "- none selected" not in global_rules,
+                global_body,
+            )
+
+            absent = tmp / "absent-rules"
+            absent.mkdir()
+            os.environ["ORCH_RULES_ROOT"] = str(absent)
+            records: list[str] = []
+
+            class _Capture(logging.Handler):
+                def emit(self, record: logging.LogRecord) -> None:
+                    records.append(record.getMessage())
+
+            handler = _Capture()
+            logger.addHandler(handler)
+            logger.setLevel(logging.WARNING)
+            logger.propagate = False
+            try:
+                with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["conductor-codex"])), \
+                     mock.patch.object(tasks_api, "maybe_emit_decision_receipt", return_value=None), \
+                     mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
+                     mock.patch.object(assembler, "get_session_current_work", return_value=None), \
+                     mock.patch.object(assembler, "get_session_supervised_projects", return_value=[]), \
+                     mock.patch.object(assembler, "get_overall_refs", return_value={"ref_context": {"refs": []}}), \
+                     mock.patch.object(assembler, "get_supervisor_refs", return_value={"ref_context": {"refs": []}}):
+                    missing = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
+            finally:
+                logger.removeHandler(handler)
+                logger.setLevel(old_level)
+                logger.propagate = old_propagate
+
+            missing_body = missing.json()
+            missing_rules = _section(missing_body.get("packet", ""), "Rules")
+            _check(
+                "missing rules store renders distinct teaching line instead of none selected",
+                missing.status_code == 200
+                and missing_body.get("ok") is True
+                and assembler.RULES_STORE_ABSENT_LINE in missing_rules
+                and "- none selected" not in missing_rules,
+                missing_body,
+            )
+            _check(
+                "missing rules store emits warning",
+                any("rules store absent" in message and str(absent) in message for message in records),
+                records,
+            )
+
+            missing_root = tmp / "missing-rules-root"
+            os.environ["ORCH_RULES_ROOT"] = str(missing_root)
+            with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["conductor-codex"])), \
+                 mock.patch.object(tasks_api, "maybe_emit_decision_receipt", return_value=None), \
+                 mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
+                 mock.patch.object(assembler, "get_session_current_work", return_value=None), \
+                 mock.patch.object(assembler, "get_session_supervised_projects", return_value=[]), \
+                 mock.patch.object(assembler, "get_overall_refs", return_value={"ref_context": {"refs": []}}), \
+                 mock.patch.object(assembler, "get_supervisor_refs", return_value={"ref_context": {"refs": []}}):
+                missing_dir = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
+            missing_dir_body = missing_dir.json()
+            missing_dir_rules = _section(missing_dir_body.get("packet", ""), "Rules")
+            _check(
+                "nonexistent rules root renders distinct teaching line",
+                missing_dir.status_code == 200
+                and missing_dir_body.get("ok") is True
+                and assembler.RULES_STORE_ABSENT_LINE in missing_dir_rules,
+                missing_dir_body,
+            )
+    finally:
+        if old_endpoint is None:
+            os.environ.pop("ORCH_WAKE_PACKET_ENDPOINT_ENABLED", None)
+        else:
+            os.environ["ORCH_WAKE_PACKET_ENDPOINT_ENABLED"] = old_endpoint
+        if old_rules_root is None:
+            os.environ.pop("ORCH_RULES_ROOT", None)
+        else:
+            os.environ["ORCH_RULES_ROOT"] = old_rules_root
+        logger.setLevel(old_level)
+        logger.propagate = old_propagate
+
+
 def _assembler_contract() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -168,6 +319,7 @@ def _assembler_contract() -> None:
         rules_root = tmp / "rules"
         (rules_root / "supervisors").mkdir(parents=True)
         (rules_root / "projects").mkdir(parents=True)
+        (rules_root / "global.md").write_text("Global wake rule", encoding="utf-8")
         (rules_root / "supervisors" / "conductor.md").write_text("Supervisor wake rule", encoding="utf-8")
         (rules_root / "projects" / "dynctx.md").write_text("Project wake rule", encoding="utf-8")
 
@@ -207,8 +359,9 @@ def _assembler_contract() -> None:
 
     snapshot = packet.get("snapshot", {})
     _check("select_context reloads supplied session roots per request", context["memory"] and "Use the selected memory." in context["memory"][0]["content"], context)
-    _check("rules_tier is the assembler rule source", len(context["rules"]) == 2 and all("sha256" in rule for rule in context["rules"]), context["rules"])
-    _check("snapshot carries memory and rules fingerprints", bool(snapshot.get("memory_files")) and len(snapshot.get("rules_files") or []) == 2, snapshot)
+    _check("rules_tier is the assembler rule source", len(context["rules"]) == 3 and all("sha256" in rule for rule in context["rules"]), context["rules"])
+    _check("rules_tier injects global before scoped rules", [rule.get("scope") for rule in context["rules"]] == ["global", "supervisor", "project"], context["rules"])
+    _check("snapshot carries memory and rules fingerprints", bool(snapshot.get("memory_files")) and len(snapshot.get("rules_files") or []) == 3, snapshot)
     _check("provenance binds rendered packet plus snapshot", bool(packet.get("provenance_hash")) and report["under_budget"] is True and "AGENTS.md Dynamic Context" in rendered, report)
 
 
@@ -481,6 +634,7 @@ def _memory_traversal_contract() -> None:
 
 def main() -> int:
     _endpoint_contract()
+    _rules_delivery_endpoint_contract()
     _assembler_contract()
     _identity_section_contract()
     _untrusted_envelope_contract()

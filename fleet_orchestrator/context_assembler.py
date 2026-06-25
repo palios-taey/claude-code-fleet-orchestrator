@@ -4,6 +4,7 @@ import argparse
 import copy
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -26,13 +27,15 @@ from fleet_orchestrator.orch_schema import (
     get_task_project,
 )
 from fleet_orchestrator.paths import repo_root
-from fleet_orchestrator.rules_tier import get_rules
+from fleet_orchestrator.rules_tier import RULES_ROOT, get_rules
 
 
+LOG = logging.getLogger(__name__)
 CORE_BUDGET_BYTES = 15 * 1024
 DEFAULT_MAX_MEMORY = 4
 DEFAULT_MAX_REFS_PER_TIER = 5
 MEMORY_BASE = Path.home() / ".claude" / "projects"
+RULES_STORE_ABSENT_LINE = "- no rules store configured - add rules/global.md or set ORCH_RULES_ROOT; see rules/README.md"
 UNTRUSTED_NONCE_FIELD = "untrusted_data_nonce"
 DEFAULT_COMPANION_SESSIONS = ("taey", "companion")
 UNAVAILABLE_CONTEXT_MARKER = "UNAVAILABLE (context selection error)"
@@ -117,7 +120,9 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
     refs = _select_refs(summary, work, task_id, session_key)
     memory_files = _read_memory_files(_memory_dirs(session_key, work, summary, roots, aliases))
     selected_memory = _rank_memory(memory_files, task_text, max_memory=max_memory)
-    rules = _select_rules(session_key, work, summary, task_text, scoped_env=scoped_env)
+    rules_selection = _select_rules(session_key, work, summary, task_text, scoped_env=scoped_env)
+    rules = rules_selection["rules"]
+    rules_meta = rules_selection["meta"]
     identity = _select_identity(raw_session, session_key, cli)
     supervisor_affordance = _supervisor_access_affordance(raw_session, roots, registered_sessions)
 
@@ -131,6 +136,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
         "supervisor_affordance": supervisor_affordance,
         "memory": selected_memory,
         "rules": rules,
+        "rules_meta": rules_meta,
         "budget_used": 0,
     }
     context["snapshot"] = _build_snapshot(session_key, cli, task_id, work, summary, selected_memory, rules, identity)
@@ -588,25 +594,46 @@ def _public_memory_item(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _select_rules(session: str, work: Dict[str, Any], summary: Optional[Dict[str, Any]],
-                  task_text: str, scoped_env: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+                  task_text: str, scoped_env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     project = (
         work.get("project_id")
         or ((summary or {}).get("project") or {}).get("id")
         or work.get("project_name")
         or ((summary or {}).get("project") or {}).get("name")
     )
-    rules = get_rules(session, project=str(project) if project else None, rules_root=_rules_root(scoped_env))
-    return _rank_rules(rules, task_text)
+    rules_root = _rules_root(scoped_env)
+    effective_root = Path(rules_root) if rules_root is not None else RULES_ROOT
+    meta = _rules_store_meta(effective_root, configured=rules_root is not None)
+    if not meta["store_present"]:
+        LOG.warning(
+            "rules store absent for wake packet session=%s project=%s root=%s; add rules/global.md or set ORCH_RULES_ROOT",
+            session,
+            project or "",
+            effective_root,
+        )
+    rules = get_rules(session, project=str(project) if project else None, rules_root=rules_root)
+    return {"rules": _rank_rules(rules, task_text), "meta": meta}
+
+
+def _rules_store_meta(root: Path, configured: bool) -> Dict[str, Any]:
+    global_path = root / "global.md"
+    root_exists = root.is_dir()
+    global_present = global_path.is_file()
+    return {
+        "root": str(root),
+        "configured": configured,
+        "root_exists": root_exists,
+        "global_path": str(global_path),
+        "global_present": global_present,
+        "store_present": root_exists and global_present,
+    }
 
 
 def _rules_root(scoped_env: Optional[Dict[str, str]] = None) -> Optional[Path]:
     raw = _scoped_env_value(scoped_env, "ORCH_RULES_ROOT").strip()
     if not raw:
         return None
-    root = Path(raw).expanduser().resolve(strict=False)
-    if not root.is_dir():
-        raise ValueError("ORCH_RULES_ROOT must point to an existing directory")
-    return root
+    return Path(raw).expanduser().resolve(strict=False)
 
 
 def _select_identity(raw_session: str, session: str, cli: str) -> Dict[str, Any]:
@@ -812,10 +839,11 @@ def _ledger_tail() -> Dict[str, Any]:
 
 def _rank_rules(rules: List[Dict[str, Any]], task_text: str) -> List[Dict[str, Any]]:
     terms = _terms(task_text)
+    scope_order = {"global": 0, "supervisor": 1, "project": 2}
     scored = []
     for rule in rules:
         score = len(terms & _terms(rule.get("text", "")[:2000]))
-        scored.append((0 if rule.get("scope") == "supervisor" else 1, -score, rule.get("path", ""), rule))
+        scored.append((scope_order.get(rule.get("scope"), 3), -score, rule.get("path", ""), rule))
     scored.sort()
     return [row[3] for row in scored]
 
@@ -869,13 +897,18 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
     if not context.get("memory"):
         lines.append("- none selected")
     lines.extend(["", "## Rules"])
-    for idx, rule in enumerate(context.get("rules") or [], start=1):
+    rules = context.get("rules") or []
+    for idx, rule in enumerate(rules, start=1):
         lines.append(f"### Rule {idx}")
         lines.extend(_render_untrusted(nonce, f"rule:{idx}:scope", rule.get("scope", "project")))
         lines.extend(_render_untrusted(nonce, f"rule:{idx}:text", rule.get("text", "")))
         lines.append("")
-    if not context.get("rules"):
-        lines.append("- none selected")
+    if not rules:
+        rules_meta = context.get("rules_meta") or {}
+        if rules_meta.get("store_present") is False:
+            lines.append(RULES_STORE_ABSENT_LINE)
+        else:
+            lines.append("- none selected")
     lines.extend([
         "",
         "## Cycle",

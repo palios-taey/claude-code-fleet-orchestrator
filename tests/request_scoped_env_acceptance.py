@@ -56,6 +56,10 @@ def _rules_text(context: dict[str, object]) -> str:
 
 
 def _write_rule(root: Path, session: str, text: str) -> None:
+    global_path = root / "global.md"
+    if not global_path.exists():
+        global_path.parent.mkdir(parents=True, exist_ok=True)
+        global_path.write_text("GLOBAL_RULE\n", encoding="utf-8")
     path = root / "supervisors" / f"{session}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text + "\n", encoding="utf-8")
