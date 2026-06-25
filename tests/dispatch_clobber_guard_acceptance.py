@@ -39,7 +39,13 @@ def _notify_stub(path: Path, log_path: Path) -> str:
 
 def main() -> int:
     from fleet_orchestrator.config import OrchConfig
-    from fleet_orchestrator.orch_schema import create_phase, create_project, create_task, get_neo4j_driver
+    from fleet_orchestrator.orch_schema import (
+        create_phase,
+        create_project,
+        create_task,
+        get_neo4j_driver,
+        update_task_status,
+    )
     import fleet_orchestrator.dispatch as D
 
     cfg = OrchConfig()
@@ -74,7 +80,7 @@ def main() -> int:
         try:
             create_project(project_id=PFX, name="dispatch clobber guard", supervisor=SUP_A, config=cfg)
             create_phase(project_id=PFX, phase_id=task_id("phase"), name="phase", config=cfg)
-            for name in ("first", "second", "forced"):
+            for name in ("first", "same-second", "second", "forced", "terminal-next"):
                 create_task(
                     phase_id=task_id("phase"),
                     task_id=task_id(name),
@@ -90,25 +96,60 @@ def main() -> int:
             _check("first dispatch records dispatcher", first_binding.get("dispatcher") == SUP_A, first_binding)
             _check("first dispatch marks task in_progress", task_status(task_id("first")) == "in_progress", task_status(task_id("first")))
 
+            same_dispatcher_refused = None
+            try:
+                D.dispatch(WORKER, task_id("same-second"), "same-second", supervisor=SUP_A)
+            except D.WorkerBusy as exc:
+                same_dispatcher_refused = str(exc)
+
+            expected = f"worker busy with {SUP_A}:{task_id('first')} (in_progress)"
+            _check("same dispatcher different task is refused", same_dispatcher_refused == expected, same_dispatcher_refused)
+            preserved = current_task()
+            _check("same dispatcher refusal preserves first current_task", preserved == first_binding, preserved)
+            _check("same dispatcher refusal rolls task back to pending", task_status(task_id("same-second")) == "pending", task_status(task_id("same-second")))
+            notify_lines = notify_log.read_text(encoding="utf-8").splitlines()
+            _check("same dispatcher refusal does not notify worker", len(notify_lines) == 1, notify_lines)
+
+            update_task_status(task_id("first"), "pending", owner=WORKER, config=cfg)
+            D.dispatch(WORKER, task_id("first"), "first rebind", supervisor=SUP_A)
+            rebound = current_task()
+            _check("same dispatcher same task rebind is allowed", rebound.get("task_id") == task_id("first"), rebound)
+            _check("same dispatcher same task rebind updates nonce", rebound.get("started_at") != first_binding.get("started_at"), rebound)
+            _check("same dispatcher same task rebind leaves task in_progress", task_status(task_id("first")) == "in_progress", task_status(task_id("first")))
+            _check("same dispatcher same task rebind notifies worker", len(notify_log.read_text(encoding="utf-8").splitlines()) == 2, notify_log.read_text(encoding="utf-8"))
+
             refused = None
             try:
                 D.dispatch(WORKER, task_id("second"), "second", supervisor=SUP_B)
             except D.WorkerBusy as exc:
                 refused = str(exc)
 
-            expected = f"worker busy with {SUP_A}:{task_id('first')} (in_progress)"
             _check("second dispatcher is refused with busy message", refused == expected, refused)
             preserved = current_task()
-            _check("refused dispatch preserves first current_task", preserved == first_binding, preserved)
+            _check("refused dispatch preserves first current_task", preserved == rebound, preserved)
             _check("refused dispatch rolls second task back to pending", task_status(task_id("second")) == "pending", task_status(task_id("second")))
             notify_lines = notify_log.read_text(encoding="utf-8").splitlines()
-            _check("refused dispatch does not notify worker", len(notify_lines) == 1, notify_lines)
+            _check("refused dispatch does not notify worker", len(notify_lines) == 2, notify_lines)
 
             D.dispatch(WORKER, task_id("forced"), "forced", supervisor=SUP_B, force=True)
             forced = current_task()
             _check("force dispatch replaces current_task", forced.get("task_id") == task_id("forced"), forced)
             _check("force dispatch records new supervisor", forced.get("supervisor") == SUP_B, forced)
-            _check("force dispatch notifies worker", len(notify_log.read_text(encoding="utf-8").splitlines()) == 2, notify_log.read_text(encoding="utf-8"))
+            _check("force dispatch notifies worker", len(notify_log.read_text(encoding="utf-8").splitlines()) == 3, notify_log.read_text(encoding="utf-8"))
+
+            update_task_status(
+                task_id("forced"),
+                "completed",
+                owner=WORKER,
+                completion_evidence={"production_observation": "dispatch clobber guard completed forced task"},
+                config=cfg,
+            )
+            D.dispatch(WORKER, task_id("terminal-next"), "terminal-next", supervisor=SUP_B)
+            terminal_next = current_task()
+            _check("terminal existing task allows next bind", terminal_next.get("task_id") == task_id("terminal-next"), terminal_next)
+            _check("terminal next task is in_progress", task_status(task_id("terminal-next")) == "in_progress", task_status(task_id("terminal-next")))
+            _check("terminal previous task stays completed", task_status(task_id("forced")) == "completed", task_status(task_id("forced")))
+            _check("terminal next dispatch notifies worker", len(notify_log.read_text(encoding="utf-8").splitlines()) == 4, notify_log.read_text(encoding="utf-8"))
         finally:
             if old_notify_cli is None:
                 os.environ.pop("ORCH_NOTIFY_CLI", None)

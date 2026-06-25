@@ -139,7 +139,7 @@ def main() -> int:
         _check("completed recurring task re-claims as in_progress", recur.get("status") == "in_progress", recur)
         _check("recurring re-claim increments counter", int(recur.get("reclaim_count") or 0) == 1, recur)
 
-        D.dispatch(WORKER, tagged_task, "next tag recurring cycle", supervisor=SUP)
+        D.dispatch(WORKER, tagged_task, "next tag recurring cycle", supervisor=SUP, force=True)
         tagged = get_task(tagged_task, config=CFG)
         _check("recurring tag also marks task re-claimable", tagged.get("status") == "in_progress", tagged)
 

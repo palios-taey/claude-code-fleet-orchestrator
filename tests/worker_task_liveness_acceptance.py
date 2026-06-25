@@ -163,10 +163,10 @@ def _setup() -> None:
     )
 
 
-def _dispatch(task_id: str) -> None:
+def _dispatch(task_id: str, *, force: bool = False) -> None:
     ok = SimpleNamespace(returncode=0, stdout="OK", stderr="")
     with mock.patch.object(dispatch_module.subprocess, "run", return_value=ok):
-        dispatch_module.dispatch(WORKER, task_id, task_id, supervisor=SUP)
+        dispatch_module.dispatch(WORKER, task_id, task_id, supervisor=SUP, force=force)
 
 
 def _current_task_id() -> str:
@@ -202,7 +202,7 @@ def main() -> int:
         _setup()
 
         _dispatch(FIRST)
-        _dispatch(SECOND)
+        _dispatch(SECOND, force=True)
         _check("rapid double dispatch leaves single current_task on second", _current_task_id() == SECOND, _current_task_id())
         _check("first dispatch is still in_progress before TTL", get_task(FIRST, config=CFG).get("status") == "in_progress", get_task(FIRST, config=CFG))
         _check("second dispatch is in_progress before TTL", get_task(SECOND, config=CFG).get("status") == "in_progress", get_task(SECOND, config=CFG))
@@ -262,7 +262,7 @@ def main() -> int:
             {"count": count, "task": await_task, "sent": sent},
         )
 
-        _dispatch(FREE_TEXT_WAIT)
+        _dispatch(FREE_TEXT_WAIT, force=True)
         update_task_status(
             FREE_TEXT_WAIT,
             "in_progress",
