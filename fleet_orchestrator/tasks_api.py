@@ -18,7 +18,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import sys
 import subprocess
 import time
@@ -292,9 +291,6 @@ ALLOWED_NOTIFY_TYPES = {
     "command": "command",
     "response_ready": "response_ready",
 }
-_COMMAND_DISPATCH_RE = re.compile(
-    r"(?im)(?:^|\s)DISPATCH\s+(?:task\s*[=:]\s*)?(?P<task_id>[A-Za-z0-9][A-Za-z0-9_.:-]*)"
-)
 MUTABLE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -513,14 +509,6 @@ def _ensure_registered_session(session_id: str, cfg: OrchConfig) -> None:
         )
 
 
-def _command_dispatch_task_id(message: str) -> Optional[str]:
-    match = _COMMAND_DISPATCH_RE.search(message or "")
-    if not match:
-        return None
-    task_id = match.group("task_id").strip()
-    return task_id if task_id and task_id != "task" else None
-
-
 def _infer_dispatch_supervisor(target: str, data: Dict[str, Any]) -> Optional[str]:
     for key in ("from", "sender", "supervisor", "dispatcher"):
         value = str(data.get(key) or "").strip()
@@ -541,6 +529,26 @@ def _dispatch_description(task_id: str, message: str, cfg: OrchConfig) -> str:
     _, _, after = first_line.partition(marker)
     fallback = after.strip(" \t-:").lstrip("\u2014").strip()
     return fallback or task_id
+
+
+def _dispatch_task_id_from_payload(data: Dict[str, Any], target: str) -> Optional[str]:
+    if data.get("dispatch") is not True:
+        return None
+    task_id = str(data.get("task_id") or "").strip()
+    if task_id:
+        return task_id
+    raise HTTPException(
+        status_code=400,
+        detail=_required_body_detail(
+            "task_id",
+            {"dispatch": True, "task_id": "<task-id>", "message": "<optional dispatch prompt>"},
+            endpoint=f"POST /api/sessions/{target}/notify",
+            command=(
+                f"curl -X POST /api/sessions/{target}/notify "
+                "-d '{\"dispatch\":true,\"task_id\":\"<task-id>\"}'"
+            ),
+        ),
+    )
 
 
 @app.get("/api/tasks")
@@ -1481,7 +1489,8 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
         )
 
     data = await req.json()
-    notify_type = data.get("type", "standard")
+    command_task_id = _dispatch_task_id_from_payload(data, target)
+    notify_type = data.get("type", "command" if command_task_id else "standard")
     message = (data.get("message") or "").strip()
 
     if notify_type not in ALLOWED_NOTIFY_TYPES:
@@ -1494,7 +1503,7 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
                 '{"message":"<notification text>","type":"standard"}.'
             ),
         )
-    if not message:
+    if not message and not command_task_id:
         raise HTTPException(
             status_code=400,
             detail=_required_body_detail(
@@ -1507,11 +1516,6 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
     cfg = _cfg()
     _ensure_registered_session(target, cfg)
 
-    command_task_id = (
-        _command_dispatch_task_id(message)
-        if notify_type == "command"
-        else None
-    )
     if command_task_id:
         supervisor = _infer_dispatch_supervisor(target, data)
         description = _dispatch_description(command_task_id, message, cfg)
@@ -1521,7 +1525,7 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
                 command_task_id,
                 description,
                 supervisor=supervisor,
-                prompt_body=message,
+                prompt_body=message or None,
                 priority=str(data.get("priority") or "normal"),
                 force=bool(data.get("force")),
             )

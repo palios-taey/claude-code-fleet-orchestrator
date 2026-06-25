@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Acceptance: command-shaped session notify uses canonical dispatch liveness.
+"""Acceptance: explicit session-notify dispatch uses canonical liveness.
 
 Issue #195 remaining gap: the UI/API command path could send ``DISPATCH ...``
 through plain ``taey-notify`` without binding current_task or registering
 task-keyed worker liveness. A silent peer then had no record_outcome, no Stop
 hook wake, and no liveness timeout wake for the supervisor.
+
+Follow-up hardening: dispatch intent is explicit JSON payload state
+(``dispatch: true`` + ``task_id``), not inferred from prose tokens.
 """
 from __future__ import annotations
 
@@ -162,19 +165,25 @@ def main() -> int:
             calls.append(list(args))
             return SimpleNamespace(returncode=0, stdout="OK", stderr="")
 
-        _check(
-            "parser accepts operator DISPATCH task-id prose",
-            tasks_api._command_dispatch_task_id("DISPATCH task-deadbeef - fix it") == "task-deadbeef",
-            tasks_api._command_dispatch_task_id("DISPATCH task-deadbeef - fix it"),
-        )
+        direct_calls: list[list[str]] = []
+        with mock.patch.object(tasks_api, "_ensure_registered_session", return_value=None), \
+             mock.patch.object(tasks_api.subprocess, "run", side_effect=lambda args, **_kw: direct_calls.append(list(args)) or SimpleNamespace(returncode=0, stdout="OK", stderr="")):
+            prose_response = client.post(
+                f"/api/sessions/{PEER}/notify",
+                json={"type": "command", "message": f"DISPATCH {TASK} - prose mention", "from": SUP},
+            )
+        _check("prose DISPATCH mention remains plain notify", prose_response.status_code == 200 and prose_response.json().get("dispatch_registered") is None, prose_response.text)
+        _check("prose DISPATCH mention does not bind current_task", _redis().get(_state_key(PEER, "current_task")) is None, _redis().get(_state_key(PEER, "current_task")))
+        _check("prose DISPATCH mention calls direct taey-notify", direct_calls and direct_calls[0][-1] == "command", direct_calls)
+
         with mock.patch.object(tasks_api, "_ensure_registered_session", return_value=None), \
              mock.patch.object(dispatch_module.subprocess, "run", side_effect=fake_notify):
             response = client.post(
                 f"/api/sessions/{PEER}/notify",
-                json={"type": "command", "message": f"DISPATCH {TASK} - command path", "from": SUP},
+                json={"dispatch": True, "task_id": TASK, "message": "explicit dispatch path", "from": SUP},
             )
 
-        _check("command notify dispatch endpoint succeeds", response.status_code == 200 and response.json().get("dispatch_registered") is True, response.text)
+        _check("explicit command notify dispatch endpoint succeeds", response.status_code == 200 and response.json().get("dispatch_registered") is True, response.text)
         _check("canonical dispatch call used handoff metadata", calls and "--handoff" in calls[0] and "--dispatcher-task-id" in calls[0], calls)
         current_raw = _redis().get(_state_key(PEER, "current_task"))
         current = json.loads(current_raw) if current_raw else {}
@@ -229,7 +238,7 @@ def main() -> int:
     if FAILURES:
         print(f"\nFAIL -- {len(FAILURES)}: {FAILURES}")
         return 1
-    print("\nPASS -- command notify dispatch binds liveness and unconfirmed peer work prevents stop-condition suppression.")
+    print("\nPASS -- explicit command notify dispatch binds liveness and unconfirmed peer work prevents stop-condition suppression.")
     return 0
 
 
