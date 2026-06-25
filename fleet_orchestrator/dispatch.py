@@ -130,14 +130,15 @@ def _current_task_status(task_id: str) -> Optional[str]:
 
 
 def _busy_current_task_error(worker: str, existing: Optional[dict[str, Any]],
-                             dispatcher: Optional[str]) -> Optional[WorkerBusy]:
+                             dispatcher: Optional[str], task_id: str) -> Optional[WorkerBusy]:
     if not existing:
         return None
+    existing_task_id = str(existing.get("task_id") or "").strip()
+    incoming_task_id = str(task_id or "").strip()
     existing_dispatcher = str(existing.get("dispatcher") or existing.get("supervisor") or "").strip()
     incoming_dispatcher = str(dispatcher or "").strip()
-    if existing_dispatcher == incoming_dispatcher:
+    if existing_dispatcher == incoming_dispatcher and existing_task_id == incoming_task_id:
         return None
-    existing_task_id = str(existing.get("task_id") or "").strip()
     status = _current_task_status(existing_task_id)
     if status in _TERMINAL_TASK_STATUSES:
         return None
@@ -159,7 +160,12 @@ def _bind_current_task_checked(r: Any, worker: str, current_task: dict[str, Any]
             try:
                 pipe.watch(key)
                 if not force:
-                    busy = _busy_current_task_error(worker, _decode_current_task(pipe.get(key)), dispatcher)
+                    busy = _busy_current_task_error(
+                        worker,
+                        _decode_current_task(pipe.get(key)),
+                        dispatcher,
+                        str(current_task["task_id"]),
+                    )
                     if busy:
                         pipe.unwatch()
                         raise busy
