@@ -99,6 +99,7 @@ _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "interrupted"})
 HUMAN_REVIEW_TASK_TYPE = "human-review"
 HUMAN_REVIEW_QUESTION_TYPE = "human_review_gate"
 COMPLETED_EVIDENCE_NEXT_STEP = (
+    'The completion-evidence check is a shape/plausibility filter. It rejects lazy false-done (empty / trivial / malformed) but does NOT verify the evidence is true (the runtime has no git access; SHA-existence and gate-run truth are out of scope). A task marked completed with evidence is a SELF-REPORTED claim that passed a plausibility filter - not a verified result. The trust-bearing gate is independent re-verification by a DIFFERENT instance (verifier != producer): r5-audit-gate / ship-gate / a sibling re-running by execution. (ORCHESTRATION_INTEGRITY already states the automated completion-gate was deliberately shelved for this reason - a local system cannot bind a builder who holds the pen.) '
     'Use `taey-task update <task-id> completed --evidence '
     '\'{"commit_sha":"<sha>","production_observation":"<what you verified>"}\'` '
     'or PATCH /api/task/<task-id> with body '
@@ -189,7 +190,7 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
     if evidence is None:
         return None
     if not isinstance(evidence, dict):
-        raise CompletionEvidenceError(f"completion evidence must be a JSON object. {COMPLETED_EVIDENCE_NEXT_STEP}")
+        raise CompletionEvidenceError(f"The completion-evidence check is a shape/plausibility filter (self-reported claim, not verified provenance). completion evidence must be a JSON object. {COMPLETED_EVIDENCE_NEXT_STEP}")
     normalized: Dict[str, str] = {}
     for key in _COMPLETION_EVIDENCE_KEYS:
         value = evidence.get(key)
@@ -198,6 +199,7 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         # Must be a real non-empty string — not 0/False/[] coerced via str().
         if not isinstance(value, str):
             raise CompletionEvidenceError(
+                "The completion-evidence check is a shape/plausibility filter (self-reported, not verified). "
                 f"completion evidence {key!r} must be a string, got {type(value).__name__}. "
                 f"{COMPLETED_EVIDENCE_NEXT_STEP}"
             )
@@ -209,6 +211,7 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         # this only rejects values that cannot plausibly BE the thing they claim to be.
         if not _evidence_value_well_formed(key, text):
             raise CompletionEvidenceError(
+                "The completion-evidence check is a shape/plausibility filter (rejects lazy false-done but does NOT verify truth - no git access at runtime; self-reported only). "
                 f"completion evidence {key!r}={text!r} is not well-formed "
                 f"(commit_sha=4-64 hex, gate_run_id>=3 id-chars, production_observation>=8 chars). "
                 f"{COMPLETED_EVIDENCE_NEXT_STEP}"
@@ -216,7 +219,7 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         normalized[key] = text
     if not normalized:
         raise CompletionEvidenceError(
-            "completed status requires evidence with at least one of: "
+            "The completion-evidence check is a shape/plausibility filter (rejects lazy false-done but does NOT verify truth - no git access at runtime). A completed task with evidence is a SELF-REPORTED claim. Trust is via independent r5 (verifier != producer). completed status requires evidence with at least one of: "
             f"commit_sha, gate_run_id, production_observation. {COMPLETED_EVIDENCE_NEXT_STEP}"
         )
     return normalized

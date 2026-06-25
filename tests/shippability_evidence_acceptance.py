@@ -29,7 +29,7 @@ PFX = f"{_require_test_namespace()}-ship-evidence-{uuid.uuid4().hex[:8]}"
 os.environ["ORCH_SHIP_GATES"] = "audit"
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
-from fleet_orchestrator.orch_schema import create_phase, create_project, create_task, init_schema  # noqa: E402
+from fleet_orchestrator.orch_schema import create_phase, create_project, create_task, init_schema, _normalize_completion_evidence, CompletionEvidenceError  # noqa: E402
 from fleet_orchestrator.shippability import evaluate_shippability  # noqa: E402
 
 
@@ -104,6 +104,26 @@ def main() -> int:
         _check("completed gate with valid evidence is shippable", valid.get("shippable") is True, valid)
         _check("valid evidence leaves no incomplete gates", valid.get("incomplete_gates") == [], valid)
         _check("success reason says valid evidence", "valid evidence" in str(valid.get("reason") or ""), valid)
+
+        # ADVERSARIAL: shape-check accepts fabricated (documents it is NOT verification)
+        fabricated = {"commit_sha": "deadbeef", "production_observation": "fabricated, never ran"}
+        try:
+            norm = _normalize_completion_evidence(fabricated)
+            _check("ADVERSARIAL: fabricated-but-shape-valid evidence is ACCEPTED by _normalize (shape filter, NOT provenance verification)", norm is not None and norm.get("commit_sha") == "deadbeef", norm)
+        except Exception as e:
+            _check("ADVERSARIAL: fabricated-but-shape-valid evidence is ACCEPTED by _normalize (shape filter, NOT provenance verification)", False, str(e))
+
+        # trivial junk rejected
+        try:
+            _normalize_completion_evidence({"production_observation": "x"})
+            _check("ADVERSARIAL: junk evidence 'x' is REJECTED", False)
+        except CompletionEvidenceError:
+            _check("ADVERSARIAL: junk evidence 'x' is REJECTED by shape check", True)
+        try:
+            _normalize_completion_evidence({})
+            _check("ADVERSARIAL: empty evidence dict for completed is REJECTED", False)
+        except CompletionEvidenceError:
+            _check("ADVERSARIAL: empty evidence dict for completed is REJECTED by shape check", True)
 
         _seed_project(NONGATE_PROJECT, f"{NONGATE_PROJECT}::not-a-gate")
         no_gates = evaluate_shippability(NONGATE_PROJECT, config=CFG)
