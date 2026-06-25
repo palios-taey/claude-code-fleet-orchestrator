@@ -13,27 +13,12 @@ def get_rules(session: str, project: Optional[str] = None, rules_root: Optional[
     entries: List[Dict[str, Any]] = []
     seen: set[Path] = set()
 
+    _append_rule_entry(entries, seen, root / "global.md", "global", "global")
     for scope, key in (("supervisor", session), ("project", project)):
         if not key:
             continue
         for path in _candidate_paths(root, scope, str(key)):
-            resolved = path.resolve(strict=False)
-            if resolved in seen or not path.is_file():
-                continue
-            seen.add(resolved)
-            text = path.read_text(encoding="utf-8", errors="replace").strip()
-            if not text:
-                continue
-            stat = path.stat()
-            entries.append({
-                "scope": scope,
-                "key": str(key),
-                "text": text,
-                "path": str(path),
-                "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                "mtime_ns": stat.st_mtime_ns,
-                "size": stat.st_size,
-            })
+            _append_rule_entry(entries, seen, path, scope, str(key))
     return entries
 
 
@@ -61,6 +46,26 @@ def _candidate_paths(root: Path, scope: str, key: str) -> List[Path]:
         root / scope / f"{safe_key}.md",
         root / f"{scope}-{safe_key}.md",
     ]
+
+
+def _append_rule_entry(entries: List[Dict[str, Any]], seen: set[Path], path: Path, scope: str, key: str) -> None:
+    resolved = path.resolve(strict=False)
+    if resolved in seen or not path.is_file():
+        return
+    seen.add(resolved)
+    text = path.read_text(encoding="utf-8", errors="replace").strip()
+    if not text:
+        return
+    stat = path.stat()
+    entries.append({
+        "scope": scope,
+        "key": key,
+        "text": text,
+        "path": str(path),
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "mtime_ns": stat.st_mtime_ns,
+        "size": stat.st_size,
+    })
 
 
 def _write_rules(scope: str, key: str, text: str, rules_root: Optional[Path]) -> Path:
