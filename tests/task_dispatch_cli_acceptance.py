@@ -146,6 +146,7 @@ def main() -> int:
         argv = ["taey-task", "dispatch", _TASK, _PEER]
         with mock.patch.object(cli, "api_call", side_effect=lambda method, endpoint, data=None: _api_call(client, method, endpoint, data)), \
              mock.patch.object(cli, "detect_from_node", return_value=_SUP), \
+             mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
              mock.patch.object(dispatch_module.subprocess, "run", return_value=ok) as notify_run, \
              mock.patch.object(sys, "argv", argv):
             cli.main()

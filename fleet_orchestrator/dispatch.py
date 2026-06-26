@@ -72,6 +72,7 @@ from .notify_state import redis_connect as _notify_redis_connect
 from .notify_state import state_key as _notify_state_key
 from .decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from .handoff_validation import mark_superseded_for_task
+from .hook_installation import hook_installation_status
 from .rules_tier import get_rules
 from .worker_liveness import register_worker_task_liveness
 
@@ -95,6 +96,10 @@ class OrchTaskNotReady(Exception):
 
 class WorkerBusy(Exception):
     """Dispatch blocked because another live dispatcher already owns the worker slot."""
+
+
+class HooksNotInstalled(Exception):
+    """Dispatch blocked because the target session has no managed notify hooks."""
 
 
 def _base_session_name(worker: str) -> str:
@@ -666,10 +671,12 @@ def dispatch(
     3. If ``supervisor`` is provided, write ``taey:<worker>:parent`` so
        the Stop hook addresses notifications correctly even for multi-
        level trees (where suffix-strip wouldn't reach the right node).
-    4. Assemble a wake packet for ``worker`` and ``task_id``. The original
+    4. Refuse if the target CLI does not have managed notify hooks installed;
+       without hooks the worker cannot maintain wake/stop-discipline state.
+    5. Assemble a wake packet for ``worker`` and ``task_id``. The original
        dispatch body is embedded in the packet's Human section, so direct
-       dispatch and un-hooked sessions still receive rules and context.
-    5. Inject that rendered packet by invoking ``taey-notify <worker> <body>``,
+       dispatch still receives rules and context.
+    6. Inject that rendered packet by invoking ``taey-notify <worker> <body>``,
        which the released fleet-notify daemon will pick up and deliver
        via tmux as soon as the worker is idle.
 
@@ -678,6 +685,10 @@ def dispatch(
     Pass ``prompt_body`` to override the dispatch body embedded inside the
     packet; it is never sent as an un-injected standalone prompt.
     """
+    hook_status = hook_installation_status(worker)
+    if not hook_status.ok:
+        raise HooksNotInstalled(hook_status.detail)
+
     r = _redis_connect()
     product_id = _resolve_product_id(worker)
     if product_id and not is_bugfix:

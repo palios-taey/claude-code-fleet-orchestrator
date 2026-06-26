@@ -107,6 +107,7 @@ def _dispatch_body(*, worker: str, supervisor: str, prompt_body: str | None,
                  mock.patch.object(dispatch_module, "mark_superseded_for_task"), \
                  mock.patch.object(dispatch_module, "bind_current_task", return_value=123.0), \
                  mock.patch.object(dispatch_module, "OrchConfig", return_value=SimpleNamespace(notify_cli_path="notify")), \
+                 mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
                  mock.patch.object(dispatch_module.subprocess, "run", side_effect=fake_run), \
                  mock.patch.object(dispatch_module, "maybe_emit_decision_receipt"), \
                  task_project_patch, \
@@ -157,14 +158,14 @@ def _direct_dispatch_no_endpoint_contract() -> None:
     _assert_mandatory_packet("direct dispatch with endpoint disabled", body, "DIRECT_DISPATCH_BODY")
 
 
-def _unhooked_session_contract() -> None:
+def _hooked_session_contract() -> None:
     body = _dispatch_body(
-        worker="unhooked-codex",
+        worker="hooked-codex",
         supervisor="supervisor",
-        prompt_body="NO_HOOK_SESSION_BODY",
+        prompt_body="HOOKED_SESSION_BODY",
         endpoint_enabled="0",
     )
-    _assert_mandatory_packet("unhooked session dispatch", body, "NO_HOOK_SESSION_BODY")
+    _assert_mandatory_packet("hooked session dispatch", body, "HOOKED_SESSION_BODY")
 
 
 def _adhoc_no_neo_contract() -> None:
@@ -181,7 +182,7 @@ def _adhoc_no_neo_contract() -> None:
 
 def main() -> int:
     _direct_dispatch_no_endpoint_contract()
-    _unhooked_session_contract()
+    _hooked_session_contract()
     _adhoc_no_neo_contract()
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")

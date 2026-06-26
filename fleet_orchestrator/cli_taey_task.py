@@ -159,6 +159,7 @@ def cmd_dispatch(args):
 
     from fleet_orchestrator.dispatch import (
         BugLockActive,
+        HooksNotInstalled,
         OrchTaskNotReady,
         WorkerBusy,
         dispatch as dispatch_task,
@@ -173,7 +174,7 @@ def cmd_dispatch(args):
             priority=args.priority,
             force=bool(args.force),
         )
-    except (BugLockActive, OrchTaskNotReady, WorkerBusy, RuntimeError) as exc:
+    except (BugLockActive, HooksNotInstalled, OrchTaskNotReady, WorkerBusy, RuntimeError) as exc:
         print(
             f"ERROR: dispatch failed: {exc}. "
             f"Inspect with `taey-task status {task_id}` or retry `taey-task dispatch {task_id} {args.peer}`.",

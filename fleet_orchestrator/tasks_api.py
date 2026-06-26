@@ -63,6 +63,7 @@ from fleet_orchestrator.loop_engine import (
 from fleet_orchestrator.shippability import evaluate_shippability
 from fleet_orchestrator.dispatch import (
     BugLockActive,
+    HooksNotInstalled,
     OrchTaskNotReady,
     WorkerBusy,
     bind_current_task,
@@ -1529,7 +1530,7 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
                 priority=str(data.get("priority") or "normal"),
                 force=bool(data.get("force")),
             )
-        except (BugLockActive, OrchTaskNotReady, WorkerBusy) as exc:
+        except (BugLockActive, HooksNotInstalled, OrchTaskNotReady, WorkerBusy) as exc:
             raise HTTPException(
                 status_code=409,
                 detail={

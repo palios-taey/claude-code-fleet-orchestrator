@@ -114,7 +114,8 @@ creating a real expiring pause and no expiry creating an indefinite pause until
 ## 7. System / namespacing (read but not product config)
 
 `DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`, `XDG_DATA_HOME`, `PATH`,
-`CLAUDE_SETTINGS_PATH`, `TAEYS_HANDS_ROOT`, `TAEY_NODE_ID`,
+`CLAUDE_SETTINGS_PATH`, `CODEX_HOOKS_PATH`, `GEMINI_SETTINGS_PATH`,
+`GROK_HOOKS_PATH`, `TAEYS_HANDS_ROOT`, `TAEY_NODE_ID`,
 `NOTIFY_DAEMON_PIDFILE`, `NOTIFY_KEY_PREFIX`.
 
 ## 8. Test-only (never read by the running server)
