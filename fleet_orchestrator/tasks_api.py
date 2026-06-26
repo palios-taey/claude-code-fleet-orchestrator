@@ -789,13 +789,17 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             if phase_id:
                 phase_completed = check_phase_complete(phase_id, config=cfg)
 
+        task_after = load_task_record(task_id, config=cfg) or {}
         return {
             "ok": True,
             "task_id": task_id,
-            "status": status,
-            "owner": owner,
-            "blocked_on": blocked_on if blocked_on is not None else task_before.get("blocked_on"),
-            "completion_evidence": completion_evidence if status in TERMINAL_STATUSES else task_before.get("completion_evidence"),
+            "status": task_after.get("status", status),
+            "owner": task_after.get("owner", owner),
+            "blocked_on": task_after.get("blocked_on"),
+            "completion_evidence": task_after.get("completion_evidence"),
+            "completion_evidence_verification": task_after.get("completion_evidence_verification"),
+            "completion_evidence_verification_status": task_after.get("completion_evidence_verification_status"),
+            "completion_evidence_verified": task_after.get("completion_evidence_verified"),
             "phase_completed": phase_completed,
         }
     except CompletionEvidenceError as e:

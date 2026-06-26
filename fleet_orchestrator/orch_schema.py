@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, get_neo4j_driver
+from .evidence_verification import UNVERIFIED, VERIFIED, verify_completion_evidence
 from .inflight import PEER_HEARTBEAT_STALE_SEC as _DEFAULT_PEER_HEARTBEAT_STALE_SEC
 from .inflight import task_actively_in_flight
 from .notify_state import redis_connect as _notify_redis_connect
@@ -99,7 +100,7 @@ _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "interrupted"})
 HUMAN_REVIEW_TASK_TYPE = "human-review"
 HUMAN_REVIEW_QUESTION_TYPE = "human_review_gate"
 COMPLETED_EVIDENCE_NEXT_STEP = (
-    'The completion-evidence check is a shape/plausibility filter. It rejects lazy false-done (empty / trivial / malformed) but does NOT verify the evidence is true (the runtime has no git access; SHA-existence and gate-run truth are out of scope). A task marked completed with evidence is a SELF-REPORTED claim that passed a plausibility filter - not a verified result. The trust-bearing gate is independent re-verification by a DIFFERENT instance (verifier != producer): r5-audit-gate / ship-gate / a sibling re-running by execution. (ORCHESTRATION_INTEGRITY already states the automated completion-gate was deliberately shelved for this reason - a local system cannot bind a builder who holds the pen.) '
+    'Completed writes require shape-valid evidence and record completion_evidence_verification. VERIFIED means GitHub confirms the commit exists and the required independent gate contexts passed for that exact commit_sha; UNVERIFIED means a shape-valid self-report only. '
     'Use `taey-task update <task-id> completed --evidence '
     '\'{"commit_sha":"<sha>","production_observation":"<what you verified>"}\'` '
     'or PATCH /api/task/<task-id> with body '
@@ -174,6 +175,44 @@ def _decode_json_field(raw: Any, default: Any) -> Any:
     return raw
 
 
+def _completion_verification_status(verification: Dict[str, Any]) -> str:
+    status = str(verification.get("status") or "").strip().upper()
+    if status in {VERIFIED, UNVERIFIED}:
+        return status
+    return VERIFIED if verification.get("verified") is True else UNVERIFIED
+
+
+def _legacy_unverified_completion_verification(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "status": UNVERIFIED,
+        "verified": False,
+        "source": "legacy-or-direct-db-write",
+        "repo": "",
+        "commit_sha": str(evidence.get("commit_sha") or "").strip(),
+        "required_checks": [],
+        "producer": "",
+        "verifier": "none",
+        "reason": "completed task has evidence but no independent verification record",
+        "checks": [],
+    }
+
+
+def _attach_completion_evidence_verification(record: Dict[str, Any]) -> Dict[str, Any]:
+    evidence = _decode_json_field(record.get("completion_evidence"), None)
+    record["completion_evidence"] = evidence
+    verification = _decode_json_field(record.get("completion_evidence_verification"), None)
+    if not isinstance(verification, dict) and record.get("status") == "completed" and isinstance(evidence, dict) and evidence:
+        verification = _legacy_unverified_completion_verification(evidence)
+    if isinstance(verification, dict):
+        status = _completion_verification_status(verification)
+        verification["status"] = status
+        verification["verified"] = status == VERIFIED
+        record["completion_evidence_verification"] = verification
+        record["completion_evidence_verification_status"] = status
+        record["completion_evidence_verified"] = status == VERIFIED
+    return record
+
+
 def _evidence_value_well_formed(key: str, text: str) -> bool:
     """Cheap shape check per evidence key — rejects trivial junk, never claims to verify provenance."""
     if key == "commit_sha":
@@ -207,11 +246,11 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         if not text:
             continue
         # Per-key shape so trivial junk ("x"/"0") cannot pass as evidence.
-        # NOT a provenance check (no git access at runtime — SHA-existence is correctly out of scope);
-        # this only rejects values that cannot plausibly BE the thing they claim to be.
+        # This only rejects values that cannot plausibly BE the thing they claim to be;
+        # the independent verifier writes VERIFIED/UNVERIFIED beside the accepted evidence.
         if not _evidence_value_well_formed(key, text):
             raise CompletionEvidenceError(
-                "The completion-evidence check is a shape/plausibility filter (rejects lazy false-done but does NOT verify truth - no git access at runtime; self-reported only). "
+                "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. "
                 f"completion evidence {key!r}={text!r} is not well-formed "
                 f"(commit_sha=4-64 hex, gate_run_id>=3 id-chars, production_observation>=8 chars). "
                 f"{COMPLETED_EVIDENCE_NEXT_STEP}"
@@ -219,7 +258,7 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
         normalized[key] = text
     if not normalized:
         raise CompletionEvidenceError(
-            "The completion-evidence check is a shape/plausibility filter (rejects lazy false-done but does NOT verify truth - no git access at runtime). A completed task with evidence is a SELF-REPORTED claim. Trust is via independent r5 (verifier != producer). completed status requires evidence with at least one of: "
+            "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. completed status requires evidence with at least one of: "
             f"commit_sha, gate_run_id, production_observation. {COMPLETED_EVIDENCE_NEXT_STEP}"
         )
     return normalized
@@ -2709,6 +2748,17 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                     + _human_review_answer_next_step("{question_id}")
                 )
         completion_evidence_value = _validate_terminal_status_write(status, completion_evidence)
+        completed_by_value = completed_by or owner or ""
+        completion_verification_value = (
+            verify_completion_evidence(completion_evidence_value, producer=completed_by_value)
+            if status == "completed"
+            else None
+        )
+        completion_verification_status = (
+            _completion_verification_status(completion_verification_value)
+            if isinstance(completion_verification_value, dict)
+            else None
+        )
         if result is None:
             rec = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
@@ -2738,6 +2788,18 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                         WHEN $terminal_status THEN $completion_evidence
                         ELSE NULL
                     END,
+                    t.completion_evidence_verification = CASE
+                        WHEN $status = 'completed' THEN $completion_evidence_verification
+                        ELSE NULL
+                    END,
+                    t.completion_evidence_verification_status = CASE
+                        WHEN $status = 'completed' THEN $completion_evidence_verification_status
+                        ELSE NULL
+                    END,
+                    t.completion_evidence_verified = CASE
+                        WHEN $status = 'completed' THEN $completion_evidence_verified
+                        ELSE NULL
+                    END,
                     t.completed_by = CASE
                         WHEN $status = 'completed' THEN $completed_by
                         ELSE NULL
@@ -2750,8 +2812,11 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                 RETURN t.id AS id, t.owner AS owner, previous_owner AS previous_owner
             """, task_id=task_id, status=status, owner=owner, blocked_on=blocked_on_value,
                  completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
+                 completion_evidence_verification=_json_encode(completion_verification_value) if completion_verification_value else None,
+                 completion_evidence_verification_status=completion_verification_status,
+                 completion_evidence_verified=completion_verification_status == VERIFIED,
                  terminal_status=terminal_status,
-                 completed_by=completed_by or owner or "")
+                 completed_by=completed_by_value)
         else:
             rec = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
@@ -2782,6 +2847,18 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                         WHEN $terminal_status THEN $completion_evidence
                         ELSE NULL
                     END,
+                    t.completion_evidence_verification = CASE
+                        WHEN $status = 'completed' THEN $completion_evidence_verification
+                        ELSE NULL
+                    END,
+                    t.completion_evidence_verification_status = CASE
+                        WHEN $status = 'completed' THEN $completion_evidence_verification_status
+                        ELSE NULL
+                    END,
+                    t.completion_evidence_verified = CASE
+                        WHEN $status = 'completed' THEN $completion_evidence_verified
+                        ELSE NULL
+                    END,
                     t.completed_by = CASE
                         WHEN $status = 'completed' THEN $completed_by
                         ELSE NULL
@@ -2795,8 +2872,11 @@ def update_task_status(task_id: str, status: str, owner: str = "",
             """, task_id=task_id, status=status, owner=owner, result=result,
                  blocked_on=blocked_on_value,
                  completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
+                 completion_evidence_verification=_json_encode(completion_verification_value) if completion_verification_value else None,
+                 completion_evidence_verification_status=completion_verification_status,
+                 completion_evidence_verified=completion_verification_status == VERIFIED,
                  terminal_status=terminal_status,
-                 completed_by=completed_by or owner or "")
+                 completed_by=completed_by_value)
         task_row = rec.single()
         if task_row is None:
             return False
@@ -2865,7 +2945,7 @@ def get_task(task_id: str,
             return None
         task = _normalize_map(dict(result["t"]))
         task["forced_continuation_count"] = int(task.get("forced_continuation_count", 0) or 0)
-        task["completion_evidence"] = _decode_json_field(task.get("completion_evidence"), None)
+        task = _attach_completion_evidence_verification(task)
         return _attach_ref_runtime(task, source_path=task.get("source_path"))
 
 
@@ -2982,6 +3062,12 @@ def get_project_summary(project_id: str,
                              owner: t.owner,
                              priority: t.priority,
                              blocked_on: t.blocked_on,
+                             completion_evidence: t.completion_evidence,
+                             completion_evidence_verification: t.completion_evidence_verification,
+                             completion_evidence_verification_status: t.completion_evidence_verification_status,
+                             completion_evidence_verified: t.completion_evidence_verified,
+                             completed_by: t.completed_by,
+                             completed_at: t.completed_at,
                              refs: t.refs,
                              source_path: t.source_path
                          }
@@ -3023,6 +3109,7 @@ def get_project_summary(project_id: str,
                 if task is None:
                     continue
                 task_row = _normalize_map(dict(task))
+                task_row = _attach_completion_evidence_verification(task_row)
                 tasks.append(_attach_ref_runtime(
                     task_row,
                     source_path=task_row.get("source_path") or phase.get("source_path") or project.get("source_path"),
