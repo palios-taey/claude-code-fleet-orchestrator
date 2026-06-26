@@ -120,6 +120,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
     refs = _select_refs(summary, work, task_id, session_key)
     memory_files = _read_memory_files(_memory_dirs(session_key, work, summary, roots, aliases))
     selected_memory = _rank_memory(memory_files, task_text, max_memory=max_memory)
+    repo_head = _git_head()
     rules_selection = _select_rules(session_key, work, summary, task_text, scoped_env=scoped_env)
     rules = rules_selection["rules"]
     rules_meta = rules_selection["meta"]
@@ -139,7 +140,17 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
         "rules_meta": rules_meta,
         "budget_used": 0,
     }
-    context["snapshot"] = _build_snapshot(session_key, cli, task_id, work, summary, selected_memory, rules, identity)
+    context["snapshot"] = _build_snapshot(
+        session_key,
+        cli,
+        task_id,
+        work,
+        summary,
+        selected_memory,
+        rules,
+        identity,
+        repo_head=repo_head,
+    )
     context["budget_used"] = _estimate_tokens(json.dumps(context, sort_keys=True))
     return context
 
@@ -176,12 +187,18 @@ def assemble(packet: Dict[str, Any], cli: str, budget_bytes: int = CORE_BUDGET_B
 
 
 def build_packet(session: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = copy.deepcopy(context.get("snapshot") or {})
+    generated_at_commit = str(
+        snapshot.get("repo_head")
+        or snapshot.get("assembler_version")
+        or _git_head()
+    )
     packet = {
         "packet_id": str(uuid.uuid4()),
         "generated_for": _normalize_session(session),
-        "generated_at_commit": _git_head(),
+        "generated_at_commit": generated_at_commit,
         "provenance_hash": "",
-        "snapshot": copy.deepcopy(context.get("snapshot") or {}),
+        "snapshot": snapshot,
         "context": context,
         "cycle": {
             "cycle_n": None,
@@ -748,11 +765,13 @@ def _companion_identity_paths(root: Path) -> List[Path]:
 
 def _build_snapshot(session: str, cli: str, task_id: Optional[str], work: Dict[str, Any],
                     summary: Optional[Dict[str, Any]], memory: List[Dict[str, Any]],
-                    rules: List[Dict[str, Any]], identity: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                    rules: List[Dict[str, Any]], identity: Optional[Dict[str, Any]] = None,
+                    repo_head: Optional[str] = None) -> Dict[str, Any]:
     resolved_task = task_id or work.get("task_id") or work.get("top_task_id")
     identity = identity or {}
+    head = repo_head if repo_head is not None else _git_head()
     return {
-        "repo_head": _git_head(),
+        "repo_head": head,
         "session_id": session,
         "cli": cli,
         "requested_task_id": task_id,
@@ -806,7 +825,7 @@ def _build_snapshot(session: str, cli: str, task_id: Optional[str], work: Dict[s
             for item in identity.get("files") or []
         ],
         "ledger": _ledger_tail(),
-        "assembler_version": _git_head(),
+        "assembler_version": head,
     }
 
 

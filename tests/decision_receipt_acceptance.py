@@ -212,6 +212,17 @@ def _dispatch_wake_wiring_contract() -> None:
              mock.patch.object(dispatch_module, "_claim_ready_orch_task"), \
              mock.patch.object(dispatch_module, "mark_superseded_for_task"), \
              mock.patch.object(dispatch_module, "bind_current_task", return_value=123.0), \
+             mock.patch.object(dispatch_module, "_assemble_dispatch_prompt", return_value=(
+                 "# AGENTS.md Dynamic Context\nDISPATCH_PACKET",
+                 {
+                     "cli": "codex",
+                     "packet_id": "packet-dispatch-receipt",
+                     "provenance_hash": "abc123",
+                     "size_report": {"under_budget": True},
+                     "rules": [{"scope": "global", "path": "rules/global.md"}],
+                     "refs": {"overall": [], "supervisor": [], "project": [], "phase": [], "task": []},
+                 },
+             )), \
              mock.patch.object(dispatch_module, "OrchConfig", return_value=SimpleNamespace(notify_cli_path="notify")), \
              mock.patch.object(dispatch_module.subprocess, "run", return_value=SimpleNamespace(returncode=0, stderr="", stdout="")), \
              mock.patch.object(receipts, "get_redis_sync", return_value=fake):
@@ -227,6 +238,10 @@ def _dispatch_wake_wiring_contract() -> None:
     payload = _payload(fake)
     _assert_schema("dispatch wake receipt", payload)
     _check("dispatch wake receipt records dispatch source", payload["kind"] == "wake", payload)
+    _check("dispatch wake receipt records assembled packet metadata",
+           "mandatory wake packet" in payload.get("why_this_context", "")
+           and "rules/global.md" in payload.get("rule_tier_applied", ""),
+           payload)
 
 
 def _receipt_consumer_contract() -> None:
@@ -294,6 +309,17 @@ def _receipt_sink_fail_open_contract() -> None:
                  mock.patch.object(dispatch_module, "_claim_ready_orch_task"), \
                  mock.patch.object(dispatch_module, "mark_superseded_for_task"), \
                  mock.patch.object(dispatch_module, "bind_current_task", return_value=123.0), \
+                 mock.patch.object(dispatch_module, "_assemble_dispatch_prompt", return_value=(
+                     "# AGENTS.md Dynamic Context\nDISPATCH_PACKET",
+                     {
+                         "cli": "codex",
+                         "packet_id": "packet-dispatch-receipt",
+                         "provenance_hash": "abc123",
+                         "size_report": {"under_budget": True},
+                         "rules": [{"scope": "global", "path": "rules/global.md"}],
+                         "refs": {"overall": [], "supervisor": [], "project": [], "phase": [], "task": []},
+                     },
+                 )), \
                  mock.patch.object(dispatch_module, "OrchConfig", return_value=SimpleNamespace(notify_cli_path="notify")), \
                  mock.patch.object(dispatch_module.subprocess, "run", return_value=SimpleNamespace(returncode=0, stderr="", stdout="")):
                 try:

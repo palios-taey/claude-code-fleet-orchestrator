@@ -152,7 +152,23 @@ def main() -> int:
 
         task = get_task(_TASK, config=CFG)
         cur = _current_task()
-        _check("CLI dispatch invokes taey-notify once through dispatch()", notify_run.call_count == 1, notify_run.call_args_list)
+        notify_calls = [
+            call
+            for call in notify_run.call_args_list
+            if call.args
+            and isinstance(call.args[0], list)
+            and call.args[0]
+            and call.args[0][0] == "taey-notify"
+        ]
+        git_head_calls = [
+            call
+            for call in notify_run.call_args_list
+            if call.args
+            and isinstance(call.args[0], list)
+            and call.args[0][:3] == ["git", "rev-parse", "HEAD"]
+        ]
+        _check("CLI dispatch invokes taey-notify once through dispatch()", len(notify_calls) == 1, notify_run.call_args_list)
+        _check("CLI dispatch computes packet git head once", len(git_head_calls) == 1, notify_run.call_args_list)
         _check("dispatch claims task in Neo4j", task.get("status") == "in_progress", task)
         _check("dispatch records dispatched_to peer", task.get("dispatched_to") == _PEER, task)
         _check("dispatch binds Redis current_task", cur.get("task_id") == _TASK, cur)
