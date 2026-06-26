@@ -92,6 +92,7 @@ class TaskParentNotFoundError(TaskIdCollisionError):
 _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
+_COMPLETION_EVIDENCE_CONTEXT_KEYS = ("repo",)
 _NON_SUCCESS_TERMINAL_EVIDENCE_KEYS = ("reason", "error", "production_observation")
 # Closed set of legal task statuses. Validated BEFORE any completed-specific logic so a
 # non-canonical spelling can never slip past the evidence gate.
@@ -100,11 +101,11 @@ _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "interrupted"})
 HUMAN_REVIEW_TASK_TYPE = "human-review"
 HUMAN_REVIEW_QUESTION_TYPE = "human_review_gate"
 COMPLETED_EVIDENCE_NEXT_STEP = (
-    'Completed writes require shape-valid evidence and record completion_evidence_verification. VERIFIED means GitHub confirms the commit exists and the required independent gate contexts passed for that exact commit_sha; UNVERIFIED means a shape-valid self-report only. '
+    'Completed writes require shape-valid evidence and record completion_evidence_verification. VERIFIED means GitHub confirms the commit exists in evidence.repo (when supplied and allowlisted by ORCH_COMPLETION_ALLOWED_REPOS) or the configured/inferred allowlisted repo, and the required independent gate contexts passed for that exact commit_sha from trusted GitHub actors/apps; UNVERIFIED means a shape-valid self-report only. '
     'Use `taey-task update <task-id> completed --evidence '
-    '\'{"commit_sha":"<sha>","production_observation":"<what you verified>"}\'` '
+    '\'{"commit_sha":"<sha>","repo":"OWNER/REPO","production_observation":"<what you verified>"}\'` '
     'or PATCH /api/task/<task-id> with body '
-    '{"status":"completed","evidence":{"commit_sha":"<sha>",'
+    '{"status":"completed","evidence":{"commit_sha":"<sha>","repo":"OWNER/REPO",'
     '"production_observation":"<what you verified>"}}.'
 )
 NON_SUCCESS_EVIDENCE_NEXT_STEP = (
@@ -218,6 +219,15 @@ def _evidence_value_well_formed(key: str, text: str) -> bool:
     if key == "commit_sha":
         # 4 (git --short min) to 64 (SHA-256) hex — future-proofs the sha256 transition (ChatGPT ws0 audit).
         return 4 <= len(text) <= 64 and all(c in "0123456789abcdefABCDEF" for c in text)
+    if key == "repo":
+        parts = text.split("/")
+        allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+        return (
+            len(parts) == 2
+            and all(1 <= len(part) <= 100 for part in parts)
+            and all(all(c in allowed for c in part) for part in parts)
+            and ".." not in text
+        )
     if key == "gate_run_id":
         return len(text) >= 3 and all(c.isalnum() or c in "._:-/" for c in text)
     if key == "production_observation":
@@ -231,7 +241,7 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
     if not isinstance(evidence, dict):
         raise CompletionEvidenceError(f"The completion-evidence check is a shape/plausibility filter (self-reported claim, not verified provenance). completion evidence must be a JSON object. {COMPLETED_EVIDENCE_NEXT_STEP}")
     normalized: Dict[str, str] = {}
-    for key in _COMPLETION_EVIDENCE_KEYS:
+    for key in _COMPLETION_EVIDENCE_KEYS + _COMPLETION_EVIDENCE_CONTEXT_KEYS:
         value = evidence.get(key)
         if value is None:
             continue
@@ -252,14 +262,14 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
             raise CompletionEvidenceError(
                 "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. "
                 f"completion evidence {key!r}={text!r} is not well-formed "
-                f"(commit_sha=4-64 hex, gate_run_id>=3 id-chars, production_observation>=8 chars). "
+                f"(commit_sha=4-64 hex, repo=OWNER/REPO, gate_run_id>=3 id-chars, production_observation>=8 chars). "
                 f"{COMPLETED_EVIDENCE_NEXT_STEP}"
             )
         normalized[key] = text
-    if not normalized:
+    if not any(key in normalized for key in _COMPLETION_EVIDENCE_KEYS):
         raise CompletionEvidenceError(
             "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. completed status requires evidence with at least one of: "
-            f"commit_sha, gate_run_id, production_observation. {COMPLETED_EVIDENCE_NEXT_STEP}"
+            f"commit_sha, gate_run_id, production_observation. Optional repo=OWNER/REPO selects the GitHub repository for commit verification. {COMPLETED_EVIDENCE_NEXT_STEP}"
         )
     return normalized
 
@@ -1494,7 +1504,7 @@ def _in_progress_block_reason(task_id: Optional[str], description: Optional[str]
         f"Finish in-progress task {task_id_value}: {task_title}. "
         f"If this is dispatched peer work, call record_outcome('<session>', 'done', '<summary>'); "
         f"if you own the tracker task directly, run `taey-task update {task_id_value} completed "
-        "--evidence '{\"commit_sha\":\"<sha>\",\"production_observation\":\"<what you verified>\"}'`."
+        "--evidence '{\"commit_sha\":\"<sha>\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"<what you verified>\"}'`."
     )
 
 
@@ -3628,7 +3638,7 @@ def complete_project(project_id: str, *, force: bool = False,
                 f"project {project_id} has incomplete tasks. Inspect remaining work with "
                 f"`taey-plan show {project_id}` or GET /api/projects/{project_id}; complete tasks with "
                 "`taey-task update <task-id> completed --evidence "
-                '\'{"commit_sha":"<sha>","production_observation":"<what you verified>"}\'`, '
+                '\'{"commit_sha":"<sha>","repo":"OWNER/REPO","production_observation":"<what you verified>"}\'`, '
                 "or force close with body "
                 '{"force":true,"closure_reason":"<why>","completed_by":"<session-id>"} '
                 f"to POST /api/projects/{project_id}/complete."

@@ -135,9 +135,9 @@ AUTH_FAILURE_DETAIL = (
 )
 COMPLETED_TASK_NEXT_STEP = (
     'Use `taey-task update %TASK_ID% completed --evidence '
-    '\'{"commit_sha":"<sha>","production_observation":"<what you verified>"}\'` '
+    '\'{"commit_sha":"<sha>","repo":"OWNER/REPO","production_observation":"<what you verified>"}\'` '
     'or PATCH /api/task/%TASK_ID% with body '
-    '{"status":"completed","evidence":{"commit_sha":"<sha>",'
+    '{"status":"completed","evidence":{"commit_sha":"<sha>","repo":"OWNER/REPO",'
     '"production_observation":"<what you verified>"}}.'
 )
 FAILED_TASK_NEXT_STEP = (

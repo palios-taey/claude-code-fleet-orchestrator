@@ -27,7 +27,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
   `ORCH_ALLOW_UNAUTH_NON_LOOPBACK=1` as an explicit exposure acknowledgement.
   Prefer `ORCH_AUTH_TOKEN` for any non-loopback deployment that can receive
   untrusted callers.
-- The completion-evidence check first enforces shape/plausibility, then records a separate truth marker. `completion_evidence_verification.status=VERIFIED` only when `gh api` confirms the GitHub commit exists and every required independent gate context passed for that exact `commit_sha`; otherwise the completed task is surfaced as `UNVERIFIED`. Local/non-repo completions and completions without `commit_sha` stay completed but explicitly unverified. The token is still the control for *who can reach the port*.
+- The completion-evidence check first enforces shape/plausibility, then records a separate truth marker. `completion_evidence_verification.status=VERIFIED` only when `gh api` confirms the GitHub commit exists in `evidence.repo` when supplied and present in `ORCH_COMPLETION_ALLOWED_REPOS`, otherwise the configured or inferred allowlisted repo, and every required independent gate context passed for that exact `commit_sha` from trusted GitHub actors/apps; otherwise the completed task is surfaced as `UNVERIFIED`. `repo` is optional context only and cannot satisfy completion evidence by itself; off-allowlist repos stay `UNVERIFIED`, not rejected. Local/non-repo completions and completions without `commit_sha` stay completed but explicitly unverified. The token is still the control for *who can reach the port*.
 - The **public read-only** surface (`scripts/orch-public`, `:5005`) is separate,
   GET-only, fail-closed (shows nothing unless a session is explicitly allowlisted),
   and scrubs secrets/operator paths. It is the only surface intended for exposure.
@@ -39,8 +39,11 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ORCH_HOST` | `127.0.0.1` | Bind interface for the mutable API/dashboard (see posture above). |
 | `ORCH_PORT` | `5002` | Mutable API/dashboard port. |
 | `ORCH_API_BASE` / `ORCH_DASHBOARD_URL` | `http://127.0.0.1:5002` | Base URL the CLIs call. |
-| `ORCH_COMPLETION_GITHUB_REPO` / `GITHUB_REPOSITORY` | inferred from `gh api repos/:owner/:repo` | GitHub `OWNER/REPO` used to verify completed-task `commit_sha` evidence. If no repo or `gh` access is available, completions are marked `UNVERIFIED`, not rejected. |
+| `ORCH_COMPLETION_GITHUB_REPO` / `GITHUB_REPOSITORY` | inferred from `gh api repos/:owner/:repo` | Fallback GitHub `OWNER/REPO` used to verify completed-task `commit_sha` evidence when the evidence omits `repo`. If no repo or `gh` access is available, completions are marked `UNVERIFIED`, not rejected. |
+| `ORCH_COMPLETION_ALLOWED_REPOS` | fleet production repo allowlist | Comma-separated GitHub `OWNER/REPO` allowlist for completed-task verification. A caller-supplied `evidence.repo` outside this list is `UNVERIFIED`, even if the commit and statuses exist. |
 | `ORCH_COMPLETION_REQUIRED_CHECKS` / `ORCH_PRE_MERGE_REQUIRED_CHECKS` | `r5-audit-gate,ship-gate-acceptance` | Comma-separated GitHub check/status contexts required before a completed task's commit evidence can be marked `VERIFIED`. |
+| `ORCH_COMPLETION_TRUSTED_CHECK_RUN_APPS` | `github-actions` | Comma-separated GitHub check-run app slugs trusted for required check-run contexts. Matching name + success is insufficient if the app is not trusted. |
+| `ORCH_COMPLETION_TRUSTED_STATUS_CREATORS` | `github-actions[bot]` | Comma-separated GitHub commit-status creator logins trusted for required status contexts. Matching context + success is insufficient if the creator is not trusted. |
 | `ORCH_NEO4J_URI` / `ORCH_NEO4J_DB` | (required) | Neo4j connection. **No auth** — the orchestrator connects with no credentials and does not support internal-service auth (run Neo4j with `NEO4J_AUTH=none`). Internal-service credentials are intentionally unsupported: the network is the boundary, and a credential dimension in the driver config caused a recurring outage. |
 | `ORCH_REDIS_HOST` / `ORCH_REDIS_PORT` | (required) | Orchestrator Redis connection for API/dashboard state, locks, receipts, and orchestrator-owned runtime data. The core `OrchConfig` has no built-in default; set these explicitly, as in `.env.example`. |
 | `REDIS_HOST` / `REDIS_PORT` | `127.0.0.1` / `6379` | Fleet-notify/session-state Redis used by dispatch `current_task`, Stop-hook `idle`/outcome state, session pause, and worker liveness. Set this to the same instance as `ORCH_REDIS_*` for normal local installs; split only for deliberate divergence testing. |
@@ -75,7 +78,9 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 `ORCH_SHIP_GATES` (fail-closed — no gates ⇒ not shippable; cannot be emptied to
 force a pass), `ORCH_PRE_MERGE_REQUIRED_CHECKS` (consumed by the pre-merge gate
 and as the fallback completed-task verification context list),
-`ORCH_COMPLETION_GITHUB_REPO`, `ORCH_COMPLETION_REQUIRED_CHECKS`.
+`ORCH_COMPLETION_GITHUB_REPO`, `ORCH_COMPLETION_ALLOWED_REPOS`,
+`ORCH_COMPLETION_REQUIRED_CHECKS`, `ORCH_COMPLETION_TRUSTED_CHECK_RUN_APPS`,
+`ORCH_COMPLETION_TRUSTED_STATUS_CREATORS`.
 
 ## 5. Feature toggles
 

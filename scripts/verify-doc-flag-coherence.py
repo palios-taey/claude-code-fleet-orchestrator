@@ -31,6 +31,7 @@ HELPER_ENV_READERS = {
     "_optional_env",
     "_require_env",
     "_scoped_env_value",
+    "_csv_env_values",
     "default_on_feature_enabled",
 }
 DOCUMENTED_ONLY = {
