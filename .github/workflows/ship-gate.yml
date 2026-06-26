@@ -184,6 +184,14 @@ jobs:
           ORCH_REDIS_PORT: "6379"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
         run: python tests/task_completion_evidence_acceptance.py
+      - name: Ship-gate — completion evidence truth marker
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+        run: python tests/completion_evidence_verification_acceptance.py
       - name: Ship-gate — malformed task update bodies teach 4xx
         run: python tests/task_update_body_acceptance.py
       - name: Ship-gate — shippability requires completed gate evidence

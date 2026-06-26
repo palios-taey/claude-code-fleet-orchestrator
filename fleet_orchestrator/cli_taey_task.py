@@ -124,6 +124,11 @@ def cmd_status(args):
         print(f"  Completed at: {t.get('completed_at')}")
     if t.get("completion_evidence"):
         print(f"  Completion evidence: {json.dumps(t.get('completion_evidence'), sort_keys=True)}")
+    verification = t.get("completion_evidence_verification")
+    if isinstance(verification, dict):
+        status = verification.get("status") or ("VERIFIED" if verification.get("verified") else "UNVERIFIED")
+        reason = verification.get("reason") or "-"
+        print(f"  Completion evidence verification: {status} - {reason}")
     print(f"  Description: {t.get('description', '?')[:200]}")
 
 
