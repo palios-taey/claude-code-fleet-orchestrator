@@ -7,6 +7,16 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 DEFAULT_REQUIRED_GITHUB_CHECKS = ("r5-audit-gate", "ship-gate-acceptance")
+DEFAULT_COMPLETION_REPO_ALLOWLIST = (
+    "palios-taey/claude-code-fleet-orchestrator",
+    "palios-taey/claude-code-fleet-notify",
+    "palios-taey/infra-soul",
+    "palios-taey/taeys-hands",
+    "palios-taey/the-conductor",
+    "palios-taey/treasurer",
+)
+DEFAULT_TRUSTED_CHECK_RUN_APPS = ("github-actions",)
+DEFAULT_TRUSTED_STATUS_CREATORS = ("github-actions[bot]",)
 VERIFIED = "VERIFIED"
 UNVERIFIED = "UNVERIFIED"
 _GH_TIMEOUT_SEC = 10
@@ -17,6 +27,24 @@ def required_github_checks() -> Tuple[str, ...]:
     values = [part.strip() for part in raw.split(",") if part.strip()] if raw else list(DEFAULT_REQUIRED_GITHUB_CHECKS)
     checks = tuple(dict.fromkeys(values))
     return checks or DEFAULT_REQUIRED_GITHUB_CHECKS
+
+
+def _csv_env_values(name: str, defaults: Iterable[str]) -> Tuple[str, ...]:
+    raw = os.environ.get(name, "")
+    values = [part.strip() for part in raw.split(",") if part.strip()] if raw else list(defaults)
+    return tuple(dict.fromkeys(values))
+
+
+def allowed_completion_repos() -> Tuple[str, ...]:
+    return _csv_env_values("ORCH_COMPLETION_ALLOWED_REPOS", DEFAULT_COMPLETION_REPO_ALLOWLIST)
+
+
+def trusted_check_run_apps() -> Tuple[str, ...]:
+    return _csv_env_values("ORCH_COMPLETION_TRUSTED_CHECK_RUN_APPS", DEFAULT_TRUSTED_CHECK_RUN_APPS)
+
+
+def trusted_status_creators() -> Tuple[str, ...]:
+    return _csv_env_values("ORCH_COMPLETION_TRUSTED_STATUS_CREATORS", DEFAULT_TRUSTED_STATUS_CREATORS)
 
 
 def _gh_api(path: str) -> Any:
@@ -61,6 +89,34 @@ def repo_from_completion_evidence(evidence: Dict[str, Any]) -> str:
     return str(evidence.get("repo") or "").strip()
 
 
+def _repo_allowed_for_completion_evidence(repo: str) -> bool:
+    return repo.strip().lower() in {allowed.lower() for allowed in allowed_completion_repos()}
+
+
+def _check_run_app_slug(run: Dict[str, Any]) -> str:
+    app = run.get("app")
+    if not isinstance(app, dict):
+        return ""
+    return str(app.get("slug") or "").strip()
+
+
+def _status_creator_login(status: Dict[str, Any]) -> str:
+    creator = status.get("creator")
+    if not isinstance(creator, dict):
+        return ""
+    return str(creator.get("login") or "").strip()
+
+
+def _trusted_check_run(run: Dict[str, Any]) -> bool:
+    slug = _check_run_app_slug(run)
+    return slug.lower() in {allowed.lower() for allowed in trusted_check_run_apps()}
+
+
+def _trusted_status(status: Dict[str, Any]) -> bool:
+    login = _status_creator_login(status)
+    return login.lower() in {allowed.lower() for allowed in trusted_status_creators()}
+
+
 def _latest_named(items: Iterable[Dict[str, Any]], field: str, name: str) -> Optional[Dict[str, Any]]:
     matches = [item for item in items if item.get(field) == name]
     if not matches:
@@ -82,12 +138,13 @@ def _check_run_state(repo: str, sha: str, check: str) -> Tuple[bool, Dict[str, A
         return False, {"name": check, "kind": "check-run", "ok": False, "detail": "missing check-run"}
     status = run.get("status")
     conclusion = run.get("conclusion")
-    ok = status == "completed" and conclusion == "success"
+    trusted = _trusted_check_run(run)
+    ok = status == "completed" and conclusion == "success" and trusted
     return ok, {
         "name": check,
         "kind": "check-run",
         "ok": ok,
-        "detail": f"status={status} conclusion={conclusion}",
+        "detail": f"status={status} conclusion={conclusion} app={_check_run_app_slug(run) or 'missing'} trusted_app={trusted}",
         "run_id": run.get("id"),
         "url": run.get("html_url") or run.get("details_url"),
     }
@@ -102,12 +159,13 @@ def _status_state(repo: str, sha: str, check: str) -> Tuple[bool, Dict[str, Any]
     if not status:
         return False, {"name": check, "kind": "commit-status", "ok": False, "detail": "missing commit status"}
     state = status.get("state")
-    ok = state == "success"
+    trusted = _trusted_status(status)
+    ok = state == "success" and trusted
     return ok, {
         "name": check,
         "kind": "commit-status",
         "ok": ok,
-        "detail": f"state={state}",
+        "detail": f"state={state} creator={_status_creator_login(status) or 'missing'} trusted_creator={trusted}",
         "url": status.get("target_url"),
     }
 
@@ -160,7 +218,16 @@ def verify_completion_evidence(
         )
     repo = repo_from_completion_evidence(evidence)
     try:
-        if not repo:
+        if repo:
+            if not _repo_allowed_for_completion_evidence(repo):
+                return _unverified(
+                    "completion evidence repo is not in the ORCH_COMPLETION_ALLOWED_REPOS allowlist; arbitrary forks cannot satisfy VERIFIED provenance",
+                    commit_sha=commit_sha,
+                    repo=repo,
+                    required_checks=checks,
+                    producer=producer,
+                )
+        else:
             repo = github_repo_from_environment_or_gh()
         _commit_exists(repo, commit_sha)
         observations: List[Dict[str, Any]] = []
