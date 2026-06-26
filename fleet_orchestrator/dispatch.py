@@ -1,6 +1,6 @@
 """Supervisor→worker dispatch primitive.
 
-Writes the task body to the worker's Redis inbox AND records
+Assembles the mandatory wake packet, writes it to the worker's Redis inbox, AND records
 ``taey:<worker>:current_task`` so the worker's Stop hook can include
 the task summary in its supervisor-notify when the worker finishes.
 
@@ -41,8 +41,10 @@ CLI equivalent::
         --description "Run the assigned worker task" \\
         --prompt-file /tmp/worker.prompt
 
-Once dispatched, the worker receives the prompt via the released
-``claude-code-fleet-notify`` daemon (idle=1 + inbox>0 → tmux inject).
+Once dispatched, the worker receives a rendered wake packet via the released
+``claude-code-fleet-notify`` daemon (idle=1 + inbox>0 → tmux inject). The packet
+contains rules, refs, identity, operating context, and the original dispatch body.
+This path does not depend on the optional wake-packet endpoint or session hooks.
 When the worker stops, its Stop hook reads current_task and notifies
 the supervisor with the task id + description + duration in the
 peer_idle body.
@@ -56,13 +58,21 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 from .config import OrchConfig, get_neo4j_session, notify_cli
+from .context_assembler import (
+    assemble as assemble_wake_packet,
+    build_packet as build_wake_packet,
+    select_context as select_wake_context,
+    size_report as wake_size_report,
+)
 from .notify_state import redis_connect as _notify_redis_connect
 from .notify_state import state_key as _notify_state_key
 from .decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from .handoff_validation import mark_superseded_for_task
+from .rules_tier import get_rules
 from .worker_liveness import register_worker_task_liveness
 
 logger = logging.getLogger(__name__)
@@ -92,6 +102,18 @@ def _base_session_name(worker: str) -> str:
         if worker.endswith(suffix):
             return worker[: -len(suffix)]
     return worker
+
+
+def _cli_for_worker(worker: str) -> str:
+    for suffix, cli in (
+        ("-codex", "codex"),
+        ("-gemini", "gemini"),
+        ("-grok", "grok"),
+        ("-claude", "claude"),
+    ):
+        if worker.endswith(suffix):
+            return cli
+    return "claude"
 
 
 def _resolve_product_id(worker: str) -> Optional[str]:
@@ -496,6 +518,129 @@ def _mark_in_progress_best_effort(task_id: str, worker: str) -> bool:
     return record is not None
 
 
+def _default_dispatch_body(task_id: str, description: str) -> str:
+    return (
+        f"DISPATCH task={task_id}\n"
+        f"description: {description}\n"
+        f"(Recorded as your current_task in Redis. Your Stop hook will "
+        f"notify the supervisor when you finish.)"
+    )
+
+
+def _with_record_outcome_footer(body: str, worker: str) -> str:
+    if "record_outcome" in body:
+        return body
+    return body.rstrip() + (
+        "\n\n---\nWHEN DONE — call record_outcome so the supervisor knows "
+        "the result (otherwise outcome=unknown + current_task persists as "
+        "'previous dispatch unresolved'). One line via bash tool:\n\n"
+        f"python3 -c \"from fleet_orchestrator import record_outcome; "
+        f"record_outcome('{worker}', 'done', '<short outcome summary>')\"\n\n"
+        "Replace 'done' with 'error' or 'interrupted' if the task did not "
+        "complete cleanly. The '<short outcome summary>' is your one-line "
+        "report — what landed, what's at /tmp/..., what's the verdict."
+    )
+
+
+def _project_hint_from_task_id(task_id: str) -> Optional[str]:
+    prefix, sep, _rest = str(task_id or "").partition("::")
+    return prefix if sep and prefix else None
+
+
+def _rules_root_from_env() -> Optional[Path]:
+    raw = os.environ.get("ORCH_RULES_ROOT", "").strip()
+    return Path(raw).expanduser().resolve(strict=False) if raw else None
+
+
+def _minimal_dispatch_context(worker: str, task_id: str, description: str,
+                              supervisor: Optional[str], cli: str) -> dict[str, Any]:
+    session = _base_session_name(worker)
+    project = _project_hint_from_task_id(task_id)
+    return {
+        "overall_refs": [],
+        "supervisor_refs": [],
+        "project_refs": [],
+        "phase_refs": [],
+        "task_refs": [],
+        "identity": {},
+        "supervisor_affordance": {},
+        "memory": [],
+        "rules": get_rules(session, project=project, rules_root=_rules_root_from_env()),
+        "rules_meta": {},
+        "budget_used": 0,
+        "snapshot": {
+            "repo_head": "",
+            "session_id": session,
+            "cli": cli,
+            "requested_task_id": task_id,
+            "resolved_work": {
+                "source": "in_progress_own",
+                "project_id": project,
+                "phase_id": None,
+                "task_id": task_id,
+                "description": description,
+                "status": "in_progress",
+                "owner": supervisor or "",
+                "dispatched_to": worker,
+                "task_type": None,
+                "blocked_on": None,
+            },
+        },
+    }
+
+
+def _select_dispatch_context(worker: str, task_id: str, description: str,
+                             supervisor: Optional[str], cli: str) -> tuple[dict[str, Any], str]:
+    try:
+        return select_wake_context(worker, task_id=task_id, cli=cli), ""
+    except Exception as exc:
+        warning = (
+            "full task-scoped context selection unavailable; dispatch built the "
+            f"mandatory packet from dispatch-local state and available rules: {exc.__class__.__name__}: {exc}"
+        )
+        logger.warning(
+            "dispatch mandatory packet using minimal context worker=%s task=%s error=%s",
+            worker,
+            task_id,
+            exc,
+        )
+        return _minimal_dispatch_context(worker, task_id, description, supervisor, cli), warning
+
+
+def _assemble_dispatch_prompt(worker: str, task_id: str, description: str,
+                              supervisor: Optional[str], dispatcher: str,
+                              dispatch_body: str) -> tuple[str, dict[str, Any]]:
+    cli = _cli_for_worker(worker)
+    context, warning = _select_dispatch_context(worker, task_id, description, supervisor, cli)
+    packet = build_wake_packet(worker, context)
+    dispatch_record = {
+        "from": dispatcher,
+        "type": "dispatch",
+        "task_id": task_id,
+        "description": description,
+        "supervisor": supervisor or "",
+        "body": dispatch_body,
+    }
+    if warning:
+        dispatch_record["context_warning"] = warning
+    packet.setdefault("human", {}).setdefault("replies_since_last", []).append(dispatch_record)
+    rendered = assemble_wake_packet(packet, cli)
+    return rendered, {
+        "cli": cli,
+        "packet_id": packet.get("packet_id", ""),
+        "provenance_hash": packet.get("provenance_hash", ""),
+        "size_report": wake_size_report(rendered, packet),
+        "rules": [
+            {"scope": rule.get("scope", ""), "path": rule.get("path", "")}
+            for rule in context.get("rules") or []
+        ],
+        "refs": {
+            tier: [ref.get("path", "") for ref in context.get(f"{tier}_refs") or []]
+            for tier in ("overall", "supervisor", "project", "phase", "task")
+        },
+    }
+
+
 def dispatch(
     worker: str,
     task_id: str,
@@ -506,7 +651,7 @@ def dispatch(
     is_bugfix: bool = False,
     force: bool = False,
 ) -> None:
-    """Record the task on the worker side and inject the prompt.
+    """Record the task on the worker side and inject the mandatory wake packet.
 
     Side effects (in order):
 
@@ -521,13 +666,17 @@ def dispatch(
     3. If ``supervisor`` is provided, write ``taey:<worker>:parent`` so
        the Stop hook addresses notifications correctly even for multi-
        level trees (where suffix-strip wouldn't reach the right node).
-    4. Inject the prompt by invoking ``taey-notify <worker> <body>``,
+    4. Assemble a wake packet for ``worker`` and ``task_id``. The original
+       dispatch body is embedded in the packet's Human section, so direct
+       dispatch and un-hooked sessions still receive rules and context.
+    5. Inject that rendered packet by invoking ``taey-notify <worker> <body>``,
        which the released fleet-notify daemon will pick up and deliver
        via tmux as soon as the worker is idle.
 
-    The prompt body defaults to a JSON envelope wrapping {task_id,
+    The prompt body defaults to a text envelope wrapping {task_id,
     description} so the worker can identify what it's being asked to do.
-    Pass ``prompt_body`` to override with custom text.
+    Pass ``prompt_body`` to override the dispatch body embedded inside the
+    packet; it is never sent as an un-injected standalone prompt.
     """
     r = _redis_connect()
     product_id = _resolve_product_id(worker)
@@ -557,36 +706,24 @@ def dispatch(
     except WorkerBusy:
         _rollback_claim_only(worker, task_id)
         raise
+    dispatch_body = _with_record_outcome_footer(
+        prompt_body if prompt_body is not None else _default_dispatch_body(task_id, description),
+        worker,
+    )
+    try:
+        prompt_body, packet_meta = _assemble_dispatch_prompt(
+            worker,
+            task_id,
+            description,
+            supervisor,
+            from_session,
+            dispatch_body,
+        )
+    except Exception as exc:
+        _rollback_claim(worker, task_id, binding_nonce)
+        raise RuntimeError(f"mandatory dispatch wake-packet assembly failed: {exc}") from exc
+
     mark_superseded_for_task(_redis_connect(), from_session, task_id)
-
-    if prompt_body is None:
-        prompt_body = (
-            f"DISPATCH task={task_id}\n"
-            f"description: {description}\n"
-            f"(Recorded as your current_task in Redis. Your Stop hook will "
-            f"notify the supervisor when you finish.)"
-        )
-
-    # Standard record_outcome footer: workers reliably forget to call
-    # record_outcome unless told explicitly. Without it, peer_idle reaches the
-    # supervisor with
-    # outcome=unknown and outcome_details=None — the supervisor can't
-    # tell clean-finish from error-restart from interrupted, and the
-    # CAS done-clear never fires so current_task persists as "previous
-    # dispatch did not complete cleanly" (dispatch persistence rule).
-    # Auto-append unless caller opts out by passing the footer themselves
-    # (we detect via 'record_outcome' substring already present).
-    if "record_outcome" not in prompt_body:
-        prompt_body = prompt_body.rstrip() + (
-            "\n\n---\nWHEN DONE — call record_outcome so the supervisor knows "
-            "the result (otherwise outcome=unknown + current_task persists as "
-            "'previous dispatch unresolved'). One line via bash tool:\n\n"
-            f"python3 -c \"from fleet_orchestrator import record_outcome; "
-            f"record_outcome('{worker}', 'done', '<short outcome summary>')\"\n\n"
-            "Replace 'done' with 'error' or 'interrupted' if the task did not "
-            "complete cleanly. The '<short outcome summary>' is your one-line "
-            "report — what landed, what's at /tmp/..., what's the verdict."
-        )
 
     cli = OrchConfig().notify_cli_path
     result = subprocess.run(
@@ -626,9 +763,9 @@ def dispatch(
     maybe_emit_decision_receipt(
         "wake",
         {
-            "why_this_context": "dispatch delivered a task wake through taey-notify",
-            "refs_used": [],
-            "rule_tier_applied": "dispatch",
+            "why_this_context": "dispatch assembled the mandatory wake packet and delivered it through taey-notify",
+            "refs_used": packet_meta.get("refs", {}),
+            "rule_tier_applied": packet_meta.get("rules", []),
             "observable_state": {
                 "source": "dispatch",
                 "worker": worker,
@@ -636,6 +773,10 @@ def dispatch(
                 "supervisor": supervisor,
                 "priority": priority,
                 "prompt_sha256": hashlib.sha256(prompt_body.encode("utf-8")).hexdigest(),
+                "cli": packet_meta.get("cli", ""),
+                "packet_id": packet_meta.get("packet_id", ""),
+                "provenance_hash": packet_meta.get("provenance_hash", ""),
+                "size_report": packet_meta.get("size_report", {}),
             },
             "target": worker,
             "task_id": task_id,

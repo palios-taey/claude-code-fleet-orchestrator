@@ -21,7 +21,9 @@ The normal usage pattern is:
 
 This is a clear-then-reinject pattern, not hidden long-context magic. The packet is the current scoped slice.
 
-The hook path uses the same endpoint. `SessionStart` and `UserPromptSubmit` emit the packet as additional hook context; `PostToolUse` appends it after drained notifications. Hook delivery is fail-open: if the local API is down or the endpoint is disabled, the hook emits no packet context rather than blocking the operator.
+The dispatch path does not depend on the endpoint. `fleet_orchestrator.dispatch.dispatch()` assembles the packet directly, embeds the dispatch body in the packet's Human section, and sends the rendered packet through `taey-notify`. A direct `dispatch()` call and a session with no notify hooks installed still receive global, supervisor, and project rules when they apply. If full task-scoped context selection is unavailable for an ad-hoc/no-Neo4j dispatch, dispatch still sends a packet built from dispatch-local state plus available rules and includes a visible warning. If packet rendering or wake delivery fails, dispatch rolls back the claim instead of sending an un-injected prompt.
+
+The hook path uses the same assembler through the endpoint. `SessionStart` and `UserPromptSubmit` emit the packet as additional hook context; `PostToolUse` appends it after drained notifications. Hook delivery is fail-open: if the local API is down or the endpoint is disabled, the hook emits no packet context rather than blocking the operator.
 
 Consumer banner: consumers MUST check body[ok]; HTTP 200 alone does not imply context was assembled. Treat a wake-packet response as usable only when the response body reports `ok: true`, `enabled: true`, and includes a non-empty `packet`.
 
