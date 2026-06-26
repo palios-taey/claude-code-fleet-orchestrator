@@ -384,7 +384,6 @@ def _select_refs(summary: Optional[Dict[str, Any]], work: Dict[str, Any],
     if summary:
         ref_tiers = summary.get("ref_tiers") or {}
         tiers["overall"] = _ref_context_entries(ref_tiers.get("overall"))
-        tiers["supervisor"] = _ref_context_entries(ref_tiers.get("supervisor"))
         tiers["project"] = _ref_context_entries(ref_tiers.get("project"))
 
         phase_id = work.get("phase_id")
@@ -407,8 +406,7 @@ def _select_refs(summary: Optional[Dict[str, Any]], work: Dict[str, Any],
         tiers["task"] = _ref_context_entries({"ref_context": work.get("task_ref_context")})
     if not tiers["overall"]:
         tiers["overall"] = _ref_context_entries(_safe_context_record(get_overall_refs))
-    if not tiers["supervisor"]:
-        tiers["supervisor"] = _ref_context_entries(_safe_context_record(get_supervisor_refs, session))
+    tiers["supervisor"] = _ref_context_entries(_safe_context_record(get_supervisor_refs, session))
     return tiers
 
 
