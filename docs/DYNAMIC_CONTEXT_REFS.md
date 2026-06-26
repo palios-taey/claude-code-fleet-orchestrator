@@ -62,7 +62,7 @@ Overall refs come from the global `OrchGlobalContext {key: 'overall'}` record th
 
 ### Supervisor
 
-Supervisor refs come from `OrchSupervisor.refs`. When the packet has a project summary, the summary supplies the project supervisor's refs. If no project summary supplies supervisor refs, the assembler falls back to `get_supervisor_refs(session)` for the target session.
+Supervisor refs come from `OrchSupervisor.refs` for the session receiving the packet. The assembler always calls `get_supervisor_refs(session)` with the normalized request session, even when the selected task belongs to a project owned by a different supervisor. Project summaries may expose the project owner's supervisor tier to other summary consumers, but wake packets do not use that tier for `supervisor_refs`.
 
 Because supervisor refs can be rendered into worker wake packets for supervised project work, they are not a private note channel. Use this tier for supervisor-level operating context that workers under that supervisor may safely see.
 

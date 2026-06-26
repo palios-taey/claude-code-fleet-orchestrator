@@ -365,6 +365,91 @@ def _assembler_contract() -> None:
     _check("provenance binds rendered packet plus snapshot", bool(packet.get("provenance_hash")) and report["under_budget"] is True and "AGENTS.md Dynamic Context" in rendered, report)
 
 
+def _supervisor_refs_follow_receiving_session_contract() -> None:
+    summary = {
+        "project": {
+            "id": "tutor-wedge",
+            "name": "Tutor Wedge",
+            "description": "cross-project supervisor ref regression",
+            "source_path": "",
+        },
+        "phases": [
+            {
+                "phase": {"id": "tutor-wedge::p1", "name": "Phase 1"},
+                "tasks": [
+                    {
+                        "id": "tutor-wedge::fix",
+                        "description": "conductor is executing a task in tutor's project",
+                        "status": "in_progress",
+                    }
+                ],
+            }
+        ],
+        "ref_tiers": {
+            "overall": {"ref_context": {"refs": []}},
+            "supervisor": {
+                "ref_context": {
+                    "refs": [
+                        {
+                            "path": "tutor/REPRODUCE.md",
+                            "content": "WRONG_PROJECT_OWNER_SUPERVISOR_REF",
+                        }
+                    ]
+                }
+            },
+            "project": {"ref_context": {"refs": []}},
+            "phases": [],
+            "tasks": [],
+        },
+    }
+    receiving_session_refs = {
+        "ref_context": {
+            "refs": [
+                {
+                    "path": "conductor/AUDIT.md",
+                    "content": "SESSION_CORRECT_SUPERVISOR_REF",
+                }
+            ]
+        }
+    }
+
+    with mock.patch.object(
+        assembler,
+        "get_task_project",
+        return_value={"project_id": "tutor-wedge", "project_name": "Tutor Wedge"},
+    ), \
+         mock.patch.object(assembler, "get_project_summary", return_value=summary), \
+         mock.patch.object(assembler, "get_overall_refs", return_value={"ref_context": {"refs": []}}), \
+         mock.patch.object(assembler, "get_supervisor_refs", return_value=receiving_session_refs) as supervisor_reader:
+        context = assembler.select_context(
+            "conductor-codex",
+            task_id="tutor-wedge::fix",
+            cli="codex",
+            session_roots={},
+        )
+
+    packet = assembler.build_packet("conductor-codex", context)
+    rendered = assembler.assemble(packet, "codex")
+
+    _check(
+        "cross-project task selects receiving session supervisor ref",
+        context["supervisor_refs"]
+        and context["supervisor_refs"][0].get("content") == "SESSION_CORRECT_SUPERVISOR_REF",
+        context["supervisor_refs"],
+    )
+    _check(
+        "cross-project task does not render task project owner supervisor ref",
+        "SESSION_CORRECT_SUPERVISOR_REF" in rendered
+        and "WRONG_PROJECT_OWNER_SUPERVISOR_REF" not in rendered,
+        rendered,
+    )
+    _check(
+        "supervisor ref lookup uses normalized receiving session",
+        supervisor_reader.call_args_list == [mock.call("conductor")],
+        supervisor_reader.call_args_list,
+    )
+
+
 def _select_empty_context(session: str, cli: str) -> dict:
     with mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
          mock.patch.object(assembler, "get_session_current_work", return_value=None), \
@@ -636,6 +721,7 @@ def main() -> int:
     _endpoint_contract()
     _rules_delivery_endpoint_contract()
     _assembler_contract()
+    _supervisor_refs_follow_receiving_session_contract()
     _identity_section_contract()
     _untrusted_envelope_contract()
     _context_selection_error_contract()
