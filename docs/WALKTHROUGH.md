@@ -214,7 +214,7 @@ tells you why.
 ```bash
 curl -s -X PATCH http://127.0.0.1:5002/api/task/scaffold \
   -H 'Content-Type: application/json' \
-  -d '{"status":"completed","completion_evidence":{"commit_sha":"<sha>","production_observation":"<what you observed>"}}'
+  -d '{"status":"completed","evidence":{"commit_sha":"<sha>","repo":"OWNER/REPO","production_observation":"<what you observed>"}}'
 ```
 
 **Expect:** `{"ok": true, ...}` and `feature` becomes the next ready task. (Evidence is recorded as

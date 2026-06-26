@@ -13,7 +13,7 @@ Usage:
     taey-task status <task-id>        # Check a task's status
     taey-task dispatch <task-id> <peer>  # Claim/bind/wake peer work
     taey-task dispatch <task-id> <peer> --force  # Explicitly replace a peer's live current_task
-    taey-task update <task-id> completed --evidence '{"commit_sha":"abc123","production_observation":"verified live"}'
+    taey-task update <task-id> completed --evidence '{"commit_sha":"abc123","repo":"OWNER/REPO","production_observation":"verified live"}'
     taey-task update <task-id> failed --evidence '{"reason":"blocked by missing dependency"}'
 """
 import argparse
@@ -252,7 +252,7 @@ def main():
     p_update.add_argument("--clear-blocked-on", action="store_true",
                           help="Clear the task's blocked_on marker")
     p_update.add_argument("--evidence",
-                          help="JSON object with completion evidence, e.g. '{\"commit_sha\":\"abc123\",\"production_observation\":\"verified live\"}'")
+                          help="JSON object with completion evidence, e.g. '{\"commit_sha\":\"abc123\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"verified live\"}'")
 
     args = parser.parse_args()
     if args.command == "create":

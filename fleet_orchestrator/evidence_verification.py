@@ -57,6 +57,10 @@ def github_repo_from_environment_or_gh() -> str:
     return str(repo)
 
 
+def repo_from_completion_evidence(evidence: Dict[str, Any]) -> str:
+    return str(evidence.get("repo") or "").strip()
+
+
 def _latest_named(items: Iterable[Dict[str, Any]], field: str, name: str) -> Optional[Dict[str, Any]]:
     matches = [item for item in items if item.get(field) == name]
     if not matches:
@@ -147,13 +151,17 @@ def verify_completion_evidence(
     checks = required_github_checks()
     commit_sha = str(evidence.get("commit_sha") or "").strip()
     if not commit_sha:
+        repo = repo_from_completion_evidence(evidence)
         return _unverified(
             "completion evidence has no commit_sha; local/non-repo completion remains a self-report",
+            repo=repo,
             required_checks=checks,
             producer=producer,
         )
+    repo = repo_from_completion_evidence(evidence)
     try:
-        repo = github_repo_from_environment_or_gh()
+        if not repo:
+            repo = github_repo_from_environment_or_gh()
         _commit_exists(repo, commit_sha)
         observations: List[Dict[str, Any]] = []
         failures: List[str] = []
@@ -193,6 +201,7 @@ def verify_completion_evidence(
         return _unverified(
             str(exc),
             commit_sha=commit_sha,
+            repo=repo,
             required_checks=checks,
             producer=producer,
         )

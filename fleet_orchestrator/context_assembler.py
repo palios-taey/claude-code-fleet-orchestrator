@@ -974,7 +974,7 @@ def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
     if source == "peer_reported_done":
         return access_lines + [
             f"- Peer {owner} is no longer actively working `{task_id}` (reported done or stalled).",
-            f"- verify their work; if complete, close it: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"production_observation\":\"<obs>\"}}'`.",
+            f"- verify their work; if complete, close it: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"<obs>\"}}'`.",
             "- Peers cannot self-complete supervised tasks. Advance the chain.",
         ]
 
@@ -989,8 +989,8 @@ def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
             ]
         lines = [
             f"- Drive `{task_id}` to terminal; inspect current state with `taey-task status {task_id}`.",
-            f"- Close with evidence: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"production_observation\":\"<obs>\"}}'`.",
-            f"- Evidence-less terminal writes are REJECTED; use `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"production_observation\":\"<obs>\"}}'`.",
+            f"- Close with evidence: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"<obs>\"}}'`.",
+            f"- Evidence-less terminal writes are REJECTED; use `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"<obs>\"}}'`.",
             f"- Human-review gate tasks complete via the question/UI path; inspect `{task_id}` with `taey-task status {task_id}`.",
         ]
         return access_lines + lines
