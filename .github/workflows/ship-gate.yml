@@ -58,6 +58,47 @@ jobs:
               )
           PYIDENT
           echo "PYTHONPATH=$RUNNER_TEMP/notifystub" >> "$GITHUB_ENV"
+      - name: Stub managed hook settings for dispatch acceptance
+        run: |
+          mkdir -p "$RUNNER_TEMP/hook-settings"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "hook-settings"
+          specs = {
+              "codex.json": {
+                  "SessionStart": "codex_session_start.py",
+                  "PreToolUse": "codex_pre_tool.py",
+                  "PostToolUse": "codex_post_tool.py",
+                  "Stop": "codex_stop.py",
+                  "UserPromptSubmit": "codex_user_prompt.py",
+              },
+              "gemini.json": {
+                  "BeforeTool": "gemini_before_tool.py",
+                  "AfterTool": "gemini_after_tool.py",
+                  "BeforeAgent": "gemini_before_agent.py",
+                  "AfterAgent": "gemini_after_agent.py",
+              },
+              "grok.json": {
+                  "SessionStart": "grok_session_start.py",
+                  "Stop": "grok_stop.py",
+                  "UserPromptSubmit": "grok_user_prompt.py",
+              },
+          }
+          for filename, events in specs.items():
+              (root / filename).write_text(json.dumps({
+                  "hooks": {
+                      event: [{"hooks": [{"type": "command", "command": f"python3 /notify/hooks/{script}"}]}]
+                      for event, script in events.items()
+                  }
+              }), encoding="utf-8")
+          PY
+          {
+            echo "CODEX_HOOKS_PATH=$RUNNER_TEMP/hook-settings/codex.json"
+            echo "GEMINI_SETTINGS_PATH=$RUNNER_TEMP/hook-settings/gemini.json"
+            echo "GROK_HOOKS_PATH=$RUNNER_TEMP/hook-settings/grok.json"
+          } >> "$GITHUB_ENV"
       - name: Ship-gate — generic operator env contract
         env:
           ORCH_DOTENV: empty
@@ -103,6 +144,8 @@ jobs:
         run: python tests/fleet_identity_deumbilical_acceptance.py
       - name: Ship-gate — easy setup is install-safe and version-aligned
         run: python tests/easy_setup_acceptance.py
+      - name: Ship-gate — hookless dispatch is refused and surfaced
+        run: python tests/hook_installation_acceptance.py
       - name: Wait for Neo4j (bolt)
         run: |
           python - <<'PY'

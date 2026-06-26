@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from .hook_installation import hook_installation_status
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANAGED_BY = "claude-code-fleet-orchestrator"
 MANAGED_DENIES = ["AskUserQuestion", "AskUserQuestion(*)"]
@@ -1202,6 +1204,31 @@ def _doctor_claude_hooks() -> CheckResult:
     return CheckResult("claude-hooks", True, "hook commands present exactly-once at expected paths")
 
 
+def _doctor_session_hooks() -> CheckResult:
+    OrchConfig, _, _ = _load_config_module()
+    cfg = OrchConfig()
+    sessions = [session for session in cfg.session_ids if str(session).strip()]
+    if not sessions:
+        return CheckResult(
+            "session-hooks",
+            True,
+            "WARN: no ORCH_SESSION_IDS configured; dispatch still checks target hook installation",
+            "set ORCH_SESSION_IDS to let doctor enumerate fleet sessions",
+        )
+    statuses = [hook_installation_status(str(session)) for session in sessions]
+    missing = [status for status in statuses if not status.ok]
+    if missing:
+        detail = "; ".join(status.detail for status in missing)
+        return CheckResult(
+            "session-hooks",
+            True,
+            f"WARN: {detail}",
+            "install claude-code-fleet-notify hooks for every configured fleet session CLI",
+        )
+    detail = "; ".join(status.detail for status in statuses)
+    return CheckResult("session-hooks", True, detail)
+
+
 def _run_fail_open_hook(hook_name: str) -> tuple[int, str, str]:
     payload = json.dumps({"stop_hook_active": True})
     env = os.environ.copy()
@@ -1303,6 +1330,7 @@ def run_doctor() -> List[CheckResult]:
         ("health", _doctor_health),
         ("claude-settings", _doctor_claude_settings),
         ("claude-hooks", _doctor_claude_hooks),
+        ("session-hooks", _doctor_session_hooks),
         ("stop-round-trip", _doctor_stop_round_trip),
         ("notify-daemon", _doctor_notify_daemon),
         ("orch-watch", _doctor_orch_watch),
