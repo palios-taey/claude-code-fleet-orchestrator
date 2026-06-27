@@ -961,6 +961,62 @@ def _process_worker_liveness_expirations(
     return sent
 
 
+def _process_idle_owner_graph_work(
+    r,
+    dedup_ttl_sec: int,
+    *,
+    task_id_prefix: Optional[str] = None,
+) -> int:
+    from fleet_orchestrator.orch_schema import (
+        WAKE_ALLOW_STOP,
+        get_session_stop_decision,
+        list_self_owned_in_progress_sessions,
+    )
+
+    sent = 0
+    for candidate in list_self_owned_in_progress_sessions(task_id_prefix=task_id_prefix):
+        owner = str(candidate.get("session_id") or "").strip()
+        if not owner:
+            continue
+        if not r.get(state_key(owner, "idle")):
+            continue
+        if r.get(state_key(owner, "current_task")):
+            continue
+        try:
+            decision = get_session_stop_decision(owner)
+        except Exception as exc:
+            log.error("owner graph-work stop-decision failed: owner=%s task=%s error=%s",
+                      owner, candidate.get("task_id"), exc)
+            continue
+        if decision.get("block") is False and decision.get("wake_type") == WAKE_ALLOW_STOP:
+            continue
+        if not decision.get("block"):
+            continue
+
+        task_id = str(decision.get("task_id") or candidate.get("task_id") or "unknown-task")
+        dedup_key = orch_key("orch-watch-owner-graph-work", owner, task_id)
+        if r.exists(dedup_key):
+            continue
+        reason = str(decision.get("reason") or "").strip()
+        if not reason:
+            reason = (
+                f"WAKE: you own in-progress task={candidate.get('task_id')} in the "
+                "tracker and are idle with no Redis current_task binding. Re-check "
+                "`taey-plan current` / `taey-plan next` and continue."
+            )
+        if _send_wake(
+            r,
+            owner,
+            reason,
+            priority="high",
+            msg_id=f"orch-watch-owner-graph-work-{owner}-{task_id}-{int(time.time())}",
+        ):
+            r.set(dedup_key, "1", ex=dedup_ttl_sec)
+            sent += 1
+            log.info("Sent OWNER_GRAPH_WORK wake: owner=%s task=%s", owner, task_id)
+    return sent
+
+
 def handle_done_del(r, node_id: str, snapshot: dict,
                      readiness_checker, dedup_ttl_sec: int) -> None:
     """A worker's current_task was DEL'd. Distinguish done-clear (Stop
@@ -1312,6 +1368,7 @@ def main():
             try:
                 _process_handoff_timeouts(r)
                 _process_worker_liveness_expirations(r, args.dedup_ttl_sec)
+                _process_idle_owner_graph_work(r, args.dedup_ttl_sec)
                 for k in r.scan_iter(match=current_task_scan_pattern()):
                     node = node_from_current_task_key(k)
                     if node:
@@ -1328,6 +1385,7 @@ def main():
             try:
                 _process_handoff_timeouts(r)
                 _process_worker_liveness_expirations(r, args.dedup_ttl_sec)
+                _process_idle_owner_graph_work(r, args.dedup_ttl_sec)
             except Exception as exc:
                 log.error("background liveness pass failed: %s", exc)
             continue

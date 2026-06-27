@@ -3246,6 +3246,55 @@ def get_session_current_work(session_id: str,
         return result
 
 
+def list_self_owned_in_progress_sessions(*,
+                                         task_id_prefix: Optional[str] = None,
+                                         config: Optional[OrchConfig] = None,
+                                         limit: int = 200) -> List[Dict[str, Any]]:
+    """Return sessions with self-owned graph work that may need a wake sweep.
+
+    Redis ``current_task`` sweeps cover dispatched/bound work. This query covers
+    the complementary graph-only case: an owner has marked a task in_progress
+    itself, there is no distinct dispatched peer, and a live project still
+    expects that owner to drive forward.
+    """
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        rows = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE t.status = 'in_progress'
+              AND coalesce(t.owner, '') <> ''
+              AND (coalesce(t.dispatched_to, '') = '' OR t.dispatched_to = t.owner)
+              AND ($task_id_prefix IS NULL OR t.id STARTS WITH $task_id_prefix)
+              AND NOT (
+                  coalesce(t.task_type, '') = $human_review_task_type
+                  AND EXISTS {
+                      MATCH (q:OrchQuestion)-[:CONCERNS_TASK]->(t)
+                      WHERE q.question_type = $human_review_question_type
+                        AND q.status = 'open'
+                        AND q.gate_task_id = t.id
+                  }
+              )
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+            RETURN DISTINCT t.owner AS session_id,
+                   t.id AS task_id,
+                   t.description AS description,
+                   p.id AS project_id,
+                   ph.id AS phase_id,
+                   coalesce(t.priority, 999999999) AS priority,
+                   coalesce(p.priority, 999999999) AS project_priority,
+                   t.created_at AS created_at
+            ORDER BY project_priority ASC, priority ASC, created_at ASC
+            LIMIT $limit
+        """,
+            task_id_prefix=task_id_prefix,
+            human_review_task_type=HUMAN_REVIEW_TASK_TYPE,
+            human_review_question_type=HUMAN_REVIEW_QUESTION_TYPE,
+            limit=int(limit),
+        )
+        return [dict(row) for row in rows]
+
+
 def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = None,
                            project_id: Optional[str] = None,
                            config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:

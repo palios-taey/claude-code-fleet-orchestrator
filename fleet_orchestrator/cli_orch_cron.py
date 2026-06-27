@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """orch-cron — recurring task runner with file-tracked state.
 
-Replaces and supersedes the static ``recurring_triggers.json`` pattern.
-Backward compatible with the existing JSON schema; adds one optional field
-(``state_file``) that turns each recurring task into a first-class
-"process tracked through files" — the supervisor can grep the
-state_file to see the task's full history without context-switching
-into the worker pane.
+Reads an operator-controlled JSON registry of recurring triggers. A trigger
+can either wake a session with a prompt file or dispatch an OrchTask by id.
+The optional ``state_file`` turns each recurring fire into a first-class
+"process tracked through files" — the supervisor can grep the state_file to
+see the task's full history without context-switching into the worker pane.
 
-JSON registry (default: ``~/.config/orch/recurring.json`` or path
-passed via ``--registry``)::
+JSON registry (path passed via ``--registry``)::
 
     {
       "_doc": "Recurring task registry — orch-cron fires due entries.",
@@ -20,10 +18,22 @@ passed via ``--registry``)::
           "tz": "America/New_York",          // schedule timezone
           "minute": 9,                       // wall-clock minute
           "hours": [8, 10, 12, 14, 16, 18, 20, 22],
-          "prompt_file": "/path/to/wake-prompt.txt",
+          "prompt_file": "/path/to/wake-prompt.txt", // prompt wake mode
           "state_file": "/path/to/x.jsonl",  // OPTIONAL — append fire records here
           "enabled": true,
           "note": "freeform"
+        },
+        {
+          "id": "upwork-proposal-cycle",
+          "session": "treasurer",
+          "supervisor": "treasurer",
+          "task_id": "recurring-context::upwork-proposal-cycle", // OrchTask mode
+          "description": "Run the Upwork proposal recurring cycle",
+          "tz": "America/New_York",
+          "minute": 39,
+          "hours": [8, 10, 12, 14, 16, 18, 20, 22],
+          "state_file": "/path/to/upwork-cycle.jsonl",
+          "enabled": true
         }
       ]
     }
@@ -68,7 +78,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 try:
     from zoneinfo import ZoneInfo
@@ -110,6 +120,76 @@ def should_fire(trig: dict, now_local: datetime) -> bool:
     return now_local.hour in trig.get("hours", []) and now_local.minute == trig.get("minute")
 
 
+def _dedup_fire(redis_client: Any, fire_id: str) -> bool:
+    dedup_key = orch_key("orch-cron-fired", fire_id)
+    if redis_client is None:
+        return True
+    if redis_client.exists(dedup_key):
+        return False
+    redis_client.set(dedup_key, "1", ex=DEDUP_TTL_SEC)
+    return True
+
+
+def _clear_dedup(redis_client: Any, fire_id: str) -> None:
+    if redis_client is None:
+        return
+    try:
+        redis_client.delete(orch_key("orch-cron-fired", fire_id))
+    except Exception:
+        pass
+
+
+def _task_prompt_body(trig: dict, task_id: str, description: str) -> str:
+    body = str(trig.get("prompt_body") or "").strip()
+    if body:
+        return body
+    return (
+        f"DISPATCH {task_id} — recurring cadence fire from orch-cron. "
+        f"{description}"
+    )
+
+
+def _fire_task_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> str:
+    trig_id = trig.get("id") or trig.get("task_id") or trig.get("session", "?")
+    session = str(trig.get("session") or "").strip()
+    task_id = str(trig.get("task_id") or "").strip()
+    if not session:
+        return "skipped:no_session"
+    if not task_id:
+        return "skipped:no_task_id"
+
+    description = str(trig.get("description") or f"Recurring task cadence fire: {task_id}")
+    fire_id = f"{trig_id}-{now_local:%Y%m%d-%H%M}"
+    if dry_run:
+        log.info("[DRY] would dispatch task trigger %s @ %s task=%s session=%s",
+                 trig_id, fire_id, task_id, session)
+        return "dry_run"
+    if not _dedup_fire(r, fire_id):
+        return "skipped:already_fired"
+
+    try:
+        from fleet_orchestrator.dispatch import OrchTaskNotReady, WorkerBusy, dispatch
+
+        dispatch(
+            session,
+            task_id,
+            description,
+            supervisor=str(trig.get("supervisor") or session),
+            prompt_body=_task_prompt_body(trig, task_id, description),
+            priority=str(trig.get("priority") or "normal"),
+            is_bugfix=bool(trig.get("is_bugfix", False)),
+            force=bool(trig.get("force", False)),
+        )
+    except (OrchTaskNotReady, WorkerBusy) as exc:
+        _clear_dedup(r, fire_id)
+        log.info("SKIP task trigger %s task=%s session=%s: %s",
+                 trig_id, task_id, session, exc)
+        return "skipped:task_not_ready"
+
+    log.info("FIRE %s session=%s task=%s", trig_id, session, task_id)
+    return "dispatched"
+
+
 def fire_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> str:
     """Fire one due trigger. Returns the result label written to state_file."""
     trig_id = trig.get("id") or trig.get("session", "?")
@@ -119,6 +199,9 @@ def fire_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> s
 
     if not trig.get("enabled", True):
         return "skipped:disabled"
+
+    if trig.get("task_id"):
+        return _fire_task_trigger(r, trig, now_local, dry_run=dry_run)
 
     prompt_file = trig.get("prompt_file")
     if not prompt_file or not os.path.isfile(prompt_file):
@@ -138,11 +221,8 @@ def fire_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> s
     # Redis dedup so two cron ticks in the same minute don't double-fire.
     # Only set the dedup key after we've passed the dry-run check, so a
     # dry-run doesn't block a subsequent real fire in the same minute.
-    dedup_key = orch_key("orch-cron-fired", fire_id)
-    if r is not None:
-        if r.exists(dedup_key):
-            return "skipped:already_fired"
-        r.set(dedup_key, "1", ex=DEDUP_TTL_SEC)
+    if not _dedup_fire(r, fire_id):
+        return "skipped:already_fired"
 
     cli = OrchConfig().notify_cli_path
     cli_path = shutil.which(cli) or (cli if os.path.isfile(cli) and os.access(cli, os.X_OK) else None)
@@ -160,6 +240,21 @@ def fire_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> s
     log.info("FIRE %s session=%s (%d char prompt, hash=%s)",
              trig_id, session, len(prompt), prompt_hash)
     return "dispatched"
+
+
+def trigger_payload_hash(trig: dict) -> str:
+    if trig.get("prompt_file") and os.path.isfile(trig["prompt_file"]):
+        with open(trig["prompt_file"], "rb") as f:
+            return "sha256:" + hashlib.sha256(f.read()).hexdigest()[:16]
+    if trig.get("task_id"):
+        task_id = str(trig.get("task_id") or "")
+        payload = _task_prompt_body(
+            trig,
+            task_id,
+            str(trig.get("description") or f"Recurring task cadence fire: {task_id}"),
+        )
+        return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()[:16]
+    return ""
 
 
 def append_state_file(state_file: Optional[str], record: dict) -> Optional[str]:
@@ -225,10 +320,7 @@ def tick(registry_path: str, redis_client, dry_run: bool = False,
 
         trig_id = trig.get("id") or trig.get("session", "?")
         result = fire_trigger(redis_client, trig, now_local, dry_run=dry_run)
-        prompt_hash = ""
-        if trig.get("prompt_file") and os.path.isfile(trig["prompt_file"]):
-            with open(trig["prompt_file"], "rb") as f:
-                prompt_hash = "sha256:" + hashlib.sha256(f.read()).hexdigest()[:16]
+        prompt_hash = trigger_payload_hash(trig)
         # Only append a state_file record for ACTUAL dispatches. Skipped
         # ticks (already-fired, disabled, no-prompt-file) and dry-runs
         # are logged but not persisted, so the state_file stays a clean
@@ -239,6 +331,8 @@ def tick(registry_path: str, redis_client, dry_run: bool = False,
                 "ts": int(time.time()),
                 "fire_id": f"{trig_id}-{now_local:%Y%m%d-%H%M}",
                 "session": trig.get("session"),
+                "trigger_mode": "task" if trig.get("task_id") else "prompt",
+                "task_id": trig.get("task_id") or "",
                 "tz_hour_minute": f"{now_local:%H:%M}",
                 "prompt_hash": prompt_hash,
                 "result": result,
