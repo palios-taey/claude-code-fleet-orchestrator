@@ -1049,20 +1049,34 @@ def _session_pause_active(session_id: str, config: Optional[OrchConfig] = None) 
     return True
 
 
+def _is_configured_dashboard_supervisor_session(session_id: str, cfg: OrchConfig) -> bool:
+    session = str(session_id or "").strip().lower()
+    if not session:
+        return False
+    return session in {
+        _dashboard_supervisor_session(str(raw_session or ""))
+        for raw_session in cfg.session_ids or []
+    }
+
+
 def _resolve_supervisor_session(session_id: str, config: Optional[OrchConfig] = None) -> str:
+    cfg = config or OrchConfig()
+    session = str(session_id or "").strip()
+    if _is_configured_dashboard_supervisor_session(session, cfg):
+        return _normalize_owner_session(session)
     r = _fleet_state_redis()
     try:
-        explicit = r.get(_state_key(session_id, "parent"))
+        explicit = r.get(_state_key(session, "parent"))
     except Exception:
         explicit = None
-    if explicit:
+    if explicit and str(explicit).strip() != session:
         return str(explicit)
     for suffix in ("-codex", "-gemini", "-grok", "-claude"):
-        if session_id.endswith(suffix):
-            base = session_id[: -len(suffix)]
+        if session.endswith(suffix):
+            base = session[: -len(suffix)]
             if base:
                 return base
-    return session_id
+    return session
 
 
 def _session_is_supervisor_context(session_id: str, supervisor: str) -> bool:
