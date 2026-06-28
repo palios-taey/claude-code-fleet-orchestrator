@@ -10,10 +10,16 @@ from __future__ import annotations
 import os
 import re
 import sys
+import ast
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from fleet_orchestrator.evidence_verification import (  # noqa: E402
+    COMPLETION_ALLOWLIST_UNSET_WARNING,
+    allowed_completion_repos,
+    warn_if_completion_allowlist_unset,
+)
 from fleet_orchestrator.orch_template import apply_gate_template  # noqa: E402
 
 
@@ -42,6 +48,7 @@ PRIVATE_NAME_PATTERN = re.compile(
     r"|\b(Gaia|Logos|Cosmos|Clarity|Horizon|Prophet|Brain|Math|PATHOS|POTENTIAL|TRUTH)\b"
     r"|\bthe Map\b|\bthe Family\b|\bFamily\b",
 )
+OPERATOR_ORG_REPO_PATTERN = re.compile(r"\bpalios-taey/[A-Za-z0-9_.-]+\b")
 SHIPPED_SURFACES = [
     "README.md",
     ".env.example",  # the file README tells users to `cp` — a 2026-06-15 DR audit found
@@ -55,6 +62,7 @@ SHIPPED_SURFACES = [
     "fleet_orchestrator/orch_schema.py",
     "fleet_orchestrator/context_assembler.py",
     "fleet_orchestrator/dispatch.py",
+    "fleet_orchestrator/evidence_verification.py",
     "fleet_orchestrator/loop_engine.py",
     "fleet_orchestrator/plan_loader.py",
     "fleet_orchestrator/plan_readiness.py",
@@ -66,6 +74,7 @@ SHIPPED_SURFACES = [
     "ui/index.html",
     "ui/static/app.js",
 ]
+CONFIG_DEFAULT_SURFACES = sorted(str(path.relative_to(ROOT)) for path in (ROOT / "fleet_orchestrator").glob("*.py"))
 
 
 def _check(label: str, cond: bool, extra: object = "") -> None:
@@ -97,6 +106,53 @@ def _gate_tasks(plan: dict) -> list[dict]:
 
 def _text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def _literal_strings(node: ast.AST) -> list[str]:
+    values = []
+    for child in ast.walk(node):
+        if isinstance(child, ast.Constant) and isinstance(child.value, str):
+            values.append(child.value)
+    return values
+
+
+def _assignment_names(node: ast.AST) -> list[str]:
+    names: list[str] = []
+    targets: list[ast.AST] = []
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    for target in targets:
+        if isinstance(target, ast.Name):
+            names.append(target.id)
+    return names
+
+
+def _operator_org_default_leaks() -> list[str]:
+    leaks: list[str] = []
+    for path in CONFIG_DEFAULT_SURFACES:
+        tree = ast.parse(_text(path), filename=path)
+        for node in tree.body:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            names = _assignment_names(node)
+            if not any(name.isupper() or "DEFAULT" in name.upper() for name in names):
+                continue
+            value = node.value
+            for literal in _literal_strings(value):
+                matches = sorted(set(OPERATOR_ORG_REPO_PATTERN.findall(literal)))
+                if matches:
+                    leaks.append(f"{path}:{getattr(node, 'lineno', '?')} {','.join(names)} -> {matches}")
+    return leaks
+
+
+class _WarningRecorder:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def warning(self, message: str, *args: object) -> None:
+        self.messages.append(message % args if args else message)
 
 
 def main() -> int:
@@ -147,6 +203,34 @@ def main() -> int:
         if matches:
             leaks[path] = matches
     _check("shipped surfaces contain no private fleet identity literals", not leaks, leaks)
+
+    old_completion_allowlist = os.environ.get("ORCH_COMPLETION_ALLOWED_REPOS")
+    try:
+        os.environ.pop("ORCH_COMPLETION_ALLOWED_REPOS", None)
+        recorder = _WarningRecorder()
+        _check(
+            "unset ORCH_COMPLETION_ALLOWED_REPOS has no product default allowlist",
+            allowed_completion_repos() == (),
+            allowed_completion_repos(),
+        )
+        _check(
+            "unset ORCH_COMPLETION_ALLOWED_REPOS emits loud UNVERIFIED startup warning",
+            warn_if_completion_allowlist_unset(recorder) is True
+            and any(COMPLETION_ALLOWLIST_UNSET_WARNING in message for message in recorder.messages),
+            recorder.messages,
+        )
+    finally:
+        if old_completion_allowlist is None:
+            os.environ.pop("ORCH_COMPLETION_ALLOWED_REPOS", None)
+        else:
+            os.environ["ORCH_COMPLETION_ALLOWED_REPOS"] = old_completion_allowlist
+
+    org_default_leaks = _operator_org_default_leaks()
+    _check(
+        "config/default surfaces contain no operator org repo defaults",
+        not org_default_leaks,
+        org_default_leaks,
+    )
 
     # Durable recurrence guard (the "extend the scan" gatekeeper recommended on PR#101):
     # PERSONAL name + operator MACHINE profile must not appear ANYWHERE in the tracked

@@ -45,6 +45,7 @@ os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
+from fleet_orchestrator import evidence_verification  # noqa: E402
 from fleet_orchestrator.orch_schema import create_phase, create_project, create_task  # noqa: E402
 from fleet_orchestrator.tasks_api import app  # noqa: E402
 
@@ -179,6 +180,14 @@ def _cli_status_text(client: TestClient, task_id: str) -> str:
     return stdout.getvalue()
 
 
+class _WarningRecorder:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def warning(self, message: str, *args: object) -> None:
+        self.messages.append(message % args if args else message)
+
+
 def main() -> int:
     _cleanup(PREFIX)
     client = TestClient(app)
@@ -204,6 +213,44 @@ def main() -> int:
         os.environ["PATH"] = f"{tmp}{os.pathsep}{os.environ['PATH']}"
         os.environ["ORCH_COMPLETION_GITHUB_REPO"] = CONDUCTOR_REPO
         os.environ["ORCH_COMPLETION_REQUIRED_CHECKS"] = "r5-audit-gate,ship-gate-acceptance"
+        os.environ.pop("ORCH_COMPLETION_ALLOWED_REPOS", None)
+        check(
+            "unset completion repo allowlist has no product default",
+            evidence_verification.allowed_completion_repos() == (),
+            repr(evidence_verification.allowed_completion_repos()),
+        )
+        recorder = _WarningRecorder()
+        check(
+            "unset completion repo allowlist emits UNVERIFIED startup warning",
+            evidence_verification.warn_if_completion_allowlist_unset(recorder) is True
+            and any("UNVERIFIED" in message and "ORCH_COMPLETION_ALLOWED_REPOS" in message for message in recorder.messages),
+            repr(recorder.messages),
+        )
+        explicit_unset = evidence_verification.verify_completion_evidence(
+            {"commit_sha": GREEN_SHA, "repo": ORCH_REPO, "production_observation": "unset allowlist explicit repo probe"},
+            producer="tester-api",
+        )
+        check(
+            "unset completion repo allowlist keeps explicit repo UNVERIFIED",
+            explicit_unset is not None
+            and explicit_unset.get("status") == "UNVERIFIED"
+            and explicit_unset.get("verified") is False
+            and "ORCH_COMPLETION_ALLOWED_REPOS" in explicit_unset.get("reason", ""),
+            json.dumps(explicit_unset, sort_keys=True),
+        )
+        inferred_unset = evidence_verification.verify_completion_evidence(
+            {"commit_sha": CONDUCTOR_SHA, "production_observation": "unset allowlist inferred repo probe"},
+            producer="tester-api",
+        )
+        check(
+            "unset completion repo allowlist keeps inferred repo UNVERIFIED",
+            inferred_unset is not None
+            and inferred_unset.get("status") == "UNVERIFIED"
+            and inferred_unset.get("verified") is False
+            and inferred_unset.get("repo") == CONDUCTOR_REPO
+            and "ORCH_COMPLETION_ALLOWED_REPOS" in inferred_unset.get("reason", ""),
+            json.dumps(inferred_unset, sort_keys=True),
+        )
         os.environ["ORCH_COMPLETION_ALLOWED_REPOS"] = f"{ORCH_REPO},{CONDUCTOR_REPO}"
         os.environ["ORCH_COMPLETION_TRUSTED_CHECK_RUN_APPS"] = "github-actions"
         os.environ["ORCH_COMPLETION_TRUSTED_STATUS_CREATORS"] = "github-actions[bot]"

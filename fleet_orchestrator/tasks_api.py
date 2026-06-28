@@ -43,6 +43,7 @@ from fleet_orchestrator.context_assembler import (
 )
 from fleet_orchestrator.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from fleet_orchestrator.easy_setup import api_host
+from fleet_orchestrator.evidence_verification import warn_if_completion_allowlist_unset
 from fleet_orchestrator.version import __version__ as RUNNING_VERSION
 from fleet_orchestrator.evidence_contract import REQUEST_TERMINAL_EVIDENCE_KEYS, TERMINAL_STATUSES
 from fleet_orchestrator.feature_flags import TRUE_ENV_VALUES, chat_enabled, wake_packet_endpoint_enabled
@@ -366,6 +367,7 @@ async def _optional_mutable_auth(request: Request, call_next):
 @app.on_event("startup")
 def _init_schema_on_startup() -> None:
     _enforce_mutable_api_exposure()
+    warn_if_completion_allowlist_unset(LOGGER)
     result = init_schema(config=_cfg())
     errors = result.get("errors") or []
     if errors:

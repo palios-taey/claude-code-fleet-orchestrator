@@ -34,7 +34,7 @@ This file is the single entry point for any code review of `claude-code-fleet-or
 
 **Integrity / honesty:**
 - C7. **Ship gates are fail-closed** — no declared gate tasks ⇒ not shippable; the config cannot be emptied/gamed to force a pass (`shippability.py`).
-- C8. **No operator-specific identity or paths are baked in as defaults** — names/paths/IPs come from config/env; missing config fails loud, not a silent operator default. (Enforced by `tests/standalone_sessions_acceptance.py`, `tests/lane_state_acceptance.py`.)
+- C8. **No operator-specific identity or paths are baked in as defaults** — names/paths/IPs/repos come from config/env; missing config fails loud, not a silent operator default. Completed-task GitHub repo verification has no product allowlist default: `ORCH_COMPLETION_ALLOWED_REPOS` must be configured, or commit-based completions stay `UNVERIFIED` with a startup warning. (Enforced by `tests/standalone_sessions_acceptance.py`, `tests/lane_state_acceptance.py`, `tests/fleet_identity_deumbilical_acceptance.py`.)
 - C9. **`version.py` is the single source of truth for the version**, and a release tag that disagrees with it fails CI (`.github/workflows/version-tag-consistency.yml`).
 - C10. **`orch-watch` independently monitors notification-delivery liveness by default.** Verify `fleet_orchestrator/cli_orch_watch.py`: `ORCH_NOTIFY_DAEMON_WATCHDOG` defaults on, `check_notify_daemon_liveness` checks the delegated router service and `taey:_notify_daemon:heartbeat` freshness, `check_stuck_inbox_delivery` checks old `${NOTIFY_KEY_PREFIX:-taey}:*:inbox` messages, and watchdog failures alert out-of-band through direct tmux submission rather than depending on `taey-notify`.
 
