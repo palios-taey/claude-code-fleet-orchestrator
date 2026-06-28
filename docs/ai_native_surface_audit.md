@@ -14,10 +14,10 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 216.
-- Teaches: 94.
+- Enumerated surfaces: 224.
+- Teaches: 98.
 - Needs-fix baseline debt: 53.
-- Exempt reviewed baseline rows: 69.
+- Exempt reviewed baseline rows: 72.
 
 <!-- ai-native-surfaces:start -->
 | File | Function | Kind | Ordinal | Line Hint | Fingerprint | Classification | Teaching Evidence | Rationale | Review |
@@ -127,6 +127,8 @@ Summary:
 | fleet_orchestrator/orch_schema.py | create_task | orch_raise_error | 1 | 2449 | 7f54b3d92ee6300a | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/orch_schema.py | create_task | orch_raise_error | 2 | 2511 | a0c81e66bc3ecc98 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/orch_schema.py | edit_project_condition | orch_raise_error | 1 | 3645 | c6aef8a544f70683 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/orch_schema.py | resolve_human_review_hold | orch_raise_error | 1 | 3623 | 85adb5229967d3c1 | teaches | POST /api/ui/human-review-holds/{}/resolve | Verdict-required error names the exact UI hold-resolution endpoint and accepted body. | task-e01ac5b9 |
+| fleet_orchestrator/orch_schema.py | resolve_human_review_hold | orch_raise_error | 2 | 3716 | 00d4b005ba9d04df | exempt |  | Raw notify subprocess failure after durable chat recording is an operator/logging concern; the UI endpoint wraps it as an internal transport failure. | task-e01ac5b9 |
 | fleet_orchestrator/orch_schema.py | resolve_ref_path | orch_return_none_error | 1 | 614 | 169ae424dede9728 | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
 | fleet_orchestrator/orch_schema.py | resolve_ref_path | orch_return_none_error | 2 | 616 | 1d4083e77d945e0c | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
 | fleet_orchestrator/orch_schema.py | resolve_ref_path | orch_return_none_error | 3 | 618 | 9d6856933337a22c | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
@@ -234,6 +236,11 @@ Summary:
 | fleet_orchestrator/tasks_api.py | ui_answer_human_review_gate_endpoint | http_exception_detail | 3 | 898 | 8ef39f3dd36572d9 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | ui_answer_human_review_gate_endpoint | json_response_error | 1 | 910 | af945b0e31ca4a15 | teaches | POST /api/human-review-gates | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | ui_answer_human_review_gate_endpoint | json_response_error | 2 | 916 | a40ba0877882c1b9 | exempt |  | Raw subprocess/persistence/unhandled server failure is an operator/logging concern, not a client-correctable AI workflow surface. | anbr-fix-exempt:internal-transport-or-500 |
+| fleet_orchestrator/tasks_api.py | ui_resolve_human_review_hold_endpoint | http_exception_detail | 1 | 990 | ccbb342a67fa7d9a | exempt |  | Security rejection intentionally withholds workflow detail; the correct action is to use the trusted dashboard/API origin. | task-e01ac5b9 |
+| fleet_orchestrator/tasks_api.py | ui_resolve_human_review_hold_endpoint | http_exception_detail | 2 | 995 | 60529c7f73a08054 | teaches | POST /api/ui/human-review-holds/{}/resolve | Missing-verdict error returns the exact endpoint and body field contract. | task-e01ac5b9 |
+| fleet_orchestrator/tasks_api.py | ui_resolve_human_review_hold_endpoint | http_exception_detail | 3 | 1006 | 72eaaa17e546f0de | teaches | taey-task | Missing/changed hold error names the task inspect CLI and UI resolution path. | task-e01ac5b9 |
+| fleet_orchestrator/tasks_api.py | ui_resolve_human_review_hold_endpoint | json_response_error | 1 | 1022 | 662ae1525f71f87f | teaches | POST /api/ui/human-review-holds/{}/resolve | ValueError wrapper returns the exact hold-resolution endpoint as next_step. | task-e01ac5b9 |
+| fleet_orchestrator/tasks_api.py | ui_resolve_human_review_hold_endpoint | json_response_error | 2 | 1028 | a40ba0877882c1b9 | exempt |  | Raw persistence/notify/internal failure is logged and returned as a 500 operator concern, not a client-correctable AI workflow surface. | task-e01ac5b9 |
 | fleet_orchestrator/tasks_api.py | update | json_response_error | 1 | 667 | f64c93f2129a0ecd | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | update | json_response_error | 2 | 676 | a7e4e83c6bf59785 | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | update | json_response_error | 3 | 706 | d6c61be575531467 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |

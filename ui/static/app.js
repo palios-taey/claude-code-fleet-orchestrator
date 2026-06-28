@@ -9,6 +9,8 @@ const SUPERVISOR_BADGES_ENDPOINT = "/api/supervisors/badges";
 const CHAT_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}`;
 const CHAT_PROMOTE_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}/promote`;
 const UI_QUESTION_ANSWER_ENDPOINT = (questionId) => `/api/ui/questions/${encodeURIComponent(questionId)}/answer`;
+const UI_HUMAN_REVIEW_HOLD_RESOLVE_ENDPOINT = (taskId) =>
+  `/api/ui/human-review-holds/${encodeURIComponent(taskId)}/resolve`;
 const POLL_INTERVAL_MS = 5000;
 const IS_PUBLIC_MODE = window.ORCH_PUBLIC_MODE === true;
 // Populated at runtime from GET /api/sessions (data-derived; no hardcoded operator fleet).
@@ -342,11 +344,18 @@ function renderOpenQuestions(openQuestions) {
     <section class="stop-conditions">
       <h3>Open questions</h3>
       <ul>${openQuestions.map((item) => {
-        const questionId = item.question_id || item.id || "";
+        const isHumanReviewHold = item.type === "human_review_hold";
+        const holdTaskId = isHumanReviewHold ? (item.task_id || item.id || "") : "";
+        const questionId = isHumanReviewHold ? "" : (item.question_id || item.id || "");
         return `
           <li>
             <p>${escapeHtml(item.reason || item.text || "")}</p>
-            ${questionId ? `
+            ${holdTaskId ? `
+              <div class="question-answer" data-human-review-hold-task-id="${escapeHtml(holdTaskId)}">
+                <textarea rows="2" placeholder="Verdict"></textarea>
+                <button type="button" data-resolve-human-review-hold="${escapeHtml(holdTaskId)}">Resolve hold</button>
+              </div>
+            ` : questionId ? `
               <div class="question-answer" data-question-id="${escapeHtml(questionId)}">
                 <textarea rows="2" placeholder="Verdict"></textarea>
                 <button type="button" data-answer-question="${escapeHtml(questionId)}">Record verdict</button>
@@ -852,6 +861,38 @@ if (!IS_PUBLIC_MODE) {
 
 if (!IS_PUBLIC_MODE) {
   elements.chatOpenQuestions.addEventListener("click", async (event) => {
+    const holdTarget = event.target.closest("[data-resolve-human-review-hold]");
+    if (holdTarget) {
+      const taskId = holdTarget.dataset.resolveHumanReviewHold;
+      const container = holdTarget.closest("[data-human-review-hold-task-id]");
+      const verdict = container?.querySelector("textarea")?.value.trim() || "";
+      if (!taskId || !verdict) {
+        setChatStatus("Verdict required", "error", 5000);
+        return;
+      }
+      holdTarget.disabled = true;
+      setChatStatus("Resolving hold...", "pending", 0);
+      try {
+        await fetchJson(UI_HUMAN_REVIEW_HOLD_RESOLVE_ENDPOINT(taskId), {
+          method: "POST",
+          body: JSON.stringify({ verdict, resolved_by: "operator" }),
+        });
+        await loadSupervisorBadges();
+        mergeSupervisorBadgeSessions();
+        await Promise.all([loadChat(), loadSessions(), loadSessionProjects()]);
+        ensureSelectedProject();
+        renderSessionCards();
+        renderProjectList();
+        renderChatPanel();
+        await loadSelectedProject();
+        setChatStatus("Hold resolved", "success", 5000);
+      } catch (error) {
+        holdTarget.disabled = false;
+        setChatStatus(error.message, "error", 8000);
+      }
+      return;
+    }
+
     const target = event.target.closest("[data-answer-question]");
     if (!target) {
       return;
