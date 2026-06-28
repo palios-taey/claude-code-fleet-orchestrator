@@ -327,10 +327,14 @@ def _http_error(exc: ValueError) -> HTTPException:
 @router.get("/{lineage}")
 async def chat_history(lineage: str) -> Dict[str, Any]:
     try:
+        open_questions = await get_open_questions(lineage)
+        from fleet_orchestrator.orch_schema import get_supervisor_human_review_holds
+
+        open_questions.extend(get_supervisor_human_review_holds(lineage, config=OrchConfig()))
         return {
             "lineage": _normalize_lineage(lineage),
             "messages": await get_conversation(lineage),
-            "open_questions": await get_open_questions(lineage),
+            "open_questions": open_questions,
             "needs_you": await needs_you(lineage),
         }
     except ValueError as exc:

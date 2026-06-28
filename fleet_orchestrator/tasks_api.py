@@ -110,6 +110,7 @@ from fleet_orchestrator.orch_schema import (
     get_session_stop_decision,
     get_task_phase,
     reset_project,
+    resolve_human_review_hold,
     supervisor_access_resolution,
     session_registration_error_detail,
     set_project_stop_reason,
@@ -980,6 +981,50 @@ async def ui_answer_human_review_gate_endpoint(question_id: str, req: Request) -
         )
     except Exception as exc:
         LOGGER.exception("Unhandled UI human-review answer failed question=%s", question_id)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+
+@app.post("/api/ui/human-review-holds/{task_id}/resolve")
+async def ui_resolve_human_review_hold_endpoint(task_id: str, req: Request) -> Dict[str, Any]:
+    if not _origin_allowed_for_ui(req):
+        raise HTTPException(status_code=403, detail="origin does not match dashboard host")
+    data = await req.json()
+    verdict = str(data.get("verdict") or data.get("answer") or data.get("comment") or "").strip()
+    resolved_by = str(data.get("resolved_by") or data.get("answered_by") or data.get("from") or "operator").strip()
+    if not verdict:
+        raise HTTPException(
+            status_code=422,
+            detail=_required_body_detail(
+                "verdict",
+                {"verdict": "<decision text>", "resolved_by": "<reviewer>"},
+                endpoint=f"POST /api/ui/human-review-holds/{task_id}/resolve",
+            ),
+        )
+    try:
+        result = resolve_human_review_hold(task_id, verdict, resolved_by, config=_cfg())
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": result.get("reason") or "human-review hold not found",
+                    "task_id": task_id,
+                    "next_step": (
+                        "Open `/ui/`, select the supervisor with the NEEDS-YOU badge, and resolve an "
+                        "open AWAIT:human-review hold; or inspect the task with "
+                        f"GET /api/tasks/{task_id} / `taey-task status {task_id}`."
+                    ),
+                },
+            )
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": str(exc), "next_step": f"POST /api/ui/human-review-holds/{task_id}/resolve"},
+        )
+    except Exception as exc:
+        LOGGER.exception("Unhandled UI human-review hold resolution failed task=%s", task_id)
         return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
 

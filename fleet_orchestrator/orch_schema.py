@@ -3536,6 +3536,197 @@ def _supervisor_badge_session(value: Any) -> str:
     return _dashboard_supervisor_session(value)
 
 
+def _human_review_hold_record(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    marker = _declared_await_signal(row.get("blocked_on"))
+    if not marker or marker.get("kind") != "human-review":
+        return None
+    task_id = str(row.get("task_id") or "").strip()
+    if not task_id:
+        return None
+    detail = str(marker.get("detail") or "").strip()
+    description = str(row.get("description") or "").strip()
+    reason = detail or description or "human review requested"
+    return {
+        "id": task_id,
+        "type": "human_review_hold",
+        "task_id": task_id,
+        "project_id": str(row.get("project_id") or ""),
+        "phase_id": str(row.get("phase_id") or ""),
+        "owner": str(row.get("owner") or ""),
+        "supervisor": _supervisor_badge_session(row.get("effective_supervisor") or row.get("owner") or ""),
+        "blocked_on": str(row.get("blocked_on") or ""),
+        "detail": detail,
+        "description": description,
+        "reason": f"HUMAN REVIEW HOLD [{task_id}]\n{reason}",
+        "resolve_endpoint": f"/api/ui/human-review-holds/{task_id}/resolve",
+    }
+
+
+def get_supervisor_human_review_holds(supervisor: str,
+                                      config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
+    """Return open structured AWAIT:human-review holds for one dashboard supervisor."""
+    supervisor_value = _supervisor_badge_session(supervisor)
+    if not supervisor_value:
+        return []
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    terminal_statuses = list(_TERMINAL_TASK_STATUSES)
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WITH p, ph, t,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
+                 END AS effective_supervisor
+            WHERE coalesce(effective_supervisor, '') <> ''
+              AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+              AND toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:HUMAN-REVIEW:'
+            RETURN t.id AS task_id,
+                   t.description AS description,
+                   t.owner AS owner,
+                   t.blocked_on AS blocked_on,
+                   p.id AS project_id,
+                   ph.id AS phase_id,
+                   effective_supervisor AS effective_supervisor
+            ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, t.created_at ASC
+        """, terminal_statuses=terminal_statuses)
+        holds = []
+        for record in result:
+            hold = _human_review_hold_record(dict(record))
+            if hold and hold.get("supervisor") == supervisor_value:
+                holds.append(hold)
+        return holds
+
+
+def _human_review_resolution_message(task_id: str, verdict: str, *,
+                                     resolved_by: str, blocked_on: str) -> str:
+    return (
+        f"HUMAN REVIEW RESOLVED [{task_id}]\n"
+        f"resolved_by: {resolved_by}\n"
+        f"cleared_blocked_on: {blocked_on}\n\n"
+        f"{verdict}\n\n"
+        "The human-review hold is cleared. Continue the task using this verdict."
+    )
+
+
+def resolve_human_review_hold(task_id: str, verdict: str, resolved_by: str,
+                              config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    """Resolve a structured AWAIT:human-review task hold without completing the task."""
+    verdict_text = str(verdict or "").strip()
+    reviewer = str(resolved_by or "").strip() or "operator"
+    if not verdict_text:
+        raise ValueError(
+            f"verdict must be non-empty. POST /api/ui/human-review-holds/{task_id}/resolve "
+            'with body {"verdict":"<decision>","resolved_by":"<reviewer>"} or use `/ui/`.'
+        )
+    cfg = config or OrchConfig()
+    resolved_task_id = resolve_task_id(task_id, config=cfg)
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            WITH p, ph, t,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
+                 END AS effective_supervisor
+            WHERE NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+            RETURN t.id AS task_id,
+                   t.description AS description,
+                   t.owner AS owner,
+                   t.status AS status,
+                   t.blocked_on AS blocked_on,
+                   p.id AS project_id,
+                   ph.id AS phase_id,
+                   effective_supervisor AS effective_supervisor
+        """,
+            task_id=resolved_task_id,
+            terminal_statuses=list(_TERMINAL_TASK_STATUSES),
+        ).single()
+        if row is None:
+            return {"ok": False, "task_id": resolved_task_id, "reason": "task not found or already terminal"}
+        hold = _human_review_hold_record(dict(row))
+        if not hold:
+            return {"ok": False, "task_id": resolved_task_id, "reason": "task is not blocked on AWAIT:human-review"}
+        blocked_on = str(row.get("blocked_on") or "")
+        resolution = {
+            "verdict": verdict_text,
+            "resolved_by": reviewer,
+            "resolved_at": _utc_now_iso(),
+            "cleared_blocked_on": blocked_on,
+        }
+        updated = session.run("""
+            MATCH (t:OrchTask {id: $task_id})
+            WHERE coalesce(t.blocked_on, '') = $blocked_on
+            SET t.blocked_on = NULL,
+                t.human_review_resolution = $resolution,
+                t.human_review_resolved_by = $resolved_by,
+                t.human_review_resolved_at = datetime(),
+                t.updated_at = datetime()
+            RETURN t.id AS task_id, t.status AS status, t.owner AS owner, t.blocked_on AS blocked_on
+        """,
+            task_id=resolved_task_id,
+            blocked_on=blocked_on,
+            resolution=_json_encode(resolution),
+            resolved_by=reviewer,
+        ).single()
+        if updated is None:
+            return {"ok": False, "task_id": resolved_task_id, "reason": "human-review hold changed before resolution"}
+
+    supervisor = str(hold.get("supervisor") or hold.get("owner") or "").strip()
+    body = _human_review_resolution_message(
+        resolved_task_id,
+        verdict_text,
+        resolved_by=reviewer,
+        blocked_on=blocked_on,
+    )
+    if supervisor:
+        from .chat_layer import append_message_sync
+
+        append_message_sync(
+            supervisor,
+            "operator-ui",
+            body,
+            role="user",
+            message_type="human_review_resolution",
+            metadata={
+                "source": "human_review_hold_resolution",
+                "task_id": resolved_task_id,
+                "blocked_on": blocked_on,
+                "resolved_by": reviewer,
+                "human_review_resolution": True,
+            },
+            config=cfg,
+        )
+        result = subprocess.run(
+            [cfg.notify_cli_path, supervisor, body, "--from", "operator-ui",
+             "--type", "message", "--priority", "high"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"{cfg.notify_cli_path} failed")
+
+    return {
+        "ok": True,
+        "task_id": resolved_task_id,
+        "status": updated.get("status"),
+        "owner": updated.get("owner"),
+        "blocked_on": updated.get("blocked_on"),
+        "supervisor": supervisor,
+        "resolved_by": reviewer,
+        "verdict_delivered": bool(supervisor),
+    }
+
+
 def _supervisor_badge_fallback_session(dashboard_set: set[str], cfg: OrchConfig) -> str:
     configured = str(getattr(cfg, "badge_fallback_supervisor", "") or "").strip()
     if not configured:
