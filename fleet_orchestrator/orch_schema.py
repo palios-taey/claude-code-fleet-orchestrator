@@ -3485,6 +3485,225 @@ def get_session_supervised_projects(session_id: str,
         return [_decode_project_node(dict(record["p"])) for record in result]
 
 
+def _supervisor_badge_seed(supervisor: str) -> Dict[str, Any]:
+    return {
+        "supervisor": supervisor,
+        "state": "IDLE",
+        "label": "IDLE",
+        "summary": "No open task or question is present on this supervisor's projects.",
+        "open_task_count": 0,
+        "in_progress_count": 0,
+        "await_count": 0,
+        "human_review_hold_count": 0,
+        "dependency_wait_count": 0,
+        "live_resolver_wait_count": 0,
+        "open_question_count": 0,
+        "question_ids": [],
+        "reasons": [],
+    }
+
+
+def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict[str, Any]]:
+    """Derived per-supervisor work badge for the dashboard.
+
+    This is intentionally a view over existing OrchProject/OrchTask/OrchQuestion
+    state. No stopped state is inferred in this view.
+    """
+    cfg = config or OrchConfig()
+    badges: Dict[str, Dict[str, Any]] = {
+        supervisor: _supervisor_badge_seed(supervisor)
+        for supervisor in list_dashboard_sessions(config=cfg)
+    }
+    question_ids_by_supervisor: Dict[str, set[str]] = {supervisor: set() for supervisor in badges}
+    unknown_questions_by_supervisor: Dict[str, int] = {supervisor: 0 for supervisor in badges}
+
+    def row_for(raw_supervisor: Any) -> Optional[Dict[str, Any]]:
+        supervisor = _normalize_owner_session(str(raw_supervisor or "").strip())
+        if not supervisor:
+            return None
+        if supervisor.lower() in {"unassigned", "unknown", "none", "null"}:
+            return None
+        if supervisor not in badges:
+            badges[supervisor] = _supervisor_badge_seed(supervisor)
+            question_ids_by_supervisor[supervisor] = set()
+            unknown_questions_by_supervisor[supervisor] = 0
+        return badges[supervisor]
+
+    def add_question_id(supervisor: str, raw_record: Any) -> bool:
+        record = _decode_json_field(raw_record, {})
+        if not isinstance(record, dict):
+            return False
+        question_id = str(record.get("id") or record.get("question_id") or "").strip()
+        if not question_id:
+            return False
+        question_ids_by_supervisor.setdefault(supervisor, set()).add(question_id)
+        return True
+
+    driver = get_neo4j_driver(cfg)
+    terminal_statuses = list(_TERMINAL_TASK_STATUSES)
+    with driver.session(database=cfg.neo4j_db) as session:
+        task_rows = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WITH p, t,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN coalesce(t.owner, '')
+                   ELSE p.supervisor
+                 END AS effective_supervisor
+            WHERE coalesce(effective_supervisor, '') <> ''
+              AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+            RETURN effective_supervisor AS supervisor,
+                   count(DISTINCT t) AS open_task_count,
+                   count(DISTINCT CASE WHEN coalesce(t.status, '') = 'in_progress' THEN t END) AS in_progress_count,
+                   count(DISTINCT CASE
+                       WHEN toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:' THEN t
+                   END) AS await_count,
+                   count(DISTINCT CASE
+                       WHEN toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:HUMAN-REVIEW:' THEN t
+                   END) AS human_review_hold_count
+        """, terminal_statuses=terminal_statuses)
+        for record in task_rows:
+            badge = row_for(record["supervisor"])
+            if badge is None:
+                continue
+            badge["open_task_count"] += int(record["open_task_count"] or 0)
+            badge["in_progress_count"] += int(record["in_progress_count"] or 0)
+            badge["await_count"] += int(record["await_count"] or 0)
+            badge["human_review_hold_count"] += int(record["human_review_hold_count"] or 0)
+
+        dependency_rows = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)-[:DEPENDS_ON]->(dep:OrchTask)
+            WITH p, t, dep,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN coalesce(t.owner, '')
+                   ELSE p.supervisor
+                 END AS effective_supervisor
+            WHERE coalesce(effective_supervisor, '') <> ''
+              AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+              AND NOT (coalesce(dep.status, 'pending') IN $terminal_statuses)
+            RETURN effective_supervisor AS supervisor,
+                   count(DISTINCT t) AS dependency_wait_count
+        """, terminal_statuses=terminal_statuses)
+        for record in dependency_rows:
+            badge = row_for(record["supervisor"])
+            if badge is not None:
+                badge["dependency_wait_count"] += int(record["dependency_wait_count"] or 0)
+
+        resolver_rows = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            MATCH (resolver:OrchTask {id: t.blocked_on})
+            WITH p, t, resolver,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN coalesce(t.owner, '')
+                   ELSE p.supervisor
+                 END AS effective_supervisor
+            WHERE coalesce(effective_supervisor, '') <> ''
+              AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+              AND resolver.status IN ['in_progress', 'dispatched']
+            RETURN effective_supervisor AS supervisor,
+                   count(DISTINCT t) AS live_resolver_wait_count
+        """, terminal_statuses=terminal_statuses)
+        for record in resolver_rows:
+            badge = row_for(record["supervisor"])
+            if badge is not None:
+                badge["live_resolver_wait_count"] += int(record["live_resolver_wait_count"] or 0)
+
+        question_rows = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            MATCH (q:OrchQuestion {status: 'open'})-[:CONCERNS_TASK]->(t)
+            WITH p, t, q,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN coalesce(t.owner, '')
+                   ELSE p.supervisor
+                 END AS effective_supervisor
+            WHERE coalesce(effective_supervisor, '') <> ''
+              AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+            RETURN effective_supervisor AS supervisor,
+                   count(DISTINCT q) AS open_question_count,
+                   collect(DISTINCT q.id) AS question_ids
+        """, terminal_statuses=terminal_statuses)
+        for record in question_rows:
+            badge = row_for(record["supervisor"])
+            if badge is None:
+                continue
+            supervisor = badge["supervisor"]
+            ids = [str(item) for item in (record["question_ids"] or []) if item]
+            question_ids_by_supervisor.setdefault(supervisor, set()).update(ids)
+            unknown_questions_by_supervisor[supervisor] = (
+                unknown_questions_by_supervisor.get(supervisor, 0)
+                + max(0, int(record["open_question_count"] or 0) - len(ids))
+            )
+
+    from .config import get_redis_sync
+
+    redis_client = get_redis_sync(cfg)
+    for supervisor in list(badges):
+        lineage = _chat_lineage(supervisor)
+        open_questions = redis_client.lrange(_chat_key("openq", lineage), 0, -1) or []
+        for raw_question in open_questions:
+            if not add_question_id(supervisor, raw_question):
+                unknown_questions_by_supervisor[supervisor] = unknown_questions_by_supervisor.get(supervisor, 0) + 1
+        needs_you = redis_client.get(_chat_key("needs_you", lineage))
+        if needs_you and not add_question_id(supervisor, needs_you) and not open_questions:
+            unknown_questions_by_supervisor[supervisor] = unknown_questions_by_supervisor.get(supervisor, 0) + 1
+
+    for badge in badges.values():
+        supervisor = badge["supervisor"]
+        question_ids = sorted(question_ids_by_supervisor.get(supervisor, set()))
+        badge["question_ids"] = question_ids[:5]
+        badge["open_question_count"] = len(question_ids) + unknown_questions_by_supervisor.get(supervisor, 0)
+        reasons: List[str] = []
+        if badge["open_question_count"]:
+            reasons.append("open_question")
+        if badge["human_review_hold_count"]:
+            reasons.append("human_review_hold")
+        if badge["in_progress_count"]:
+            reasons.append("in_progress")
+        if badge["await_count"]:
+            reasons.append("await_signal")
+        if badge["dependency_wait_count"]:
+            reasons.append("dependency_wait")
+        if badge["live_resolver_wait_count"]:
+            reasons.append("live_resolver_wait")
+        if badge["open_task_count"] and not reasons:
+            reasons.append("open_work")
+        badge["reasons"] = reasons
+        if badge["open_question_count"] or badge["human_review_hold_count"]:
+            badge["state"] = "NEEDS-YOU"
+            badge["label"] = "NEEDS-YOU"
+            badge["summary"] = (
+                f"{badge['open_question_count']} open question(s) and "
+                f"{badge['human_review_hold_count']} human-review hold(s) need a UI answer."
+            )
+        elif badge["open_task_count"]:
+            badge["state"] = "ACTIVE"
+            badge["label"] = "ACTIVE"
+            badge["summary"] = (
+                f"{badge['open_task_count']} open task(s): "
+                f"{', '.join(reasons)}."
+            )
+        else:
+            badge["state"] = "IDLE"
+            badge["label"] = "IDLE"
+            badge["summary"] = "No open task or question is present on this supervisor's projects."
+    return dict(sorted(badges.items()))
+
+
 def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
                             config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
     cfg = config or OrchConfig()

@@ -99,6 +99,7 @@ from fleet_orchestrator.orch_schema import (
     get_session_stop_status,
     get_session_supervised_projects,
     get_session_next_ready,
+    get_supervisor_badges,
     get_project_summary,
     get_ready_tasks,
     get_session_current_work,
@@ -1289,6 +1290,15 @@ async def reset_project_endpoint(project_id: str, req: Request) -> Dict[str, Any
 def sessions() -> Dict[str, Any]:
     """Sessions to render as dashboard cards — canonical supervisors from the configured allowlist."""
     return {"sessions": list_dashboard_sessions(config=_cfg())}
+
+
+@app.get("/api/supervisors/badges")
+def supervisor_badges() -> Dict[str, Any]:
+    """Per-supervisor ACTIVE/IDLE/NEEDS-YOU badge view over orchestration truth."""
+    return {
+        "badges": get_supervisor_badges(config=_cfg()),
+        "states": ["NEEDS-YOU", "ACTIVE", "IDLE"],
+    }
 
 
 @app.get("/api/sessions/{session_id}/current")
