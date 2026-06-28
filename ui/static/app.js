@@ -359,23 +359,50 @@ function renderOpenQuestions(openQuestions) {
   `;
 }
 
-function renderChatMessages(messages) {
+function questionIdForRecord(item) {
+  return item?.question_id || item?.id || "";
+}
+
+function gateQuestionIdForMessage(message) {
+  const metadata = message?.metadata || {};
+  return metadata.reply_to_question_id || metadata.question_id || metadata.open_question_id || "";
+}
+
+function openQuestionIdSet(openQuestions) {
+  return new Set((openQuestions || []).map(questionIdForRecord).filter(Boolean));
+}
+
+function renderChatMessages(messages, openQuestions = []) {
   if (IS_PUBLIC_MODE) {
     return "";
   }
   if (!messages.length) {
     return '<p class="empty-hint">(no chat messages yet)</p>';
   }
-  return messages.map((message) => `
-    <article class="summary-card" data-message-id="${escapeHtml(message.id || "")}">
-      <div class="status-row">
-        <strong>${escapeHtml(message.sender || message.role || "unknown")}</strong>
-        <span class="muted">${escapeHtml(message.ts || "")}</span>
-      </div>
-      <p>${escapeHtml(message.text || "")}</p>
-      ${message.role === "user" ? `<button type="button" data-promote-reply="${escapeHtml(message.id || "")}">Promote to MEMORY</button>` : ""}
-    </article>
-  `).join("");
+  const openIds = openQuestionIdSet(openQuestions);
+  return messages.map((message) => {
+    const gateQuestionId = gateQuestionIdForMessage(message);
+    const metadata = message.metadata || {};
+    const gateLabel = metadata.gate_id || metadata.gate_task_id || gateQuestionId;
+    const canAnswerGate = gateQuestionId && openIds.has(gateQuestionId);
+    return `
+      <article class="summary-card" data-message-id="${escapeHtml(message.id || "")}">
+        <div class="status-row">
+          <strong>${escapeHtml(message.sender || message.role || "unknown")}</strong>
+          <span class="muted">${escapeHtml(message.ts || "")}</span>
+        </div>
+        ${gateLabel ? `<p class="muted">gate ${escapeHtml(gateLabel)}</p>` : ""}
+        <p>${escapeHtml(message.text || "")}</p>
+        ${canAnswerGate ? `
+          <div class="question-answer chat-gate-answer" data-question-id="${escapeHtml(gateQuestionId)}">
+            <textarea rows="2" placeholder="Verdict"></textarea>
+            <button type="button" data-chat-answer-question="${escapeHtml(gateQuestionId)}">Record verdict</button>
+          </div>
+        ` : ""}
+        ${message.role === "user" ? `<button type="button" data-promote-reply="${escapeHtml(message.id || "")}">Promote to MEMORY</button>` : ""}
+      </article>
+    `;
+  }).join("");
 }
 
 function renderChatPanel() {
@@ -386,7 +413,7 @@ function renderChatPanel() {
   const needsYou = chat.needs_you || (chat.open_questions || []).length;
   elements.chatNeedsYou.hidden = !needsYou;
   elements.chatOpenQuestions.innerHTML = renderOpenQuestions(chat.open_questions || []);
-  elements.chatHistory.innerHTML = renderChatMessages(chat.messages || []);
+  elements.chatHistory.innerHTML = renderChatMessages(chat.messages || [], chat.open_questions || []);
   // newest at the bottom — keep the latest exchange in view when expanded
   if (!elements.chatHistoryWrap.hidden) {
     elements.chatHistoryWrap.scrollTop = elements.chatHistoryWrap.scrollHeight;
@@ -761,6 +788,43 @@ if (elements.refDialogClose) {
 
 if (!IS_PUBLIC_MODE) {
   elements.chatHistory.addEventListener("click", async (event) => {
+    const answerTarget = event.target.closest("[data-chat-answer-question]");
+    if (answerTarget) {
+      const questionId = answerTarget.dataset.chatAnswerQuestion;
+      const container = answerTarget.closest("[data-question-id]");
+      const answer = container?.querySelector("textarea")?.value.trim() || "";
+      if (!questionId || !answer) {
+        setChatStatus("Verdict required", "error", 5000);
+        return;
+      }
+      answerTarget.disabled = true;
+      setChatStatus("Recording verdict...", "pending", 0);
+      try {
+        await fetchJson(CHAT_ENDPOINT(selectedLineage()), {
+          method: "POST",
+          body: JSON.stringify({
+            sender: "operator",
+            role: "user",
+            text: answer,
+            reply_to_question_id: questionId,
+          }),
+        });
+        await loadSupervisorBadges();
+        mergeSupervisorBadgeSessions();
+        await Promise.all([loadChat(), loadSessions(), loadSessionProjects()]);
+        ensureSelectedProject();
+        renderSessionCards();
+        renderProjectList();
+        renderChatPanel();
+        await loadSelectedProject();
+        setChatStatus("Verdict recorded", "success", 5000);
+      } catch (error) {
+        answerTarget.disabled = false;
+        setChatStatus(error.message, "error", 8000);
+      }
+      return;
+    }
+
     const target = event.target.closest("[data-promote-reply]");
     if (!target) {
       return;

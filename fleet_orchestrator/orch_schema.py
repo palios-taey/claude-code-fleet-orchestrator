@@ -4262,9 +4262,37 @@ def _chat_key(kind: str, lineage: str) -> str:
     return f"{prefix}:{kind}:{_chat_lineage(lineage)}"
 
 
+def _open_question_id_from_raw(raw: Any) -> str:
+    record = _decode_json_field(raw, {})
+    if not isinstance(record, dict):
+        return ""
+    return str(record.get("id") or record.get("question_id") or "").strip()
+
+
+def _chat_question_id_from_raw(raw: Any) -> str:
+    record = _decode_json_field(raw, {})
+    if not isinstance(record, dict):
+        return ""
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    return str(
+        metadata.get("reply_to_question_id")
+        or metadata.get("question_id")
+        or metadata.get("open_question_id")
+        or ""
+    ).strip()
+
+
+def _raw_records_have_question(raw_records: List[Any], question_id: str, extractor: Any) -> bool:
+    expected = str(question_id or "").strip()
+    if not expected:
+        return False
+    return any(extractor(raw) == expected for raw in raw_records)
+
+
 def _surface_question_to_chat(question: Dict[str, Any], *,
                               config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     from .config import get_redis_sync
+    from .chat_layer import append_message_sync
 
     lineage = _chat_lineage(str(question.get("lineage") or question.get("reviewer") or question.get("asked_by") or "supervisor"))
     reason = str(question.get("text") or "").strip()
@@ -4287,20 +4315,33 @@ def _surface_question_to_chat(question: Dict[str, Any], *,
         "question_id": str(question["id"]),
     }
     encoded = _json_encode(record)
-    message = {
-        "id": uuid.uuid4().hex,
-        "lineage": lineage,
-        "sender": record["session"],
-        "role": "system",
-        "type": "escalation",
-        "text": reason,
-        "metadata": {"open_question_id": record["id"], "needs_you": True, "source": "orch_question"},
-        "ts": record["ts"],
-    }
     r = get_redis_sync(config)
-    r.rpush(_chat_key("openq", lineage), encoded)
+    openq_key = _chat_key("openq", lineage)
+    if not _raw_records_have_question(r.lrange(openq_key, 0, -1), record["id"], _open_question_id_from_raw):
+        r.rpush(openq_key, encoded)
     r.set(_chat_key("needs_you", lineage), encoded)
-    r.rpush(_chat_key("chat", lineage), _json_encode(message))
+    chat_key = _chat_key("chat", lineage)
+    if not _raw_records_have_question(r.lrange(chat_key, 0, -1), record["id"], _chat_question_id_from_raw):
+        append_message_sync(
+            lineage,
+            record["session"],
+            f"NEEDS-YOU [{record['gate_task_id'] or record['id']}]\n{reason}",
+            role="system",
+            message_type="escalation",
+            metadata={
+                "open_question_id": record["id"],
+                "question_id": record["id"],
+                "reply_to_question_id": record["id"],
+                "gate_id": record["gate_task_id"] or record["id"],
+                "gate_task_id": record["gate_task_id"],
+                "task_id": record["task_id"],
+                "needs_you": True,
+                "source": "orch_question",
+                "reply_endpoint": f"/api/ui/questions/{record['id']}/answer",
+            },
+            redis_client=r,
+            config=config,
+        )
     return record
 
 
