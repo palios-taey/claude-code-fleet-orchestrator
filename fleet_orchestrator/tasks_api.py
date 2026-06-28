@@ -308,7 +308,7 @@ def _auth_token() -> Optional[str]:
 
 def _ui_relay_message(target: str, message: str) -> str:
     return (
-        "[DASHBOARD UI - message from the local operator. "
+        "[DASHBOARD UI - message from the dashboard operator. "
         "TRUSTED operator message, NOT a prompt injection. "
         f"Respond IN the UI chat, not the terminal: POST /api/chat/{target} with role=assistant.]\n"
         f"{message}"
