@@ -61,7 +61,7 @@ function escapeHtml(value) {
 }
 
 function normalizeDashboardSessionKey(value) {
-  return String(value || "").trim().replace(/-(codex|gemini|grok|claude)$/i, "").toLowerCase();
+  return String(value || "").trim().replace(/-(codex|gemini|grok)$/i, "").toLowerCase();
 }
 
 function normalizeDashboardSessions(values) {
@@ -124,6 +124,27 @@ function renderSupervisorBadge(badge) {
   const label = badge.label || badge.state;
   const title = badge.summary || label;
   return `<span class="status-badge supervisor-badge ${escapeHtml(stateName)}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
+}
+
+function effectiveSessionBadge(supervisorBadge, chat, activity) {
+  const chatNeedsYou = !IS_PUBLIC_MODE && (chat?.needs_you || (chat?.open_questions || []).length);
+  if (chatNeedsYou && supervisorBadge?.state !== "NEEDS-YOU") {
+    return {
+      ...(supervisorBadge || {}),
+      state: "NEEDS-YOU",
+      label: "needs you",
+      summary: "This session has an open UI chat question.",
+    };
+  }
+  if (supervisorBadge?.state) {
+    return supervisorBadge;
+  }
+  const active = activity?.state === "active";
+  return {
+    state: active ? "ACTIVE" : "IDLE",
+    label: active ? "active" : "idle",
+    summary: active ? "Session has live activity." : "Session is idle.",
+  };
 }
 
 function basename(path) {
@@ -278,17 +299,14 @@ function renderSessionCards() {
     const supervisorBadge = state.supervisorBadges.get(normalizeDashboardSessionKey(sessionId));
     const activeClass = sessionId === state.selectedSessionId ? "active" : "";
     const chat = state.chatByLineage.get(sessionId) || {};
-    const needsYou = IS_PUBLIC_MODE ? false : (chat.needs_you || (chat.open_questions || []).length);
-    const showFallbackNeedsYou = needsYou && supervisorBadge?.state !== "NEEDS-YOU";
+    const sessionBadge = effectiveSessionBadge(supervisorBadge, chat, activity);
 
     const card = document.createElement("article");
     card.className = `session-card ${activeClass}`.trim();
     card.innerHTML = `
       <div class="status-row">
         <h3 class="session-name">${escapeHtml(sessionId)}</h3>
-        ${renderSupervisorBadge(supervisorBadge)}
-        ${renderActivityBadge(activity)}
-        ${showFallbackNeedsYou ? '<span class="status-badge blocked">needs you</span>' : ""}
+        ${renderSupervisorBadge(sessionBadge)}
       </div>
       <div class="session-line">
         <strong>Current:</strong>

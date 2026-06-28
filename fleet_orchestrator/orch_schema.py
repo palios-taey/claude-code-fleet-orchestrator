@@ -1049,20 +1049,34 @@ def _session_pause_active(session_id: str, config: Optional[OrchConfig] = None) 
     return True
 
 
+def _is_configured_dashboard_supervisor_session(session_id: str, cfg: OrchConfig) -> bool:
+    session = str(session_id or "").strip().lower()
+    if not session:
+        return False
+    return session in {
+        _dashboard_supervisor_session(str(raw_session or ""))
+        for raw_session in cfg.session_ids or []
+    }
+
+
 def _resolve_supervisor_session(session_id: str, config: Optional[OrchConfig] = None) -> str:
+    cfg = config or OrchConfig()
+    session = str(session_id or "").strip()
+    if _is_configured_dashboard_supervisor_session(session, cfg):
+        return _normalize_owner_session(session)
     r = _fleet_state_redis()
     try:
-        explicit = r.get(_state_key(session_id, "parent"))
+        explicit = r.get(_state_key(session, "parent"))
     except Exception:
         explicit = None
-    if explicit:
+    if explicit and str(explicit).strip() != session:
         return str(explicit)
     for suffix in ("-codex", "-gemini", "-grok", "-claude"):
-        if session_id.endswith(suffix):
-            base = session_id[: -len(suffix)]
+        if session.endswith(suffix):
+            base = session[: -len(suffix)]
             if base:
                 return base
-    return session_id
+    return session
 
 
 def _session_is_supervisor_context(session_id: str, supervisor: str) -> bool:
@@ -1072,25 +1086,30 @@ def _session_is_supervisor_context(session_id: str, supervisor: str) -> bool:
 def _dashboard_supervisor_session(value: Any) -> str:
     session = str(value or "").strip()
     lowered = session.lower()
-    for suffix in ("-codex", "-gemini", "-grok", "-claude"):
+    for suffix in ("-codex", "-gemini", "-grok"):
         if lowered.endswith(suffix):
             session = session[: -len(suffix)]
             break
     return _normalize_owner_session(session).lower()
 
 
+def _configured_dashboard_supervisor_session(session_id: str, cfg: OrchConfig) -> str:
+    value = str(session_id or "").strip()
+    if not value:
+        return ""
+    lowered = value.lower()
+    if any(lowered.endswith(suffix) for suffix in ("-codex", "-gemini", "-grok")):
+        value = _resolve_supervisor_session(value, config=cfg)
+    return _dashboard_supervisor_session(value)
+
+
 def _configured_dashboard_supervisors(config: Optional[OrchConfig] = None) -> set[str]:
     cfg = config or OrchConfig()
     supervisors: set[str] = set()
     for raw_session in cfg.session_ids or []:
-        session_id = str(raw_session or "").strip()
-        if not session_id:
+        supervisor = _configured_dashboard_supervisor_session(str(raw_session or ""), cfg)
+        if not supervisor:
             continue
-        try:
-            supervisor = _resolve_supervisor_session(session_id, config=cfg)
-        except Exception:
-            supervisor = _normalize_owner_session(session_id)
-        supervisor = _dashboard_supervisor_session(supervisor)
         if supervisor and supervisor not in {"unassigned", "unknown", "none", "null"}:
             supervisors.add(supervisor)
     return supervisors
@@ -3499,7 +3518,7 @@ def _supervisor_badge_seed(supervisor: str) -> Dict[str, Any]:
     return {
         "supervisor": supervisor,
         "state": "IDLE",
-        "label": "IDLE",
+        "label": "idle",
         "summary": "No open task or question is present on this supervisor's projects.",
         "open_task_count": 0,
         "in_progress_count": 0,
@@ -3521,11 +3540,7 @@ def _supervisor_badge_fallback_session(dashboard_set: set[str], cfg: OrchConfig)
     configured = str(getattr(cfg, "badge_fallback_supervisor", "") or "").strip()
     if not configured:
         return ""
-    try:
-        supervisor = _resolve_supervisor_session(configured, config=cfg)
-    except Exception:
-        supervisor = configured
-    normalized = _supervisor_badge_session(supervisor)
+    normalized = _configured_dashboard_supervisor_session(configured, cfg)
     if normalized in dashboard_set:
         return normalized
     return ""
@@ -3716,21 +3731,21 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
         badge["reasons"] = reasons
         if badge["open_question_count"] or badge["human_review_hold_count"]:
             badge["state"] = "NEEDS-YOU"
-            badge["label"] = "NEEDS-YOU"
+            badge["label"] = "needs you"
             badge["summary"] = (
                 f"{badge['open_question_count']} open question(s) and "
                 f"{badge['human_review_hold_count']} human-review hold(s) need a UI answer."
             )
         elif badge["open_task_count"]:
             badge["state"] = "ACTIVE"
-            badge["label"] = "ACTIVE"
+            badge["label"] = "active"
             badge["summary"] = (
                 f"{badge['open_task_count']} open task(s): "
                 f"{', '.join(reasons)}."
             )
         else:
             badge["state"] = "IDLE"
-            badge["label"] = "IDLE"
+            badge["label"] = "idle"
             badge["summary"] = "No open task or question is present on this supervisor's projects."
     return dict(sorted(badges.items()))
 

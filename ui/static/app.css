@@ -242,7 +242,7 @@ code {
 .status-badge.idle { background: rgba(107, 91, 73, 0.12); color: var(--muted); }
 .status-badge.needs-you { background: rgba(124, 58, 237, 0.12); color: var(--blocked); }
 .status-badge.supervisor-badge {
-  text-transform: uppercase;
+  text-transform: lowercase;
   letter-spacing: 0;
 }
 

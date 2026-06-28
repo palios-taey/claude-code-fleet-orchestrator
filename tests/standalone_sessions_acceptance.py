@@ -27,8 +27,16 @@ from pathlib import Path
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO)
 
-from fleet_orchestrator.orch_schema import create_project, init_schema, get_neo4j_driver, list_dashboard_sessions  # noqa: E402
+from fleet_orchestrator.orch_schema import (  # noqa: E402
+    _dashboard_supervisor_session,
+    _resolve_supervisor_session,
+    create_project,
+    get_neo4j_driver,
+    init_schema,
+    list_dashboard_sessions,
+)
 from fleet_orchestrator.config import OrchConfig  # noqa: E402
+from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect, state_key as notify_state_key  # noqa: E402
 
 CFG = OrchConfig()
 _PFX = f"sess-ci-{uuid.uuid4().hex[:8]}"
@@ -45,6 +53,10 @@ def _cleanup() -> None:
     drv = get_neo4j_driver(CFG)
     with drv.session(database=CFG.neo4j_db) as s:
         s.run("MATCH (p:OrchProject) WHERE p.id STARTS WITH $p DETACH DELETE p", p=_PFX)
+    notify_redis_connect().delete(
+        notify_state_key(f"{_PFX}-hands", "parent"),
+        notify_state_key(f"{_PFX}-claude", "parent"),
+    )
 
 
 def _synthetic_install_root(parent: str) -> Path:
@@ -111,6 +123,20 @@ def main() -> int:
         _check("dashboard sessions exclude configured peer spelling", peer_a not in derived)
         _check("dashboard sessions exclude unconfigured data supervisor", sup_b not in derived)
         _check("dashboard sessions exclude unconfigured fixture", f"{_PFX}-fixture" not in derived)
+        hands_sup = f"{_PFX}-hands"
+        notify_redis_connect().set(notify_state_key(hands_sup, "parent"), sup_b)
+        hands_derived = list_dashboard_sessions(config=replace(CFG, session_ids=[hands_sup]))
+        _check("configured non-peer supervisor is not collapsed by Redis parent", hands_derived == [hands_sup])
+        _check("configured non-peer shared resolver stays itself", _resolve_supervisor_session(hands_sup, config=replace(CFG, session_ids=[hands_sup])) == hands_sup)
+        _check("configured non-peer supervisor parent does not mint dashboard card", sup_b not in hands_derived)
+        claude_sup = f"{_PFX}-claude"
+        notify_redis_connect().set(notify_state_key(claude_sup, "parent"), sup_b)
+        claude_derived = list_dashboard_sessions(config=replace(CFG, session_ids=[claude_sup]))
+        _check("configured claude-suffixed supervisor is not collapsed", claude_derived == [claude_sup])
+        _check("configured claude dashboard resolver stays itself", _dashboard_supervisor_session(claude_sup) == claude_sup)
+        _check("configured claude shared resolver stays itself", _resolve_supervisor_session(claude_sup, config=replace(CFG, session_ids=[claude_sup])) == claude_sup)
+        notify_redis_connect().set(notify_state_key(peer_a, "parent"), peer_a)
+        _check("non-configured peer still resolves to parent", _resolve_supervisor_session(peer_a, config=replace(CFG, session_ids=[sup_a])) == sup_a)
 
         # --- 3. LOOPBACK DEFAULT ---
         saved = os.environ.pop("ORCH_HOST", None)
