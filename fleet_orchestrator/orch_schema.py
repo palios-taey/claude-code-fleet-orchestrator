@@ -3503,6 +3503,10 @@ def _supervisor_badge_seed(supervisor: str) -> Dict[str, Any]:
     }
 
 
+def _supervisor_badge_session(value: Any) -> str:
+    return _normalize_owner_session(str(value or "").strip()).lower()
+
+
 def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict[str, Any]]:
     """Derived per-supervisor work badge for the dashboard.
 
@@ -3510,24 +3514,27 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
     state. No stopped state is inferred in this view.
     """
     cfg = config or OrchConfig()
+    dashboard_supervisors = sorted({
+        supervisor
+        for supervisor in (_supervisor_badge_session(item) for item in list_dashboard_sessions(config=cfg))
+        if supervisor and supervisor not in {"unassigned", "unknown", "none", "null"}
+    })
+    dashboard_set = set(dashboard_supervisors)
+    conductor_bucket = "conductor" if "conductor" in dashboard_set else ""
     badges: Dict[str, Dict[str, Any]] = {
         supervisor: _supervisor_badge_seed(supervisor)
-        for supervisor in list_dashboard_sessions(config=cfg)
+        for supervisor in dashboard_supervisors
     }
     question_ids_by_supervisor: Dict[str, set[str]] = {supervisor: set() for supervisor in badges}
     unknown_questions_by_supervisor: Dict[str, int] = {supervisor: 0 for supervisor in badges}
 
     def row_for(raw_supervisor: Any) -> Optional[Dict[str, Any]]:
-        supervisor = _normalize_owner_session(str(raw_supervisor or "").strip())
-        if not supervisor:
-            return None
-        if supervisor.lower() in {"unassigned", "unknown", "none", "null"}:
-            return None
-        if supervisor not in badges:
-            badges[supervisor] = _supervisor_badge_seed(supervisor)
-            question_ids_by_supervisor[supervisor] = set()
-            unknown_questions_by_supervisor[supervisor] = 0
-        return badges[supervisor]
+        supervisor = _supervisor_badge_session(raw_supervisor)
+        if supervisor in dashboard_set:
+            return badges[supervisor]
+        if conductor_bucket:
+            return badges[conductor_bucket]
+        return None
 
     def add_question_id(supervisor: str, raw_record: Any) -> bool:
         record = _decode_json_field(raw_record, {})
@@ -3548,8 +3555,8 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
                  coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
                  CASE
                    WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
-                   THEN coalesce(t.owner, '')
-                   ELSE p.supervisor
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
                  END AS effective_supervisor
             WHERE coalesce(effective_supervisor, '') <> ''
               AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
@@ -3580,8 +3587,8 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
                  coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
                  CASE
                    WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
-                   THEN coalesce(t.owner, '')
-                   ELSE p.supervisor
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
                  END AS effective_supervisor
             WHERE coalesce(effective_supervisor, '') <> ''
               AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
@@ -3603,8 +3610,8 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
                  coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
                  CASE
                    WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
-                   THEN coalesce(t.owner, '')
-                   ELSE p.supervisor
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
                  END AS effective_supervisor
             WHERE coalesce(effective_supervisor, '') <> ''
               AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
@@ -3626,8 +3633,8 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
                  coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
                  CASE
                    WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
-                   THEN coalesce(t.owner, '')
-                   ELSE p.supervisor
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
                  END AS effective_supervisor
             WHERE coalesce(effective_supervisor, '') <> ''
               AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)

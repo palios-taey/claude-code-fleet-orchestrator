@@ -683,7 +683,7 @@ elements.pauseToggle.addEventListener("change", (event) => {
 if (!IS_PUBLIC_MODE) {
   elements.chatInput.addEventListener("input", updateChatButtonState);
   elements.chatInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       elements.chatForm.requestSubmit();
     }
