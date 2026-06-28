@@ -174,7 +174,9 @@ def main() -> int:
             )
         _check("prose DISPATCH mention remains plain notify", prose_response.status_code == 200 and prose_response.json().get("dispatch_registered") is None, prose_response.text)
         _check("prose DISPATCH mention does not bind current_task", _redis().get(_state_key(PEER, "current_task")) is None, _redis().get(_state_key(PEER, "current_task")))
-        _check("prose DISPATCH mention calls direct taey-notify", direct_calls and direct_calls[0][-1] == "command", direct_calls)
+        _check("prose DISPATCH mention calls direct taey-notify", direct_calls and "--type" in direct_calls[0] and direct_calls[0][direct_calls[0].index("--type") + 1] == "command", direct_calls)
+        _check("direct session notify identifies operator sender", direct_calls and "--from" in direct_calls[0] and direct_calls[0][direct_calls[0].index("--from") + 1] == "operator-ui", direct_calls)
+        _check("direct session notify teaches UI response path", direct_calls and f"POST /api/chat/{PEER} with role=assistant" in direct_calls[0][2], direct_calls)
 
         with mock.patch.object(tasks_api, "_ensure_registered_session", return_value=None), \
              mock.patch.object(dispatch_module.subprocess, "run", side_effect=fake_notify):
@@ -184,7 +186,8 @@ def main() -> int:
             )
 
         _check("explicit command notify dispatch endpoint succeeds", response.status_code == 200 and response.json().get("dispatch_registered") is True, response.text)
-        _check("canonical dispatch call used handoff metadata", calls and "--handoff" in calls[0] and "--dispatcher-task-id" in calls[0], calls)
+        notify_calls = [call for call in calls if call and call[0] == "taey-notify"]
+        _check("canonical dispatch call used handoff metadata", notify_calls and "--handoff" in notify_calls[0] and "--dispatcher-task-id" in notify_calls[0], calls)
         current_raw = _redis().get(_state_key(PEER, "current_task"))
         current = json.loads(current_raw) if current_raw else {}
         task = get_task(TASK, config=CFG)
