@@ -23,6 +23,7 @@ Summary:
 | File | Function | Kind | Ordinal | Line Hint | Fingerprint | Classification | Teaching Evidence | Rationale | Review |
 | --- | --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
 | fleet_orchestrator/chat_layer.py | _http_error | http_exception_detail | 1 | 273 | c76409965486615c | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
+| fleet_orchestrator/chat_layer.py | chat_post | http_exception_detail | 1 | 370 | 33c14512ebacfa5e | teaches | GET /api/chat/{} | Gate-bound reply miss returns endpoint + exact reply_to_question_id next-step in-band. | hitl-no-zombie:p2-uichat-gate |
 | fleet_orchestrator/cli_taey_dispatch.py | <module> | cli_failure_message | 1 | 122 | 415f3a0a1ba97cb6 | exempt |  | Static extractor treated an exit wrapper or non-error tuple as a user-facing message; the row is not an independent runtime surface. | anbr-fix-exempt:analyzer-artifact |
 | fleet_orchestrator/cli_taey_dispatch.py | parse_json_object | cli_failure_message | 1 | 42 | f3a02b3922c82153 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_dispatch.py | parse_json_object | cli_failure_message | 2 | 44 | 881fd581dc03f92f | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
