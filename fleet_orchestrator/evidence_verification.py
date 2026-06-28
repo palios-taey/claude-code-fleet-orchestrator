@@ -1,25 +1,21 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 DEFAULT_REQUIRED_GITHUB_CHECKS = ("r5-audit-gate", "ship-gate-acceptance")
-DEFAULT_COMPLETION_REPO_ALLOWLIST = (
-    "palios-taey/claude-code-fleet-orchestrator",
-    "palios-taey/claude-code-fleet-notify",
-    "palios-taey/infra-soul",
-    "palios-taey/taeys-hands",
-    "palios-taey/the-conductor",
-    "palios-taey/treasurer",
-)
 DEFAULT_TRUSTED_CHECK_RUN_APPS = ("github-actions",)
 DEFAULT_TRUSTED_STATUS_CREATORS = ("github-actions[bot]",)
 VERIFIED = "VERIFIED"
 UNVERIFIED = "UNVERIFIED"
 _GH_TIMEOUT_SEC = 10
+COMPLETION_ALLOWLIST_UNSET_WARNING = (
+    "ORCH_COMPLETION_ALLOWED_REPOS unset - all commit-based completions will be UNVERIFIED until configured"
+)
 
 
 def required_github_checks() -> Tuple[str, ...]:
@@ -36,7 +32,16 @@ def _csv_env_values(name: str, defaults: Iterable[str]) -> Tuple[str, ...]:
 
 
 def allowed_completion_repos() -> Tuple[str, ...]:
-    return _csv_env_values("ORCH_COMPLETION_ALLOWED_REPOS", DEFAULT_COMPLETION_REPO_ALLOWLIST)
+    raw = os.environ.get("ORCH_COMPLETION_ALLOWED_REPOS", "")
+    values = [part.strip() for part in raw.split(",") if part.strip()]
+    return tuple(dict.fromkeys(values))
+
+
+def warn_if_completion_allowlist_unset(logger: Optional[logging.Logger] = None) -> bool:
+    if allowed_completion_repos():
+        return False
+    (logger or logging.getLogger(__name__)).warning(COMPLETION_ALLOWLIST_UNSET_WARNING)
+    return True
 
 
 def trusted_check_run_apps() -> Tuple[str, ...]:
@@ -91,6 +96,19 @@ def repo_from_completion_evidence(evidence: Dict[str, Any]) -> str:
 
 def _repo_allowed_for_completion_evidence(repo: str) -> bool:
     return repo.strip().lower() in {allowed.lower() for allowed in allowed_completion_repos()}
+
+
+def _repo_not_allowed_reason(repo: str, *, inferred: bool = False) -> str:
+    source = "inferred completion evidence repo" if inferred else "completion evidence repo"
+    if allowed_completion_repos():
+        return (
+            f"{source} {repo!r} is not in the ORCH_COMPLETION_ALLOWED_REPOS allowlist; "
+            "arbitrary forks cannot satisfy VERIFIED provenance"
+        )
+    return (
+        f"{source} {repo!r} cannot satisfy VERIFIED provenance because ORCH_COMPLETION_ALLOWED_REPOS is unset; "
+        "set ORCH_COMPLETION_ALLOWED_REPOS=OWNER/REPO[,OWNER/REPO...] to enable verified completions"
+    )
 
 
 def _check_run_app_slug(run: Dict[str, Any]) -> str:
@@ -221,7 +239,7 @@ def verify_completion_evidence(
         if repo:
             if not _repo_allowed_for_completion_evidence(repo):
                 return _unverified(
-                    "completion evidence repo is not in the ORCH_COMPLETION_ALLOWED_REPOS allowlist; arbitrary forks cannot satisfy VERIFIED provenance",
+                    _repo_not_allowed_reason(repo),
                     commit_sha=commit_sha,
                     repo=repo,
                     required_checks=checks,
@@ -229,6 +247,14 @@ def verify_completion_evidence(
                 )
         else:
             repo = github_repo_from_environment_or_gh()
+            if not _repo_allowed_for_completion_evidence(repo):
+                return _unverified(
+                    _repo_not_allowed_reason(repo, inferred=True),
+                    commit_sha=commit_sha,
+                    repo=repo,
+                    required_checks=checks,
+                    producer=producer,
+                )
         _commit_exists(repo, commit_sha)
         observations: List[Dict[str, Any]] = []
         failures: List[str] = []
