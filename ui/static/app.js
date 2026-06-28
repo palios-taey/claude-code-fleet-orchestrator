@@ -12,7 +12,7 @@ const UI_QUESTION_ANSWER_ENDPOINT = (questionId) => `/api/ui/questions/${encodeU
 const POLL_INTERVAL_MS = 5000;
 const IS_PUBLIC_MODE = window.ORCH_PUBLIC_MODE === true;
 // Populated at runtime from GET /api/sessions (data-derived; no hardcoded operator fleet).
-let SESSIONS = Array.isArray(window.ORCH_PUBLIC_SESSIONS) ? window.ORCH_PUBLIC_SESSIONS : [];
+let SESSIONS = [];
 
 const state = {
   paused: false,
@@ -58,6 +58,23 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function normalizeDashboardSessionKey(value) {
+  return String(value || "").trim().replace(/-(codex|gemini|grok|claude)$/i, "").toLowerCase();
+}
+
+function normalizeDashboardSessions(values) {
+  const seen = new Set();
+  const sessions = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const session = normalizeDashboardSessionKey(value);
+    if (session && !seen.has(session)) {
+      seen.add(session);
+      sessions.push(session);
+    }
+  }
+  return sessions.sort();
 }
 
 function shortHash(value) {
@@ -258,7 +275,7 @@ function renderSessionCards() {
     const current = session.current?.current;
     const activity = session.current?.activity;
     const nextReady = session.next?.next;
-    const supervisorBadge = state.supervisorBadges.get(sessionId);
+    const supervisorBadge = state.supervisorBadges.get(normalizeDashboardSessionKey(sessionId));
     const activeClass = sessionId === state.selectedSessionId ? "active" : "";
     const chat = state.chatByLineage.get(sessionId) || {};
     const needsYou = IS_PUBLIC_MODE ? false : (chat.needs_you || (chat.open_questions || []).length);
@@ -527,7 +544,7 @@ function ensureSelectedSession() {
 function mergeSupervisorBadgeSessions() {
   const badgeSessions = [...state.supervisorBadges.keys()].filter(Boolean);
   if (badgeSessions.length) {
-    SESSIONS = [...new Set([...SESSIONS, ...badgeSessions])].sort();
+    SESSIONS = normalizeDashboardSessions([...SESSIONS, ...badgeSessions]);
   }
   ensureSelectedSession();
 }
@@ -607,7 +624,10 @@ async function loadSessions() {
 async function loadSupervisorBadges() {
   try {
     const result = await fetchJson(SUPERVISOR_BADGES_ENDPOINT);
-    state.supervisorBadges = new Map(Object.entries(result.badges || {}));
+    state.supervisorBadges = new Map(Object.entries(result.badges || {}).map(([sessionId, badge]) => {
+      const session = normalizeDashboardSessionKey(sessionId);
+      return [session, { ...badge, supervisor: normalizeDashboardSessionKey(badge?.supervisor || sessionId) }];
+    }).filter(([session]) => session));
   } catch (error) {
     state.supervisorBadges.clear();
   }
@@ -637,7 +657,7 @@ async function loadChat() {
 async function loadSessionList() {
   try {
     const data = await fetchJson("/api/sessions");
-    SESSIONS = Array.isArray(data.sessions) ? data.sessions : [];
+    SESSIONS = normalizeDashboardSessions(data.sessions);
   } catch (error) {
     if (!Array.isArray(SESSIONS)) {
       SESSIONS = [];
@@ -645,6 +665,8 @@ async function loadSessionList() {
   }
   ensureSelectedSession();
 }
+
+SESSIONS = normalizeDashboardSessions(window.ORCH_PUBLIC_SESSIONS);
 
 let _refreshing = false;
 async function refresh() {

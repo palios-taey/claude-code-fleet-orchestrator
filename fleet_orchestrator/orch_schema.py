@@ -1069,6 +1069,16 @@ def _session_is_supervisor_context(session_id: str, supervisor: str) -> bool:
     return str(session_id or "").strip() == str(supervisor or "").strip()
 
 
+def _dashboard_supervisor_session(value: Any) -> str:
+    session = str(value or "").strip()
+    lowered = session.lower()
+    for suffix in ("-codex", "-gemini", "-grok", "-claude"):
+        if lowered.endswith(suffix):
+            session = session[: -len(suffix)]
+            break
+    return _normalize_owner_session(session).lower()
+
+
 def _configured_dashboard_supervisors(config: Optional[OrchConfig] = None) -> set[str]:
     cfg = config or OrchConfig()
     supervisors: set[str] = set()
@@ -1080,8 +1090,8 @@ def _configured_dashboard_supervisors(config: Optional[OrchConfig] = None) -> se
             supervisor = _resolve_supervisor_session(session_id, config=cfg)
         except Exception:
             supervisor = _normalize_owner_session(session_id)
-        supervisor = _normalize_owner_session(str(supervisor or "").strip())
-        if supervisor and supervisor.lower() not in {"unassigned", "unknown", "none", "null"}:
+        supervisor = _dashboard_supervisor_session(supervisor)
+        if supervisor and supervisor not in {"unassigned", "unknown", "none", "null"}:
             supervisors.add(supervisor)
     return supervisors
 
@@ -1105,13 +1115,13 @@ def list_dashboard_sessions(config: Optional[OrchConfig] = None) -> list:
             "MATCH (p:OrchProject) WHERE coalesce(p.supervisor, '') <> '' "
             "RETURN DISTINCT p.supervisor AS s"
         ):
-            supervisor = _normalize_owner_session(str(record["s"]).strip())
+            supervisor = _dashboard_supervisor_session(record["s"])
             if supervisor in allowlist:
                 found.add(supervisor)
         for record in session.run(
             "MATCH (s:OrchSupervisor) WHERE coalesce(s.session, '') <> '' RETURN s.session AS s"
         ):
-            supervisor = _normalize_owner_session(str(record["s"]).strip())
+            supervisor = _dashboard_supervisor_session(record["s"])
             if supervisor in allowlist:
                 found.add(supervisor)
     return sorted(found)
@@ -3504,7 +3514,21 @@ def _supervisor_badge_seed(supervisor: str) -> Dict[str, Any]:
 
 
 def _supervisor_badge_session(value: Any) -> str:
-    return _normalize_owner_session(str(value or "").strip()).lower()
+    return _dashboard_supervisor_session(value)
+
+
+def _supervisor_badge_fallback_session(dashboard_set: set[str], cfg: OrchConfig) -> str:
+    configured = str(getattr(cfg, "badge_fallback_supervisor", "") or "").strip()
+    if not configured:
+        return ""
+    try:
+        supervisor = _resolve_supervisor_session(configured, config=cfg)
+    except Exception:
+        supervisor = configured
+    normalized = _supervisor_badge_session(supervisor)
+    if normalized in dashboard_set:
+        return normalized
+    return ""
 
 
 def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict[str, Any]]:
@@ -3520,7 +3544,7 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
         if supervisor and supervisor not in {"unassigned", "unknown", "none", "null"}
     })
     dashboard_set = set(dashboard_supervisors)
-    conductor_bucket = "conductor" if "conductor" in dashboard_set else ""
+    fallback_bucket = _supervisor_badge_fallback_session(dashboard_set, cfg)
     badges: Dict[str, Dict[str, Any]] = {
         supervisor: _supervisor_badge_seed(supervisor)
         for supervisor in dashboard_supervisors
@@ -3532,8 +3556,8 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
         supervisor = _supervisor_badge_session(raw_supervisor)
         if supervisor in dashboard_set:
             return badges[supervisor]
-        if conductor_bucket:
-            return badges[conductor_bucket]
+        if fallback_bucket:
+            return badges[fallback_bucket]
         return None
 
     def add_question_id(supervisor: str, raw_record: Any) -> bool:
