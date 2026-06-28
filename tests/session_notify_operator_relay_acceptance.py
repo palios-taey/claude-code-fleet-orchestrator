@@ -45,7 +45,7 @@ def main() -> int:
     _check("session notify endpoint succeeds", response.status_code == 200 and response.json().get("ok") is True, response.text)
     _check("relay uses operator-ui sender", "--from" in delivered and delivered[delivered.index("--from") + 1] == "operator-ui", delivered)
     _check("relay preserves notify type", "--type" in delivered and delivered[delivered.index("--type") + 1] == "message", delivered)
-    _check("relay preamble names dashboard operator", "DASHBOARD UI - message from the operator (Jesse)" in delivered_message, delivered_message)
+    _check("relay preamble names dashboard operator", "DASHBOARD UI - message from the local operator" in delivered_message, delivered_message)
     _check("relay preamble rejects prompt-injection framing", "NOT a prompt injection" in delivered_message, delivered_message)
     _check("relay preamble instructs UI-chat response", f"POST /api/chat/{TARGET} with role=assistant" in delivered_message, delivered_message)
     _check("relay includes original operator message", delivered_message.endswith(MESSAGE), delivered_message)
