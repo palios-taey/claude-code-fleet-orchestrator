@@ -5,13 +5,14 @@ const SESSION_CURRENT_ENDPOINT = (sessionId) => `/api/sessions/${encodeURICompon
 const SESSION_NEXT_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/next-ready`;
 const SESSION_PROJECTS_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/projects`;
 const SESSION_NOTIFY_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/notify`;
+const SUPERVISOR_BADGES_ENDPOINT = "/api/supervisors/badges";
 const CHAT_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}`;
 const CHAT_PROMOTE_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}/promote`;
 const UI_QUESTION_ANSWER_ENDPOINT = (questionId) => `/api/ui/questions/${encodeURIComponent(questionId)}/answer`;
 const POLL_INTERVAL_MS = 5000;
 const IS_PUBLIC_MODE = window.ORCH_PUBLIC_MODE === true;
 // Populated at runtime from GET /api/sessions (data-derived; no hardcoded operator fleet).
-let SESSIONS = Array.isArray(window.ORCH_PUBLIC_SESSIONS) ? window.ORCH_PUBLIC_SESSIONS : [];
+let SESSIONS = [];
 
 const state = {
   paused: false,
@@ -19,6 +20,7 @@ const state = {
   selectedProjectIdBySession: new Map(),
   sessionCards: new Map(),
   sessionProjects: new Map(),
+  supervisorBadges: new Map(),
   chatByLineage: new Map(),
   refDrilldowns: new Map(),
   chatStatusTimeoutId: null,
@@ -58,6 +60,23 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function normalizeDashboardSessionKey(value) {
+  return String(value || "").trim().replace(/-(codex|gemini|grok|claude)$/i, "").toLowerCase();
+}
+
+function normalizeDashboardSessions(values) {
+  const seen = new Set();
+  const sessions = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const session = normalizeDashboardSessionKey(value);
+    if (session && !seen.has(session)) {
+      seen.add(session);
+      sessions.push(session);
+    }
+  }
+  return sessions.sort();
+}
+
 function shortHash(value) {
   if (!value) {
     return "n/a";
@@ -95,6 +114,16 @@ function renderStatusBadge(status) {
 function renderActivityBadge(activity) {
   const stateName = activity?.state === "active" ? "active" : "idle";
   return `<span class="status-badge ${stateName}">${stateName}</span>`;
+}
+
+function renderSupervisorBadge(badge) {
+  if (!badge?.state) {
+    return "";
+  }
+  const stateName = String(badge.state).toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+  const label = badge.label || badge.state;
+  const title = badge.summary || label;
+  return `<span class="status-badge supervisor-badge ${escapeHtml(stateName)}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
 }
 
 function basename(path) {
@@ -246,17 +275,20 @@ function renderSessionCards() {
     const current = session.current?.current;
     const activity = session.current?.activity;
     const nextReady = session.next?.next;
+    const supervisorBadge = state.supervisorBadges.get(normalizeDashboardSessionKey(sessionId));
     const activeClass = sessionId === state.selectedSessionId ? "active" : "";
     const chat = state.chatByLineage.get(sessionId) || {};
     const needsYou = IS_PUBLIC_MODE ? false : (chat.needs_you || (chat.open_questions || []).length);
+    const showFallbackNeedsYou = needsYou && supervisorBadge?.state !== "NEEDS-YOU";
 
     const card = document.createElement("article");
     card.className = `session-card ${activeClass}`.trim();
     card.innerHTML = `
       <div class="status-row">
         <h3 class="session-name">${escapeHtml(sessionId)}</h3>
+        ${renderSupervisorBadge(supervisorBadge)}
         ${renderActivityBadge(activity)}
-        ${needsYou ? '<span class="status-badge blocked">needs you</span>' : ""}
+        ${showFallbackNeedsYou ? '<span class="status-badge blocked">needs you</span>' : ""}
       </div>
       <div class="session-line">
         <strong>Current:</strong>
@@ -503,6 +535,20 @@ function syncChatTarget() {
   elements.chatInput.placeholder = target ? `Message to ${target}...` : "Message...";
 }
 
+function ensureSelectedSession() {
+  if (!state.selectedSessionId || !SESSIONS.includes(state.selectedSessionId)) {
+    state.selectedSessionId = SESSIONS[0] || null;
+  }
+}
+
+function mergeSupervisorBadgeSessions() {
+  const badgeSessions = [...state.supervisorBadges.keys()].filter(Boolean);
+  if (badgeSessions.length) {
+    SESSIONS = normalizeDashboardSessions([...SESSIONS, ...badgeSessions]);
+  }
+  ensureSelectedSession();
+}
+
 function setChatStatus(message, kind, durationMs) {
   elements.chatStatus.textContent = message;
   elements.chatStatus.className = `notify-status ${kind}`.trim();
@@ -575,6 +621,18 @@ async function loadSessions() {
   }));
 }
 
+async function loadSupervisorBadges() {
+  try {
+    const result = await fetchJson(SUPERVISOR_BADGES_ENDPOINT);
+    state.supervisorBadges = new Map(Object.entries(result.badges || {}).map(([sessionId, badge]) => {
+      const session = normalizeDashboardSessionKey(sessionId);
+      return [session, { ...badge, supervisor: normalizeDashboardSessionKey(badge?.supervisor || sessionId) }];
+    }).filter(([session]) => session));
+  } catch (error) {
+    state.supervisorBadges.clear();
+  }
+}
+
 async function loadChat() {
   if (IS_PUBLIC_MODE) {
     state.chatByLineage.clear();
@@ -599,16 +657,16 @@ async function loadChat() {
 async function loadSessionList() {
   try {
     const data = await fetchJson("/api/sessions");
-    SESSIONS = Array.isArray(data.sessions) ? data.sessions : [];
+    SESSIONS = normalizeDashboardSessions(data.sessions);
   } catch (error) {
     if (!Array.isArray(SESSIONS)) {
       SESSIONS = [];
     }
   }
-  if (!state.selectedSessionId || !SESSIONS.includes(state.selectedSessionId)) {
-    state.selectedSessionId = SESSIONS[0] || null;
-  }
+  ensureSelectedSession();
 }
+
+SESSIONS = normalizeDashboardSessions(window.ORCH_PUBLIC_SESSIONS);
 
 let _refreshing = false;
 async function refresh() {
@@ -620,7 +678,13 @@ async function refresh() {
   _refreshing = true;
   try {
     await loadSessionList();
-    await Promise.all([loadSessions(), loadSessionProjects(), IS_PUBLIC_MODE ? Promise.resolve() : loadChat()]);
+    await loadSupervisorBadges();
+    mergeSupervisorBadgeSessions();
+    await Promise.all([
+      loadSessions(),
+      loadSessionProjects(),
+      IS_PUBLIC_MODE ? Promise.resolve() : loadChat(),
+    ]);
     ensureSelectedProject();
     renderSessionCards();
     renderProjectList();
@@ -640,6 +704,12 @@ elements.pauseToggle.addEventListener("change", (event) => {
 
 if (!IS_PUBLIC_MODE) {
   elements.chatInput.addEventListener("input", updateChatButtonState);
+  elements.chatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      elements.chatForm.requestSubmit();
+    }
+  });
 }
 
 function setChatExpanded(open) {
@@ -718,6 +788,8 @@ if (!IS_PUBLIC_MODE) {
         method: "POST",
         body: JSON.stringify({ answer, answered_by: "operator" }),
       });
+      await loadSupervisorBadges();
+      mergeSupervisorBadgeSessions();
       await Promise.all([loadChat(), loadSessions(), loadSessionProjects()]);
       ensureSelectedProject();
       renderSessionCards();
