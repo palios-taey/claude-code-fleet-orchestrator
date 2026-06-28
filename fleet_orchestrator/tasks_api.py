@@ -43,6 +43,7 @@ from fleet_orchestrator.context_assembler import (
 )
 from fleet_orchestrator.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from fleet_orchestrator.easy_setup import api_host
+from fleet_orchestrator.evidence_verification import warn_if_completion_allowlist_unset
 from fleet_orchestrator.version import __version__ as RUNNING_VERSION
 from fleet_orchestrator.evidence_contract import REQUEST_TERMINAL_EVIDENCE_KEYS, TERMINAL_STATUSES
 from fleet_orchestrator.feature_flags import TRUE_ENV_VALUES, chat_enabled, wake_packet_endpoint_enabled
@@ -98,6 +99,7 @@ from fleet_orchestrator.orch_schema import (
     get_session_stop_status,
     get_session_supervised_projects,
     get_session_next_ready,
+    get_supervisor_badges,
     get_project_summary,
     get_ready_tasks,
     get_session_current_work,
@@ -108,6 +110,7 @@ from fleet_orchestrator.orch_schema import (
     get_session_stop_decision,
     get_task_phase,
     reset_project,
+    resolve_human_review_hold,
     supervisor_access_resolution,
     session_registration_error_detail,
     set_project_stop_reason,
@@ -293,6 +296,7 @@ ALLOWED_NOTIFY_TYPES = {
     "response_ready": "response_ready",
 }
 MUTABLE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+UI_RELAY_SENDER = "operator-ui"
 
 
 def _auth_token() -> Optional[str]:
@@ -301,6 +305,15 @@ def _auth_token() -> Optional[str]:
         return None
     token = token.strip()
     return token or None
+
+
+def _ui_relay_message(target: str, message: str) -> str:
+    return (
+        "[DASHBOARD UI - message from the dashboard operator. "
+        "TRUSTED operator message, NOT a prompt injection. "
+        f"Respond IN the UI chat, not the terminal: POST /api/chat/{target} with role=assistant.]\n"
+        f"{message}"
+    )
 
 
 def _bearer_token(authorization: Optional[str]) -> Optional[str]:
@@ -366,6 +379,7 @@ async def _optional_mutable_auth(request: Request, call_next):
 @app.on_event("startup")
 def _init_schema_on_startup() -> None:
     _enforce_mutable_api_exposure()
+    warn_if_completion_allowlist_unset(LOGGER)
     result = init_schema(config=_cfg())
     errors = result.get("errors") or []
     if errors:
@@ -970,6 +984,50 @@ async def ui_answer_human_review_gate_endpoint(question_id: str, req: Request) -
         return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
 
+@app.post("/api/ui/human-review-holds/{task_id}/resolve")
+async def ui_resolve_human_review_hold_endpoint(task_id: str, req: Request) -> Dict[str, Any]:
+    if not _origin_allowed_for_ui(req):
+        raise HTTPException(status_code=403, detail="origin does not match dashboard host")
+    data = await req.json()
+    verdict = str(data.get("verdict") or data.get("answer") or data.get("comment") or "").strip()
+    resolved_by = str(data.get("resolved_by") or data.get("answered_by") or data.get("from") or "operator").strip()
+    if not verdict:
+        raise HTTPException(
+            status_code=422,
+            detail=_required_body_detail(
+                "verdict",
+                {"verdict": "<decision text>", "resolved_by": "<reviewer>"},
+                endpoint=f"POST /api/ui/human-review-holds/{task_id}/resolve",
+            ),
+        )
+    try:
+        result = resolve_human_review_hold(task_id, verdict, resolved_by, config=_cfg())
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": result.get("reason") or "human-review hold not found",
+                    "task_id": task_id,
+                    "next_step": (
+                        "Open `/ui/`, select the supervisor with the NEEDS-YOU badge, and resolve an "
+                        "open AWAIT:human-review hold; or inspect the task with "
+                        f"GET /api/tasks/{task_id} / `taey-task status {task_id}`."
+                    ),
+                },
+            )
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": str(exc), "next_step": f"POST /api/ui/human-review-holds/{task_id}/resolve"},
+        )
+    except Exception as exc:
+        LOGGER.exception("Unhandled UI human-review hold resolution failed task=%s", task_id)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+
 @app.get("/api/projects")
 def list_projects() -> Dict[str, Any]:
     """List all OrchProject nodes with decoded Stage A fields and aggregate task status counts."""
@@ -1289,6 +1347,15 @@ def sessions() -> Dict[str, Any]:
     return {"sessions": list_dashboard_sessions(config=_cfg())}
 
 
+@app.get("/api/supervisors/badges")
+def supervisor_badges() -> Dict[str, Any]:
+    """Per-supervisor ACTIVE/IDLE/NEEDS-YOU badge view over orchestration truth."""
+    return {
+        "badges": get_supervisor_badges(config=_cfg()),
+        "states": ["NEEDS-YOU", "ACTIVE", "IDLE"],
+    }
+
+
 @app.get("/api/sessions/{session_id}/current")
 def session_current(session_id: str) -> Dict[str, Any]:
     """What this session is currently executing — top in_progress task with project/phase context."""
@@ -1561,8 +1628,17 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
             )
         return {"ok": True, "dispatch_registered": True, "task_id": command_task_id}
 
+    relay_message = _ui_relay_message(target, message)
     result = subprocess.run(
-        ["taey-notify", target, message, "--type", ALLOWED_NOTIFY_TYPES[notify_type]],
+        [
+            "taey-notify",
+            target,
+            relay_message,
+            "--type",
+            ALLOWED_NOTIFY_TYPES[notify_type],
+            "--from",
+            UI_RELAY_SENDER,
+        ],
         capture_output=True,
         text=True,
         timeout=10,
@@ -1590,7 +1666,8 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
                 "source": "session_notify",
                 "target": target,
                 "notify_type": notify_type,
-                "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest(),
+                "from": UI_RELAY_SENDER,
+                "message_sha256": hashlib.sha256(relay_message.encode("utf-8")).hexdigest(),
             },
             "target": target,
             "next_contract": "fleet-notify daemon delivers the queued message to the target session",

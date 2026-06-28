@@ -101,7 +101,7 @@ _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "interrupted"})
 HUMAN_REVIEW_TASK_TYPE = "human-review"
 HUMAN_REVIEW_QUESTION_TYPE = "human_review_gate"
 COMPLETED_EVIDENCE_NEXT_STEP = (
-    'Completed writes require shape-valid evidence and record completion_evidence_verification. VERIFIED means GitHub confirms the commit exists in evidence.repo (when supplied and allowlisted by ORCH_COMPLETION_ALLOWED_REPOS) or the configured/inferred allowlisted repo, and the required independent gate contexts passed for that exact commit_sha from trusted GitHub actors/apps; UNVERIFIED means a shape-valid self-report only. '
+    'Completed writes require shape-valid evidence and record completion_evidence_verification. VERIFIED means GitHub confirms the commit exists in a repo present in ORCH_COMPLETION_ALLOWED_REPOS and the required independent gate contexts passed for that exact commit_sha from trusted GitHub actors/apps. If evidence.repo is omitted, the configured/inferred runtime repo is used but must still be in ORCH_COMPLETION_ALLOWED_REPOS; UNVERIFIED means a shape-valid self-report only. '
     'Use `taey-task update <task-id> completed --evidence '
     '\'{"commit_sha":"<sha>","repo":"OWNER/REPO","production_observation":"<what you verified>"}\'` '
     'or PATCH /api/task/<task-id> with body '
@@ -1049,39 +1049,68 @@ def _session_pause_active(session_id: str, config: Optional[OrchConfig] = None) 
     return True
 
 
+def _is_configured_dashboard_supervisor_session(session_id: str, cfg: OrchConfig) -> bool:
+    session = str(session_id or "").strip().lower()
+    if not session:
+        return False
+    return session in {
+        _dashboard_supervisor_session(str(raw_session or ""))
+        for raw_session in cfg.session_ids or []
+    }
+
+
 def _resolve_supervisor_session(session_id: str, config: Optional[OrchConfig] = None) -> str:
+    cfg = config or OrchConfig()
+    session = str(session_id or "").strip()
+    if _is_configured_dashboard_supervisor_session(session, cfg):
+        return _normalize_owner_session(session)
     r = _fleet_state_redis()
     try:
-        explicit = r.get(_state_key(session_id, "parent"))
+        explicit = r.get(_state_key(session, "parent"))
     except Exception:
         explicit = None
-    if explicit:
+    if explicit and str(explicit).strip() != session:
         return str(explicit)
     for suffix in ("-codex", "-gemini", "-grok", "-claude"):
-        if session_id.endswith(suffix):
-            base = session_id[: -len(suffix)]
+        if session.endswith(suffix):
+            base = session[: -len(suffix)]
             if base:
                 return base
-    return session_id
+    return session
 
 
 def _session_is_supervisor_context(session_id: str, supervisor: str) -> bool:
     return str(session_id or "").strip() == str(supervisor or "").strip()
 
 
+def _dashboard_supervisor_session(value: Any) -> str:
+    session = str(value or "").strip()
+    lowered = session.lower()
+    for suffix in ("-codex", "-gemini", "-grok"):
+        if lowered.endswith(suffix):
+            session = session[: -len(suffix)]
+            break
+    return _normalize_owner_session(session).lower()
+
+
+def _configured_dashboard_supervisor_session(session_id: str, cfg: OrchConfig) -> str:
+    value = str(session_id or "").strip()
+    if not value:
+        return ""
+    lowered = value.lower()
+    if any(lowered.endswith(suffix) for suffix in ("-codex", "-gemini", "-grok")):
+        value = _resolve_supervisor_session(value, config=cfg)
+    return _dashboard_supervisor_session(value)
+
+
 def _configured_dashboard_supervisors(config: Optional[OrchConfig] = None) -> set[str]:
     cfg = config or OrchConfig()
     supervisors: set[str] = set()
     for raw_session in cfg.session_ids or []:
-        session_id = str(raw_session or "").strip()
-        if not session_id:
+        supervisor = _configured_dashboard_supervisor_session(str(raw_session or ""), cfg)
+        if not supervisor:
             continue
-        try:
-            supervisor = _resolve_supervisor_session(session_id, config=cfg)
-        except Exception:
-            supervisor = _normalize_owner_session(session_id)
-        supervisor = _normalize_owner_session(str(supervisor or "").strip())
-        if supervisor and supervisor.lower() not in {"unassigned", "unknown", "none", "null"}:
+        if supervisor and supervisor not in {"unassigned", "unknown", "none", "null"}:
             supervisors.add(supervisor)
     return supervisors
 
@@ -1105,13 +1134,13 @@ def list_dashboard_sessions(config: Optional[OrchConfig] = None) -> list:
             "MATCH (p:OrchProject) WHERE coalesce(p.supervisor, '') <> '' "
             "RETURN DISTINCT p.supervisor AS s"
         ):
-            supervisor = _normalize_owner_session(str(record["s"]).strip())
+            supervisor = _dashboard_supervisor_session(record["s"])
             if supervisor in allowlist:
                 found.add(supervisor)
         for record in session.run(
             "MATCH (s:OrchSupervisor) WHERE coalesce(s.session, '') <> '' RETURN s.session AS s"
         ):
-            supervisor = _normalize_owner_session(str(record["s"]).strip())
+            supervisor = _dashboard_supervisor_session(record["s"])
             if supervisor in allowlist:
                 found.add(supervisor)
     return sorted(found)
@@ -3485,6 +3514,433 @@ def get_session_supervised_projects(session_id: str,
         return [_decode_project_node(dict(record["p"])) for record in result]
 
 
+def _supervisor_badge_seed(supervisor: str) -> Dict[str, Any]:
+    return {
+        "supervisor": supervisor,
+        "state": "IDLE",
+        "label": "idle",
+        "summary": "No open task or question is present on this supervisor's projects.",
+        "open_task_count": 0,
+        "in_progress_count": 0,
+        "await_count": 0,
+        "human_review_hold_count": 0,
+        "dependency_wait_count": 0,
+        "live_resolver_wait_count": 0,
+        "open_question_count": 0,
+        "question_ids": [],
+        "reasons": [],
+    }
+
+
+def _supervisor_badge_session(value: Any) -> str:
+    return _dashboard_supervisor_session(value)
+
+
+def _human_review_hold_record(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    marker = _declared_await_signal(row.get("blocked_on"))
+    if not marker or marker.get("kind") != "human-review":
+        return None
+    task_id = str(row.get("task_id") or "").strip()
+    if not task_id:
+        return None
+    detail = str(marker.get("detail") or "").strip()
+    description = str(row.get("description") or "").strip()
+    reason = detail or description or "human review requested"
+    return {
+        "id": task_id,
+        "type": "human_review_hold",
+        "task_id": task_id,
+        "project_id": str(row.get("project_id") or ""),
+        "phase_id": str(row.get("phase_id") or ""),
+        "owner": str(row.get("owner") or ""),
+        "supervisor": _supervisor_badge_session(row.get("effective_supervisor") or row.get("owner") or ""),
+        "blocked_on": str(row.get("blocked_on") or ""),
+        "detail": detail,
+        "description": description,
+        "reason": f"HUMAN REVIEW HOLD [{task_id}]\n{reason}",
+        "resolve_endpoint": f"/api/ui/human-review-holds/{task_id}/resolve",
+    }
+
+
+def get_supervisor_human_review_holds(supervisor: str,
+                                      config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
+    """Return open structured AWAIT:human-review holds for one dashboard supervisor."""
+    supervisor_value = _supervisor_badge_session(supervisor)
+    if not supervisor_value:
+        return []
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    terminal_statuses = list(_TERMINAL_TASK_STATUSES)
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WITH p, ph, t,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
+                 END AS effective_supervisor
+            WHERE coalesce(effective_supervisor, '') <> ''
+              AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+              AND toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:HUMAN-REVIEW:'
+            RETURN t.id AS task_id,
+                   t.description AS description,
+                   t.owner AS owner,
+                   t.blocked_on AS blocked_on,
+                   p.id AS project_id,
+                   ph.id AS phase_id,
+                   effective_supervisor AS effective_supervisor
+            ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, t.created_at ASC
+        """, terminal_statuses=terminal_statuses)
+        holds = []
+        for record in result:
+            hold = _human_review_hold_record(dict(record))
+            if hold and hold.get("supervisor") == supervisor_value:
+                holds.append(hold)
+        return holds
+
+
+def _human_review_resolution_message(task_id: str, verdict: str, *,
+                                     resolved_by: str, blocked_on: str) -> str:
+    return (
+        f"HUMAN REVIEW RESOLVED [{task_id}]\n"
+        f"resolved_by: {resolved_by}\n"
+        f"cleared_blocked_on: {blocked_on}\n\n"
+        f"{verdict}\n\n"
+        "The human-review hold is cleared. Continue the task using this verdict."
+    )
+
+
+def resolve_human_review_hold(task_id: str, verdict: str, resolved_by: str,
+                              config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    """Resolve a structured AWAIT:human-review task hold without completing the task."""
+    verdict_text = str(verdict or "").strip()
+    reviewer = str(resolved_by or "").strip() or "operator"
+    if not verdict_text:
+        raise ValueError(
+            f"verdict must be non-empty. POST /api/ui/human-review-holds/{task_id}/resolve "
+            'with body {"verdict":"<decision>","resolved_by":"<reviewer>"} or use `/ui/`.'
+        )
+    cfg = config or OrchConfig()
+    resolved_task_id = resolve_task_id(task_id, config=cfg)
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            WITH p, ph, t,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
+                 END AS effective_supervisor
+            WHERE NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+            RETURN t.id AS task_id,
+                   t.description AS description,
+                   t.owner AS owner,
+                   t.status AS status,
+                   t.blocked_on AS blocked_on,
+                   p.id AS project_id,
+                   ph.id AS phase_id,
+                   effective_supervisor AS effective_supervisor
+        """,
+            task_id=resolved_task_id,
+            terminal_statuses=list(_TERMINAL_TASK_STATUSES),
+        ).single()
+        if row is None:
+            return {"ok": False, "task_id": resolved_task_id, "reason": "task not found or already terminal"}
+        hold = _human_review_hold_record(dict(row))
+        if not hold:
+            return {"ok": False, "task_id": resolved_task_id, "reason": "task is not blocked on AWAIT:human-review"}
+        blocked_on = str(row.get("blocked_on") or "")
+        resolution = {
+            "verdict": verdict_text,
+            "resolved_by": reviewer,
+            "resolved_at": _utc_now_iso(),
+            "cleared_blocked_on": blocked_on,
+        }
+        updated = session.run("""
+            MATCH (t:OrchTask {id: $task_id})
+            WHERE coalesce(t.blocked_on, '') = $blocked_on
+            SET t.blocked_on = NULL,
+                t.human_review_resolution = $resolution,
+                t.human_review_resolved_by = $resolved_by,
+                t.human_review_resolved_at = datetime(),
+                t.updated_at = datetime()
+            RETURN t.id AS task_id, t.status AS status, t.owner AS owner, t.blocked_on AS blocked_on
+        """,
+            task_id=resolved_task_id,
+            blocked_on=blocked_on,
+            resolution=_json_encode(resolution),
+            resolved_by=reviewer,
+        ).single()
+        if updated is None:
+            return {"ok": False, "task_id": resolved_task_id, "reason": "human-review hold changed before resolution"}
+
+    supervisor = str(hold.get("supervisor") or hold.get("owner") or "").strip()
+    body = _human_review_resolution_message(
+        resolved_task_id,
+        verdict_text,
+        resolved_by=reviewer,
+        blocked_on=blocked_on,
+    )
+    if supervisor:
+        from .chat_layer import append_message_sync
+
+        append_message_sync(
+            supervisor,
+            "operator-ui",
+            body,
+            role="user",
+            message_type="human_review_resolution",
+            metadata={
+                "source": "human_review_hold_resolution",
+                "task_id": resolved_task_id,
+                "blocked_on": blocked_on,
+                "resolved_by": reviewer,
+                "human_review_resolution": True,
+            },
+            config=cfg,
+        )
+        result = subprocess.run(
+            [cfg.notify_cli_path, supervisor, body, "--from", "operator-ui",
+             "--type", "message", "--priority", "high"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"{cfg.notify_cli_path} failed")
+
+    return {
+        "ok": True,
+        "task_id": resolved_task_id,
+        "status": updated.get("status"),
+        "owner": updated.get("owner"),
+        "blocked_on": updated.get("blocked_on"),
+        "supervisor": supervisor,
+        "resolved_by": reviewer,
+        "verdict_delivered": bool(supervisor),
+    }
+
+
+def _supervisor_badge_fallback_session(dashboard_set: set[str], cfg: OrchConfig) -> str:
+    configured = str(getattr(cfg, "badge_fallback_supervisor", "") or "").strip()
+    if not configured:
+        return ""
+    normalized = _configured_dashboard_supervisor_session(configured, cfg)
+    if normalized in dashboard_set:
+        return normalized
+    return ""
+
+
+def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict[str, Any]]:
+    """Derived per-supervisor work badge for the dashboard.
+
+    This is intentionally a view over existing OrchProject/OrchTask/OrchQuestion
+    state. No stopped state is inferred in this view.
+    """
+    cfg = config or OrchConfig()
+    dashboard_supervisors = sorted({
+        supervisor
+        for supervisor in (_supervisor_badge_session(item) for item in list_dashboard_sessions(config=cfg))
+        if supervisor and supervisor not in {"unassigned", "unknown", "none", "null"}
+    })
+    dashboard_set = set(dashboard_supervisors)
+    fallback_bucket = _supervisor_badge_fallback_session(dashboard_set, cfg)
+    badges: Dict[str, Dict[str, Any]] = {
+        supervisor: _supervisor_badge_seed(supervisor)
+        for supervisor in dashboard_supervisors
+    }
+    question_ids_by_supervisor: Dict[str, set[str]] = {supervisor: set() for supervisor in badges}
+    unknown_questions_by_supervisor: Dict[str, int] = {supervisor: 0 for supervisor in badges}
+
+    def row_for(raw_supervisor: Any) -> Optional[Dict[str, Any]]:
+        supervisor = _supervisor_badge_session(raw_supervisor)
+        if supervisor in dashboard_set:
+            return badges[supervisor]
+        if fallback_bucket:
+            return badges[fallback_bucket]
+        return None
+
+    def add_question_id(supervisor: str, raw_record: Any) -> bool:
+        record = _decode_json_field(raw_record, {})
+        if not isinstance(record, dict):
+            return False
+        question_id = str(record.get("id") or record.get("question_id") or "").strip()
+        if not question_id:
+            return False
+        question_ids_by_supervisor.setdefault(supervisor, set()).add(question_id)
+        return True
+
+    driver = get_neo4j_driver(cfg)
+    terminal_statuses = list(_TERMINAL_TASK_STATUSES)
+    with driver.session(database=cfg.neo4j_db) as session:
+        task_rows = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WITH p, t,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
+                 END AS effective_supervisor
+            WHERE coalesce(effective_supervisor, '') <> ''
+              AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+            RETURN effective_supervisor AS supervisor,
+                   count(DISTINCT t) AS open_task_count,
+                   count(DISTINCT CASE WHEN coalesce(t.status, '') = 'in_progress' THEN t END) AS in_progress_count,
+                   count(DISTINCT CASE
+                       WHEN toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:' THEN t
+                   END) AS await_count,
+                   count(DISTINCT CASE
+                       WHEN toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:HUMAN-REVIEW:' THEN t
+                   END) AS human_review_hold_count
+        """, terminal_statuses=terminal_statuses)
+        for record in task_rows:
+            badge = row_for(record["supervisor"])
+            if badge is None:
+                continue
+            badge["open_task_count"] += int(record["open_task_count"] or 0)
+            badge["in_progress_count"] += int(record["in_progress_count"] or 0)
+            badge["await_count"] += int(record["await_count"] or 0)
+            badge["human_review_hold_count"] += int(record["human_review_hold_count"] or 0)
+
+        dependency_rows = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)-[:DEPENDS_ON]->(dep:OrchTask)
+            WITH p, t, dep,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
+                 END AS effective_supervisor
+            WHERE coalesce(effective_supervisor, '') <> ''
+              AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+              AND NOT (coalesce(dep.status, 'pending') IN $terminal_statuses)
+            RETURN effective_supervisor AS supervisor,
+                   count(DISTINCT t) AS dependency_wait_count
+        """, terminal_statuses=terminal_statuses)
+        for record in dependency_rows:
+            badge = row_for(record["supervisor"])
+            if badge is not None:
+                badge["dependency_wait_count"] += int(record["dependency_wait_count"] or 0)
+
+        resolver_rows = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            MATCH (resolver:OrchTask {id: t.blocked_on})
+            WITH p, t, resolver,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
+                 END AS effective_supervisor
+            WHERE coalesce(effective_supervisor, '') <> ''
+              AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+              AND resolver.status IN ['in_progress', 'dispatched']
+            RETURN effective_supervisor AS supervisor,
+                   count(DISTINCT t) AS live_resolver_wait_count
+        """, terminal_statuses=terminal_statuses)
+        for record in resolver_rows:
+            badge = row_for(record["supervisor"])
+            if badge is not None:
+                badge["live_resolver_wait_count"] += int(record["live_resolver_wait_count"] or 0)
+
+        question_rows = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            MATCH (q:OrchQuestion {status: 'open'})-[:CONCERNS_TASK]->(t)
+            WITH p, t, q,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
+                 END AS effective_supervisor
+            WHERE coalesce(effective_supervisor, '') <> ''
+              AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+            RETURN effective_supervisor AS supervisor,
+                   count(DISTINCT q) AS open_question_count,
+                   collect(DISTINCT q.id) AS question_ids
+        """, terminal_statuses=terminal_statuses)
+        for record in question_rows:
+            badge = row_for(record["supervisor"])
+            if badge is None:
+                continue
+            supervisor = badge["supervisor"]
+            ids = [str(item) for item in (record["question_ids"] or []) if item]
+            question_ids_by_supervisor.setdefault(supervisor, set()).update(ids)
+            unknown_questions_by_supervisor[supervisor] = (
+                unknown_questions_by_supervisor.get(supervisor, 0)
+                + max(0, int(record["open_question_count"] or 0) - len(ids))
+            )
+
+    from .config import get_redis_sync
+
+    redis_client = get_redis_sync(cfg)
+    for supervisor in list(badges):
+        lineage = _chat_lineage(supervisor)
+        open_questions = redis_client.lrange(_chat_key("openq", lineage), 0, -1) or []
+        for raw_question in open_questions:
+            if not add_question_id(supervisor, raw_question):
+                unknown_questions_by_supervisor[supervisor] = unknown_questions_by_supervisor.get(supervisor, 0) + 1
+        needs_you = redis_client.get(_chat_key("needs_you", lineage))
+        if needs_you and not add_question_id(supervisor, needs_you) and not open_questions:
+            unknown_questions_by_supervisor[supervisor] = unknown_questions_by_supervisor.get(supervisor, 0) + 1
+
+    for badge in badges.values():
+        supervisor = badge["supervisor"]
+        question_ids = sorted(question_ids_by_supervisor.get(supervisor, set()))
+        badge["question_ids"] = question_ids[:5]
+        badge["open_question_count"] = len(question_ids) + unknown_questions_by_supervisor.get(supervisor, 0)
+        reasons: List[str] = []
+        if badge["open_question_count"]:
+            reasons.append("open_question")
+        if badge["human_review_hold_count"]:
+            reasons.append("human_review_hold")
+        if badge["in_progress_count"]:
+            reasons.append("in_progress")
+        if badge["await_count"]:
+            reasons.append("await_signal")
+        if badge["dependency_wait_count"]:
+            reasons.append("dependency_wait")
+        if badge["live_resolver_wait_count"]:
+            reasons.append("live_resolver_wait")
+        if badge["open_task_count"] and not reasons:
+            reasons.append("open_work")
+        badge["reasons"] = reasons
+        if badge["open_question_count"] or badge["human_review_hold_count"]:
+            badge["state"] = "NEEDS-YOU"
+            badge["label"] = "needs you"
+            badge["summary"] = (
+                f"{badge['open_question_count']} open question(s) and "
+                f"{badge['human_review_hold_count']} human-review hold(s) need a UI answer."
+            )
+        elif badge["open_task_count"]:
+            badge["state"] = "ACTIVE"
+            badge["label"] = "active"
+            badge["summary"] = (
+                f"{badge['open_task_count']} open task(s): "
+                f"{', '.join(reasons)}."
+            )
+        else:
+            badge["state"] = "IDLE"
+            badge["label"] = "idle"
+            badge["summary"] = "No open task or question is present on this supervisor's projects."
+    return dict(sorted(badges.items()))
+
+
 def get_project_ready_tasks(project_id: str, owner: Optional[str] = None,
                             config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
     cfg = config or OrchConfig()
@@ -3997,9 +4453,37 @@ def _chat_key(kind: str, lineage: str) -> str:
     return f"{prefix}:{kind}:{_chat_lineage(lineage)}"
 
 
+def _open_question_id_from_raw(raw: Any) -> str:
+    record = _decode_json_field(raw, {})
+    if not isinstance(record, dict):
+        return ""
+    return str(record.get("id") or record.get("question_id") or "").strip()
+
+
+def _chat_question_id_from_raw(raw: Any) -> str:
+    record = _decode_json_field(raw, {})
+    if not isinstance(record, dict):
+        return ""
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    return str(
+        metadata.get("reply_to_question_id")
+        or metadata.get("question_id")
+        or metadata.get("open_question_id")
+        or ""
+    ).strip()
+
+
+def _raw_records_have_question(raw_records: List[Any], question_id: str, extractor: Any) -> bool:
+    expected = str(question_id or "").strip()
+    if not expected:
+        return False
+    return any(extractor(raw) == expected for raw in raw_records)
+
+
 def _surface_question_to_chat(question: Dict[str, Any], *,
                               config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     from .config import get_redis_sync
+    from .chat_layer import append_message_sync
 
     lineage = _chat_lineage(str(question.get("lineage") or question.get("reviewer") or question.get("asked_by") or "supervisor"))
     reason = str(question.get("text") or "").strip()
@@ -4022,20 +4506,33 @@ def _surface_question_to_chat(question: Dict[str, Any], *,
         "question_id": str(question["id"]),
     }
     encoded = _json_encode(record)
-    message = {
-        "id": uuid.uuid4().hex,
-        "lineage": lineage,
-        "sender": record["session"],
-        "role": "system",
-        "type": "escalation",
-        "text": reason,
-        "metadata": {"open_question_id": record["id"], "needs_you": True, "source": "orch_question"},
-        "ts": record["ts"],
-    }
     r = get_redis_sync(config)
-    r.rpush(_chat_key("openq", lineage), encoded)
+    openq_key = _chat_key("openq", lineage)
+    if not _raw_records_have_question(r.lrange(openq_key, 0, -1), record["id"], _open_question_id_from_raw):
+        r.rpush(openq_key, encoded)
     r.set(_chat_key("needs_you", lineage), encoded)
-    r.rpush(_chat_key("chat", lineage), _json_encode(message))
+    chat_key = _chat_key("chat", lineage)
+    if not _raw_records_have_question(r.lrange(chat_key, 0, -1), record["id"], _chat_question_id_from_raw):
+        append_message_sync(
+            lineage,
+            record["session"],
+            f"NEEDS-YOU [{record['gate_task_id'] or record['id']}]\n{reason}",
+            role="system",
+            message_type="escalation",
+            metadata={
+                "open_question_id": record["id"],
+                "question_id": record["id"],
+                "reply_to_question_id": record["id"],
+                "gate_id": record["gate_task_id"] or record["id"],
+                "gate_task_id": record["gate_task_id"],
+                "task_id": record["task_id"],
+                "needs_you": True,
+                "source": "orch_question",
+                "reply_endpoint": f"/api/ui/questions/{record['id']}/answer",
+            },
+            redis_client=r,
+            config=config,
+        )
     return record
 
 

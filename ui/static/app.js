@@ -5,13 +5,16 @@ const SESSION_CURRENT_ENDPOINT = (sessionId) => `/api/sessions/${encodeURICompon
 const SESSION_NEXT_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/next-ready`;
 const SESSION_PROJECTS_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/projects`;
 const SESSION_NOTIFY_ENDPOINT = (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/notify`;
+const SUPERVISOR_BADGES_ENDPOINT = "/api/supervisors/badges";
 const CHAT_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}`;
 const CHAT_PROMOTE_ENDPOINT = (lineage) => `/api/chat/${encodeURIComponent(lineage)}/promote`;
 const UI_QUESTION_ANSWER_ENDPOINT = (questionId) => `/api/ui/questions/${encodeURIComponent(questionId)}/answer`;
+const UI_HUMAN_REVIEW_HOLD_RESOLVE_ENDPOINT = (taskId) =>
+  `/api/ui/human-review-holds/${encodeURIComponent(taskId)}/resolve`;
 const POLL_INTERVAL_MS = 5000;
 const IS_PUBLIC_MODE = window.ORCH_PUBLIC_MODE === true;
 // Populated at runtime from GET /api/sessions (data-derived; no hardcoded operator fleet).
-let SESSIONS = Array.isArray(window.ORCH_PUBLIC_SESSIONS) ? window.ORCH_PUBLIC_SESSIONS : [];
+let SESSIONS = [];
 
 const state = {
   paused: false,
@@ -19,6 +22,7 @@ const state = {
   selectedProjectIdBySession: new Map(),
   sessionCards: new Map(),
   sessionProjects: new Map(),
+  supervisorBadges: new Map(),
   chatByLineage: new Map(),
   refDrilldowns: new Map(),
   chatStatusTimeoutId: null,
@@ -58,6 +62,23 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function normalizeDashboardSessionKey(value) {
+  return String(value || "").trim().replace(/-(codex|gemini|grok)$/i, "").toLowerCase();
+}
+
+function normalizeDashboardSessions(values) {
+  const seen = new Set();
+  const sessions = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const session = normalizeDashboardSessionKey(value);
+    if (session && !seen.has(session)) {
+      seen.add(session);
+      sessions.push(session);
+    }
+  }
+  return sessions.sort();
+}
+
 function shortHash(value) {
   if (!value) {
     return "n/a";
@@ -95,6 +116,37 @@ function renderStatusBadge(status) {
 function renderActivityBadge(activity) {
   const stateName = activity?.state === "active" ? "active" : "idle";
   return `<span class="status-badge ${stateName}">${stateName}</span>`;
+}
+
+function renderSupervisorBadge(badge) {
+  if (!badge?.state) {
+    return "";
+  }
+  const stateName = String(badge.state).toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+  const label = badge.label || badge.state;
+  const title = badge.summary || label;
+  return `<span class="status-badge supervisor-badge ${escapeHtml(stateName)}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
+}
+
+function effectiveSessionBadge(supervisorBadge, chat, activity) {
+  const chatNeedsYou = !IS_PUBLIC_MODE && (chat?.needs_you || (chat?.open_questions || []).length);
+  if (chatNeedsYou && supervisorBadge?.state !== "NEEDS-YOU") {
+    return {
+      ...(supervisorBadge || {}),
+      state: "NEEDS-YOU",
+      label: "needs you",
+      summary: "This session has an open UI chat question.",
+    };
+  }
+  if (supervisorBadge?.state) {
+    return supervisorBadge;
+  }
+  const active = activity?.state === "active";
+  return {
+    state: active ? "ACTIVE" : "IDLE",
+    label: active ? "active" : "idle",
+    summary: active ? "Session has live activity." : "Session is idle.",
+  };
 }
 
 function basename(path) {
@@ -246,17 +298,17 @@ function renderSessionCards() {
     const current = session.current?.current;
     const activity = session.current?.activity;
     const nextReady = session.next?.next;
+    const supervisorBadge = state.supervisorBadges.get(normalizeDashboardSessionKey(sessionId));
     const activeClass = sessionId === state.selectedSessionId ? "active" : "";
     const chat = state.chatByLineage.get(sessionId) || {};
-    const needsYou = IS_PUBLIC_MODE ? false : (chat.needs_you || (chat.open_questions || []).length);
+    const sessionBadge = effectiveSessionBadge(supervisorBadge, chat, activity);
 
     const card = document.createElement("article");
     card.className = `session-card ${activeClass}`.trim();
     card.innerHTML = `
       <div class="status-row">
         <h3 class="session-name">${escapeHtml(sessionId)}</h3>
-        ${renderActivityBadge(activity)}
-        ${needsYou ? '<span class="status-badge blocked">needs you</span>' : ""}
+        ${renderSupervisorBadge(sessionBadge)}
       </div>
       <div class="session-line">
         <strong>Current:</strong>
@@ -292,11 +344,18 @@ function renderOpenQuestions(openQuestions) {
     <section class="stop-conditions">
       <h3>Open questions</h3>
       <ul>${openQuestions.map((item) => {
-        const questionId = item.question_id || item.id || "";
+        const isHumanReviewHold = item.type === "human_review_hold";
+        const holdTaskId = isHumanReviewHold ? (item.task_id || item.id || "") : "";
+        const questionId = isHumanReviewHold ? "" : (item.question_id || item.id || "");
         return `
           <li>
             <p>${escapeHtml(item.reason || item.text || "")}</p>
-            ${questionId ? `
+            ${holdTaskId ? `
+              <div class="question-answer" data-human-review-hold-task-id="${escapeHtml(holdTaskId)}">
+                <textarea rows="2" placeholder="Verdict"></textarea>
+                <button type="button" data-resolve-human-review-hold="${escapeHtml(holdTaskId)}">Resolve hold</button>
+              </div>
+            ` : questionId ? `
               <div class="question-answer" data-question-id="${escapeHtml(questionId)}">
                 <textarea rows="2" placeholder="Verdict"></textarea>
                 <button type="button" data-answer-question="${escapeHtml(questionId)}">Record verdict</button>
@@ -309,23 +368,50 @@ function renderOpenQuestions(openQuestions) {
   `;
 }
 
-function renderChatMessages(messages) {
+function questionIdForRecord(item) {
+  return item?.question_id || item?.id || "";
+}
+
+function gateQuestionIdForMessage(message) {
+  const metadata = message?.metadata || {};
+  return metadata.reply_to_question_id || metadata.question_id || metadata.open_question_id || "";
+}
+
+function openQuestionIdSet(openQuestions) {
+  return new Set((openQuestions || []).map(questionIdForRecord).filter(Boolean));
+}
+
+function renderChatMessages(messages, openQuestions = []) {
   if (IS_PUBLIC_MODE) {
     return "";
   }
   if (!messages.length) {
     return '<p class="empty-hint">(no chat messages yet)</p>';
   }
-  return messages.map((message) => `
-    <article class="summary-card" data-message-id="${escapeHtml(message.id || "")}">
-      <div class="status-row">
-        <strong>${escapeHtml(message.sender || message.role || "unknown")}</strong>
-        <span class="muted">${escapeHtml(message.ts || "")}</span>
-      </div>
-      <p>${escapeHtml(message.text || "")}</p>
-      ${message.role === "user" ? `<button type="button" data-promote-reply="${escapeHtml(message.id || "")}">Promote to MEMORY</button>` : ""}
-    </article>
-  `).join("");
+  const openIds = openQuestionIdSet(openQuestions);
+  return messages.map((message) => {
+    const gateQuestionId = gateQuestionIdForMessage(message);
+    const metadata = message.metadata || {};
+    const gateLabel = metadata.gate_id || metadata.gate_task_id || gateQuestionId;
+    const canAnswerGate = gateQuestionId && openIds.has(gateQuestionId);
+    return `
+      <article class="summary-card" data-message-id="${escapeHtml(message.id || "")}">
+        <div class="status-row">
+          <strong>${escapeHtml(message.sender || message.role || "unknown")}</strong>
+          <span class="muted">${escapeHtml(message.ts || "")}</span>
+        </div>
+        ${gateLabel ? `<p class="muted">gate ${escapeHtml(gateLabel)}</p>` : ""}
+        <p>${escapeHtml(message.text || "")}</p>
+        ${canAnswerGate ? `
+          <div class="question-answer chat-gate-answer" data-question-id="${escapeHtml(gateQuestionId)}">
+            <textarea rows="2" placeholder="Verdict"></textarea>
+            <button type="button" data-chat-answer-question="${escapeHtml(gateQuestionId)}">Record verdict</button>
+          </div>
+        ` : ""}
+        ${message.role === "user" ? `<button type="button" data-promote-reply="${escapeHtml(message.id || "")}">Promote to MEMORY</button>` : ""}
+      </article>
+    `;
+  }).join("");
 }
 
 function renderChatPanel() {
@@ -336,7 +422,7 @@ function renderChatPanel() {
   const needsYou = chat.needs_you || (chat.open_questions || []).length;
   elements.chatNeedsYou.hidden = !needsYou;
   elements.chatOpenQuestions.innerHTML = renderOpenQuestions(chat.open_questions || []);
-  elements.chatHistory.innerHTML = renderChatMessages(chat.messages || []);
+  elements.chatHistory.innerHTML = renderChatMessages(chat.messages || [], chat.open_questions || []);
   // newest at the bottom — keep the latest exchange in view when expanded
   if (!elements.chatHistoryWrap.hidden) {
     elements.chatHistoryWrap.scrollTop = elements.chatHistoryWrap.scrollHeight;
@@ -503,6 +589,20 @@ function syncChatTarget() {
   elements.chatInput.placeholder = target ? `Message to ${target}...` : "Message...";
 }
 
+function ensureSelectedSession() {
+  if (!state.selectedSessionId || !SESSIONS.includes(state.selectedSessionId)) {
+    state.selectedSessionId = SESSIONS[0] || null;
+  }
+}
+
+function mergeSupervisorBadgeSessions() {
+  const badgeSessions = [...state.supervisorBadges.keys()].filter(Boolean);
+  if (badgeSessions.length) {
+    SESSIONS = normalizeDashboardSessions([...SESSIONS, ...badgeSessions]);
+  }
+  ensureSelectedSession();
+}
+
 function setChatStatus(message, kind, durationMs) {
   elements.chatStatus.textContent = message;
   elements.chatStatus.className = `notify-status ${kind}`.trim();
@@ -575,6 +675,18 @@ async function loadSessions() {
   }));
 }
 
+async function loadSupervisorBadges() {
+  try {
+    const result = await fetchJson(SUPERVISOR_BADGES_ENDPOINT);
+    state.supervisorBadges = new Map(Object.entries(result.badges || {}).map(([sessionId, badge]) => {
+      const session = normalizeDashboardSessionKey(sessionId);
+      return [session, { ...badge, supervisor: normalizeDashboardSessionKey(badge?.supervisor || sessionId) }];
+    }).filter(([session]) => session));
+  } catch (error) {
+    state.supervisorBadges.clear();
+  }
+}
+
 async function loadChat() {
   if (IS_PUBLIC_MODE) {
     state.chatByLineage.clear();
@@ -599,16 +711,16 @@ async function loadChat() {
 async function loadSessionList() {
   try {
     const data = await fetchJson("/api/sessions");
-    SESSIONS = Array.isArray(data.sessions) ? data.sessions : [];
+    SESSIONS = normalizeDashboardSessions(data.sessions);
   } catch (error) {
     if (!Array.isArray(SESSIONS)) {
       SESSIONS = [];
     }
   }
-  if (!state.selectedSessionId || !SESSIONS.includes(state.selectedSessionId)) {
-    state.selectedSessionId = SESSIONS[0] || null;
-  }
+  ensureSelectedSession();
 }
+
+SESSIONS = normalizeDashboardSessions(window.ORCH_PUBLIC_SESSIONS);
 
 let _refreshing = false;
 async function refresh() {
@@ -620,7 +732,13 @@ async function refresh() {
   _refreshing = true;
   try {
     await loadSessionList();
-    await Promise.all([loadSessions(), loadSessionProjects(), IS_PUBLIC_MODE ? Promise.resolve() : loadChat()]);
+    await loadSupervisorBadges();
+    mergeSupervisorBadgeSessions();
+    await Promise.all([
+      loadSessions(),
+      loadSessionProjects(),
+      IS_PUBLIC_MODE ? Promise.resolve() : loadChat(),
+    ]);
     ensureSelectedProject();
     renderSessionCards();
     renderProjectList();
@@ -640,6 +758,12 @@ elements.pauseToggle.addEventListener("change", (event) => {
 
 if (!IS_PUBLIC_MODE) {
   elements.chatInput.addEventListener("input", updateChatButtonState);
+  elements.chatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      elements.chatForm.requestSubmit();
+    }
+  });
 }
 
 function setChatExpanded(open) {
@@ -673,6 +797,43 @@ if (elements.refDialogClose) {
 
 if (!IS_PUBLIC_MODE) {
   elements.chatHistory.addEventListener("click", async (event) => {
+    const answerTarget = event.target.closest("[data-chat-answer-question]");
+    if (answerTarget) {
+      const questionId = answerTarget.dataset.chatAnswerQuestion;
+      const container = answerTarget.closest("[data-question-id]");
+      const answer = container?.querySelector("textarea")?.value.trim() || "";
+      if (!questionId || !answer) {
+        setChatStatus("Verdict required", "error", 5000);
+        return;
+      }
+      answerTarget.disabled = true;
+      setChatStatus("Recording verdict...", "pending", 0);
+      try {
+        await fetchJson(CHAT_ENDPOINT(selectedLineage()), {
+          method: "POST",
+          body: JSON.stringify({
+            sender: "operator",
+            role: "user",
+            text: answer,
+            reply_to_question_id: questionId,
+          }),
+        });
+        await loadSupervisorBadges();
+        mergeSupervisorBadgeSessions();
+        await Promise.all([loadChat(), loadSessions(), loadSessionProjects()]);
+        ensureSelectedProject();
+        renderSessionCards();
+        renderProjectList();
+        renderChatPanel();
+        await loadSelectedProject();
+        setChatStatus("Verdict recorded", "success", 5000);
+      } catch (error) {
+        answerTarget.disabled = false;
+        setChatStatus(error.message, "error", 8000);
+      }
+      return;
+    }
+
     const target = event.target.closest("[data-promote-reply]");
     if (!target) {
       return;
@@ -700,6 +861,38 @@ if (!IS_PUBLIC_MODE) {
 
 if (!IS_PUBLIC_MODE) {
   elements.chatOpenQuestions.addEventListener("click", async (event) => {
+    const holdTarget = event.target.closest("[data-resolve-human-review-hold]");
+    if (holdTarget) {
+      const taskId = holdTarget.dataset.resolveHumanReviewHold;
+      const container = holdTarget.closest("[data-human-review-hold-task-id]");
+      const verdict = container?.querySelector("textarea")?.value.trim() || "";
+      if (!taskId || !verdict) {
+        setChatStatus("Verdict required", "error", 5000);
+        return;
+      }
+      holdTarget.disabled = true;
+      setChatStatus("Resolving hold...", "pending", 0);
+      try {
+        await fetchJson(UI_HUMAN_REVIEW_HOLD_RESOLVE_ENDPOINT(taskId), {
+          method: "POST",
+          body: JSON.stringify({ verdict, resolved_by: "operator" }),
+        });
+        await loadSupervisorBadges();
+        mergeSupervisorBadgeSessions();
+        await Promise.all([loadChat(), loadSessions(), loadSessionProjects()]);
+        ensureSelectedProject();
+        renderSessionCards();
+        renderProjectList();
+        renderChatPanel();
+        await loadSelectedProject();
+        setChatStatus("Hold resolved", "success", 5000);
+      } catch (error) {
+        holdTarget.disabled = false;
+        setChatStatus(error.message, "error", 8000);
+      }
+      return;
+    }
+
     const target = event.target.closest("[data-answer-question]");
     if (!target) {
       return;
@@ -718,6 +911,8 @@ if (!IS_PUBLIC_MODE) {
         method: "POST",
         body: JSON.stringify({ answer, answered_by: "operator" }),
       });
+      await loadSupervisorBadges();
+      mergeSupervisorBadgeSessions();
       await Promise.all([loadChat(), loadSessions(), loadSessionProjects()]);
       ensureSelectedProject();
       renderSessionCards();

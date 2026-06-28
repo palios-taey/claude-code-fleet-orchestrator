@@ -2,7 +2,8 @@
 """orch-cron — recurring task runner with file-tracked state.
 
 Reads an operator-controlled JSON registry of recurring triggers. A trigger
-can either wake a session with a prompt file or dispatch an OrchTask by id.
+can wake a session with a prompt file, dispatch an OrchTask by id, or run an
+operator-authored command directly on the cadence.
 The optional ``state_file`` turns each recurring fire into a first-class
 "process tracked through files" — the supervisor can grep the state_file to
 see the task's full history without context-switching into the worker pane.
@@ -34,9 +35,25 @@ JSON registry (path passed via ``--registry``)::
           "hours": [8, 10, 12, 14, 16, 18, 20, 22],
           "state_file": "/path/to/upwork-cycle.jsonl",
           "enabled": true
+        },
+        {
+          "id": "careers-act-advance",
+          "command": "cd /path/to/repo && .venv/bin/python scripts/loop/cycle.py",
+          "cwd": "/path/to/repo",            // optional subprocess cwd
+          "timeout_sec": 600,                // optional; default 600, always enforced
+          "tz": "America/New_York",
+          "minute": 59,
+          "hours": [8, 10, 12, 14, 16, 18, 20, 22],
+          "state_file": "/path/to/careers-act.jsonl",
+          "enabled": true
         }
       ]
     }
+
+Trigger modes are mutually exclusive. A trigger with more than one of
+``command``, ``task_id``, or ``prompt_file`` is skipped as ambiguous instead of
+using silent precedence. Commands are trusted operator registry input and may
+use shell syntax; never interpolate non-registry data into command strings.
 
 State file format (jsonl, one record per fire)::
 
@@ -44,6 +61,12 @@ State file format (jsonl, one record per fire)::
      "session": "x-claude", "tz_hour_minute": "20:09",
      "prompt_hash": "sha256:..."  /* of prompt_file at fire time */,
      "result": "dispatched" | "skipped:already_fired" | "skipped:disabled" }
+
+    {"ts": 1779800000, "fire_id": "careers-act-20260526-2059",
+     "trigger_mode": "command", "command": "cd /repo && ./run.sh",
+     "cwd": "/repo", "timeout_sec": 600, "exit_code": 0,
+     "stdout": "...", "stderr": "...", "duration_sec": 1.234,
+     "result": "command:exit_0" | "command:timeout" | "command:error" }
 
 Operators (e.g., the WAKE_PROMPT.txt-driven posting loop) can grep the
 state_file for fires of a given type, count fires per day, replay a
@@ -101,6 +124,8 @@ log = logging.getLogger(__name__)
 # 120s TTL guards only the same-minute window; an hour later the slot is fresh.
 DEDUP_TTL_SEC = 120
 NOTIFY_KEY_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+COMMAND_TIMEOUT_DEFAULT_SEC = 600.0
+COMMAND_OUTPUT_LIMIT = 4000
 
 
 def orch_key(namespace: str, *parts: str) -> str:
@@ -137,6 +162,36 @@ def _clear_dedup(redis_client: Any, fire_id: str) -> None:
         redis_client.delete(orch_key("orch-cron-fired", fire_id))
     except Exception:
         pass
+
+
+def _trigger_route_fields(trig: dict) -> list[str]:
+    return [field for field in ("command", "task_id", "prompt_file") if field in trig]
+
+
+def _truncate_output(value: Any, limit: int = COMMAND_OUTPUT_LIMIT) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        text = value.decode(errors="replace")
+    else:
+        text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...[truncated {len(text) - limit} chars]"
+
+
+def _command_timeout_sec(trig: dict) -> float:
+    raw = trig.get("timeout_sec", COMMAND_TIMEOUT_DEFAULT_SEC)
+    timeout = float(raw)
+    if timeout <= 0:
+        raise ValueError("timeout_sec must be > 0")
+    return timeout
+
+
+def _command_args(command: Any) -> tuple[Any, bool]:
+    if isinstance(command, list):
+        return [str(part) for part in command], False
+    return str(command), True
 
 
 def _task_prompt_body(trig: dict, task_id: str, description: str) -> str:
@@ -190,18 +245,116 @@ def _fire_task_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False
     return "dispatched"
 
 
+def _fire_command_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> str:
+    trig_id = trig.get("id") or "command"
+    command = trig.get("command")
+    if isinstance(command, list):
+        has_command = bool(command)
+    else:
+        has_command = bool(str(command or "").strip())
+    if not has_command:
+        log.warning("SKIP command trigger %s: no command configured", trig_id)
+        return "skipped:no_command"
+
+    try:
+        timeout_sec = _command_timeout_sec(trig)
+    except (TypeError, ValueError) as exc:
+        log.warning("SKIP command trigger %s: bad timeout_sec: %s", trig_id, exc)
+        return "skipped:bad_timeout"
+
+    cwd = str(trig.get("cwd") or "").strip() or None
+    fire_id = f"{trig_id}-{now_local:%Y%m%d-%H%M}"
+    args, shell = _command_args(command)
+    if dry_run:
+        log.info("[DRY] would run command trigger %s @ %s command=%r cwd=%s timeout=%s",
+                 trig_id, fire_id, command, cwd or "", timeout_sec)
+        return "dry_run"
+    if not _dedup_fire(r, fire_id):
+        return "skipped:already_fired"
+
+    started = time.monotonic()
+    base_record = {
+        "ts": int(time.time()),
+        "fire_id": fire_id,
+        "trigger_mode": "command",
+        "command": command,
+        "cwd": cwd or "",
+        "timeout_sec": timeout_sec,
+        "tz_hour_minute": f"{now_local:%H:%M}",
+        "hostname": socket.gethostname(),
+    }
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=cwd,
+            timeout=timeout_sec,
+            capture_output=True,
+            text=True,
+            shell=shell,
+        )
+        duration = time.monotonic() - started
+        result = f"command:exit_{completed.returncode}"
+        record = {
+            **base_record,
+            "duration_sec": round(duration, 3),
+            "exit_code": completed.returncode,
+            "stdout": _truncate_output(completed.stdout),
+            "stderr": _truncate_output(completed.stderr),
+            "result": result,
+        }
+        append_state_file(trig.get("state_file"), record)
+        log.info("FIRE command trigger %s exit=%s duration=%.3fs cwd=%s",
+                 trig_id, completed.returncode, duration, cwd or "")
+        return result
+    except subprocess.TimeoutExpired as exc:
+        duration = time.monotonic() - started
+        record = {
+            **base_record,
+            "duration_sec": round(duration, 3),
+            "exit_code": None,
+            "stdout": _truncate_output(exc.stdout),
+            "stderr": _truncate_output(exc.stderr),
+            "result": "command:timeout",
+        }
+        append_state_file(trig.get("state_file"), record)
+        log.warning("TIMEOUT command trigger %s after %.3fs (timeout=%ss)",
+                    trig_id, duration, timeout_sec)
+        return "command:timeout"
+    except OSError as exc:
+        duration = time.monotonic() - started
+        record = {
+            **base_record,
+            "duration_sec": round(duration, 3),
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "",
+            "error": str(exc),
+            "result": "command:error",
+        }
+        append_state_file(trig.get("state_file"), record)
+        log.error("ERROR command trigger %s: %s", trig_id, exc)
+        return "command:error"
+
+
 def fire_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> str:
     """Fire one due trigger. Returns the result label written to state_file."""
     trig_id = trig.get("id") or trig.get("session", "?")
-    session = trig.get("session")
-    if not session:
-        return "skipped:no_session"
 
     if not trig.get("enabled", True):
         return "skipped:disabled"
 
-    if trig.get("task_id"):
+    route_fields = _trigger_route_fields(trig)
+    if len(route_fields) > 1:
+        log.warning("SKIP trigger %s: ambiguous trigger modes %s", trig_id, ",".join(route_fields))
+        return "skipped:ambiguous_trigger"
+    if route_fields == ["command"]:
+        return _fire_command_trigger(r, trig, now_local, dry_run=dry_run)
+    if route_fields == ["task_id"]:
         return _fire_task_trigger(r, trig, now_local, dry_run=dry_run)
+
+    session = trig.get("session")
+    if not session:
+        return "skipped:no_session"
 
     prompt_file = trig.get("prompt_file")
     if not prompt_file or not os.path.isfile(prompt_file):
@@ -243,6 +396,12 @@ def fire_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> s
 
 
 def trigger_payload_hash(trig: dict) -> str:
+    if "command" in trig:
+        payload = json.dumps(
+            {"command": trig.get("command"), "cwd": trig.get("cwd") or ""},
+            sort_keys=True,
+        )
+        return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()[:16]
     if trig.get("prompt_file") and os.path.isfile(trig["prompt_file"]):
         with open(trig["prompt_file"], "rb") as f:
             return "sha256:" + hashlib.sha256(f.read()).hexdigest()[:16]
@@ -339,6 +498,8 @@ def tick(registry_path: str, redis_client, dry_run: bool = False,
                 "hostname": socket.gethostname(),
             }
             append_state_file(trig.get("state_file"), record)
+            fires += 1
+        elif "command" in trig and result.startswith("command:"):
             fires += 1
 
     return fires

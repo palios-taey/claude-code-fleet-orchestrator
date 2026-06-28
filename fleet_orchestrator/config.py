@@ -155,6 +155,9 @@ OPTIONAL_ENV = (
      "registered supervisor ids; source of truth for supervisor plan/root affordances and "
      "plan-modeling role detection. Also an optional notify/wake target filter: when SET, "
      "an unlisted target raises 400; when EMPTY, that filter is OFF."),
+    ("ORCH_BADGE_FALLBACK_SUPERVISOR", "unset (drop non-dashboard badge work)",
+     "optional explicit dashboard supervisor bucket for badge work whose effective supervisor "
+     "is not itself a dashboard session; unset keeps the dashboard fail-closed"),
     ("NOTIFY_KEY_PREFIX", "taey",
      "canonical redis namespace; override only to run a second isolated fleet on one redis"),
     ("ORCH_NOTIFY_CLI", "taey-notify",
@@ -281,6 +284,7 @@ class OrchConfig:
     notify_cli_path: str = field(default_factory=notify_cli)
     product_owner_map: Dict[str, str] = field(default_factory=_parse_product_owner_map)
     session_ids: list[str] = field(default_factory=_parse_session_ids)
+    badge_fallback_supervisor: str = field(default_factory=lambda: _optional_env("ORCH_BADGE_FALLBACK_SUPERVISOR", "") or "")
 
     heartbeat_interval_s: float = 12.0
     heartbeat_ttl_s: int = 36

@@ -7,6 +7,7 @@ task; the dashboard UI path records the verdict and releases dependents.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -27,6 +28,7 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
     get_session_next_ready,
     init_schema,
     get_task,
+    _surface_question_to_chat,
     update_task_status,
 )
 from fleet_orchestrator.tasks_api import app  # noqa: E402
@@ -51,6 +53,8 @@ PROJECT = f"{PFX}-project"
 PHASE = f"{PROJECT}::phase"
 GATE = f"{PROJECT}::human-review"
 QUESTION = f"{PFX}-question"
+GATE_TWO = f"{PROJECT}::human-review-two"
+QUESTION_TWO = f"{PFX}-question-two"
 DOWNSTREAM = f"{PROJECT}::downstream"
 FAILURES: list[str] = []
 
@@ -73,7 +77,7 @@ def _cleanup() -> None:
         session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=PFX)
 
 
-def _question_row() -> dict:
+def _question_row(question_id: str = QUESTION, task_id: str = GATE) -> dict:
     with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
         row = session.run(
             """
@@ -86,10 +90,47 @@ def _question_row() -> dict:
                    props.unverified_answered_by AS unverified_answered_by,
                    t.id AS task_id
             """,
-            id=QUESTION,
-            task=GATE,
+            id=question_id,
+            task=task_id,
         ).single()
     return dict(row) if row else {}
+
+
+def _chat_messages() -> list[dict]:
+    records: list[dict] = []
+    for raw in get_redis_sync(CFG).lrange(_redis_key("chat"), 0, -1):
+        try:
+            records.append(json.loads(raw))
+        except Exception:
+            records.append({"raw": raw})
+    return records
+
+
+def _open_question_ids() -> set[str]:
+    ids: set[str] = set()
+    for raw in get_redis_sync(CFG).lrange(_redis_key("openq"), 0, -1):
+        try:
+            record = json.loads(raw)
+        except Exception:
+            continue
+        if isinstance(record, dict):
+            question_id = str(record.get("id") or record.get("question_id") or "").strip()
+            if question_id:
+                ids.add(question_id)
+    return ids
+
+
+def _chat_messages_for_question(question_id: str) -> list[dict]:
+    matches: list[dict] = []
+    for message in _chat_messages():
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        if question_id in {
+            str(metadata.get("open_question_id") or ""),
+            str(metadata.get("question_id") or ""),
+            str(metadata.get("reply_to_question_id") or ""),
+        }:
+            matches.append(message)
+    return matches
 
 
 def main() -> int:
@@ -117,7 +158,30 @@ def main() -> int:
 
         r = get_redis_sync(CFG)
         _check("dashboard needs_you points at durable question", QUESTION in (r.get(_redis_key("needs_you")) or ""), r.get(_redis_key("needs_you")))
-        _check("dashboard open_questions contains durable question", any(QUESTION in item for item in r.lrange(_redis_key("openq"), 0, -1)), r.lrange(_redis_key("openq"), 0, -1))
+        _check("dashboard open_questions contains durable question", QUESTION in _open_question_ids(), r.lrange(_redis_key("openq"), 0, -1))
+        gate_messages = _chat_messages_for_question(QUESTION)
+        _check("NEEDS-YOU chat message auto-posted once", len(gate_messages) == 1, _chat_messages())
+        gate_metadata = gate_messages[0].get("metadata", {}) if gate_messages else {}
+        _check(
+            "NEEDS-YOU chat message carries exact gate binding",
+            gate_metadata.get("question_id") == QUESTION
+            and gate_metadata.get("reply_to_question_id") == QUESTION
+            and gate_metadata.get("gate_task_id") == GATE
+            and gate_metadata.get("reply_endpoint") == f"/api/ui/questions/{QUESTION}/answer",
+            gate_metadata,
+        )
+        _surface_question_to_chat(
+            {
+                "id": QUESTION,
+                "text": "Which artifact should ship?",
+                "task_id": GATE,
+                "gate_task_id": GATE,
+                "reviewer": REVIEWER,
+                "lineage": REVIEWER,
+            },
+            config=CFG,
+        )
+        _check("NEEDS-YOU chat message dedupes per gate", len(_chat_messages_for_question(QUESTION)) == 1, _chat_messages())
 
         create_task(phase_id=PHASE, task_id=DOWNSTREAM, description="released after human verdict", owner=SUP, wake_owner_if_ready=False, config=CFG)
         add_dependency(DOWNSTREAM, GATE, config=CFG)
@@ -193,25 +257,60 @@ def main() -> int:
         _check("peer answer leaves gate task blocked", gate.get("status") != "completed", gate)
         _check("peer answer writes no completion evidence", not evidence, evidence)
         _check("dashboard needs_you remains for real human", QUESTION in (r.get(_redis_key("needs_you")) or ""), r.get(_redis_key("needs_you")))
-        _check("dashboard open question remains for real human", any(QUESTION in item for item in r.lrange(_redis_key("openq"), 0, -1)), r.lrange(_redis_key("openq"), 0, -1))
+        _check("dashboard open question remains for real human", QUESTION in _open_question_ids(), r.lrange(_redis_key("openq"), 0, -1))
         after = get_session_next_ready(SUP, project_id=PROJECT, config=CFG)
         _check("downstream remains blocked after normal answer endpoint", not after or after.get("task_id") != DOWNSTREAM, after)
 
-        ui_response = client.post(
-            f"/api/ui/questions/{QUESTION}/answer",
-            json={"answer": "Ship artifact B", "answered_by": REVIEWER},
+        create_response_two = client.post(
+            "/api/human-review-gates",
+            json={
+                "phase_id": PHASE,
+                "task_id": GATE_TWO,
+                "question_id": QUESTION_TWO,
+                "prompt": "Should artifact C ship?",
+                "reviewer": REVIEWER,
+                "from": SUP,
+                "notify": False,
+            },
+        )
+        _check("second human-review gate endpoint returns ok", create_response_two.status_code == 200 and create_response_two.json().get("ok"), create_response_two.text)
+        _check("second NEEDS-YOU chat message auto-posted once", len(_chat_messages_for_question(QUESTION_TWO)) == 1, _chat_messages())
+
+        chat_reply = client.post(
+            f"/api/chat/{REVIEWER}",
+            json={
+                "answer": "ignored alias",
+                "sender": REVIEWER,
+                "role": "user",
+                "text": "Ship artifact B",
+                "reply_to_question_id": QUESTION,
+            },
             headers={"origin": "http://testserver"},
         )
-        _check("UI review endpoint records verified answer", ui_response.status_code == 200 and ui_response.json().get("verified") is True, ui_response.text)
-        _check("UI review endpoint completes gate", ui_response.json().get("gate_completed") is True, ui_response.json())
+        chat_payload = chat_reply.json() if chat_reply.status_code == 200 else {}
+        bound_reply = chat_payload.get("bound_gate_reply") or {}
+        _check("UI chat bound reply records verified answer", chat_reply.status_code == 200 and bound_reply.get("verified") is True, chat_reply.text)
+        _check("UI chat bound reply completes exact gate", bound_reply.get("gate_completed") is True and bound_reply.get("gate_task_id") == GATE, chat_payload)
+        _check("UI chat reply message carries reply binding", (chat_payload.get("message", {}).get("metadata") or {}).get("reply_to_question_id") == QUESTION, chat_payload)
         final_question = _question_row()
-        _check("UI answer closes durable question as verified", final_question.get("status") == "answered" and final_question.get("verified") is True, final_question)
+        _check("UI chat answer closes durable question as verified", final_question.get("status") == "answered" and final_question.get("verified") is True, final_question)
         final_gate = get_task(GATE, config=CFG)
-        _check("UI answer completes human-review gate task", final_gate.get("status") == "completed", final_gate)
+        _check("UI chat answer completes human-review gate task", final_gate.get("status") == "completed", final_gate)
         final_ready = get_session_next_ready(SUP, project_id=PROJECT, config=CFG)
-        _check("downstream releases after UI verdict", final_ready and final_ready.get("task_id") == DOWNSTREAM, final_ready)
-        _check("dashboard needs_you clears after UI verdict", not r.get(_redis_key("needs_you")), r.get(_redis_key("needs_you")))
-        _check("dashboard open question clears after UI verdict", not any(QUESTION in item for item in r.lrange(_redis_key("openq"), 0, -1)), r.lrange(_redis_key("openq"), 0, -1))
+        _check("downstream releases after chat-bound UI verdict", final_ready and final_ready.get("task_id") == DOWNSTREAM, final_ready)
+        _check("bound chat reply leaves other gate open", _question_row(QUESTION_TWO, GATE_TWO).get("status") == "open" and get_task(GATE_TWO, config=CFG).get("status") != "completed", _question_row(QUESTION_TWO, GATE_TWO))
+        _check("dashboard needs_you remains for unanswered gate", QUESTION_TWO in (r.get(_redis_key("needs_you")) or ""), r.get(_redis_key("needs_you")))
+        _check("dashboard open question clears answered gate", QUESTION not in _open_question_ids(), r.lrange(_redis_key("openq"), 0, -1))
+        _check("dashboard open question retains unanswered gate", QUESTION_TWO in _open_question_ids(), r.lrange(_redis_key("openq"), 0, -1))
+
+        ui_response = client.post(
+            f"/api/ui/questions/{QUESTION_TWO}/answer",
+            json={"answer": "Hold artifact C", "answered_by": REVIEWER},
+            headers={"origin": "http://testserver"},
+        )
+        _check("open-question UI endpoint still completes remaining gate", ui_response.status_code == 200 and ui_response.json().get("gate_completed") is True, ui_response.text)
+        _check("dashboard needs_you clears after all UI verdicts", not r.get(_redis_key("needs_you")), r.get(_redis_key("needs_you")))
+        _check("dashboard open questions clear after all UI verdicts", not r.lrange(_redis_key("openq"), 0, -1), r.lrange(_redis_key("openq"), 0, -1))
     finally:
         _cleanup()
 

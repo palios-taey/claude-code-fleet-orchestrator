@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from fleet_orchestrator.config import OrchConfig, get_redis_async
+from fleet_orchestrator.config import OrchConfig, get_redis_async, get_redis_sync
 from fleet_orchestrator.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 
 _NOTIFY_KEY_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
@@ -76,7 +76,7 @@ def _json_loads(raw: str) -> Dict[str, Any]:
     return {"value": value}
 
 
-async def append_message(
+def _message_record(
     lineage: str,
     sender: str,
     text: str,
@@ -84,9 +84,7 @@ async def append_message(
     role: str = "user",
     message_type: str = "chat",
     metadata: Optional[Dict[str, Any]] = None,
-    redis_client: Any = None,
-    config: Optional[OrchConfig] = None,
-) -> Dict[str, Any]:
+) -> tuple[str, Dict[str, Any]]:
     lineage_value = _normalize_lineage(lineage)
     body = str(text or "").strip()
     if not body:
@@ -104,21 +102,74 @@ async def append_message(
         "metadata": metadata or {},
         "ts": _now_iso(),
     }
+    return lineage_value, record
+
+
+def _emit_chat_receipt(record: Dict[str, Any], lineage_value: str, *,
+                       config: Optional[OrchConfig] = None) -> None:
+    if record["type"] == "escalation":
+        return
+    maybe_emit_decision_receipt(
+        "chat_send",
+        {
+            "why_this_context": "chat message appended to durable lineage",
+            "refs_used": [],
+            "rule_tier_applied": "chat",
+            "observable_state": {"chat_record": record},
+            "lineage": lineage_value,
+            "next_contract": "lineage conversation is available to future wake context",
+        },
+        config=config,
+    )
+
+
+def append_message_sync(
+    lineage: str,
+    sender: str,
+    text: str,
+    *,
+    role: str = "user",
+    message_type: str = "chat",
+    metadata: Optional[Dict[str, Any]] = None,
+    redis_client: Any = None,
+    config: Optional[OrchConfig] = None,
+) -> Dict[str, Any]:
+    lineage_value, record = _message_record(
+        lineage,
+        sender,
+        text,
+        role=role,
+        message_type=message_type,
+        metadata=metadata,
+    )
+    client = redis_client or get_redis_sync(config)
+    client.rpush(_message_key(lineage_value), json.dumps(record, separators=(",", ":")))
+    _emit_chat_receipt(record, lineage_value, config=config)
+    return record
+
+
+async def append_message(
+    lineage: str,
+    sender: str,
+    text: str,
+    *,
+    role: str = "user",
+    message_type: str = "chat",
+    metadata: Optional[Dict[str, Any]] = None,
+    redis_client: Any = None,
+    config: Optional[OrchConfig] = None,
+) -> Dict[str, Any]:
+    lineage_value, record = _message_record(
+        lineage,
+        sender,
+        text,
+        role=role,
+        message_type=message_type,
+        metadata=metadata,
+    )
     client = redis_client or get_redis_async(config)
     await client.rpush(_message_key(lineage_value), json.dumps(record, separators=(",", ":")))
-    if record["type"] != "escalation":
-        maybe_emit_decision_receipt(
-            "chat_send",
-            {
-                "why_this_context": "chat message appended to durable lineage",
-                "refs_used": [],
-                "rule_tier_applied": "chat",
-                "observable_state": {"chat_record": record},
-                "lineage": lineage_value,
-                "next_contract": "lineage conversation is available to future wake context",
-            },
-            config=config,
-        )
+    _emit_chat_receipt(record, lineage_value, config=config)
     return record
 
 
@@ -276,10 +327,14 @@ def _http_error(exc: ValueError) -> HTTPException:
 @router.get("/{lineage}")
 async def chat_history(lineage: str) -> Dict[str, Any]:
     try:
+        open_questions = await get_open_questions(lineage)
+        from fleet_orchestrator.orch_schema import get_supervisor_human_review_holds
+
+        open_questions.extend(get_supervisor_human_review_holds(lineage, config=OrchConfig()))
         return {
             "lineage": _normalize_lineage(lineage),
             "messages": await get_conversation(lineage),
-            "open_questions": await get_open_questions(lineage),
+            "open_questions": open_questions,
             "needs_you": await needs_you(lineage),
         }
     except ValueError as exc:
@@ -290,23 +345,69 @@ async def chat_history(lineage: str) -> Dict[str, Any]:
 async def chat_post(lineage: str, req: Request) -> Dict[str, Any]:
     data = await req.json()
     try:
+        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
         role = str(data.get("role") or "user").strip().lower() or "user"
         if role not in CLIENT_ROLES:
             raise ValueError(f"role must be one of {sorted(CLIENT_ROLES)}. {CHAT_POST_NEXT_STEP}")
+        sender = data.get("sender") or "operator"
+        text = data.get("text") or data.get("message") or ""
+        reply_to_question_id = str(
+            data.get("reply_to_question_id")
+            or data.get("question_id")
+            or metadata.get("reply_to_question_id")
+            or metadata.get("question_id")
+            or ""
+        ).strip()
+        bound_gate_reply: Optional[Dict[str, Any]] = None
+        if reply_to_question_id:
+            if role != "user":
+                raise ValueError("gate-bound replies must use role=user. POST /api/chat/<lineage> with reply_to_question_id and role=user.")
+            from fleet_orchestrator.orch_schema import complete_human_review_gate
+
+            bound_gate_reply = complete_human_review_gate(
+                reply_to_question_id,
+                str(text or ""),
+                str(sender or "operator"),
+                config=OrchConfig(),
+            )
+            if not bound_gate_reply.get("ok"):
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": "question not found or not an open human-review gate",
+                        "question_id": reply_to_question_id,
+                        "next_step": (
+                            f"Inspect GET /api/chat/{_normalize_lineage(lineage)} for open_questions, "
+                            "then reply with the exact reply_to_question_id from the NEEDS-YOU message."
+                        ),
+                    },
+                )
+            metadata = {
+                **metadata,
+                "reply_to_question_id": reply_to_question_id,
+                "gate_task_id": bound_gate_reply.get("gate_task_id") or "",
+                "human_review_reply": True,
+                "verified": bool(bound_gate_reply.get("verified")),
+            }
         message = await append_message(
             lineage,
-            sender=data.get("sender") or "operator",
+            sender=sender,
             role=role,
-            text=data.get("text") or data.get("message") or "",
-            metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else None,
+            text=text,
+            metadata=metadata,
         )
-        if message["role"] == "user":
+        if message["role"] == "user" and not reply_to_question_id:
             # CL-4 fix: a user reply clears the needs-you BADGE (human responded)
             # but must NOT delete the open-question records — that silently wiped
             # all pending escalations on any chat message. Resolve explicitly via
             # the dedicated path, not as a side effect of every user message.
             await clear_needs_you(lineage)
-        return {"ok": True, "message": message}
+        response = {"ok": True, "message": message}
+        if bound_gate_reply:
+            response["bound_gate_reply"] = bound_gate_reply
+        return response
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise _http_error(exc)
 
