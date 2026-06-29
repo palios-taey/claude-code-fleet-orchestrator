@@ -3994,6 +3994,150 @@ def resolve_human_review_hold(task_id: str, verdict: str, resolved_by: str,
     }
 
 
+def _human_review_auto_clear_message(holds: List[Dict[str, Any]], *, responded_by: str,
+                                     scope: str) -> str:
+    task_lines = "\n".join(
+        f"- {hold['task_id']}: {hold.get('blocked_on') or ''}"
+        for hold in holds
+    )
+    plural = "" if len(holds) == 1 else "s"
+    return (
+        f"HUMAN REVIEW HOLD AUTO-CLEARED [{len(holds)} task{plural}]\n"
+        f"responded_by: {responded_by}\n"
+        f"scope: {scope}\n"
+        f"cleared_tasks:\n{task_lines}\n\n"
+        "The operator responded in this chat, so the dashboard cleared the NEEDS-YOU hold. "
+        "Continue using the response above. If you still need the operator, re-raise by setting "
+        "blocked_on to AWAIT:human-review:<specific question>."
+    )
+
+
+def auto_clear_human_review_holds_for_reply(supervisor: str, *, responded_by: str,
+                                            reply_to_question_id: str = "",
+                                            config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    """Clear open AWAIT:human-review holds when the operator replies in a supervisor chat."""
+    supervisor_value = _supervisor_badge_session(supervisor)
+    if not supervisor_value:
+        return {"ok": True, "supervisor": "", "cleared_count": 0, "cleared_holds": []}
+    cfg = config or OrchConfig()
+    target_task_id = ""
+    raw_reply_target = str(reply_to_question_id or "").strip()
+    if raw_reply_target:
+        target_task_id = resolve_task_id(raw_reply_target, config=cfg)
+    driver = get_neo4j_driver(cfg)
+    terminal_statuses = list(_TERMINAL_TASK_STATUSES)
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WITH p, ph, t,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
+                 END AS effective_supervisor
+            WHERE coalesce(effective_supervisor, '') = $supervisor
+              AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+              AND toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:HUMAN-REVIEW:'
+              AND ($target_task_id = '' OR t.id = $target_task_id)
+            RETURN t.id AS task_id,
+                   t.description AS description,
+                   t.owner AS owner,
+                   t.blocked_on AS blocked_on,
+                   p.id AS project_id,
+                   ph.id AS phase_id,
+                   effective_supervisor AS effective_supervisor
+            ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, t.created_at ASC
+        """,
+            supervisor=supervisor_value,
+            target_task_id=target_task_id,
+            terminal_statuses=terminal_statuses,
+        )
+        holds = []
+        for record in result:
+            hold = _human_review_hold_record(dict(record))
+            if hold and hold.get("supervisor") == supervisor_value:
+                holds.append(hold)
+        if not holds:
+            return {
+                "ok": True,
+                "supervisor": supervisor_value,
+                "cleared_count": 0,
+                "cleared_holds": [],
+                "reply_to_question_id": target_task_id or raw_reply_target,
+            }
+        cleared_at = _utc_now_iso()
+        actor = str(responded_by or "").strip() or "operator"
+        scope = "specific_hold" if target_task_id else "lineage"
+        items = []
+        for hold in holds:
+            record = {
+                "source": "chat_user_reply",
+                "scope": scope,
+                "cleared_by": actor,
+                "cleared_at": cleared_at,
+                "reply_to_question_id": target_task_id,
+                "cleared_blocked_on": hold.get("blocked_on") or "",
+            }
+            items.append({
+                "task_id": hold["task_id"],
+                "blocked_on": hold.get("blocked_on") or "",
+                "record": _json_encode(record),
+            })
+        updated = session.run("""
+            UNWIND $items AS item
+            MATCH (t:OrchTask {id: item.task_id})
+            WHERE coalesce(t.blocked_on, '') = item.blocked_on
+            SET t.blocked_on = NULL,
+                t.human_review_auto_clear = item.record,
+                t.human_review_auto_cleared_by = $actor,
+                t.human_review_auto_cleared_at = datetime(),
+                t.updated_at = datetime()
+            RETURN t.id AS task_id
+        """, items=items, actor=actor).data()
+    cleared_ids = {str(row.get("task_id") or "") for row in updated}
+    cleared_holds = [hold for hold in holds if str(hold.get("task_id") or "") in cleared_ids]
+    for hold in cleared_holds:
+        _sync_human_review_hold_chat(
+            str(hold.get("task_id") or ""),
+            previous_blocked_on=hold.get("blocked_on"),
+            previous_owner=hold.get("owner"),
+            config=cfg,
+        )
+    if cleared_holds:
+        from .chat_layer import append_message_sync
+
+        append_message_sync(
+            supervisor_value,
+            "operator-ui",
+            _human_review_auto_clear_message(cleared_holds, responded_by=actor, scope=scope),
+            role="system",
+            message_type="human_review_hold_auto_clear",
+            metadata={
+                "source": "human_review_hold_auto_clear",
+                "cleared_task_ids": [hold["task_id"] for hold in cleared_holds],
+                "reply_to_question_id": target_task_id,
+                "scope": scope,
+            },
+            config=cfg,
+        )
+    return {
+        "ok": True,
+        "supervisor": supervisor_value,
+        "cleared_count": len(cleared_holds),
+        "cleared_holds": [
+            {
+                "task_id": hold.get("task_id"),
+                "blocked_on": hold.get("blocked_on"),
+            }
+            for hold in cleared_holds
+        ],
+        "reply_to_question_id": target_task_id or raw_reply_target,
+    }
+
+
 def _supervisor_badge_fallback_session(dashboard_set: set[str], cfg: OrchConfig) -> str:
     configured = str(getattr(cfg, "badge_fallback_supervisor", "") or "").strip()
     if not configured:
