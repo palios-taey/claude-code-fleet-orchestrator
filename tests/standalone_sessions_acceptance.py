@@ -69,6 +69,7 @@ def _synthetic_install_root(parent: str) -> Path:
     Path(install, ".env").write_text(
         "ORCH_GATE_REPO=/tmp/poison-gate-repo\n"
         "ACCOUNTABILITY_LEDGER_PATH=/tmp/poison-ledger.jsonl\n"
+        "ACCOUNTABILITY_CI_AUDIT_PATH=/tmp/poison-ci-audit.jsonl\n"
         "ORCH_DATA_DIR=/tmp/poison-data-dir\n",
         encoding="utf-8",
     )
@@ -86,7 +87,7 @@ def _resolve_paths_under_home(home: str, install_root: Path) -> dict:
     code = (
         "import json, fleet_orchestrator.accountability_ledger as L, fleet_orchestrator.gate_runner as G;"
         "from fleet_orchestrator.paths import data_dir, repo_root;"
-        "print(json.dumps({'ledger': L.LEDGER_PATH, 'repo': G.DEFAULT_REPO, 'repo_root': str(repo_root()), 'data_dir': str(data_dir())}))"
+        "print(json.dumps({'ledger': L.LEDGER_PATH, 'ci_audit': L.CI_AUDIT_PATH, 'repo': G.DEFAULT_REPO, 'repo_root': str(repo_root()), 'data_dir': str(data_dir())}))"
     )
     out = subprocess.check_output([sys.executable, "-c", code], env=env, text=True, cwd=str(install_root))
     return json.loads(out.strip().splitlines()[-1])
@@ -103,11 +104,13 @@ def main() -> int:
             paths = _resolve_paths_under_home(home, install_root)
         data_dir = Path(paths["data_dir"])
         ledger = Path(paths["ledger"])
+        ci_audit = Path(paths["ci_audit"])
         repo = Path(paths["repo"])
         repo_root = Path(paths["repo_root"])
         _check("probe imported from synthetic install root", repo_root == install_root)
         _check("data_dir follows foreign HOME", data_dir == Path(home) / ".local" / "share" / "claude-code-fleet-orchestrator")
         _check("ledger path is derived from data_dir", ledger == data_dir / "accountability" / "ledger.jsonl")
+        _check("CI audit path is derived from data_dir", ci_audit == data_dir / "accountability" / "ci-audit.jsonl")
         _check("gate repo default follows repo_root()", repo == repo_root)
 
         # --- 2. DYNAMIC SESSIONS: fail-closed canonical supervisor allowlist ---

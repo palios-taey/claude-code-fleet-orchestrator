@@ -52,6 +52,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ORCH_DOTENV` | auto-discover | Explicit dotenv path. Set to `empty` to suppress cwd/repo `.env` auto-loading for defaults-contract tests; normal operator runs can leave auto-discovery enabled. |
 | `ORCH_NOTIFY_CLI` / `ORCH_NOTIFY_LIB_ROOT` | `taey-notify` / auto | Notification CLI name + lib root. |
 | `ACCOUNTABILITY_LEDGER_PATH` | platform state dir | Location of the hash-chained accountability ledger. The ledger module is explicit that it is **tamper-evident, not tamper-proof**; an ephemeral path silently loses the record — point it at durable, operator-owned storage. |
+| `ACCOUNTABILITY_CI_AUDIT_PATH` | platform state dir | Location of the separate hash-chained CI merge audit ledger (`ci-audit.jsonl`). Use durable, operator-owned storage; this chain records completed CONTROL merges only when real gate results and durations are supplied. |
 
 ## 2. Security & access
 

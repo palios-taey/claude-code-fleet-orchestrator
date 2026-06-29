@@ -77,6 +77,22 @@ The helper resolves the PR head SHA, verifies `r5-audit-gate` and
 the supplied OrchTask is `completed` with `completion_evidence.commit_sha`
 matching the head SHA and either `gate_run_id` or `production_observation`.
 
+After the actual CONTROL merge completes, append the merge to the separate
+hash-chained CI audit ledger only with real gate verdicts and durations:
+
+```bash
+python -m fleet_orchestrator.accountability_ledger record-merge \
+  --repo OWNER/REPO \
+  --sha <merged-sha> \
+  --merged-by <operator-or-session> \
+  --gate-result r5-audit-gate=success=<seconds> \
+  --gate-result ship-gate-acceptance=success=<seconds>
+python -m fleet_orchestrator.accountability_ledger verify-chain --ci
+```
+
+Do not run this before the merge and do not invent durations; the recorder fails
+loudly when gate results or durations are absent.
+
 Gate-runner command strings (`--clean`, `--boot`, and `--assert`) are trusted
 operator-authored local input and are executed through the local shell by design.
 They are not sandboxed or safe for untrusted gate definitions. See
