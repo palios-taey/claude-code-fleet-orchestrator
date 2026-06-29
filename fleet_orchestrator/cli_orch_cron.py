@@ -2,8 +2,8 @@
 """orch-cron — recurring task runner with file-tracked state.
 
 Reads an operator-controlled JSON registry of recurring triggers. A trigger
-can wake a session with a prompt file, dispatch an OrchTask by id, or run an
-operator-authored command directly on the cadence.
+can wake a session with a prompt file, dispatch an OrchTask by id, reset and
+dispatch a project, or run an operator-authored command directly on the cadence.
 The optional ``state_file`` turns each recurring fire into a first-class
 "process tracked through files" — the supervisor can grep the state_file to
 see the task's full history without context-switching into the worker pane.
@@ -37,6 +37,18 @@ JSON registry (path passed via ``--registry``)::
           "enabled": true
         },
         {
+          "id": "linkedin-plan-cycle",
+          "session": "treasurer",
+          "supervisor": "treasurer",
+          "project": "linkedin-plan",        // Project reset + next-ready dispatch mode
+          "description": "Run the LinkedIn recurring plan",
+          "tz": "America/New_York",
+          "minute": 39,
+          "hours": [8, 10, 12, 14, 16, 18, 20, 22],
+          "state_file": "/path/to/linkedin-cycle.jsonl",
+          "enabled": true
+        },
+        {
           "id": "careers-act-advance",
           "command": "cd /path/to/repo && .venv/bin/python scripts/loop/cycle.py",
           "cwd": "/path/to/repo",            // optional subprocess cwd
@@ -51,9 +63,10 @@ JSON registry (path passed via ``--registry``)::
     }
 
 Trigger modes are mutually exclusive. A trigger with more than one of
-``command``, ``task_id``, or ``prompt_file`` is skipped as ambiguous instead of
-using silent precedence. Commands are trusted operator registry input and may
-use shell syntax; never interpolate non-registry data into command strings.
+``command``, ``task_id``, ``project``, or ``prompt_file`` is skipped as ambiguous
+instead of using silent precedence. Commands are trusted operator registry input
+and may use shell syntax; never interpolate non-registry data into command
+strings.
 
 State file format (jsonl, one record per fire)::
 
@@ -67,6 +80,11 @@ State file format (jsonl, one record per fire)::
      "cwd": "/repo", "timeout_sec": 600, "exit_code": 0,
      "stdout": "...", "stderr": "...", "duration_sec": 1.234,
      "result": "command:exit_0" | "command:timeout" | "command:error" }
+
+    {"ts": 1779800000, "fire_id": "linkedin-plan-20260526-2039",
+     "trigger_mode": "project", "project": "linkedin-plan",
+     "task_id": "linkedin-plan::step-0", "session": "treasurer",
+     "result": "dispatched" }
 
 Operators (e.g., the WAKE_PROMPT.txt-driven posting loop) can grep the
 state_file for fires of a given type, count fires per day, replay a
@@ -142,7 +160,13 @@ def load_registry(path: str) -> dict:
 
 
 def _trigger_id(trig: dict) -> str:
-    return str(trig.get("id") or trig.get("session") or trig.get("task_id") or "?")
+    return str(
+        trig.get("id")
+        or trig.get("session")
+        or trig.get("task_id")
+        or trig.get("project")
+        or "?"
+    )
 
 
 def _trigger_weekdays(trig: dict) -> tuple[int, ...]:
@@ -197,7 +221,7 @@ def _clear_dedup(redis_client: Any, fire_id: str) -> None:
 
 
 def _trigger_route_fields(trig: dict) -> list[str]:
-    return [field for field in ("command", "task_id", "prompt_file") if field in trig]
+    return [field for field in ("command", "task_id", "project", "prompt_file") if field in trig]
 
 
 def _truncate_output(value: Any, limit: int = COMMAND_OUTPUT_LIMIT) -> str:
@@ -233,6 +257,16 @@ def _task_prompt_body(trig: dict, task_id: str, description: str) -> str:
     return (
         f"DISPATCH {task_id} — recurring cadence fire from orch-cron. "
         f"{description}"
+    )
+
+
+def _project_prompt_body(trig: dict, project_id: str, task_id: str, description: str) -> str:
+    body = str(trig.get("prompt_body") or "").strip()
+    if body:
+        return body
+    return (
+        f"DISPATCH {task_id} — recurring project cadence fire from orch-cron "
+        f"for project {project_id}. {description}"
     )
 
 
@@ -274,6 +308,62 @@ def _fire_task_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False
         return "skipped:task_not_ready"
 
     log.info("FIRE %s session=%s task=%s", trig_id, session, task_id)
+    return "dispatched"
+
+
+def _fire_project_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> str:
+    trig_id = trig.get("id") or trig.get("project") or trig.get("session", "?")
+    session = str(trig.get("session") or "").strip()
+    project_id = str(trig.get("project") or "").strip()
+    if not session:
+        return "skipped:no_session"
+    if not project_id:
+        return "skipped:no_project"
+
+    fire_id = f"{trig_id}-{now_local:%Y%m%d-%H%M}"
+    if dry_run:
+        log.info("[DRY] would reset project trigger %s @ %s project=%s session=%s",
+                 trig_id, fire_id, project_id, session)
+        return "dry_run"
+    if not _dedup_fire(r, fire_id):
+        return "skipped:already_fired"
+
+    from fleet_orchestrator.dispatch import OrchTaskNotReady, WorkerBusy, dispatch
+    from fleet_orchestrator.orch_schema import get_session_next_ready, reset_project
+
+    reset_project(project_id, reset_by=f"orch-cron:{trig_id}")
+    next_ready = get_session_next_ready(session, project_id=project_id)
+    task_id = str((next_ready or {}).get("task_id") or (next_ready or {}).get("id") or "").strip()
+    if not task_id:
+        log.info("SKIP project trigger %s project=%s session=%s: no ready task",
+                 trig_id, project_id, session)
+        return "skipped:no_ready_task"
+
+    description = str(
+        trig.get("description")
+        or (next_ready or {}).get("description")
+        or f"Recurring project cadence fire: {project_id}"
+    )
+    try:
+        dispatch(
+            session,
+            task_id,
+            description,
+            supervisor=str(trig.get("supervisor") or session),
+            prompt_body=_project_prompt_body(trig, project_id, task_id, description),
+            priority=str(trig.get("priority") or "normal"),
+            is_bugfix=bool(trig.get("is_bugfix", False)),
+            force=bool(trig.get("force", False)),
+        )
+    except (OrchTaskNotReady, WorkerBusy) as exc:
+        _clear_dedup(r, fire_id)
+        log.info("SKIP project trigger %s project=%s session=%s task=%s: %s",
+                 trig_id, project_id, session, task_id, exc)
+        return "skipped:task_not_ready"
+
+    trig["_orch_cron_project_task_id"] = task_id
+    log.info("FIRE project trigger %s session=%s project=%s task=%s",
+             trig_id, session, project_id, task_id)
     return "dispatched"
 
 
@@ -383,6 +473,8 @@ def fire_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> s
         return _fire_command_trigger(r, trig, now_local, dry_run=dry_run)
     if route_fields == ["task_id"]:
         return _fire_task_trigger(r, trig, now_local, dry_run=dry_run)
+    if route_fields == ["project"]:
+        return _fire_project_trigger(r, trig, now_local, dry_run=dry_run)
 
     session = trig.get("session")
     if not session:
@@ -431,6 +523,16 @@ def trigger_payload_hash(trig: dict) -> str:
     if "command" in trig:
         payload = json.dumps(
             {"command": trig.get("command"), "cwd": trig.get("cwd") or ""},
+            sort_keys=True,
+        )
+        return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()[:16]
+    if trig.get("project"):
+        payload = json.dumps(
+            {
+                "project": trig.get("project"),
+                "session": trig.get("session") or "",
+                "description": trig.get("description") or "",
+            },
             sort_keys=True,
         )
         return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()[:16]
@@ -516,12 +618,17 @@ def tick(registry_path: str, redis_client, dry_run: bool = False,
             # audit trail of "what actually went out" + the matching hash
             # sidecar genuinely represents dispatch state.
             if result == "dispatched":
+                trigger_mode = (
+                    "project" if trig.get("project")
+                    else ("task" if trig.get("task_id") else "prompt")
+                )
                 record = {
                     "ts": int(time.time()),
                     "fire_id": f"{trig_id}-{now_local:%Y%m%d-%H%M}",
                     "session": trig.get("session"),
-                    "trigger_mode": "task" if trig.get("task_id") else "prompt",
-                    "task_id": trig.get("task_id") or "",
+                    "trigger_mode": trigger_mode,
+                    "project": trig.get("project") or "",
+                    "task_id": trig.get("task_id") or trig.get("_orch_cron_project_task_id") or "",
                     "tz_hour_minute": f"{now_local:%H:%M}",
                     "prompt_hash": prompt_hash,
                     "result": result,
