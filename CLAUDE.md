@@ -44,6 +44,7 @@ Do not bypass these invariants:
 - Wake-packet refs are optional context, not instructions. Untrusted inlined content must stay nonce-wrapped and separated from trusted instruction text.
 - The system is single-user-local by design. Do not add multi-tenant assumptions, shared-host defaults, or silent remote exposure.
 - Store connectivity and state-writing failures should fail loudly. Avoid fallback behavior that makes the operator believe state was recorded when it was not.
+- Dashboard project visibility is broader than authority. `/api/sessions/{id}/projects` is a display union for active projects a session supervises or executes; stop decisions, wake packets, peer dispatch, badges, and needs-you state must continue to use supervisor-scoped project readers.
 
 Terminology:
 

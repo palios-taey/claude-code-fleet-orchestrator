@@ -3895,6 +3895,41 @@ def get_session_supervised_projects(session_id: str,
         return [_decode_project_node(dict(record["p"])) for record in result]
 
 
+def get_session_dashboard_projects(session_id: str,
+                                   config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        rows = session.run(
+            """
+            MATCH (p:OrchProject)
+            WHERE coalesce(p.migration_exempt, false) = false
+              AND coalesce(toLower(trim(p.status)), 'active') IN ['active', 'in_progress']
+            WITH p,
+                 coalesce(p.supervisor, '') = $session_id AS supervises,
+                 EXISTS {
+                     MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+                     WHERE t.owner = $session_id
+                 } AS executes
+            WHERE supervises OR executes
+            RETURN p,
+                   CASE
+                     WHEN supervises AND executes THEN 'both'
+                     WHEN supervises THEN 'supervises'
+                     ELSE 'executes'
+                   END AS session_relation
+            ORDER BY coalesce(p.priority, 999999999) ASC, p.created_at ASC
+            """,
+            session_id=session_id,
+        )
+        projects: List[Dict[str, Any]] = []
+        for record in rows:
+            project = _decode_project_node(dict(record["p"]))
+            project["session_relation"] = record["session_relation"]
+            projects.append(project)
+        return projects
+
+
 def _supervisor_badge_seed(supervisor: str) -> Dict[str, Any]:
     return {
         "supervisor": supervisor,

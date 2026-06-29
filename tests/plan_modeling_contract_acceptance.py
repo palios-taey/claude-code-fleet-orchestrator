@@ -217,6 +217,11 @@ def main() -> int:
         clean,
     )
     _check(
+        "contract teaches executor loops without widening authority",
+        any("Executor loops" in rule and "stop/wake/dispatch authority stays supervisor-scoped" in rule for rule in clean_rules),
+        clean_rules,
+    )
+    _check(
         "clean decomposed ingest response has zero plan-modeling warnings",
         clean_warnings == [],
         clean_warnings,
