@@ -24,6 +24,7 @@ from fleet_orchestrator.orch_schema import (
     get_supervisor_inflight_peer_task,
     get_supervisor_refs,
     supervisor_access_resolution,
+    get_task_step_governance,
     get_task_project,
 )
 from fleet_orchestrator.paths import repo_root
@@ -283,7 +284,7 @@ def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
                         "project_id": task_project["project_id"],
                         "project_name": task_project.get("project_name", ""),
                         "project_source_path": summary.get("project", {}).get("source_path", ""),
-                    }
+                    } | _step_governance_for_work(task_id, task.get("status"))
         raise ValueError(f"task missing from project summary: {task_id}")
 
     next_ready = get_session_next_ready(session)
@@ -320,9 +321,22 @@ def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
         row["task_id"] = row.get("top_task_id")
         row["description"] = row.get("top_task_desc")
         row["owner"] = row.get("owner") or session
+        row.update(_step_governance_for_work(row.get("task_id"), row.get("status")))
         return row
 
     return {"source": "none", "project_id": None, "description": "", "task_id": None, "status": None}
+
+
+def _step_governance_for_work(task_id: Any, status: Any) -> Dict[str, Any]:
+    if str(status or "").strip().lower() != "in_progress":
+        return {}
+    task = str(task_id or "").strip()
+    if not task:
+        return {}
+    governance = get_task_step_governance(task)
+    if not governance.get("single_owner_depends_chain"):
+        return {}
+    return {"step_governance": governance}
 
 
 def _live_supervised_projects(session: str) -> List[Dict[str, Any]]:
@@ -786,6 +800,7 @@ def _build_snapshot(session: str, cli: str, task_id: Optional[str], work: Dict[s
             "dispatched_to": work.get("dispatched_to"),
             "task_type": work.get("task_type"),
             "blocked_on": work.get("blocked_on"),
+            "step_governance": work.get("step_governance") or {},
         },
         "neo4j_summary_hash": _sha256_json(summary or {}),
         "memory_files": [
@@ -950,6 +965,7 @@ def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
     session = _operating_value(packet.get("generated_for") or "<you>", default="<you>")
     blocked_on = _operating_value(resolved.get("blocked_on"), default="")
     access_lines = _render_supervisor_access_affordance(packet)
+    step_lines = _render_step_governance_lines(resolved)
 
     if source == "none" or not resolved.get("task_id"):
         return access_lines + [
@@ -959,7 +975,7 @@ def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
         ]
 
     if blocked_on:
-        return access_lines + [
+        return access_lines + step_lines + [
             f"- `{task_id}` is blocked on `{blocked_on}`.",
             "- Dependency-gated downstream work releases only when deps are `completed`; `interrupted`/`failed` do not satisfy it.",
         ]
@@ -981,23 +997,55 @@ def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
     if source == "in_progress_own" or status == "in_progress":
         if resolved.get("dispatched_to"):
             supervisor = _operating_value(resolved.get("owner") or "<supervisor>", default="<supervisor>")
-            return access_lines + [
+            lines = [
                 f"- You are executing dispatched task `{task_id}` for `{supervisor}`; inspect it with `taey-task status {task_id}`.",
                 f"- When ready for review, run `taey-notify {supervisor} \"RESPONSE_READY: branch=<branch> sha=<sha> verify=<cmd>\" --type response_ready`.",
                 f"- Then call `record_outcome('<your-session>', 'done', '<short summary>')`; verify clean handoff with `taey-task status {task_id}`.",
                 f"- Do NOT run `taey-task update {task_id} completed`; CONTROL closes it after r5/merge/deploy.",
             ]
+            if step_lines:
+                lines = [
+                    f"- Report review-ready work to `{supervisor}` with branch, SHA, and verify command.",
+                    f"- Then call `record_outcome('<your-session>', 'done', '<short summary>')`; CONTROL closes `{task_id}`.",
+                ]
+            return access_lines + step_lines + lines
         lines = [
             f"- Drive `{task_id}` to terminal; inspect current state with `taey-task status {task_id}`.",
             f"- Close with evidence: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"<obs>\"}}'`.",
             f"- Evidence-less terminal writes are REJECTED; use `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"<obs>\"}}'`.",
             f"- Human-review gate tasks complete via the question/UI path; inspect `{task_id}` with `taey-task status {task_id}`.",
         ]
-        return access_lines + lines
+        if step_lines:
+            lines = [
+                f"- Inspect current state with `taey-task status {task_id}`.",
+                f"- Close with evidence: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"<obs>\"}}'`.",
+                "- Evidence-less terminal writes are REJECTED.",
+            ]
+        return access_lines + step_lines + lines
 
     return access_lines + [
         f"- Resolved task `{task_id}`. Inspect it: `taey-task status {task_id}`.",
         "- If it is ready, dispatch with `taey-task dispatch <task-id> <peer>`; if terminal, use `--evidence`.",
+    ]
+
+
+def _render_step_governance_lines(resolved: Dict[str, Any]) -> List[str]:
+    governance = resolved.get("step_governance") if isinstance(resolved.get("step_governance"), dict) else {}
+    if not governance or not governance.get("single_owner_depends_chain"):
+        return []
+    task_id = _operating_value(
+        governance.get("current_step_id") or resolved.get("task_id") or "<task-id>",
+        default="<task-id>",
+    )
+    raw_title = str(governance.get("current_step_title") or resolved.get("description") or "").strip()
+    title = " ".join(raw_title.split())
+    if len(title) > 180:
+        title = title[:177].rstrip() + "..."
+    title = _operating_value(title or "current step", default="current step")
+    return [
+        f"- CURRENT STEP: `{task_id}` - {title}. Do ONLY this step's actions.",
+        "- Later steps are LOCKED until this closes with evidence. Route/queue later-surface work; do NOT act on it.",
+        "- Close the current step with evidence, then stop.",
     ]
 
 
