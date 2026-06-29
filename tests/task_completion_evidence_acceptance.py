@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import hashlib
 import sys
 import uuid
 from pathlib import Path
@@ -122,6 +123,7 @@ def main() -> int:
             ("reject too-short gate_run_id 'x' (#5 format)", {"status": "completed", "from": "t", "evidence": {"gate_run_id": "x"}}),
             ("reject empty-dict evidence", {"status": "completed", "from": "t", "evidence": {}}),
             ("reject unknown-key-only evidence", {"status": "completed", "from": "t", "evidence": {"foo": "bar"}}),
+            ("reject empty outbound_actions evidence", {"status": "completed", "from": "t", "evidence": {"outbound_actions": []}}),
             ("reject evidence on in_progress (wrong transition)", {"status": "in_progress", "from": "t", "evidence": {"commit_sha": "x"}}),
             ("reject completed without evidence", {"status": "completed", "from": "t"}),
         ]
@@ -145,6 +147,99 @@ def main() -> int:
             and payload.get("completed_by") == "tester-api"
             and payload.get("completion_evidence", {}).get("production_observation") == "verified in acceptance",
             f"update={ok.status_code} payload={payload}",
+        )
+
+        outbound_hash = hashlib.sha256(b"hello from a gated outbound action").hexdigest()
+        outbound_task_id = _seed_task("outbound-good")
+        outbound_evidence = {
+            "outbound_actions": [
+                {
+                    "kind": "connect",
+                    "target": "linkedin:example",
+                    "sent_text_sha256": outbound_hash,
+                    "gate_pass": {
+                        "action_id": "gate-token-1",
+                        "content_hash": outbound_hash,
+                        "verdict": "signoff",
+                        "draft_source": "grok",
+                        "token_consumed_at": 1234567890,
+                    },
+                }
+            ]
+        }
+        outbound_ok = client.patch(
+            f"/api/task/{outbound_task_id}",
+            json={"status": "completed", "from": "tester-api", "evidence": outbound_evidence},
+        )
+        outbound_payload = client.get(f"/api/tasks/{outbound_task_id}").json()
+        check(
+            "completed outbound action requires and persists matching signoff gate_pass",
+            outbound_ok.status_code == 200
+            and outbound_payload.get("status") == "completed"
+            and outbound_payload.get("completion_evidence", {}).get("outbound_actions", [{}])[0]
+            .get("gate_pass", {})
+            .get("content_hash") == outbound_hash,
+            f"update={outbound_ok.status_code} {outbound_ok.text[:160]} payload={outbound_payload}",
+        )
+
+        mismatch_task_id = _seed_task("outbound-mismatch")
+        mismatch_hash = hashlib.sha256(b"different gated text").hexdigest()
+        mismatch = client.patch(
+            f"/api/task/{mismatch_task_id}",
+            json={
+                "status": "completed",
+                "from": "tester-api",
+                "evidence": {
+                    "outbound_actions": [
+                        {
+                            "kind": "comment",
+                            "target": "linkedin:example",
+                            "sent_text_sha256": outbound_hash,
+                            "gate_pass": {
+                                "action_id": "gate-token-2",
+                                "content_hash": mismatch_hash,
+                                "verdict": "signoff",
+                                "draft_source": "gemini",
+                                "token_consumed_at": 1234567891,
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+        mismatch_payload = client.get(f"/api/tasks/{mismatch_task_id}").json()
+        check(
+            "reject outbound action when gate_pass content_hash mismatches sent_text_sha256",
+            mismatch.status_code == 400
+            and "gate_pass.content_hash" in mismatch.text
+            and mismatch_payload.get("status") != "completed",
+            f"got {mismatch.status_code} {mismatch.text[:200]} payload={mismatch_payload}",
+        )
+
+        missing_gate_task_id = _seed_task("outbound-missing-gate")
+        missing_gate = client.patch(
+            f"/api/task/{missing_gate_task_id}",
+            json={
+                "status": "completed",
+                "from": "tester-api",
+                "evidence": {
+                    "outbound_actions": [
+                        {
+                            "kind": "dm",
+                            "target": "linkedin:example",
+                            "sent_text_sha256": outbound_hash,
+                        }
+                    ]
+                },
+            },
+        )
+        missing_gate_payload = client.get(f"/api/tasks/{missing_gate_task_id}").json()
+        check(
+            "reject outbound action without gate_pass",
+            missing_gate.status_code == 400
+            and "gate_pass" in missing_gate.text
+            and missing_gate_payload.get("status") != "completed",
+            f"got {missing_gate.status_code} {missing_gate.text[:200]} payload={missing_gate_payload}",
         )
 
         for status in sorted(TERMINAL_STATUSES):
