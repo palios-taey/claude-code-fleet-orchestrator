@@ -329,8 +329,13 @@ def _fire_project_trigger(r, trig: dict, now_local: datetime, dry_run: bool = Fa
         return "skipped:already_fired"
 
     from fleet_orchestrator.dispatch import OrchTaskNotReady, WorkerBusy, dispatch
-    from fleet_orchestrator.orch_schema import get_session_next_ready, reset_project
+    from fleet_orchestrator.orch_schema import get_session_next_ready, project_cycle_in_flight, reset_project
 
+    cycle_state = project_cycle_in_flight(project_id)
+    if cycle_state.get("in_flight"):
+        log.info("SKIP project trigger %s project=%s session=%s: skipped:cycle_in_flight %s",
+                 trig_id, project_id, session, cycle_state)
+        return "skipped:cycle_in_flight"
     reset_project(project_id, reset_by=f"orch-cron:{trig_id}")
     next_ready = get_session_next_ready(session, project_id=project_id)
     task_id = str((next_ready or {}).get("task_id") or (next_ready or {}).get("id") or "").strip()

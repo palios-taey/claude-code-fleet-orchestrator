@@ -1758,6 +1758,40 @@ def _human_gate_block_reason(task_id: Optional[str], blocked_on: Optional[str]) 
     )
 
 
+def _auto_heal_stuck_step_blocked_on(task_id: Optional[str],
+                                     blocked_on: Optional[str],
+                                     config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
+    task_value = str(task_id or "").strip()
+    blocked_value = str(blocked_on or "").strip()
+    if not task_value or not blocked_value or _declared_await_signal(blocked_value):
+        return None
+    cfg = config or OrchConfig()
+    governance = get_task_step_governance(task_value, config=cfg)
+    if not governance.get("single_owner_depends_chain"):
+        return None
+    ready_owner = str(governance.get("owner") or "").strip()
+    project_id = str(governance.get("project_id") or "").strip()
+    if ready_owner and project_id and get_session_next_ready(ready_owner, project_id=project_id, config=cfg):
+        return None
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            MATCH (t:OrchTask {id: $task_id})
+            WHERE t.status = 'in_progress'
+              AND coalesce(t.blocked_on, '') = $blocked_on
+            SET t.blocked_on = NULL,
+                t.updated_at = datetime()
+            RETURN t.id AS task_id
+        """, task_id=task_value, blocked_on=blocked_value).single()
+    if not row:
+        return None
+    return {
+        "task_id": task_value,
+        "cleared_blocked_on": blocked_value,
+        "step_governance": governance,
+    }
+
+
 def _queue_block_reason(task_id: Optional[str], description: Optional[str]) -> str:
     task_id_value = task_id or "unknown-task"
     task_title = (description or "untitled task")[:80]
@@ -2288,6 +2322,21 @@ def _raw_stop_decision(session_id: str,
                 "wake_type": WAKE_ALLOW_STOP,
                 "task_id": None,
                 "blocked_on": blocked_on,
+            }
+        auto_healed = _auto_heal_stuck_step_blocked_on(current_task_id, blocked_on, config=cfg)
+        if auto_healed:
+            return {
+                "block": True,
+                "reason": (
+                    _in_progress_block_reason(current_task_id, current_work.get("top_task_desc") if current_work else None)
+                    + f" Cleared stale blocked_on marker {blocked_on!r} for this depends-chain step."
+                ),
+                "wake_type": "WAKE_WITH_QUEUE",
+                "task_id": current_task_id,
+                "project_id": current_work.get("project_id") if current_work else None,
+                "phase_id": current_work.get("phase_id") if current_work else None,
+                "task_title_short": (str(current_work.get("top_task_desc") or "")[:80] or None) if current_work else None,
+                "auto_healed_blocked_on": auto_healed,
             }
         # blocked_on names no live autonomous resolver -> it is a human gate (or a
         # stale/self/cyclic reference). A human gate must NOT park a session in an
@@ -3245,6 +3294,79 @@ def get_task(task_id: str,
         task["forced_continuation_count"] = int(task.get("forced_continuation_count", 0) or 0)
         task = _attach_completion_evidence_verification(task)
         return _attach_ref_runtime(task, source_path=task.get("source_path"))
+
+
+def get_task_step_governance(task_id: str,
+                             config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    """Return depends-chain metadata for one task, used by wake re-orientation."""
+    task_value = str(task_id or "").strip()
+    if not task_value:
+        return {"single_owner_depends_chain": False}
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(project_task:OrchTask)
+            WITH p, ph, t,
+                 collect(DISTINCT project_task.owner) AS owners,
+                 count(DISTINCT project_task) AS project_task_count
+            OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+            WITH p, ph, t, owners, project_task_count,
+                 collect(DISTINCT dep.id) AS depends_on
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(downstream:OrchTask)-[:DEPENDS_ON]->(t)
+            WITH p, ph, t, owners, project_task_count, depends_on,
+                 collect(DISTINCT downstream.id) AS unlocks
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(src:OrchTask)-[:DEPENDS_ON]->(dst:OrchTask)
+            RETURN p.id AS project_id,
+                   ph.id AS phase_id,
+                   t.id AS task_id,
+                   t.description AS description,
+                   t.owner AS owner,
+                   t.status AS status,
+                   owners AS owners,
+                   project_task_count AS project_task_count,
+                   depends_on AS depends_on,
+                   unlocks AS unlocks,
+                   collect(DISTINCT src.id) + collect(DISTINCT dst.id) AS chain_task_ids
+        """, task_id=task_value).single()
+    if not row:
+        return {"single_owner_depends_chain": False, "current_step_id": task_value}
+
+    raw = dict(row)
+    owners = sorted({
+        str(owner).strip()
+        for owner in (raw.get("owners") or [])
+        if str(owner or "").strip()
+    })
+    depends_on = sorted({
+        str(dep).strip()
+        for dep in (raw.get("depends_on") or [])
+        if str(dep or "").strip()
+    })
+    unlocks = sorted({
+        str(dep).strip()
+        for dep in (raw.get("unlocks") or [])
+        if str(dep or "").strip()
+    })
+    chain_task_ids = {
+        str(item).strip()
+        for item in (raw.get("chain_task_ids") or [])
+        if str(item or "").strip()
+    }
+    single_owner = len(owners) == 1 and int(raw.get("project_task_count") or 0) > 0
+    in_chain = task_value in chain_task_ids
+    return {
+        "single_owner_depends_chain": bool(single_owner and in_chain),
+        "current_step_id": task_value,
+        "current_step_title": str(raw.get("description") or "").strip(),
+        "owner": str(raw.get("owner") or "").strip(),
+        "project_id": str(raw.get("project_id") or "").strip(),
+        "phase_id": str(raw.get("phase_id") or "").strip(),
+        "depends_on": depends_on,
+        "unlocks": unlocks,
+        "project_owner": owners[0] if len(owners) == 1 else "",
+    }
 
 
 def check_phase_complete(phase_id: str,
@@ -4840,6 +4962,44 @@ def reset_project(project_id: str, *, reset_by: str = "unknown",
         "reset_by": reset_by,
         "cleared_sessions": [],
         "previous_stop_reason": project.get("stop_reason_current"),
+    }
+
+
+def project_cycle_in_flight(project_id: str,
+                            config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            MATCH (p:OrchProject {id: $project_id})
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WITH p,
+                 count(t) AS total,
+                 sum(CASE WHEN t.status IN ['in_progress', 'dispatched'] THEN 1 ELSE 0 END) AS active_count,
+                 sum(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+                 sum(CASE WHEN t.status IN ['completed', 'failed', 'interrupted'] THEN 1 ELSE 0 END) AS terminal_count
+            RETURN p.id AS project_id,
+                   p.status AS project_status,
+                   total AS total,
+                   active_count AS active_count,
+                   pending_count AS pending_count,
+                   terminal_count AS terminal_count
+        """, project_id=project_id).single()
+    if not row:
+        raise ProjectNotFoundError(f"project not found: {project_id}")
+    data = dict(row)
+    active_count = int(data.get("active_count") or 0)
+    pending_count = int(data.get("pending_count") or 0)
+    terminal_count = int(data.get("terminal_count") or 0)
+    in_flight = active_count > 0 or (pending_count > 0 and terminal_count > 0)
+    return {
+        "project_id": str(data.get("project_id") or project_id),
+        "project_status": str(data.get("project_status") or ""),
+        "total": int(data.get("total") or 0),
+        "active_count": active_count,
+        "pending_count": pending_count,
+        "terminal_count": terminal_count,
+        "in_flight": in_flight,
     }
 
 
