@@ -235,12 +235,81 @@ def _evidence_value_well_formed(key: str, text: str) -> bool:
     return False
 
 
-def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+def _sha256_hex(value: str) -> bool:
+    return len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+
+def _outbound_action_error(index: int, field: str, detail: str) -> CompletionEvidenceError:
+    return CompletionEvidenceError(
+        "Outbound actions are completed-send evidence and require consumed gate provenance. "
+        f"completion evidence outbound_actions[{index}].{field} {detail}. "
+        "Expected each outbound action to include sent_text_sha256 and gate_pass where "
+        "gate_pass.content_hash equals sent_text_sha256 and gate_pass.verdict == 'signoff'."
+    )
+
+
+def _required_outbound_text(value: Any, *, index: int, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise _outbound_action_error(index, field, "must be a non-empty string")
+    return value.strip()
+
+
+def _normalize_outbound_actions(evidence: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    if "outbound_actions" not in evidence:
+        return None
+    raw_actions = evidence.get("outbound_actions")
+    if not isinstance(raw_actions, list):
+        raise CompletionEvidenceError(
+            "completion evidence outbound_actions must be a list of outbound action records. "
+            "Expected each action to include sent_text_sha256 and a signoff gate_pass."
+        )
+    if not raw_actions:
+        raise CompletionEvidenceError(
+            "completion evidence outbound_actions must contain at least one outbound action record "
+            "with sent_text_sha256 and a signoff gate_pass."
+        )
+    normalized: List[Dict[str, Any]] = []
+    for index, raw_action in enumerate(raw_actions):
+        if not isinstance(raw_action, dict):
+            raise _outbound_action_error(index, "<action>", f"must be an object, got {type(raw_action).__name__}")
+        sent_hash = _required_outbound_text(raw_action.get("sent_text_sha256"), index=index, field="sent_text_sha256")
+        if not _sha256_hex(sent_hash):
+            raise _outbound_action_error(index, "sent_text_sha256", "must be a 64-character sha256 hex string")
+        gate_pass = raw_action.get("gate_pass")
+        if not isinstance(gate_pass, dict):
+            raise _outbound_action_error(index, "gate_pass", "is required and must be an object")
+        content_hash = _required_outbound_text(gate_pass.get("content_hash"), index=index, field="gate_pass.content_hash")
+        if not _sha256_hex(content_hash):
+            raise _outbound_action_error(index, "gate_pass.content_hash", "must be a 64-character sha256 hex string")
+        if content_hash != sent_hash:
+            raise _outbound_action_error(
+                index,
+                "gate_pass.content_hash",
+                "must match outbound_actions[%d].sent_text_sha256" % index,
+            )
+        verdict = _required_outbound_text(gate_pass.get("verdict"), index=index, field="gate_pass.verdict")
+        if verdict != "signoff":
+            raise _outbound_action_error(index, "gate_pass.verdict", "must be 'signoff'")
+        normalized_gate = dict(gate_pass)
+        normalized_gate["content_hash"] = content_hash
+        normalized_gate["verdict"] = verdict
+        normalized_action = dict(raw_action)
+        normalized_action["sent_text_sha256"] = sent_hash
+        normalized_action["gate_pass"] = normalized_gate
+        try:
+            json.dumps(normalized_action, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise _outbound_action_error(index, "<action>", f"must be JSON-serializable: {exc}") from exc
+        normalized.append(normalized_action)
+    return normalized
+
+
+def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if evidence is None:
         return None
     if not isinstance(evidence, dict):
         raise CompletionEvidenceError(f"The completion-evidence check is a shape/plausibility filter (self-reported claim, not verified provenance). completion evidence must be a JSON object. {COMPLETED_EVIDENCE_NEXT_STEP}")
-    normalized: Dict[str, str] = {}
+    normalized: Dict[str, Any] = {}
     for key in _COMPLETION_EVIDENCE_KEYS + _COMPLETION_EVIDENCE_CONTEXT_KEYS:
         value = evidence.get(key)
         if value is None:
@@ -266,10 +335,13 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
                 f"{COMPLETED_EVIDENCE_NEXT_STEP}"
             )
         normalized[key] = text
-    if not any(key in normalized for key in _COMPLETION_EVIDENCE_KEYS):
+    outbound_actions = _normalize_outbound_actions(evidence)
+    if outbound_actions is not None:
+        normalized["outbound_actions"] = outbound_actions
+    if not any(key in normalized for key in _COMPLETION_EVIDENCE_KEYS) and "outbound_actions" not in normalized:
         raise CompletionEvidenceError(
             "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. completed status requires evidence with at least one of: "
-            f"commit_sha, gate_run_id, production_observation. Optional repo=OWNER/REPO selects the GitHub repository for commit verification. {COMPLETED_EVIDENCE_NEXT_STEP}"
+            f"commit_sha, gate_run_id, production_observation, or outbound_actions with signoff gate_pass provenance. Optional repo=OWNER/REPO selects the GitHub repository for commit verification. {COMPLETED_EVIDENCE_NEXT_STEP}"
         )
     return normalized
 
@@ -321,7 +393,7 @@ def _normalize_non_success_terminal_evidence(
     return normalized
 
 
-def _validate_terminal_status_write(status: str, evidence: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+def _validate_terminal_status_write(status: str, evidence: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if status not in _VALID_TASK_STATUSES:
         raise CompletionEvidenceError(
             f"invalid status {status!r}; must be one of {sorted(_VALID_TASK_STATUSES)}"
