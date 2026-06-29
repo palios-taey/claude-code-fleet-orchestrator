@@ -36,6 +36,10 @@ PHASE = f"{PROJECT}::phase"
 QUESTION_GATE = f"{PROJECT}::formal-human-review"
 QUESTION = f"{PFX}-question"
 HOLD_TASK = f"{PROJECT}::await-human-review"
+GENERIC_HOLD_ONE = f"{PROJECT}::generic-await-human-review-one"
+GENERIC_HOLD_TWO = f"{PROJECT}::generic-await-human-review-two"
+SPECIFIC_HOLD_ONE = f"{PROJECT}::specific-await-human-review-one"
+SPECIFIC_HOLD_TWO = f"{PROJECT}::specific-await-human-review-two"
 TERMINAL_HOLD_TASK = f"{PROJECT}::terminal-await-human-review"
 WORKER = f"{PFX}-worker"
 
@@ -119,6 +123,13 @@ def _hold_need_messages(task_id: str) -> list[dict]:
         message for message in _chat_messages()
         if (message.get("metadata") or {}).get("source") == "human_review_hold"
         and (message.get("metadata") or {}).get("task_id") == task_id
+    ]
+
+
+def _auto_clear_messages() -> list[dict]:
+    return [
+        message for message in _chat_messages()
+        if (message.get("metadata") or {}).get("source") == "human_review_hold_auto_clear"
     ]
 
 
@@ -225,6 +236,108 @@ def main() -> int:
         _check("supervisor chat receives the verdict", len(resolution_messages) == 1 and "canonical 35B" in resolution_messages[0].get("text", ""), resolution_messages)
         _check("supervisor notify receives the verdict", notify_calls and notify_calls[0][1] == SUP and "canonical 35B" in notify_calls[0][2], notify_calls)
         _check("supervisor notify uses operator-ui provenance", notify_calls and "--from" in notify_calls[0] and notify_calls[0][notify_calls[0].index("--from") + 1] == "operator-ui", notify_calls)
+
+        for task_id, detail in (
+            (GENERIC_HOLD_ONE, "choose the fallback model"),
+            (GENERIC_HOLD_TWO, "approve the runbook"),
+        ):
+            create_task(
+                phase_id=PHASE,
+                task_id=task_id,
+                description=f"Wait for the operator to {detail}",
+                owner=WORKER,
+                wake_owner_if_ready=False,
+                config=CFG,
+            )
+            update_task_status(
+                task_id,
+                "in_progress",
+                owner=WORKER,
+                blocked_on=f"AWAIT:human-review:{detail}",
+                config=CFG,
+            )
+        generic_badge = _badge()
+        _check("two free-text holds drive NEEDS-YOU", generic_badge.get("state") == "NEEDS-YOU" and generic_badge.get("human_review_hold_count") == 2, generic_badge)
+        generic_reply = client.post(
+            f"/api/chat/{SUP}",
+            json={"sender": "operator", "role": "user", "text": "I responded to the pending human-review holds."},
+            headers={"origin": "http://testserver"},
+        )
+        generic_payload = generic_reply.json() if generic_reply.status_code == 200 else {}
+        generic_cleared = generic_payload.get("auto_cleared_human_review_holds") or {}
+        _check("generic user reply auto-clears all supervisor holds", generic_reply.status_code == 200 and generic_cleared.get("cleared_count") == 2, generic_reply.text)
+        _check("generic reply clears first blocked_on", not get_task(GENERIC_HOLD_ONE, config=CFG).get("blocked_on"), get_task(GENERIC_HOLD_ONE, config=CFG))
+        _check("generic reply clears second blocked_on", not get_task(GENERIC_HOLD_TWO, config=CFG).get("blocked_on"), get_task(GENERIC_HOLD_TWO, config=CFG))
+        after_generic_badge = _badge()
+        _check("generic reply drops NEEDS-YOU hold badge", after_generic_badge.get("human_review_hold_count") == 0 and after_generic_badge.get("state") == "ACTIVE", after_generic_badge)
+        after_generic_chat = _chat(client)
+        _check("generic reply clears hold open questions", not _hold_items(after_generic_chat), after_generic_chat)
+        _check("generic reply clears needs_you pointer", not after_generic_chat.get("needs_you"), after_generic_chat.get("needs_you"))
+        generic_notes = _auto_clear_messages()
+        _check("generic reply posts auto-clear note", generic_notes and set(generic_notes[-1].get("metadata", {}).get("cleared_task_ids") or []) == {GENERIC_HOLD_ONE, GENERIC_HOLD_TWO}, generic_notes)
+
+        update_task_status(
+            GENERIC_HOLD_ONE,
+            "in_progress",
+            owner=WORKER,
+            blocked_on="AWAIT:human-review:still need a narrower operator answer",
+            config=CFG,
+        )
+        reraised_badge = _badge()
+        _check("supervisor re-set re-raises NEEDS-YOU", reraised_badge.get("state") == "NEEDS-YOU" and reraised_badge.get("human_review_hold_count") == 1, reraised_badge)
+        reraised_chat = _chat(client)
+        _check("re-raised hold restores needs_you pointer", (reraised_chat.get("needs_you") or {}).get("task_id") == GENERIC_HOLD_ONE, reraised_chat.get("needs_you"))
+        clear_reraised = client.post(
+            f"/api/chat/{SUP}",
+            json={"sender": "operator", "role": "user", "text": "Clearing the re-raised hold."},
+            headers={"origin": "http://testserver"},
+        )
+        _check("generic reply clears re-raised hold", clear_reraised.status_code == 200 and not get_task(GENERIC_HOLD_ONE, config=CFG).get("blocked_on"), clear_reraised.text)
+
+        for task_id, detail in (
+            (SPECIFIC_HOLD_ONE, "choose target A"),
+            (SPECIFIC_HOLD_TWO, "choose target B"),
+        ):
+            create_task(
+                phase_id=PHASE,
+                task_id=task_id,
+                description=f"Wait for the operator to {detail}",
+                owner=WORKER,
+                wake_owner_if_ready=False,
+                config=CFG,
+            )
+            update_task_status(
+                task_id,
+                "in_progress",
+                owner=WORKER,
+                blocked_on=f"AWAIT:human-review:{detail}",
+                config=CFG,
+            )
+        specific_reply = client.post(
+            f"/api/chat/{SUP}",
+            json={
+                "sender": "operator",
+                "role": "user",
+                "text": "Use target A.",
+                "reply_to_question_id": SPECIFIC_HOLD_ONE,
+            },
+            headers={"origin": "http://testserver"},
+        )
+        specific_payload = specific_reply.json() if specific_reply.status_code == 200 else {}
+        specific_cleared = specific_payload.get("auto_cleared_human_review_holds") or {}
+        _check("bound hold reply auto-clears exactly one hold", specific_reply.status_code == 200 and specific_cleared.get("cleared_count") == 1, specific_reply.text)
+        _check("bound hold reply clears referenced task", not get_task(SPECIFIC_HOLD_ONE, config=CFG).get("blocked_on"), get_task(SPECIFIC_HOLD_ONE, config=CFG))
+        _check("bound hold reply leaves sibling hold blocked", get_task(SPECIFIC_HOLD_TWO, config=CFG).get("blocked_on") == "AWAIT:human-review:choose target B", get_task(SPECIFIC_HOLD_TWO, config=CFG))
+        after_specific_badge = _badge()
+        _check("bound hold reply keeps badge for sibling hold", after_specific_badge.get("state") == "NEEDS-YOU" and after_specific_badge.get("human_review_hold_count") == 1, after_specific_badge)
+        after_specific_chat = _chat(client)
+        _check("bound hold reply keeps needs_you on sibling", (after_specific_chat.get("needs_you") or {}).get("task_id") == SPECIFIC_HOLD_TWO, after_specific_chat.get("needs_you"))
+        clear_remaining_specific = client.post(
+            f"/api/chat/{SUP}",
+            json={"sender": "operator", "role": "user", "text": "Clearing target B too."},
+            headers={"origin": "http://testserver"},
+        )
+        _check("generic reply clears remaining sibling hold", clear_remaining_specific.status_code == 200 and not get_task(SPECIFIC_HOLD_TWO, config=CFG).get("blocked_on"), clear_remaining_specific.text)
 
         create_task(
             phase_id=PHASE,
