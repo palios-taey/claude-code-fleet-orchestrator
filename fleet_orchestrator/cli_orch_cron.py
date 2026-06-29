@@ -126,6 +126,8 @@ DEDUP_TTL_SEC = 120
 NOTIFY_KEY_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
 COMMAND_TIMEOUT_DEFAULT_SEC = 600.0
 COMMAND_OUTPUT_LIMIT = 4000
+DEFAULT_WEEKDAYS = (1, 2, 3, 4, 5, 6, 7)
+_BAD_WEEKDAY_WARNING_KEYS: set[str] = set()
 
 
 def orch_key(namespace: str, *parts: str) -> str:
@@ -139,10 +141,40 @@ def load_registry(path: str) -> dict:
         return json.load(f)
 
 
+def _trigger_id(trig: dict) -> str:
+    return str(trig.get("id") or trig.get("session") or trig.get("task_id") or "?")
+
+
+def _trigger_weekdays(trig: dict) -> tuple[int, ...]:
+    if "weekdays" not in trig:
+        return DEFAULT_WEEKDAYS
+
+    raw = trig.get("weekdays")
+    if (
+        isinstance(raw, list)
+        and raw
+        and all(type(day) is int and 1 <= day <= 7 for day in raw)
+    ):
+        return tuple(raw)
+
+    trig_id = _trigger_id(trig)
+    warning_key = f"{trig_id}:{repr(raw)}"
+    if warning_key not in _BAD_WEEKDAY_WARNING_KEYS:
+        log.warning(
+            "bad weekdays in %s: expected non-empty list of ISO weekdays 1..7; treating as absent",
+            trig_id,
+        )
+        _BAD_WEEKDAY_WARNING_KEYS.add(warning_key)
+    return DEFAULT_WEEKDAYS
+
+
 def should_fire(trig: dict, now_local: datetime) -> bool:
-    """Exact-minute match within a listed hour; preserved for backward compat
-    with the existing registry format."""
-    return now_local.hour in trig.get("hours", []) and now_local.minute == trig.get("minute")
+    """Exact-minute match within a listed hour and optional ISO weekday."""
+    return (
+        now_local.hour in trig.get("hours", [])
+        and now_local.minute == trig.get("minute")
+        and now_local.isoweekday() in _trigger_weekdays(trig)
+    )
 
 
 def _dedup_fire(redis_client: Any, fire_id: str) -> bool:
@@ -465,42 +497,43 @@ def tick(registry_path: str, redis_client, dry_run: bool = False,
     reg = load_registry(registry_path)
     fires = 0
     for trig in reg.get("triggers", []):
+        trig_id = "?"
         try:
+            trig_id = _trigger_id(trig)
             tz = ZoneInfo(trig.get("tz", "America/New_York"))
+            now_local = (now_override or datetime.now(tz)).astimezone(tz) \
+                if now_override and now_override.tzinfo \
+                else (now_override or datetime.now(tz))
+
+            if not should_fire(trig, now_local):
+                continue
+
+            result = fire_trigger(redis_client, trig, now_local, dry_run=dry_run)
+            prompt_hash = trigger_payload_hash(trig)
+            # Only append a state_file record for ACTUAL dispatches. Skipped
+            # ticks (already-fired, disabled, no-prompt-file) and dry-runs
+            # are logged but not persisted, so the state_file stays a clean
+            # audit trail of "what actually went out" + the matching hash
+            # sidecar genuinely represents dispatch state.
+            if result == "dispatched":
+                record = {
+                    "ts": int(time.time()),
+                    "fire_id": f"{trig_id}-{now_local:%Y%m%d-%H%M}",
+                    "session": trig.get("session"),
+                    "trigger_mode": "task" if trig.get("task_id") else "prompt",
+                    "task_id": trig.get("task_id") or "",
+                    "tz_hour_minute": f"{now_local:%H:%M}",
+                    "prompt_hash": prompt_hash,
+                    "result": result,
+                    "hostname": socket.gethostname(),
+                }
+                append_state_file(trig.get("state_file"), record)
+                fires += 1
+            elif "command" in trig and result.startswith("command:"):
+                fires += 1
         except Exception as exc:
-            log.error("bad tz in %s: %s", trig.get("id", "?"), exc)
+            log.error("bad trigger %s: %s", trig_id, exc)
             continue
-        now_local = (now_override or datetime.now(tz)).astimezone(tz) \
-            if now_override and now_override.tzinfo \
-            else (now_override or datetime.now(tz))
-
-        if not should_fire(trig, now_local):
-            continue
-
-        trig_id = trig.get("id") or trig.get("session", "?")
-        result = fire_trigger(redis_client, trig, now_local, dry_run=dry_run)
-        prompt_hash = trigger_payload_hash(trig)
-        # Only append a state_file record for ACTUAL dispatches. Skipped
-        # ticks (already-fired, disabled, no-prompt-file) and dry-runs
-        # are logged but not persisted, so the state_file stays a clean
-        # audit trail of "what actually went out" + the matching hash
-        # sidecar genuinely represents dispatch state.
-        if result == "dispatched":
-            record = {
-                "ts": int(time.time()),
-                "fire_id": f"{trig_id}-{now_local:%Y%m%d-%H%M}",
-                "session": trig.get("session"),
-                "trigger_mode": "task" if trig.get("task_id") else "prompt",
-                "task_id": trig.get("task_id") or "",
-                "tz_hour_minute": f"{now_local:%H:%M}",
-                "prompt_hash": prompt_hash,
-                "result": result,
-                "hostname": socket.gethostname(),
-            }
-            append_state_file(trig.get("state_file"), record)
-            fires += 1
-        elif "command" in trig and result.startswith("command:"):
-            fires += 1
 
     return fires
 
