@@ -12,6 +12,7 @@ const UI_QUESTION_ANSWER_ENDPOINT = (questionId) => `/api/ui/questions/${encodeU
 const UI_HUMAN_REVIEW_HOLD_RESOLVE_ENDPOINT = (taskId) =>
   `/api/ui/human-review-holds/${encodeURIComponent(taskId)}/resolve`;
 const POLL_INTERVAL_MS = 5000;
+const FETCH_TIMEOUT_MS = 12000;
 const IS_PUBLIC_MODE = window.ORCH_PUBLIC_MODE === true;
 // Populated at runtime from GET /api/sessions (data-derived; no hardcoded operator fleet).
 let SESSIONS = [];
@@ -87,25 +88,37 @@ function shortHash(value) {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, {
-    cache: "no-store",
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
-  const rawText = await response.text();
-  let data = null;
-  if (rawText) {
-    try {
-      data = JSON.parse(rawText);
-    } catch (error) {
-      throw new Error(`${response.status} ${response.statusText} for ${url}`);
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      ...options,
+      signal: controller.signal,
+    });
+    const rawText = await response.text();
+    let data = null;
+    if (rawText) {
+      try {
+        data = JSON.parse(rawText);
+      } catch (error) {
+        throw new Error(`${response.status} ${response.statusText} for ${url}`);
+      }
     }
+    if (!response.ok) {
+      const detail = data?.detail || data?.error || `${response.status} ${response.statusText}`;
+      throw new Error(String(detail));
+    }
+    return data;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`request timeout for ${url}`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
   }
-  if (!response.ok) {
-    const detail = data?.detail || data?.error || `${response.status} ${response.statusText}`;
-    throw new Error(String(detail));
-  }
-  return data;
 }
 
 function renderStatusBadge(status) {
@@ -747,6 +760,9 @@ async function refresh() {
     }
     await loadSelectedProject();
     elements.lastUpdated.textContent = new Date().toLocaleTimeString();
+  } catch (error) {
+    console.warn("dashboard refresh failed", error);
+    elements.lastUpdated.textContent = "stale — retrying…";
   } finally {
     _refreshing = false;
   }

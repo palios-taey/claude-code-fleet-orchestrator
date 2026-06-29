@@ -522,6 +522,10 @@ code {
   display: none;
 }
 
+#chat-needs-you[hidden] {
+  display: none;
+}
+
 .chat-history {
   display: grid;
   gap: 10px;
