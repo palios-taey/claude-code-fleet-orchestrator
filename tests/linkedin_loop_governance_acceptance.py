@@ -46,6 +46,7 @@ import fleet_orchestrator.dispatch as dispatch_module  # noqa: E402
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
 from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
+    _auto_heal_stuck_step_blocked_on,
     add_dependency,
     create_phase,
     create_project,
@@ -192,6 +193,16 @@ def main() -> int:
 
         update_task_status(STEPS[1], "in_progress", owner=LINKEDIN,
                            blocked_on="AWAIT:human-review:operator decision", config=CFG)
+        direct_await_heal = _auto_heal_stuck_step_blocked_on(
+            STEPS[1],
+            "AWAIT:human-review:operator decision",
+            config=CFG,
+        )
+        direct_await_task = get_task(STEPS[1], config=CFG)
+        _check("direct auto-heal guard ignores structured AWAIT",
+               direct_await_heal is None
+               and direct_await_task.get("blocked_on") == "AWAIT:human-review:operator decision",
+               {"healed": direct_await_heal, "task": direct_await_task})
         await_decision = get_session_stop_decision(LINKEDIN, config=CFG)
         await_task = get_task(STEPS[1], config=CFG)
         _check("structured AWAIT remains parked and untouched",
