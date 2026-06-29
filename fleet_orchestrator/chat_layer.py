@@ -496,7 +496,8 @@ async def chat_post(lineage: str, req: Request) -> Dict[str, Any]:
                 )
                 # The reply is the operator response: holds and durable questions are
                 # resolved explicitly above, then the stale needs-you pointer is dropped.
-                await clear_needs_you(lineage)
+                if not (auto_answered_questions.get("skipped_question_ids") or []):
+                    await clear_needs_you(lineage)
         response = {"ok": True, "message": message}
         if bound_gate_reply:
             response["bound_gate_reply"] = bound_gate_reply

@@ -4030,8 +4030,14 @@ def _open_question_rows_for_supervisor(supervisor: str, *,
                    WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
                    THEN toLower(trim(coalesce(t.owner, '')))
                    ELSE toLower(trim(p.supervisor))
-                 END AS effective_supervisor
-            WHERE coalesce(effective_supervisor, '') = $supervisor
+                 END AS effective_supervisor,
+                 toLower(trim(coalesce(q.lineage, ''))) AS question_lineage,
+                 toLower(trim(coalesce(q.reviewer, ''))) AS question_reviewer
+            WHERE (
+                    coalesce(effective_supervisor, '') = $supervisor
+                    OR question_lineage = $supervisor
+                    OR question_reviewer = $supervisor
+                  )
               AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
               AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
               AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
@@ -4106,6 +4112,8 @@ def _refresh_chat_open_questions_for_supervisor(supervisor: str, *,
                     pipe.set(needs_key, remaining[-1])
                 else:
                     pipe.delete(needs_key)
+    elif remaining:
+        pipe.set(needs_key, remaining[-1])
     pipe.execute()
     return [question_id for question_id in purged if question_id]
 
@@ -4131,6 +4139,8 @@ def auto_answer_open_questions_for_reply(supervisor: str, *, answer: str, answer
     )
     answered: List[Dict[str, Any]] = []
     direct_answer_ids: List[str] = []
+    resolved_question_ids: List[str] = []
+    skipped_gate_ids: List[str] = []
     for row in rows:
         question_id = str(row.get("question_id") or "").strip()
         if not question_id:
@@ -4138,16 +4148,21 @@ def auto_answer_open_questions_for_reply(supervisor: str, *, answer: str, answer
         question_type = str(row.get("question_type") or "").strip()
         task_id = str(row.get("task_id") or "").strip()
         if question_type == HUMAN_REVIEW_QUESTION_TYPE:
-            result = complete_human_review_gate(question_id, answer_text, actor, config=cfg)
-            if result.get("ok"):
-                answered.append({
-                    "question_id": question_id,
-                    "task_id": task_id,
-                    "question_type": question_type,
-                    "gate_completed": bool(result.get("gate_completed")),
-                })
-                continue
+            if target_question_id:
+                result = complete_human_review_gate(question_id, answer_text, actor, config=cfg)
+                if result.get("ok"):
+                    answered.append({
+                        "question_id": question_id,
+                        "task_id": task_id,
+                        "question_type": question_type,
+                        "gate_completed": bool(result.get("gate_completed")),
+                    })
+                    resolved_question_ids.append(question_id)
+                    continue
+            skipped_gate_ids.append(question_id)
+            continue
         direct_answer_ids.append(question_id)
+        resolved_question_ids.append(question_id)
         answered.append({
             "question_id": question_id,
             "task_id": task_id,
@@ -4176,7 +4191,7 @@ def auto_answer_open_questions_for_reply(supervisor: str, *, answer: str, answer
             )
     for row in rows:
         question_id = str(row.get("question_id") or "").strip()
-        if not question_id:
+        if not question_id or question_id not in resolved_question_ids:
             continue
         lineages = [
             str(row.get("lineage") or "").strip(),
@@ -4192,6 +4207,7 @@ def auto_answer_open_questions_for_reply(supervisor: str, *, answer: str, answer
         "answered_count": len(answered),
         "answered_questions": answered,
         "purged_question_ids": purged,
+        "skipped_question_ids": skipped_gate_ids,
         "reply_to_question_id": target_question_id,
         "scope": scope,
     }
