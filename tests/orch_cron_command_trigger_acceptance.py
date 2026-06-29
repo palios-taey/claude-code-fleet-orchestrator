@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shlex
 import sys
 import tempfile
@@ -121,6 +122,91 @@ def main() -> int:
     timeout_records = _records(timeout_state)
     _check("hung command times out without wedging cron", timeout_fires == 1, timeout_fires)
     _check("hung command records timeout state", timeout_records[-1].get("result") == "command:timeout", timeout_records)
+
+    bad_hours_state = tmp / "bad-hours.jsonl"
+    valid_after_bad_state = tmp / "valid-after-bad.jsonl"
+    malformed_registry = tmp / "malformed-registry.json"
+    malformed_registry.write_text(
+        json.dumps(
+            {
+                "triggers": [
+                    {
+                        **trigger,
+                        "id": "bad-hours",
+                        "hours": now.hour,
+                        "state_file": str(bad_hours_state),
+                    },
+                    {
+                        **trigger,
+                        "id": "valid-after-bad",
+                        "state_file": str(valid_after_bad_state),
+                    },
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    malformed_fires = cron.tick(str(malformed_registry), FakeRedis(), now_override=now)
+    _check("malformed trigger does not crash other triggers", malformed_fires == 1, malformed_fires)
+    _check(
+        "valid trigger still fires after malformed trigger",
+        len(_records(valid_after_bad_state)) == 1,
+        _records(valid_after_bad_state),
+    )
+    _check("malformed trigger writes no state record", _records(bad_hours_state) == [], _records(bad_hours_state))
+
+    bad_weekday_state = tmp / "bad-weekday.jsonl"
+    bad_weekday_type_state = tmp / "bad-weekday-type.jsonl"
+    bad_weekday_registry = tmp / "bad-weekday-registry.json"
+    bad_weekday_registry.write_text(
+        json.dumps(
+            {
+                "triggers": [
+                    {
+                        **trigger,
+                        "id": "bad-weekday-values",
+                        "weekdays": [8],
+                        "state_file": str(bad_weekday_state),
+                    },
+                    {
+                        **trigger,
+                        "id": "bad-weekday-type",
+                        "weekdays": 5,
+                        "state_file": str(bad_weekday_type_state),
+                    },
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    warning_records: list[str] = []
+
+    class _WarningCapture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            warning_records.append(record.getMessage())
+
+    handler = _WarningCapture(level=logging.WARNING)
+    cron.log.addHandler(handler)
+    try:
+        bad_weekday_redis = FakeRedis()
+        bad_weekday_fires = cron.tick(str(bad_weekday_registry), bad_weekday_redis, now_override=now)
+        bad_weekday_duplicate = cron.tick(str(bad_weekday_registry), bad_weekday_redis, now_override=now)
+    finally:
+        cron.log.removeHandler(handler)
+
+    warning_text = "\n".join(warning_records)
+    _check("bad weekday values log and fire all days", bad_weekday_fires == 2, bad_weekday_fires)
+    _check("bad weekday values dedup after fail-open fire", bad_weekday_duplicate == 0, bad_weekday_duplicate)
+    _check("bad weekday warning logs once", warning_text.count("bad weekdays in bad-weekday-values") == 1, warning_text)
+    _check("bad weekday type warning logs once", warning_text.count("bad weekdays in bad-weekday-type") == 1, warning_text)
+    _check("bad weekday values write state record", len(_records(bad_weekday_state)) == 1, _records(bad_weekday_state))
+    _check(
+        "bad weekday type writes state record",
+        len(_records(bad_weekday_type_state)) == 1,
+        _records(bad_weekday_type_state),
+    )
 
     ambiguous = cron.fire_trigger(
         FakeRedis(),
