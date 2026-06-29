@@ -41,6 +41,14 @@ GENERIC_HOLD_TWO = f"{PROJECT}::generic-await-human-review-two"
 SPECIFIC_HOLD_ONE = f"{PROJECT}::specific-await-human-review-one"
 SPECIFIC_HOLD_TWO = f"{PROJECT}::specific-await-human-review-two"
 TERMINAL_HOLD_TASK = f"{PROJECT}::terminal-await-human-review"
+GENERIC_QUESTION_TASK = f"{PROJECT}::generic-open-question-task"
+GENERIC_QUESTION = f"{PFX}-generic-question"
+BOUND_QUESTION_ONE_TASK = f"{PROJECT}::bound-question-one-task"
+BOUND_QUESTION_TWO_TASK = f"{PROJECT}::bound-question-two-task"
+BOUND_QUESTION_ONE = f"{PFX}-bound-question-one"
+BOUND_QUESTION_TWO = f"{PFX}-bound-question-two"
+RERAISED_QUESTION_TASK = f"{PROJECT}::reraised-open-question-task"
+RERAISED_QUESTION = f"{PFX}-reraised-question"
 WORKER = f"{PFX}-worker"
 
 os.environ["NOTIFY_KEY_PREFIX"] = PFX
@@ -51,6 +59,7 @@ from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     create_phase,
     create_project,
+    create_question,
     create_task,
     get_neo4j_driver,
     get_supervisor_badges,
@@ -131,6 +140,15 @@ def _auto_clear_messages() -> list[dict]:
         message for message in _chat_messages()
         if (message.get("metadata") or {}).get("source") == "human_review_hold_auto_clear"
     ]
+
+
+def _question(question_id: str) -> dict:
+    with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+        row = session.run(
+            "MATCH (q:OrchQuestion {id: $id}) RETURN properties(q) AS props",
+            id=question_id,
+        ).single()
+        return dict(row["props"]) if row else {}
 
 
 def main() -> int:
@@ -338,6 +356,128 @@ def main() -> int:
             headers={"origin": "http://testserver"},
         )
         _check("generic reply clears remaining sibling hold", clear_remaining_specific.status_code == 200 and not get_task(SPECIFIC_HOLD_TWO, config=CFG).get("blocked_on"), clear_remaining_specific.text)
+
+        create_task(
+            phase_id=PHASE,
+            task_id=GENERIC_QUESTION_TASK,
+            description="Wait for operator to choose the router lane",
+            owner=WORKER,
+            wake_owner_if_ready=False,
+            config=CFG,
+        )
+        create_question(
+            question_id=GENERIC_QUESTION,
+            text="Which router lane should own this task?",
+            task_id=GENERIC_QUESTION_TASK,
+            asked_by=WORKER,
+            reviewer=SUP,
+            lineage=SUP,
+            surface=True,
+            config=CFG,
+        )
+        r = get_redis_sync(CFG)
+        stale_question = json.dumps({"id": "missing-question", "text": "x", "status": "open"}, separators=(",", ":"))
+        r.rpush(f"{PFX}:openq:{SUP}", stale_question)
+        r.set(f"{PFX}:needs_you:{SUP}", stale_question)
+        question_badge = _badge()
+        _check("ordinary question plus stale notice drives NEEDS-YOU", question_badge.get("state") == "NEEDS-YOU" and question_badge.get("open_question_count", 0) >= 2, question_badge)
+        generic_question_reply = client.post(
+            f"/api/chat/{SUP}",
+            json={"sender": "operator", "role": "user", "text": "Use the restless bandit router lane."},
+            headers={"origin": "http://testserver"},
+        )
+        generic_question_payload = generic_question_reply.json() if generic_question_reply.status_code == 200 else {}
+        generic_question_clear = generic_question_payload.get("auto_answered_open_questions") or {}
+        _check(
+            "generic user reply answers open question and purges junk",
+            generic_question_reply.status_code == 200
+            and generic_question_clear.get("answered_count") == 1
+            and "missing-question" in (generic_question_clear.get("purged_question_ids") or []),
+            generic_question_reply.text,
+        )
+        generic_question = _question(GENERIC_QUESTION)
+        _check("generic reply stores answer on question", generic_question.get("status") == "answered" and "restless bandit" in generic_question.get("answer", ""), generic_question)
+        after_question_badge = _badge()
+        _check("generic question reply drops NEEDS-YOU question badge", after_question_badge.get("open_question_count") == 0 and after_question_badge.get("state") == "ACTIVE", after_question_badge)
+        after_question_chat = _chat(client)
+        _check("generic question reply clears chat open questions", GENERIC_QUESTION not in _question_ids(after_question_chat) and "missing-question" not in _question_ids(after_question_chat), after_question_chat)
+        _check("generic question reply clears stale needs_you", not after_question_chat.get("needs_you"), after_question_chat.get("needs_you"))
+
+        for task_id, question_id, prompt in (
+            (BOUND_QUESTION_ONE_TASK, BOUND_QUESTION_ONE, "Choose bound option A?"),
+            (BOUND_QUESTION_TWO_TASK, BOUND_QUESTION_TWO, "Choose bound option B?"),
+        ):
+            create_task(
+                phase_id=PHASE,
+                task_id=task_id,
+                description=prompt,
+                owner=WORKER,
+                wake_owner_if_ready=False,
+                config=CFG,
+            )
+            create_question(
+                question_id=question_id,
+                text=prompt,
+                task_id=task_id,
+                asked_by=WORKER,
+                reviewer=SUP,
+                lineage=SUP,
+                surface=True,
+                config=CFG,
+            )
+        bound_question_reply = client.post(
+            f"/api/chat/{SUP}",
+            json={
+                "sender": "operator",
+                "role": "user",
+                "text": "Use bound option A.",
+                "reply_to_question_id": BOUND_QUESTION_ONE,
+            },
+            headers={"origin": "http://testserver"},
+        )
+        bound_question_payload = bound_question_reply.json() if bound_question_reply.status_code == 200 else {}
+        bound_question_clear = bound_question_payload.get("auto_answered_open_questions") or {}
+        _check("bound question reply answers exactly one question", bound_question_reply.status_code == 200 and bound_question_clear.get("answered_count") == 1, bound_question_reply.text)
+        _check("bound question reply answers selected question", _question(BOUND_QUESTION_ONE).get("status") == "answered", _question(BOUND_QUESTION_ONE))
+        _check("bound question reply leaves sibling open", _question(BOUND_QUESTION_TWO).get("status") == "open", _question(BOUND_QUESTION_TWO))
+        after_bound_question_badge = _badge()
+        _check("bound question reply keeps NEEDS-YOU for sibling question", after_bound_question_badge.get("state") == "NEEDS-YOU" and after_bound_question_badge.get("open_question_count") == 1, after_bound_question_badge)
+        after_bound_question_chat = _chat(client)
+        bound_chat_ids = _question_ids(after_bound_question_chat)
+        _check("bound question reply keeps only sibling in chat", BOUND_QUESTION_ONE not in bound_chat_ids and BOUND_QUESTION_TWO in bound_chat_ids, after_bound_question_chat)
+        clear_bound_sibling = client.post(
+            f"/api/chat/{SUP}",
+            json={"sender": "operator", "role": "user", "text": "Use bound option B too."},
+            headers={"origin": "http://testserver"},
+        )
+        _check("generic reply clears remaining bound sibling question", clear_bound_sibling.status_code == 200 and _question(BOUND_QUESTION_TWO).get("status") == "answered", clear_bound_sibling.text)
+
+        create_task(
+            phase_id=PHASE,
+            task_id=RERAISED_QUESTION_TASK,
+            description="Re-raised router question",
+            owner=WORKER,
+            wake_owner_if_ready=False,
+            config=CFG,
+        )
+        create_question(
+            question_id=RERAISED_QUESTION,
+            text="Still need the operator after re-raise?",
+            task_id=RERAISED_QUESTION_TASK,
+            asked_by=WORKER,
+            reviewer=SUP,
+            lineage=SUP,
+            surface=True,
+            config=CFG,
+        )
+        reraised_question_badge = _badge()
+        _check("supervisor re-raised question re-lights NEEDS-YOU", reraised_question_badge.get("state") == "NEEDS-YOU" and reraised_question_badge.get("open_question_count") == 1, reraised_question_badge)
+        clear_reraised_question = client.post(
+            f"/api/chat/{SUP}",
+            json={"sender": "operator", "role": "user", "text": "No further operator decision needed."},
+            headers={"origin": "http://testserver"},
+        )
+        _check("generic reply clears re-raised question", clear_reraised_question.status_code == 200 and _question(RERAISED_QUESTION).get("status") == "answered", clear_reraised_question.text)
 
         create_task(
             phase_id=PHASE,

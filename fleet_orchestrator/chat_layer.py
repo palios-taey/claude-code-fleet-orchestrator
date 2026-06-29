@@ -360,8 +360,10 @@ async def chat_post(lineage: str, req: Request) -> Dict[str, Any]:
             or ""
         ).strip()
         bound_gate_reply: Optional[Dict[str, Any]] = None
+        bound_question_reply: Optional[Dict[str, Any]] = None
         bound_hold_reply_task_id = ""
         auto_cleared_holds: Optional[Dict[str, Any]] = None
+        auto_answered_questions: Optional[Dict[str, Any]] = None
         if reply_to_question_id:
             if role != "user":
                 raise ValueError("gate-bound replies must use role=user. POST /api/chat/<lineage> with reply_to_question_id and role=user.")
@@ -374,33 +376,55 @@ async def chat_post(lineage: str, req: Request) -> Dict[str, Any]:
                 config=cfg,
             )
             if not bound_gate_reply.get("ok"):
-                from fleet_orchestrator.orch_schema import get_supervisor_human_review_holds, resolve_task_id
+                from fleet_orchestrator.orch_schema import (
+                    auto_answer_open_questions_for_reply,
+                    get_supervisor_human_review_holds,
+                    resolve_task_id,
+                )
 
-                target_task_id = resolve_task_id(reply_to_question_id, config=cfg)
-                hold_matches = [
-                    hold for hold in get_supervisor_human_review_holds(lineage, config=cfg)
-                    if str(hold.get("task_id") or "").strip() == target_task_id
-                ]
-                if not hold_matches:
-                    raise HTTPException(
-                        status_code=404,
-                        detail={
-                            "error": "question not found or not an open human-review gate",
-                            "question_id": reply_to_question_id,
-                            "next_step": (
-                                f"Inspect GET /api/chat/{_normalize_lineage(lineage)} for open_questions, "
-                                "then reply with the exact reply_to_question_id from the NEEDS-YOU message."
-                            ),
-                        },
-                    )
-                bound_hold_reply_task_id = target_task_id
-                bound_gate_reply = None
-                metadata = {
-                    **metadata,
-                    "reply_to_question_id": reply_to_question_id,
-                    "human_review_hold_reply": True,
-                    "human_review_reply": True,
-                }
+                bound_question_reply = auto_answer_open_questions_for_reply(
+                    lineage,
+                    answer=str(text or ""),
+                    answered_by=str(sender or "operator"),
+                    reply_to_question_id=reply_to_question_id,
+                    config=cfg,
+                )
+                target_was_purged = reply_to_question_id in set(bound_question_reply.get("purged_question_ids") or [])
+                if bound_question_reply.get("answered_count") or target_was_purged:
+                    bound_gate_reply = None
+                    metadata = {
+                        **metadata,
+                        "reply_to_question_id": reply_to_question_id,
+                        "open_question_reply": True,
+                        "auto_answered_question": bool(bound_question_reply.get("answered_count")),
+                        "purged_stale_question": target_was_purged,
+                    }
+                else:
+                    target_task_id = resolve_task_id(reply_to_question_id, config=cfg)
+                    hold_matches = [
+                        hold for hold in get_supervisor_human_review_holds(lineage, config=cfg)
+                        if str(hold.get("task_id") or "").strip() == target_task_id
+                    ]
+                    if not hold_matches:
+                        raise HTTPException(
+                            status_code=404,
+                            detail={
+                                "error": "question not found or not an open human-review gate",
+                                "question_id": reply_to_question_id,
+                                "next_step": (
+                                    f"Inspect GET /api/chat/{_normalize_lineage(lineage)} for open_questions, "
+                                    "then reply with the exact reply_to_question_id from the NEEDS-YOU message."
+                                ),
+                            },
+                        )
+                    bound_hold_reply_task_id = target_task_id
+                    bound_gate_reply = None
+                    metadata = {
+                        **metadata,
+                        "reply_to_question_id": reply_to_question_id,
+                        "human_review_hold_reply": True,
+                        "human_review_reply": True,
+                    }
             else:
                 metadata = {
                     **metadata,
@@ -426,24 +450,63 @@ async def chat_post(lineage: str, req: Request) -> Dict[str, Any]:
                     reply_to_question_id=bound_hold_reply_task_id,
                     config=cfg,
                 )
+            elif bound_question_reply:
+                auto_answered_questions = bound_question_reply
+                task_ids = [
+                    str(item.get("task_id") or "").strip()
+                    for item in (bound_question_reply.get("answered_questions") or [])
+                    if str(item.get("task_id") or "").strip()
+                ]
+                if task_ids:
+                    from fleet_orchestrator.orch_schema import auto_clear_human_review_holds_for_reply
+
+                    cleared: List[Dict[str, Any]] = []
+                    for task_id in dict.fromkeys(task_ids):
+                        result = auto_clear_human_review_holds_for_reply(
+                            lineage,
+                            responded_by=str(sender or "operator"),
+                            reply_to_question_id=task_id,
+                            config=cfg,
+                        )
+                        cleared.extend(result.get("cleared_holds") or [])
+                    if cleared:
+                        auto_cleared_holds = {
+                            "ok": True,
+                            "supervisor": _normalize_lineage(lineage),
+                            "cleared_count": len(cleared),
+                            "cleared_holds": cleared,
+                            "reply_to_question_id": reply_to_question_id,
+                        }
             elif not reply_to_question_id:
-                from fleet_orchestrator.orch_schema import auto_clear_human_review_holds_for_reply
+                from fleet_orchestrator.orch_schema import (
+                    auto_answer_open_questions_for_reply,
+                    auto_clear_human_review_holds_for_reply,
+                )
 
                 auto_cleared_holds = auto_clear_human_review_holds_for_reply(
                     lineage,
                     responded_by=str(sender or "operator"),
                     config=cfg,
                 )
-                # CL-4 fix: a user reply clears the needs-you BADGE (human responded)
-                # but must NOT delete the open-question records — that silently wiped
-                # all pending escalations on any chat message. Resolve explicitly via
-                # the dedicated path, not as a side effect of every user message.
+                auto_answered_questions = auto_answer_open_questions_for_reply(
+                    lineage,
+                    answer=str(text or ""),
+                    answered_by=str(sender or "operator"),
+                    config=cfg,
+                )
+                # The reply is the operator response: holds and durable questions are
+                # resolved explicitly above, then the stale needs-you pointer is dropped.
                 await clear_needs_you(lineage)
         response = {"ok": True, "message": message}
         if bound_gate_reply:
             response["bound_gate_reply"] = bound_gate_reply
         if auto_cleared_holds and auto_cleared_holds.get("cleared_count"):
             response["auto_cleared_human_review_holds"] = auto_cleared_holds
+        if auto_answered_questions and (
+            auto_answered_questions.get("answered_count")
+            or auto_answered_questions.get("purged_question_ids")
+        ):
+            response["auto_answered_open_questions"] = auto_answered_questions
         return response
     except HTTPException:
         raise

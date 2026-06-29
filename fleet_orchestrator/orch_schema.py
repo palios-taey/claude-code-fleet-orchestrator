@@ -4012,6 +4012,191 @@ def _human_review_auto_clear_message(holds: List[Dict[str, Any]], *, responded_b
     )
 
 
+def _open_question_rows_for_supervisor(supervisor: str, *,
+                                       target_question_id: str = "",
+                                       config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
+    supervisor_value = _supervisor_badge_session(supervisor)
+    if not supervisor_value:
+        return []
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            MATCH (q:OrchQuestion {status: 'open'})-[:CONCERNS_TASK]->(t)
+            WITH p, ph, t, q,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
+                 END AS effective_supervisor
+            WHERE coalesce(effective_supervisor, '') = $supervisor
+              AND (coalesce(p.migration_exempt, false) = false OR owner_fallback)
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+              AND ($target_question_id = '' OR q.id = $target_question_id)
+            RETURN q.id AS question_id,
+                   q.text AS text,
+                   q.question_type AS question_type,
+                   q.gate_task_id AS gate_task_id,
+                   q.lineage AS lineage,
+                   q.reviewer AS reviewer,
+                   t.id AS task_id,
+                   t.task_type AS task_type,
+                   p.id AS project_id,
+                   ph.id AS phase_id,
+                   effective_supervisor AS effective_supervisor
+            ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, q.created_at ASC
+        """,
+            supervisor=supervisor_value,
+            target_question_id=str(target_question_id or "").strip(),
+            terminal_statuses=list(_TERMINAL_TASK_STATUSES),
+        )
+        return [dict(record) for record in result]
+
+
+def _refresh_chat_open_questions_for_supervisor(supervisor: str, *,
+                                                config: Optional[OrchConfig] = None) -> List[str]:
+    from .config import get_redis_sync
+
+    supervisor_value = _supervisor_badge_session(supervisor)
+    if not supervisor_value:
+        return []
+    cfg = config or OrchConfig()
+    open_question_ids = {
+        str(row.get("question_id") or "").strip()
+        for row in _open_question_rows_for_supervisor(supervisor_value, config=cfg)
+        if str(row.get("question_id") or "").strip()
+    }
+    r = get_redis_sync(cfg)
+    openq_key = _chat_key("openq", supervisor_value)
+    raw_records = r.lrange(openq_key, 0, -1) or []
+    remaining: List[str] = []
+    purged: List[str] = []
+    for raw in raw_records:
+        record = _decode_json_field(raw, {})
+        if not isinstance(record, dict):
+            purged.append("")
+            continue
+        if record.get("source") == "human_review_hold":
+            remaining.append(raw)
+            continue
+        question_id = str(record.get("id") or record.get("question_id") or "").strip()
+        if not question_id or question_id not in open_question_ids:
+            purged.append(question_id)
+            continue
+        remaining.append(raw)
+    pipe = r.pipeline()
+    pipe.delete(openq_key)
+    if remaining:
+        pipe.rpush(openq_key, *remaining)
+    needs_key = _chat_key("needs_you", supervisor_value)
+    needs_raw = r.get(needs_key)
+    if needs_raw:
+        needs = _decode_json_field(needs_raw, {})
+        if not isinstance(needs, dict):
+            pipe.delete(needs_key)
+        elif needs.get("source") == "human_review_hold":
+            pass
+        else:
+            needs_question_id = str(needs.get("id") or needs.get("question_id") or "").strip()
+            if not needs_question_id or needs_question_id not in open_question_ids:
+                if remaining:
+                    pipe.set(needs_key, remaining[-1])
+                else:
+                    pipe.delete(needs_key)
+    pipe.execute()
+    return [question_id for question_id in purged if question_id]
+
+
+def auto_answer_open_questions_for_reply(supervisor: str, *, answer: str, answered_by: str,
+                                         reply_to_question_id: str = "",
+                                         config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    """Mark a supervisor's open OrchQuestions answered when the operator replies in chat."""
+    supervisor_value = _supervisor_badge_session(supervisor)
+    if not supervisor_value:
+        return {"ok": True, "supervisor": "", "answered_count": 0, "answered_questions": [], "purged_question_ids": []}
+    answer_text = str(answer or "").strip()
+    if not answer_text:
+        raise ValueError(f"answer must be non-empty. {CHAT_NEXT_STEP}")
+    cfg = config or OrchConfig()
+    actor = str(answered_by or "").strip() or "operator"
+    target_question_id = str(reply_to_question_id or "").strip()
+    scope = "specific_question" if target_question_id else "lineage"
+    rows = _open_question_rows_for_supervisor(
+        supervisor_value,
+        target_question_id=target_question_id,
+        config=cfg,
+    )
+    answered: List[Dict[str, Any]] = []
+    direct_answer_ids: List[str] = []
+    for row in rows:
+        question_id = str(row.get("question_id") or "").strip()
+        if not question_id:
+            continue
+        question_type = str(row.get("question_type") or "").strip()
+        task_id = str(row.get("task_id") or "").strip()
+        if question_type == HUMAN_REVIEW_QUESTION_TYPE:
+            result = complete_human_review_gate(question_id, answer_text, actor, config=cfg)
+            if result.get("ok"):
+                answered.append({
+                    "question_id": question_id,
+                    "task_id": task_id,
+                    "question_type": question_type,
+                    "gate_completed": bool(result.get("gate_completed")),
+                })
+                continue
+        direct_answer_ids.append(question_id)
+        answered.append({
+            "question_id": question_id,
+            "task_id": task_id,
+            "question_type": question_type,
+            "gate_completed": False,
+        })
+    if direct_answer_ids:
+        driver = get_neo4j_driver(cfg)
+        with driver.session(database=cfg.neo4j_db) as session:
+            session.run("""
+                UNWIND $question_ids AS question_id
+                MATCH (q:OrchQuestion {id: question_id})
+                WHERE q.status = 'open'
+                SET q.answer = $answer,
+                    q.answered_by = $answered_by,
+                    q.status = 'answered',
+                    q.answered_at = datetime(),
+                    q.answer_source = 'chat_user_reply',
+                    q.auto_answer_scope = $scope,
+                    q.auto_answered_at = datetime()
+            """,
+                question_ids=direct_answer_ids,
+                answer=answer_text,
+                answered_by=actor,
+                scope=scope,
+            )
+    for row in rows:
+        question_id = str(row.get("question_id") or "").strip()
+        if not question_id:
+            continue
+        lineages = [
+            str(row.get("lineage") or "").strip(),
+            str(row.get("reviewer") or "").strip(),
+            supervisor_value,
+        ]
+        for lineage in dict.fromkeys(item for item in lineages if item):
+            _resolve_chat_question(question_id, config=cfg, lineage=lineage)
+    purged = _refresh_chat_open_questions_for_supervisor(supervisor_value, config=cfg)
+    return {
+        "ok": True,
+        "supervisor": supervisor_value,
+        "answered_count": len(answered),
+        "answered_questions": answered,
+        "purged_question_ids": purged,
+        "reply_to_question_id": target_question_id,
+        "scope": scope,
+    }
+
+
 def auto_clear_human_review_holds_for_reply(supervisor: str, *, responded_by: str,
                                             reply_to_question_id: str = "",
                                             config: Optional[OrchConfig] = None) -> Dict[str, Any]:
