@@ -3522,6 +3522,7 @@ def _supervisor_badge_seed(supervisor: str) -> Dict[str, Any]:
         "summary": "No open task or question is present on this supervisor's projects.",
         "open_task_count": 0,
         "in_progress_count": 0,
+        "own_in_progress_count": 0,
         "await_count": 0,
         "human_review_hold_count": 0,
         "dependency_wait_count": 0,
@@ -3811,6 +3812,24 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
             badge["await_count"] += int(record["await_count"] or 0)
             badge["human_review_hold_count"] += int(record["human_review_hold_count"] or 0)
 
+        owner_rows = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WITH p, t,
+                 toLower(trim(coalesce(t.owner, ''))) AS owner,
+                 coalesce(toLower(trim(t.status)), 'pending') AS task_status
+            WHERE owner <> ''
+              AND coalesce(p.migration_exempt, false) = false
+              AND coalesce(toLower(trim(p.status)), '') IN ['active', 'in_progress']
+              AND NOT (task_status IN $terminal_statuses)
+              AND task_status = 'in_progress'
+            RETURN owner,
+                   count(DISTINCT t) AS own_in_progress_count
+        """, terminal_statuses=terminal_statuses)
+        for record in owner_rows:
+            owner = _supervisor_badge_session(record["owner"])
+            if owner in dashboard_set:
+                badges[owner]["own_in_progress_count"] += int(record["own_in_progress_count"] or 0)
+
         dependency_rows = session.run("""
             MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)-[:DEPENDS_ON]->(dep:OrchTask)
             WITH p, t, dep,
@@ -3911,6 +3930,8 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
             reasons.append("human_review_hold")
         if badge["in_progress_count"]:
             reasons.append("in_progress")
+        if badge["own_in_progress_count"] and not badge["in_progress_count"]:
+            reasons.append("owned_in_progress")
         if badge["await_count"]:
             reasons.append("await_signal")
         if badge["dependency_wait_count"]:
@@ -3920,6 +3941,8 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
         if badge["open_task_count"] and not reasons:
             reasons.append("open_work")
         badge["reasons"] = reasons
+        active_work_count = int(badge["open_task_count"] or 0)
+        own_in_progress_count = int(badge["own_in_progress_count"] or 0)
         if badge["open_question_count"] or badge["human_review_hold_count"]:
             badge["state"] = "NEEDS-YOU"
             badge["label"] = "needs you"
@@ -3927,17 +3950,23 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
                 f"{badge['open_question_count']} open question(s) and "
                 f"{badge['human_review_hold_count']} human-review hold(s) need a UI answer."
             )
-        elif badge["open_task_count"]:
+        elif active_work_count or own_in_progress_count:
             badge["state"] = "ACTIVE"
             badge["label"] = "active"
-            badge["summary"] = (
-                f"{badge['open_task_count']} open task(s): "
-                f"{', '.join(reasons)}."
-            )
+            if active_work_count:
+                badge["summary"] = (
+                    f"{active_work_count} open task(s): "
+                    f"{', '.join(reasons)}."
+                )
+            else:
+                badge["summary"] = (
+                    f"{own_in_progress_count} owned in-progress task(s): "
+                    f"{', '.join(reasons)}."
+                )
         else:
             badge["state"] = "IDLE"
             badge["label"] = "idle"
-            badge["summary"] = "No open task or question is present on this supervisor's projects."
+            badge["summary"] = "No open task, owned execution, or question is present for this supervisor."
     return dict(sorted(badges.items()))
 
 
