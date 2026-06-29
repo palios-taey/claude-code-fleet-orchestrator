@@ -515,6 +515,15 @@ jobs:
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
           ORCH_TEST_NAMESPACE: ship-gate-ci
         run: python tests/plan_status_token_reingest_acceptance.py
+      - name: Ship-gate — plan task bullet descriptions stay readable
+        env:
+          ORCH_NEO4J_URI: bolt://localhost:7687
+          ORCH_NEO4J_DB: neo4j
+          ORCH_REDIS_HOST: 127.0.0.1
+          ORCH_REDIS_PORT: "6379"
+          ORCH_DASHBOARD_URL: http://127.0.0.1:5002
+          ORCH_TEST_NAMESPACE: ship-gate-ci
+        run: python tests/plan_bullet_description_acceptance.py
       - name: Ship-gate — plan ingest injects modeling contract and lint
         run: python tests/plan_modeling_contract_acceptance.py
       - name: Ship-gate — human-review gates are first-class stop states

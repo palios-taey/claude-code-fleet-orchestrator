@@ -11,7 +11,7 @@ The execution tracker indexes markdown plans into `OrchProject`, `OrchPhase`, an
 ## Phase: phase-id - Phase Name [order: 1]
 
 ### Task: task-id - Task description [priority: 60] [owner: worker-a] [depends: other-task-id] [ref: docs/STRUCTURE.md] [ref: docs/STRUCTURE.md:10-40]
-- Optional bullet content becomes part of the task description.
+- Optional bullet content becomes part of the task description with bullet markers and line breaks preserved.
 
 ## User Stop Conditions
 - stop_when_all_ready_tasks_dispatched

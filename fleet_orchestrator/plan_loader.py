@@ -255,7 +255,7 @@ def _append_body_line(task: Optional[Dict[str, Any]], line: str) -> None:
         return
     stripped = line.strip()
     if stripped.startswith("- "):
-        task["body"].append(stripped[2:].strip())
+        task["body"].append(f"- {stripped[2:].strip()}")
     elif task["body"] and (line.startswith("  ") or line.startswith("\t")):
         task["body"][-1] = f"{task['body'][-1]} {stripped}"
 
@@ -596,7 +596,8 @@ def _parse_plan(md: str) -> Dict[str, Any]:
     for phase in phases:
         for task in phase["tasks"]:
             if task["body"]:
-                task["description"] = f"{task['description']} {' '.join(task['body'])}".strip()
+                body = "\n".join(task["body"])
+                task["description"] = f"{task['description']}\n{body}".strip()
             del task["body"]
 
     return {"project": project, "phases": phases, "errors": errors, "warnings": warnings}
