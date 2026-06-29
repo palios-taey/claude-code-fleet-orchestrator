@@ -140,9 +140,12 @@ def load_registry(path: str) -> dict:
 
 
 def should_fire(trig: dict, now_local: datetime) -> bool:
-    """Exact-minute match within a listed hour; preserved for backward compat
-    with the existing registry format."""
-    return now_local.hour in trig.get("hours", []) and now_local.minute == trig.get("minute")
+    """Exact-minute match within a listed hour and optional ISO weekday."""
+    return (
+        now_local.hour in trig.get("hours", [])
+        and now_local.minute == trig.get("minute")
+        and now_local.isoweekday() in trig.get("weekdays", [1, 2, 3, 4, 5, 6, 7])
+    )
 
 
 def _dedup_fire(redis_client: Any, fire_id: str) -> bool:

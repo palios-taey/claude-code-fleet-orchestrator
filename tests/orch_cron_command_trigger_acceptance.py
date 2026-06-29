@@ -71,6 +71,27 @@ def main() -> int:
         "state_file": str(state),
         "enabled": True,
     }
+    weekdays_trigger = {**trigger, "weekdays": [1, 2, 3, 4, 5]}
+    week = [
+        datetime(2026, 6, 22 + offset, now.hour, now.minute, tzinfo=ZoneInfo("America/New_York"))
+        for offset in range(7)
+    ]
+    _check(
+        "weekday trigger fires Monday through Friday",
+        all(cron.should_fire(weekdays_trigger, day) for day in week[:5]),
+        [day.isoweekday() for day in week[:5]],
+    )
+    _check(
+        "weekday trigger skips Saturday and Sunday",
+        not any(cron.should_fire(weekdays_trigger, day) for day in week[5:]),
+        [day.isoweekday() for day in week[5:]],
+    )
+    _check(
+        "trigger without weekdays remains every day",
+        all(cron.should_fire(trigger, day) for day in week),
+        [day.isoweekday() for day in week],
+    )
+
     _write_registry(registry, {**trigger, "minute": (now.minute + 1) % 60})
     _check("command trigger does not fire off cadence", cron.tick(str(registry), redis, now_override=now) == 0, _records(state))
 
