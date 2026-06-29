@@ -96,8 +96,8 @@ from fleet_orchestrator.orch_schema import (
     init_schema,
     get_neo4j_driver,
     get_project_user_stop_conditions,
+    get_session_dashboard_projects,
     get_session_stop_status,
-    get_session_supervised_projects,
     get_session_next_ready,
     get_supervisor_badges,
     get_project_summary,
@@ -445,6 +445,7 @@ def _project_row(project: Dict[str, Any]) -> Dict[str, Any]:
         "stop_reason_history": project.get("stop_reason_history", []),
         "priority_history": project.get("priority_history", []),
         "stop_reason_orphaned": bool(project.get("stop_reason_orphaned")),
+        "session_relation": project.get("session_relation"),
         **counts,
     }
 
@@ -1401,8 +1402,8 @@ def session_next_ready(session_id: str) -> Dict[str, Any]:
 
 @app.get("/api/sessions/{session_id}/projects")
 def session_projects(session_id: str) -> Dict[str, Any]:
-    """Supervisor-based listing; replaces the earlier task-owner-based semantics."""
-    projects = _newest_project_rows(get_session_supervised_projects(session_id, config=_cfg()))
+    """Display listing: projects supervised by this session or containing tasks it owns."""
+    projects = _newest_project_rows(get_session_dashboard_projects(session_id, config=_cfg()))
     return {"session": session_id, "projects": projects}
 
 

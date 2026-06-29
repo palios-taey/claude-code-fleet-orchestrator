@@ -261,12 +261,13 @@ function renderProjectList() {
   const currentSelection = selectedProjectId();
 
   if (!projects.length) {
-    elements.projectsList.innerHTML = '<p class="empty-hint">(no projects with tasks owned by this session)</p>';
+    elements.projectsList.innerHTML = '<p class="empty-hint">(no active projects this session supervises or executes)</p>';
     return;
   }
 
   elements.projectsList.innerHTML = projects.map((project) => {
     const activeClass = project.id === currentSelection ? "active" : "";
+    const relation = project.session_relation ? `<span>${escapeHtml(project.session_relation)}</span>` : "";
     return `
       <article class="project-card ${activeClass}" data-project-id="${escapeHtml(project.id)}">
         <div class="status-row">
@@ -279,6 +280,7 @@ function renderProjectList() {
         <div class="project-stats">
           <span>${project.phase_count ?? 0} phases</span>
           <span>${project.task_total ?? 0} tasks</span>
+          ${relation}
         </div>
         <div class="project-stats">
           <span>pending ${project.pending ?? 0}</span>

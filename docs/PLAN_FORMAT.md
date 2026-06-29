@@ -28,6 +28,14 @@ The execution tracker indexes markdown plans into `OrchProject`, `OrchPhase`, an
 - `ref` is repeatable and accepts either `[ref: <path>]` for a whole-file ref capped by the runtime ref line cap, or `[ref: <path>:<Lstart>-<Lend>]` for an explicit line range.
 - Content inside fenced code blocks is ignored by the loader.
 
+## Executor loops
+
+For a repeated executor loop, keep the project `supervisor` as the accountable gatekeeper and set each loop-step task `owner` to the executor session from `ORCH_SESSION_IDS`.
+
+Example: a treasurer-supervised LinkedIn loop should have `supervisor: treasurer` at the project level and task owners such as `linkedin`, with `depends` sequencing each step.
+
+The operator and read-only session project endpoints are display surfaces: they show active projects a session supervises or executes. Stop decisions, wake packets, peer-dispatch gates, badges, and needs-you state remain supervisor-scoped and do not use that display union.
+
 ## Ref semantics
 
 Observed in `fleet_orchestrator/orch_schema.py`:

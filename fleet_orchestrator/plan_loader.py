@@ -32,6 +32,9 @@ PLAN_MODELING_CONTRACT_RULES = (
     "(rca[analyst] -> fix[builder] -> gate[reviewer] -> deploy[operator]); never one task spanning several actors.",
     "A supervisor-owned `in_progress` task is correct only while the supervisor is actively executing it; "
     "the supervisor gates by executing its own gate tasks.",
+    "Executor loops keep the project `supervisor` as the gatekeeper and set each task `owner` to the "
+    "executor session from `ORCH_SESSION_IDS`; dashboard visibility can include owned tasks, but "
+    "stop/wake/dispatch authority stays supervisor-scoped.",
     "Dispatch (`taey-task dispatch` / `taey-plan assign`) binds the worker; bare `taey-notify` does not.",
 )
 PEER_ROLE_IDS = {"codex", "grok", "gemini"}

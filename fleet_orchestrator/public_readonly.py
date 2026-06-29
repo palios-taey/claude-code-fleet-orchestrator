@@ -19,8 +19,8 @@ from fleet_orchestrator.orch_schema import (
     get_project_user_stop_conditions,
     get_ready_tasks,
     get_session_current_work,
+    get_session_dashboard_projects,
     get_session_next_ready,
-    get_session_supervised_projects,
     list_sessions,
 )
 from fleet_orchestrator.paths import data_dir, repo_root
@@ -182,6 +182,7 @@ def _project_row(project: Dict[str, Any]) -> Dict[str, Any]:
         "priority": project.get("priority"),
         "migration_exempt": bool(project.get("migration_exempt")),
         "stop_reason_orphaned": bool(project.get("stop_reason_orphaned")),
+        "session_relation": project.get("session_relation"),
         "user_stop_conditions": _public_stop_conditions(project.get("user_stop_conditions", [])),
         **counts,
     }
@@ -491,7 +492,7 @@ def _session_projects_visible(session_id: str) -> Dict[str, Any]:
     visible_project_ids = {str(project.get("id") or "") for project in _all_project_rows()}
     raw_projects = [
         project
-        for project in get_session_supervised_projects(session_id, config=_cfg())
+        for project in get_session_dashboard_projects(session_id, config=_cfg())
         if str(project.get("id") or "") in visible_project_ids
     ]
     projects = _newest_project_rows(raw_projects)
@@ -521,11 +522,14 @@ def _public_index_html() -> str:
         f"    window.ORCH_PUBLIC_SESSIONS = {_script_safe_json(_public_sessions())};\n"
         "  </script>"
     )
-    template = template.replace(
-        '  <script src="/ui/static/app.js?v=5"></script>',
-        f"  {boot}\n  <script src=\"/ui/static/app.js?v=5\"></script>",
-        1,
+    template, count = re.subn(
+        r'(?m)^  <script src="/ui/static/app\.js\?v=[^"]+"></script>$',
+        lambda match: f"  {boot}\n{match.group(0)}",
+        template,
+        count=1,
     )
+    if count == 0:
+        template = template.replace("</body>", f"  {boot}\n</body>", 1)
     return template
 
 
