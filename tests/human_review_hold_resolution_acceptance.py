@@ -36,6 +36,8 @@ PHASE = f"{PROJECT}::phase"
 QUESTION_GATE = f"{PROJECT}::formal-human-review"
 QUESTION = f"{PFX}-question"
 HOLD_TASK = f"{PROJECT}::await-human-review"
+TERMINAL_HOLD_TASK = f"{PROJECT}::terminal-await-human-review"
+WORKER = f"{PFX}-worker"
 
 os.environ["NOTIFY_KEY_PREFIX"] = PFX
 os.environ["ORCH_SESSION_IDS"] = SUP
@@ -112,6 +114,14 @@ def _chat_messages() -> list[dict]:
     return records
 
 
+def _hold_need_messages(task_id: str) -> list[dict]:
+    return [
+        message for message in _chat_messages()
+        if (message.get("metadata") or {}).get("source") == "human_review_hold"
+        and (message.get("metadata") or {}).get("task_id") == task_id
+    ]
+
+
 def main() -> int:
     _cleanup()
     client = TestClient(app)
@@ -160,14 +170,14 @@ def main() -> int:
             phase_id=PHASE,
             task_id=HOLD_TASK,
             description="Wait for the operator to pin the canonical model",
-            owner=SUP,
+            owner=WORKER,
             wake_owner_if_ready=False,
             config=CFG,
         )
         update_task_status(
             HOLD_TASK,
             "in_progress",
-            owner=SUP,
+            owner=WORKER,
             blocked_on="AWAIT:human-review:pin the canonical 35B model",
             config=CFG,
         )
@@ -177,6 +187,21 @@ def main() -> int:
         holds = _hold_items(hold_chat)
         _check("free-text hold appears as resolvable chat item", len(holds) == 1 and holds[0].get("task_id") == HOLD_TASK, hold_chat)
         _check("free-text hold advertises UI resolve endpoint", holds and holds[0].get("resolve_endpoint") == f"/api/ui/human-review-holds/{HOLD_TASK}/resolve", holds)
+        hold_needs_you = hold_chat.get("needs_you") or {}
+        _check("free-text hold sets needs_you pointer", hold_needs_you.get("source") == "human_review_hold" and hold_needs_you.get("task_id") == HOLD_TASK, hold_needs_you)
+        hold_need_messages = _hold_need_messages(HOLD_TASK)
+        _check("free-text hold auto-posts NEEDS-YOU chat note", len(hold_need_messages) == 1, _chat_messages())
+        _check("free-text hold chat note carries task id and need", HOLD_TASK in hold_need_messages[0].get("text", "") and "canonical 35B" in hold_need_messages[0].get("text", ""), hold_need_messages)
+        hold_need_metadata = hold_need_messages[0].get("metadata", {}) if hold_need_messages else {}
+        _check("free-text hold chat note carries exact binding", hold_need_metadata.get("task_id") == HOLD_TASK and hold_need_metadata.get("blocked_on") == "AWAIT:human-review:pin the canonical 35B model", hold_need_metadata)
+        update_task_status(
+            HOLD_TASK,
+            "in_progress",
+            owner=WORKER,
+            blocked_on="AWAIT:human-review:pin the canonical 35B model",
+            config=CFG,
+        )
+        _check("free-text hold chat note is idempotent", len(_hold_need_messages(HOLD_TASK)) == 1, _chat_messages())
 
         with mock.patch.object(orch_schema.subprocess, "run", side_effect=fake_notify):
             hold_resolve = client.post(
@@ -192,6 +217,7 @@ def main() -> int:
         _check("free-text hold resolution drops NEEDS-YOU badge", after_hold_badge.get("human_review_hold_count") == 0 and after_hold_badge.get("state") == "ACTIVE", after_hold_badge)
         after_hold_chat = _chat(client)
         _check("free-text hold disappears from chat open questions", not _hold_items(after_hold_chat), after_hold_chat)
+        _check("free-text hold clears needs_you pointer", not after_hold_chat.get("needs_you"), after_hold_chat.get("needs_you"))
         resolution_messages = [
             message for message in _chat_messages()
             if (message.get("metadata") or {}).get("source") == "human_review_hold_resolution"
@@ -199,6 +225,34 @@ def main() -> int:
         _check("supervisor chat receives the verdict", len(resolution_messages) == 1 and "canonical 35B" in resolution_messages[0].get("text", ""), resolution_messages)
         _check("supervisor notify receives the verdict", notify_calls and notify_calls[0][1] == SUP and "canonical 35B" in notify_calls[0][2], notify_calls)
         _check("supervisor notify uses operator-ui provenance", notify_calls and "--from" in notify_calls[0] and notify_calls[0][notify_calls[0].index("--from") + 1] == "operator-ui", notify_calls)
+
+        create_task(
+            phase_id=PHASE,
+            task_id=TERMINAL_HOLD_TASK,
+            description="Wait for the operator to choose the release branch",
+            owner=WORKER,
+            wake_owner_if_ready=False,
+            config=CFG,
+        )
+        update_task_status(
+            TERMINAL_HOLD_TASK,
+            "in_progress",
+            owner=WORKER,
+            blocked_on="AWAIT:human-review:choose the release branch",
+            config=CFG,
+        )
+        terminal_hold_chat = _chat(client)
+        _check("terminalized hold sets needs_you pointer", (terminal_hold_chat.get("needs_you") or {}).get("task_id") == TERMINAL_HOLD_TASK, terminal_hold_chat.get("needs_you"))
+        update_task_status(
+            TERMINAL_HOLD_TASK,
+            "failed",
+            owner=WORKER,
+            completion_evidence={"reason": "terminalization cleanup acceptance"},
+            completed_by=WORKER,
+            config=CFG,
+        )
+        after_terminal_chat = _chat(client)
+        _check("terminalized hold clears needs_you pointer", not after_terminal_chat.get("needs_you"), after_terminal_chat.get("needs_you"))
 
         app_js = (ROOT / "ui/static/app.js").read_text(encoding="utf-8")
         _check("dashboard renders free-text hold resolve control", "data-resolve-human-review-hold" in app_js, "app.js")

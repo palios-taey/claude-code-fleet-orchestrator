@@ -1428,6 +1428,179 @@ def _declared_await_signal_stop_reason(signal: Dict[str, str]) -> str:
     )
 
 
+def _human_review_hold_notice_record(hold: Dict[str, Any], lineage: str) -> Dict[str, Any]:
+    task_id = str(hold.get("task_id") or hold.get("id") or "").strip()
+    blocked_on = str(hold.get("blocked_on") or "").strip()
+    detail = str(hold.get("detail") or hold.get("reason") or "").strip()
+    return {
+        "id": task_id,
+        "question_id": task_id,
+        "lineage": lineage,
+        "session": lineage,
+        "reason": detail or "human review requested",
+        "status": "open",
+        "ts": _utc_now_iso(),
+        "source": "human_review_hold",
+        "type": "human_review_hold",
+        "task_id": task_id,
+        "blocked_on": blocked_on,
+        "detail": detail,
+        "resolve_endpoint": f"/api/ui/human-review-holds/{task_id}/resolve",
+    }
+
+
+def _human_review_hold_chat_record_matches(raw_record: Any, task_id: str, blocked_on: str) -> bool:
+    record = _decode_json_field(raw_record, {})
+    if not isinstance(record, dict):
+        return False
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    return (
+        metadata.get("source") == "human_review_hold"
+        and str(metadata.get("task_id") or "").strip() == task_id
+        and str(metadata.get("blocked_on") or "").strip() == blocked_on
+    )
+
+
+def _needs_you_human_review_hold(raw_record: Any) -> Dict[str, Any]:
+    record = _decode_json_field(raw_record, {})
+    if not isinstance(record, dict) or record.get("source") != "human_review_hold":
+        return {}
+    return record
+
+
+def _set_human_review_hold_needs_you(lineage: str, hold: Dict[str, Any], *,
+                                     redis_client: Any) -> None:
+    record = _human_review_hold_notice_record(hold, lineage)
+    redis_client.set(_chat_key("needs_you", lineage), _json_encode(record))
+
+
+def _refresh_human_review_hold_needs_you(lineage: str, *, cleared_task_id: str,
+                                         config: OrchConfig, redis_client: Any) -> None:
+    remaining_holds = [
+        hold for hold in get_supervisor_human_review_holds(lineage, config=config)
+        if str(hold.get("task_id") or "").strip() != cleared_task_id
+    ]
+    needs_key = _chat_key("needs_you", lineage)
+    current_hold = _needs_you_human_review_hold(redis_client.get(needs_key))
+    if remaining_holds:
+        if not current_hold or str(current_hold.get("task_id") or "").strip() == cleared_task_id:
+            _set_human_review_hold_needs_you(lineage, remaining_holds[0], redis_client=redis_client)
+        return
+    if current_hold and (not cleared_task_id or str(current_hold.get("task_id") or "").strip() == cleared_task_id):
+        open_questions = redis_client.lrange(_chat_key("openq", lineage), 0, -1) or []
+        if open_questions:
+            redis_client.set(needs_key, open_questions[-1])
+        else:
+            redis_client.delete(needs_key)
+
+
+def _surface_human_review_hold_to_chat(hold: Dict[str, Any], *,
+                                       config: OrchConfig, redis_client: Any) -> None:
+    lineage = _chat_lineage(str(hold.get("supervisor") or hold.get("owner") or ""))
+    task_id = str(hold.get("task_id") or hold.get("id") or "").strip()
+    blocked_on = str(hold.get("blocked_on") or "").strip()
+    detail = str(hold.get("detail") or hold.get("reason") or "").strip() or "human review requested"
+    _set_human_review_hold_needs_you(lineage, hold, redis_client=redis_client)
+    if _raw_records_have_question(
+        redis_client.lrange(_chat_key("chat", lineage), 0, -1),
+        task_id,
+        lambda raw: task_id if _human_review_hold_chat_record_matches(raw, task_id, blocked_on) else "",
+    ):
+        return
+    from .chat_layer import append_message_sync
+
+    append_message_sync(
+        lineage,
+        "orch-human-review",
+        f"NEEDS-YOU [{task_id}]\n{detail}",
+        role="system",
+        message_type="escalation",
+        metadata={
+            "source": "human_review_hold",
+            "task_id": task_id,
+            "blocked_on": blocked_on,
+            "detail": detail,
+            "needs_you": True,
+            "resolve_endpoint": f"/api/ui/human-review-holds/{task_id}/resolve",
+        },
+        redis_client=redis_client,
+        config=config,
+    )
+
+
+def _sync_human_review_hold_chat(task_id: str, *, previous_blocked_on: Any,
+                                 previous_owner: Any,
+                                 config: OrchConfig) -> None:
+    previous_marker = _declared_await_signal(previous_blocked_on)
+    cfg = config
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            WITH p, ph, t,
+                 coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null'] AS owner_fallback,
+                 CASE
+                   WHEN coalesce(toLower(trim(p.supervisor)), '') IN ['', 'unassigned', 'unknown', 'none', 'null']
+                   THEN toLower(trim(coalesce(t.owner, '')))
+                   ELSE toLower(trim(p.supervisor))
+                 END AS effective_supervisor
+            RETURN t.id AS task_id,
+                   t.description AS description,
+                   t.owner AS owner,
+                   t.status AS status,
+                   t.blocked_on AS blocked_on,
+                   p.id AS project_id,
+                   p.supervisor AS project_supervisor,
+                   p.status AS project_status,
+                   p.migration_exempt AS migration_exempt,
+                   ph.id AS phase_id,
+                   owner_fallback AS owner_fallback,
+                   effective_supervisor AS effective_supervisor
+        """, task_id=task_id).single()
+    if row is None:
+        return
+    row_dict = dict(row)
+    current_marker = _declared_await_signal(row_dict.get("blocked_on"))
+    current_is_hold = (
+        bool(current_marker)
+        and current_marker.get("kind") == "human-review"
+        and str(row_dict.get("status") or "pending") not in _TERMINAL_TASK_STATUSES
+        and str(row_dict.get("project_status") or "").strip().lower() in {"active", "in_progress"}
+        and (not bool(row_dict.get("migration_exempt")) or bool(row_dict.get("owner_fallback")))
+    )
+    redis_client = None
+    if previous_marker and previous_marker.get("kind") == "human-review":
+        from .config import get_redis_sync
+
+        redis_client = get_redis_sync(cfg)
+        previous_supervisor = (
+            str(previous_owner or "").strip()
+            if row_dict.get("owner_fallback")
+            else str(row_dict.get("project_supervisor") or "").strip()
+        )
+        previous_lineage = _supervisor_badge_session(previous_supervisor)
+        current_lineage = _supervisor_badge_session(row_dict.get("effective_supervisor") or row_dict.get("owner") or "")
+        if previous_lineage and (
+            not current_is_hold
+            or str(previous_blocked_on or "").strip() != str(row_dict.get("blocked_on") or "").strip()
+            or previous_lineage != current_lineage
+        ):
+            _refresh_human_review_hold_needs_you(
+                previous_lineage,
+                cleared_task_id=str(row_dict.get("task_id") or task_id),
+                config=cfg,
+                redis_client=redis_client,
+            )
+    if current_is_hold:
+        if redis_client is None:
+            from .config import get_redis_sync
+
+            redis_client = get_redis_sync(cfg)
+        hold = _human_review_hold_record(row_dict)
+        if hold:
+            _surface_human_review_hold_to_chat(hold, config=cfg, redis_client=redis_client)
+
+
 def _blocked_on_has_live_resolver(blocked_on: Optional[str],
                                   current_task_id: Optional[str] = None,
                                   config: Optional[OrchConfig] = None) -> bool:
@@ -2801,7 +2974,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
         if result is None:
             rec = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
-                WITH t, t.owner AS previous_owner
+                WITH t, t.owner AS previous_owner, t.blocked_on AS previous_blocked_on
                 SET t.status = $status,
                     t.owner = CASE WHEN coalesce(trim($owner), '') = '' THEN t.owner ELSE $owner END,
                     t.blocked_on = CASE
@@ -2848,7 +3021,11 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                         ELSE NULL
                     END,
                     t.updated_at = datetime()
-                RETURN t.id AS id, t.owner AS owner, previous_owner AS previous_owner
+                RETURN t.id AS id,
+                       t.owner AS owner,
+                       t.blocked_on AS blocked_on,
+                       previous_owner AS previous_owner,
+                       previous_blocked_on AS previous_blocked_on
             """, task_id=task_id, status=status, owner=owner, blocked_on=blocked_on_value,
                  completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
                  completion_evidence_verification=_json_encode(completion_verification_value) if completion_verification_value else None,
@@ -2859,7 +3036,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
         else:
             rec = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
-                WITH t, t.owner AS previous_owner
+                WITH t, t.owner AS previous_owner, t.blocked_on AS previous_blocked_on
                 SET t.status = $status,
                     t.owner = CASE WHEN coalesce(trim($owner), '') = '' THEN t.owner ELSE $owner END,
                     t.result = $result,
@@ -2907,7 +3084,11 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                         ELSE NULL
                     END,
                     t.updated_at = datetime()
-                RETURN t.id AS id, t.owner AS owner, previous_owner AS previous_owner
+                RETURN t.id AS id,
+                       t.owner AS owner,
+                       t.blocked_on AS blocked_on,
+                       previous_owner AS previous_owner,
+                       previous_blocked_on AS previous_blocked_on
             """, task_id=task_id, status=status, owner=owner, result=result,
                  blocked_on=blocked_on_value,
                  completion_evidence=_json_encode(completion_evidence_value) if completion_evidence_value else None,
@@ -2939,6 +3120,12 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                 END,
                 p.updated_at = datetime()
         """, task_id=task_id, status=status)
+        _sync_human_review_hold_chat(
+            task_id,
+            previous_blocked_on=task_row.get("previous_blocked_on"),
+            previous_owner=task_row.get("previous_owner"),
+            config=cfg,
+        )
         if terminal_status:
             from .worker_liveness import clear_worker_task_liveness
 
@@ -3680,6 +3867,13 @@ def resolve_human_review_hold(task_id: str, verdict: str, resolved_by: str,
         ).single()
         if updated is None:
             return {"ok": False, "task_id": resolved_task_id, "reason": "human-review hold changed before resolution"}
+
+    _sync_human_review_hold_chat(
+        resolved_task_id,
+        previous_blocked_on=blocked_on,
+        previous_owner=row.get("owner"),
+        config=cfg,
+    )
 
     supervisor = str(hold.get("supervisor") or hold.get("owner") or "").strip()
     body = _human_review_resolution_message(
