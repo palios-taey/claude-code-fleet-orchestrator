@@ -2259,6 +2259,19 @@ def _raw_stop_decision(session_id: str,
                 "task_priority": next_ready.get("priority"),
                 "task_title_short": (str(next_ready.get("description") or "")[:80] or None),
             }
+    next_ready = get_session_next_ready(ready_owner, config=cfg)
+    if next_ready:
+        task_id = next_ready.get("task_id") or next_ready.get("id")
+        return {
+            "block": True,
+            "reason": _queue_block_reason(task_id, next_ready.get("description")),
+            "wake_type": "WAKE_WITH_QUEUE",
+            "task_id": task_id,
+            "project_id": next_ready.get("project_id"),
+            "phase_id": next_ready.get("phase_id"),
+            "task_priority": next_ready.get("priority"),
+            "task_title_short": (str(next_ready.get("description") or "")[:80] or None),
+        }
 
     observed_done_task_id = _observed_stop_task_id(session_id, config=cfg)
     observed_done_outcome = (
