@@ -25,7 +25,7 @@ os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 os.environ.setdefault("ORCH_SESSION_IDS", "delivery-supervisor,delivery-worker")
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
-from fleet_orchestrator.orch_schema import get_task, init_schema  # noqa: E402
+from fleet_orchestrator.orch_schema import CompletionEvidenceError, create_task, get_task, init_schema  # noqa: E402
 from fleet_orchestrator.plan_loader import load_plan_from_text  # noqa: E402
 from fleet_orchestrator.tasks_api import app  # noqa: E402
 
@@ -45,9 +45,11 @@ CFG = OrchConfig()
 PFX = f"{_require_test_namespace()}-delivery-{uuid.uuid4().hex[:8]}"
 SUP = "delivery-supervisor"
 PROJECT = f"{PFX}-project"
+PHASE = f"{PROJECT}::main"
 GATED_DELIVER = f"{PROJECT}::gated-deliver"
 GATED_NOOP = f"{PROJECT}::gated-noop"
 GATED_REJECT = f"{PROJECT}::gated-reject"
+DIRECT_GATE = f"{PROJECT}::direct-gate"
 NORMAL_EVIDENCE = f"{PROJECT}::normal-evidence"
 NORMAL_DELIVERY_ONLY = f"{PROJECT}::normal-delivery-only"
 FAILURES: list[str] = []
@@ -99,6 +101,38 @@ def main() -> int:
         _check("plan ingest succeeds", ingest.get("project_id") == PROJECT and not ingest.get("errors"), ingest)
         _check("delivery_gate metadata persisted true", get_task(GATED_DELIVER, config=CFG).get("delivery_gate") is True, get_task(GATED_DELIVER, config=CFG))
         _check("normal task has no delivery gate", get_task(NORMAL_EVIDENCE, config=CFG).get("delivery_gate") in (None, False), get_task(NORMAL_EVIDENCE, config=CFG))
+        create_task(
+            phase_id=PHASE,
+            task_id=DIRECT_GATE,
+            description="Direct create can opt into delivery gate",
+            owner=SUP,
+            delivery_gate=True,
+            wake_owner_if_ready=False,
+            config=CFG,
+        )
+        _check("direct create can persist delivery_gate true", get_task(DIRECT_GATE, config=CFG).get("delivery_gate") is True, get_task(DIRECT_GATE, config=CFG))
+
+        terminal_initial_error = ""
+        try:
+            create_task(
+                phase_id=PHASE,
+                task_id=f"{PROJECT}::terminal-initial",
+                description="Terminal initial status is rejected through delivery gate",
+                owner=SUP,
+                initial_status="completed",
+                delivery_gate=True,
+                wake_owner_if_ready=False,
+                config=CFG,
+            )
+        except CompletionEvidenceError as exc:
+            terminal_initial_error = str(exc)
+        except Exception as exc:
+            terminal_initial_error = f"{type(exc).__name__}: {exc}"
+        _check(
+            "delivery-gated terminal initial status uses delivery evidence rejection",
+            "delivery-gated" in terminal_initial_error and "missing evidence" in terminal_initial_error,
+            terminal_initial_error,
+        )
 
         no_evidence = client.patch(f"/api/task/{GATED_REJECT}", json={"status": "completed", "from": SUP})
         _check("delivery-gated completion rejects missing evidence", no_evidence.status_code == 400 and "delivery-gated" in no_evidence.text, no_evidence.text)
@@ -128,6 +162,20 @@ def main() -> int:
             },
         )
         _check("delivery-gated completion rejects unchecked no-op", unchecked_noop.status_code == 400 and "checked" in unchecked_noop.text, unchecked_noop.text)
+
+        too_short_noop = client.patch(
+            f"/api/task/{GATED_REJECT}",
+            json={
+                "status": "completed",
+                "from": SUP,
+                "evidence": {"no_op": {"reason": "x", "checked": True}},
+            },
+        )
+        _check(
+            "delivery-gated completion rejects too-short no-op reason",
+            too_short_noop.status_code == 400 and "at least 8" in too_short_noop.text,
+            too_short_noop.text,
+        )
 
         both = client.patch(
             f"/api/task/{GATED_REJECT}",

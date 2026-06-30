@@ -111,11 +111,11 @@ COMPLETED_EVIDENCE_NEXT_STEP = (
 DELIVERY_GATE_EVIDENCE_NEXT_STEP = (
     'Delivery-gated task completions require evidence with exactly one delivery outcome: '
     '`{"delivered":{"<mechanical-proof>":"<value>"}}` or '
-    '`{"no_op":{"reason":"<why nothing was delivered>","checked":true}}`. '
+    '`{"no_op":{"reason":"<why nothing was delivered, at least 8 chars>","checked":true}}`. '
     'Use `taey-task update <task-id> completed --evidence '
     '\'{"delivered":{"careers_db_delta":{"rows_changed":1}}}\'` '
     'or PATCH /api/task/<task-id> with body '
-    '{"status":"completed","evidence":{"no_op":{"reason":"<why>","checked":true}}}.'
+    '{"status":"completed","evidence":{"no_op":{"reason":"<why no-op>","checked":true}}}.'
 )
 NON_SUCCESS_EVIDENCE_NEXT_STEP = (
     'Use `taey-task update <task-id> %STATUS% --evidence '
@@ -343,8 +343,8 @@ def _normalize_delivery_gate_evidence(evidence: Dict[str, Any]) -> Dict[str, Any
 
     no_op = _json_serializable_object(evidence["no_op"], "no_op")
     reason = no_op.get("reason")
-    if not isinstance(reason, str) or not reason.strip():
-        _delivery_gate_evidence_error("evidence.no_op.reason must be a non-empty string")
+    if not isinstance(reason, str) or len(reason.strip()) < 8:
+        _delivery_gate_evidence_error("evidence.no_op.reason must be a string of at least 8 characters")
     if no_op.get("checked") is not True:
         _delivery_gate_evidence_error("evidence.no_op.checked must be the JSON boolean true")
     no_op["reason"] = reason.strip()
@@ -2916,11 +2916,13 @@ def create_task(
     heartbeat_exempt_secs: Optional[int] = None,
     initial_status: str = "pending",
     wake_owner_if_ready: bool = True,
+    delivery_gate: Optional[bool] = None,
     config: Optional[OrchConfig] = None,
 ) -> str:
     """Create an OrchTask linked to a phase."""
+    delivery_gate_enabled = bool(delivery_gate)
     if initial_status in _VALID_TASK_STATUSES:
-        _validate_terminal_status_write(initial_status, None)
+        _validate_terminal_status_write(initial_status, None, delivery_gate=delivery_gate_enabled)
     if str(initial_status or "").strip().lower() in _TERMINAL_TASK_STATUSES:
         raise CompletionEvidenceError(
             "terminal initial status is not accepted; create the task pending and complete it through the evidence-gated task API"
@@ -2963,7 +2965,11 @@ def create_task(
                 t.capability_tags = $capability_tags,
                 t.file_blast_radius = $file_blast_radius,
                 t.estimated_tokens = $estimated_tokens,
-                t.heartbeat_exempt_secs = $heartbeat_exempt_secs
+                t.heartbeat_exempt_secs = $heartbeat_exempt_secs,
+                t.delivery_gate = CASE
+                    WHEN $delivery_gate IS NULL THEN coalesce(t.delivery_gate, false)
+                    ELSE $delivery_gate
+                END
             MERGE (ph)-[:HAS_TASK]->(t)
             RETURN t.id AS id
         """,
@@ -2981,6 +2987,7 @@ def create_task(
             estimated_tokens=estimated_tokens,
             heartbeat_exempt_secs=heartbeat_exempt_secs,
             initial_status=initial_status,
+            delivery_gate=delivery_gate,
         )
         record = result.single()
         if record is None:
