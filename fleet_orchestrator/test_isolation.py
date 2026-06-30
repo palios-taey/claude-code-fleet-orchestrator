@@ -2,7 +2,7 @@
 
 The product runtime still uses the operator-configured Redis and Neo4j stores.
 Agent-run acceptance tests are different: they are mutation probes, so they must
-run against throwaway stores instead of the operator's live loopback services.
+run against throwaway loopback stores instead of the operator's live services.
 """
 
 from __future__ import annotations
@@ -96,6 +96,12 @@ def store_isolation_errors(env: Mapping[str, str] | None = None) -> list[str]:
         errors.append("ORCH_NEO4J_URI is unset; the isolated runner must provide a throwaway Neo4j URI.")
     elif neo_port is None:
         errors.append(f"ORCH_NEO4J_URI has no parseable Bolt port: {values.get('ORCH_NEO4J_URI')!r}")
+    elif not allow_live_loopback_ports and not _loopback_host(neo_host):
+        errors.append(
+            f"ORCH_NEO4J_URI host {neo_host!r} is non-loopback; "
+            "local agent mutation tests must use scripts/orch-acceptance-isolated "
+            "so Neo4j is a throwaway loopback container."
+        )
     elif not allow_live_loopback_ports and _loopback_host(neo_host) and neo_port in LIVE_NEO4J_PORTS:
         errors.append(
             f"ORCH_NEO4J_URI points at loopback live Neo4j port {neo_port}; "
@@ -106,6 +112,12 @@ def store_isolation_errors(env: Mapping[str, str] | None = None) -> list[str]:
     redis_port = _int_port(values.get("ORCH_REDIS_PORT"))
     if not redis_host or redis_port is None:
         errors.append("ORCH_REDIS_HOST/ORCH_REDIS_PORT must point at a throwaway orchestrator Redis.")
+    elif not allow_live_loopback_ports and not _loopback_host(redis_host):
+        errors.append(
+            f"ORCH_REDIS_HOST {redis_host!r} is non-loopback; "
+            "local agent mutation tests must use scripts/orch-acceptance-isolated "
+            "so orchestrator Redis is a throwaway loopback container."
+        )
     elif not allow_live_loopback_ports and _loopback_host(redis_host) and redis_port in LIVE_REDIS_PORTS:
         errors.append(
             f"ORCH_REDIS_HOST/ORCH_REDIS_PORT point at loopback live Redis port {redis_port}; "
@@ -116,6 +128,12 @@ def store_isolation_errors(env: Mapping[str, str] | None = None) -> list[str]:
     notify_port = _int_port(values.get("REDIS_PORT"))
     if not notify_host or notify_port is None:
         errors.append("REDIS_HOST/REDIS_PORT must point at a throwaway notify Redis.")
+    elif not allow_live_loopback_ports and not _loopback_host(notify_host):
+        errors.append(
+            f"REDIS_HOST {notify_host!r} is non-loopback; "
+            "local agent mutation tests must use scripts/orch-acceptance-isolated "
+            "so notify Redis is a throwaway loopback container."
+        )
     elif not allow_live_loopback_ports and _loopback_host(notify_host) and notify_port in LIVE_REDIS_PORTS:
         errors.append(
             f"REDIS_HOST/REDIS_PORT point at loopback live notify Redis port {notify_port}; "

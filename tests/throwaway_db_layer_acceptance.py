@@ -41,6 +41,17 @@ def _live_defaults_env() -> dict[str, str]:
     }
 
 
+def _non_loopback_live_env() -> dict[str, str]:
+    return {
+        "ORCH_NEO4J_URI": "bolt://10.0.0.163:7689",
+        "ORCH_NEO4J_DB": "neo4j",
+        "ORCH_REDIS_HOST": "10.0.0.68",
+        "ORCH_REDIS_PORT": "6379",
+        "REDIS_HOST": "10.0.0.68",
+        "REDIS_PORT": "6379",
+    }
+
+
 def main() -> int:
     live_errors = store_isolation_errors(_live_defaults_env())
     live_text = "\n".join(live_errors)
@@ -51,6 +62,13 @@ def main() -> int:
     fake_throwaway = {**_live_defaults_env(), ISOLATION_ENV: THROWAWAY_MODE}
     fake_errors = store_isolation_errors(fake_throwaway)
     _check("throwaway marker alone cannot bless live ports", any("live Neo4j" in item for item in fake_errors), fake_errors)
+
+    non_loopback_throwaway = {**_non_loopback_live_env(), ISOLATION_ENV: THROWAWAY_MODE}
+    non_loopback_errors = store_isolation_errors(non_loopback_throwaway)
+    non_loopback_text = "\n".join(non_loopback_errors)
+    _check("non-loopback Neo4j is rejected in throwaway mode", "ORCH_NEO4J_URI host" in non_loopback_text, non_loopback_errors)
+    _check("non-loopback orchestrator Redis is rejected in throwaway mode", "ORCH_REDIS_HOST" in non_loopback_text, non_loopback_errors)
+    _check("non-loopback notify Redis is rejected in throwaway mode", "REDIS_HOST" in non_loopback_text, non_loopback_errors)
 
     isolated = build_throwaway_env(
         base_env={},

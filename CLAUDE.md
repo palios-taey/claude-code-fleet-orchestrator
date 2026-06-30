@@ -104,7 +104,7 @@ taey-question answer <question-id> "approved"
 
 Use the smallest gate that proves the touched invariant, then include the command and result in your report.
 
-First establish the environment. Some checks are hermetic, but many acceptance scripts mutate Neo4j and Redis through `ORCH_NEO4J_URI`, `ORCH_NEO4J_DB`, `ORCH_REDIS_HOST`, and `ORCH_REDIS_PORT`. Do not point those variables at an operator's live loopback stores for agent-run tests. Store-backed acceptance must run through `scripts/orch-acceptance-isolated -- python tests/<name>_acceptance.py`, which starts throwaway Neo4j plus separate orchestrator and notify Redis instances, sets `ORCH_DOTENV=empty`, and provides isolated `ORCH_TEST_NAMESPACE` / `NOTIFY_KEY_PREFIX` values. GitHub Actions service-container runs are the only `ORCH_AGENT_TEST_INFRA=ephemeral-ci` path.
+First establish the environment. Some checks are hermetic, but many acceptance scripts mutate Neo4j and Redis through `ORCH_NEO4J_URI`, `ORCH_NEO4J_DB`, `ORCH_REDIS_HOST`, and `ORCH_REDIS_PORT`. Do not point those variables at an operator's live stores for agent-run tests, whether loopback or non-loopback. Store-backed acceptance must run through `scripts/orch-acceptance-isolated -- python tests/<name>_acceptance.py`, which starts throwaway Neo4j plus separate orchestrator and notify Redis instances on non-live loopback ports, sets `ORCH_DOTENV=empty`, and provides isolated `ORCH_TEST_NAMESPACE` / `NOTIFY_KEY_PREFIX` values. GitHub Actions service-container runs are the only `ORCH_AGENT_TEST_INFRA=ephemeral-ci` path.
 
 Useful local checks:
 
