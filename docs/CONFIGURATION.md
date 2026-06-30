@@ -65,6 +65,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ORCH_BADGE_FALLBACK_SUPERVISOR` | unset | Optional explicit dashboard supervisor bucket for `/api/supervisors/badges` work whose effective supervisor is not itself visible in `/api/sessions`. Honored only when it resolves to a configured dashboard supervisor; unset drops non-dashboard work from the badge view. |
 | `ORCH_SESSION_ROOTS` | `""` | Maps sessions → repo roots for context; these roots are also auto-derived as allowed `[ref:]` roots. |
 | `ORCH_RULES_ROOT` | `""` | Directory of rule files surfaced in context. |
+| `ORCH_MEMORY_ROOT` | `""` | Directory of local memory files surfaced in wake-packet Memory. |
 | `ORCH_IDENTITY_ROOT` | `""` | Optional trusted identity directory for wake packets. Companion sessions load full operator-supplied identity from this root; engineering sessions use the built-in lean role core. Supported layouts: Markdown files under companion or taey subdirectories, root-level companion/taey/IDENTITY/PERSONALITY Markdown files, or the corpus identity plus layer_1 layout. |
 | `ORCH_COMPANION_SESSIONS` | `taey,companion` | Comma-separated session ids that should receive companion identity instead of engineering identity. CLI peer suffixes (`-codex`, `-gemini`, `-grok`) remain engineering. |
 

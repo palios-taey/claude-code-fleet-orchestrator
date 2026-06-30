@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fleet_orchestrator.context_assembler as assembler  # noqa: E402
+import fleet_orchestrator.memory_tier as memory_tier  # noqa: E402
 import fleet_orchestrator.tasks_api as tasks_api  # noqa: E402
 
 
@@ -297,6 +298,107 @@ def _rules_delivery_endpoint_contract() -> None:
         logger.propagate = old_propagate
 
 
+def _memory_tier_endpoint_contract() -> None:
+    client = _client()
+    old_endpoint = os.environ.get("ORCH_WAKE_PACKET_ENDPOINT_ENABLED")
+    old_memory_root = os.environ.get("ORCH_MEMORY_ROOT")
+    try:
+        os.environ["ORCH_WAKE_PACKET_ENDPOINT_ENABLED"] = "1"
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            memory_root = tmp / "memory"
+            (memory_root / "supervisors").mkdir(parents=True)
+            (memory_root / "projects").mkdir(parents=True)
+            (memory_root / "global.md").write_text(
+                "---\nname: global endpoint memory\ndescription: endpoint global\n---\nGLOBAL_ENDPOINT_MEMORY_TEXT\n",
+                encoding="utf-8",
+            )
+            (memory_root / "supervisors" / "conductor.md").write_text(
+                "---\nname: supervisor endpoint memory\ndescription: endpoint supervisor\n---\nSUPERVISOR_ENDPOINT_MEMORY_TEXT\n",
+                encoding="utf-8",
+            )
+            (memory_root / "projects" / "dynctx.md").write_text(
+                "---\nname: project endpoint memory\ndescription: endpoint project\n---\nPROJECT_ENDPOINT_MEMORY_TEXT\n",
+                encoding="utf-8",
+            )
+            os.environ["ORCH_MEMORY_ROOT"] = str(memory_root)
+
+            with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["conductor-codex"])), \
+                 mock.patch.object(tasks_api, "maybe_emit_decision_receipt", return_value=None), \
+                 mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
+                 mock.patch.object(
+                     assembler,
+                     "get_session_current_work",
+                     return_value={"top_task_id": "dynctx::current", "top_task_desc": "current work", "project_id": "dynctx"},
+                 ), \
+                 mock.patch.object(
+                     assembler,
+                     "get_project_summary",
+                     return_value={"project": {"id": "dynctx", "name": "dynctx", "source_path": ""}, "phases": [], "ref_tiers": {}},
+                 ), \
+                 mock.patch.object(assembler, "get_task_step_governance", return_value={}), \
+                 mock.patch.object(assembler, "get_session_supervised_projects", return_value=[]), \
+                 mock.patch.object(assembler, "get_overall_refs", return_value={"ref_context": {"refs": []}}), \
+                 mock.patch.object(assembler, "get_supervisor_refs", return_value={"ref_context": {"refs": []}}):
+                response = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
+
+            body = response.json()
+            memory = _section(body.get("packet", ""), "Memory")
+            _check(
+                "memory tier renders global, supervisor, and project memory",
+                response.status_code == 200
+                and body.get("ok") is True
+                and "GLOBAL_ENDPOINT_MEMORY_TEXT" in memory
+                and "SUPERVISOR_ENDPOINT_MEMORY_TEXT" in memory
+                and "PROJECT_ENDPOINT_MEMORY_TEXT" in memory
+                and "- none selected" not in memory,
+                body,
+            )
+            _check(
+                "memory tier ranks project before supervisor before global",
+                memory.find("PROJECT_ENDPOINT_MEMORY_TEXT") >= 0
+                and memory.find("PROJECT_ENDPOINT_MEMORY_TEXT") < memory.find("SUPERVISOR_ENDPOINT_MEMORY_TEXT")
+                and memory.find("SUPERVISOR_ENDPOINT_MEMORY_TEXT") < memory.find("GLOBAL_ENDPOINT_MEMORY_TEXT"),
+                memory,
+            )
+    finally:
+        if old_endpoint is None:
+            os.environ.pop("ORCH_WAKE_PACKET_ENDPOINT_ENABLED", None)
+        else:
+            os.environ["ORCH_WAKE_PACKET_ENDPOINT_ENABLED"] = old_endpoint
+        if old_memory_root is None:
+            os.environ.pop("ORCH_MEMORY_ROOT", None)
+        else:
+            os.environ["ORCH_MEMORY_ROOT"] = old_memory_root
+
+
+def _memory_tier_budget_contract() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        (root / "supervisors").mkdir(parents=True)
+        (root / "projects").mkdir(parents=True)
+        (root / "global.md").write_text("---\nname: global\n---\n" + ("G" * 256), encoding="utf-8")
+        (root / "supervisors" / "sup.md").write_text("---\nname: supervisor\n---\n" + ("S" * 64), encoding="utf-8")
+        (root / "projects" / "proj.md").write_text("---\nname: project\n---\n" + ("P" * 256), encoding="utf-8")
+
+        two_items = memory_tier.get_memory("sup", project="proj", memory_root=root, max_items=2)
+        capped = memory_tier.get_memory("sup", project="proj", memory_root=root, max_item_bytes=24, max_total_bytes=120)
+
+    _check(
+        "memory tier caps by ranked item count",
+        [item.get("scope") for item in two_items] == ["project", "supervisor"],
+        two_items,
+    )
+    _check(
+        "memory tier caps item size and drops low-ranked entries whole",
+        capped
+        and capped[0].get("scope") == "project"
+        and "truncated: memory item exceeded per-item budget" in capped[0].get("content", "")
+        and all(item.get("scope") != "global" for item in capped),
+        capped,
+    )
+
+
 def _assembler_contract() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -336,7 +438,9 @@ def _assembler_contract() -> None:
 
         old_memory_base = assembler.MEMORY_BASE
         old_rules_root = os.environ.get("ORCH_RULES_ROOT")
+        old_memory_root = os.environ.get("ORCH_MEMORY_ROOT")
         os.environ["ORCH_RULES_ROOT"] = str(rules_root)
+        os.environ.pop("ORCH_MEMORY_ROOT", None)
         assembler.MEMORY_BASE = memory_root
         try:
             with mock.patch.object(assembler, "get_task_project", return_value={"project_id": "dynctx", "project_name": "Dynamic Context"}), \
@@ -356,6 +460,10 @@ def _assembler_contract() -> None:
                 os.environ.pop("ORCH_RULES_ROOT", None)
             else:
                 os.environ["ORCH_RULES_ROOT"] = old_rules_root
+            if old_memory_root is None:
+                os.environ.pop("ORCH_MEMORY_ROOT", None)
+            else:
+                os.environ["ORCH_MEMORY_ROOT"] = old_memory_root
 
     snapshot = packet.get("snapshot", {})
     _check("select_context reloads supplied session roots per request", context["memory"] and "Use the selected memory." in context["memory"][0]["content"], context)
@@ -419,6 +527,7 @@ def _supervisor_refs_follow_receiving_session_contract() -> None:
         return_value={"project_id": "tutor-wedge", "project_name": "Tutor Wedge"},
     ), \
          mock.patch.object(assembler, "get_project_summary", return_value=summary), \
+         mock.patch.object(assembler, "get_task_step_governance", return_value={}), \
          mock.patch.object(assembler, "get_overall_refs", return_value={"ref_context": {"refs": []}}), \
          mock.patch.object(assembler, "get_supervisor_refs", return_value=receiving_session_refs) as supervisor_reader:
         context = assembler.select_context(
@@ -659,7 +768,9 @@ def _empty_work_context_contract() -> None:
         supervisor = {"ref_context": {"refs": [{"path": "/tmp/supervisor.md", "content": "supervisor ref"}]}}
 
         old_memory_base = assembler.MEMORY_BASE
+        old_memory_root = os.environ.get("ORCH_MEMORY_ROOT")
         assembler.MEMORY_BASE = memory_root
+        os.environ.pop("ORCH_MEMORY_ROOT", None)
         try:
             with mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
                  mock.patch.object(assembler, "get_session_current_work", return_value=None), \
@@ -673,6 +784,10 @@ def _empty_work_context_contract() -> None:
                 )
         finally:
             assembler.MEMORY_BASE = old_memory_base
+            if old_memory_root is None:
+                os.environ.pop("ORCH_MEMORY_ROOT", None)
+            else:
+                os.environ["ORCH_MEMORY_ROOT"] = old_memory_root
 
     _check("no-current-task still selects MEMORY.md from actual session root",
            context["memory"] and "standing session memory" in context["memory"][0]["content"], context)
@@ -720,6 +835,8 @@ def _memory_traversal_contract() -> None:
 def main() -> int:
     _endpoint_contract()
     _rules_delivery_endpoint_contract()
+    _memory_tier_endpoint_contract()
+    _memory_tier_budget_contract()
     _assembler_contract()
     _supervisor_refs_follow_receiving_session_contract()
     _identity_section_contract()
