@@ -290,12 +290,14 @@ def _set_task_metadata(task: Dict[str, Any], cfg: OrchConfig) -> None:
             MATCH (t:OrchTask {id: $task_id})
             SET t.owner = $owner,
                 t.capability_tags = $tags,
+                t.delivery_gate = $delivery_gate,
                 t.recurring = $recurring,
                 t.updated_at = datetime()
         """,
             task_id=task["id"],
             owner=task.get("owner", ""),
             tags=task.get("tags", []),
+            delivery_gate=bool(task.get("delivery_gate", False)),
             recurring=bool(task.get("recurring", False)),
         )
 
@@ -550,6 +552,7 @@ def _parse_plan(md: str) -> Dict[str, Any]:
                 "tags": meta.get("tags", []),
                 "depends": meta.get("depends", []),
                 "refs": meta.get("refs", []),
+                "delivery_gate": _bool_meta(meta.get("delivery_gate")),
                 "recurring": _bool_meta(meta.get("recurring")) or "recurring" in {
                     str(tag).strip().lower() for tag in meta.get("tags", [])
                 },
