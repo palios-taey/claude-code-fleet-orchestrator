@@ -119,6 +119,7 @@ from fleet_orchestrator.orch_schema import (
     update_project_priority,
     update_task_status,
     validate_source_path_for_refs,
+    _resolve_supervisor_session,
 )
 from fleet_orchestrator.plan_loader import (
     PlanIdError,
@@ -783,11 +784,12 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
 
         if sender and owner == sender:
             if status == "in_progress":
+                binding_supervisor = _resolve_supervisor_session(sender, config=cfg)
                 bind_current_task(
                     worker=sender,
                     task_id=task_id,
                     description=task_before.get("description", ""),
-                    supervisor=sender,
+                    supervisor=binding_supervisor,
                     set_parent=True,
                 )
             elif status == "completed":
