@@ -21,5 +21,13 @@ rules/supervisor/
 rules/projects/
 rules/project/
 
+# Local operator memory. Keep README.md tracked; per-session and per-project
+# memory overlays belong to the local operator.
+memory/global.md
+memory/supervisors/
+memory/supervisor/
+memory/projects/
+memory/project/
+
 # dead/parked code kept locally as .bak, never tracked (main stays clean)
 *.bak

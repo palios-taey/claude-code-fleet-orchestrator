@@ -178,7 +178,8 @@ def _resolver_contract() -> None:
 
     with mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
          mock.patch.object(assembler, "get_session_current_work", return_value=current), \
-         mock.patch.object(assembler, "get_session_supervised_projects", return_value=[]):
+         mock.patch.object(assembler, "get_session_supervised_projects", return_value=[]), \
+         mock.patch.object(assembler, "get_task_step_governance", return_value={}):
         work = assembler._resolve_work("sup", None)
     _check("resolver surfaces own in-progress work", work.get("source") == "in_progress_own" and work.get("task_id") == "sup::current", work)
 
