@@ -108,6 +108,15 @@ COMPLETED_EVIDENCE_NEXT_STEP = (
     '{"status":"completed","evidence":{"commit_sha":"<sha>","repo":"OWNER/REPO",'
     '"production_observation":"<what you verified>"}}.'
 )
+DELIVERY_GATE_EVIDENCE_NEXT_STEP = (
+    'Delivery-gated task completions require evidence with exactly one delivery outcome: '
+    '`{"delivered":{"<mechanical-proof>":"<value>"}}` or '
+    '`{"no_op":{"reason":"<why nothing was delivered>","checked":true}}`. '
+    'Use `taey-task update <task-id> completed --evidence '
+    '\'{"delivered":{"careers_db_delta":{"rows_changed":1}}}\'` '
+    'or PATCH /api/task/<task-id> with body '
+    '{"status":"completed","evidence":{"no_op":{"reason":"<why>","checked":true}}}.'
+)
 NON_SUCCESS_EVIDENCE_NEXT_STEP = (
     'Use `taey-task update <task-id> %STATUS% --evidence '
     '\'{"reason":"<why>"}\'` or PATCH /api/task/<task-id> with body '
@@ -304,12 +313,58 @@ def _normalize_outbound_actions(evidence: Dict[str, Any]) -> Optional[List[Dict[
     return normalized
 
 
-def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _delivery_gate_evidence_error(reason: str) -> None:
+    raise CompletionEvidenceError(
+        f"delivery-gated task completion rejected: {reason}. {DELIVERY_GATE_EVIDENCE_NEXT_STEP}"
+    )
+
+
+def _json_serializable_object(value: Any, field: str) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        _delivery_gate_evidence_error(f"evidence.{field} must be a JSON object")
+    if not value:
+        _delivery_gate_evidence_error(f"evidence.{field} must be a non-empty object")
+    try:
+        normalized = json.loads(json.dumps(value, separators=(",", ":"), sort_keys=True))
+    except (TypeError, ValueError) as exc:
+        _delivery_gate_evidence_error(f"evidence.{field} must be JSON-serializable: {exc}")
+    if not isinstance(normalized, dict) or not normalized:
+        _delivery_gate_evidence_error(f"evidence.{field} must remain a non-empty object after JSON normalization")
+    return normalized
+
+
+def _normalize_delivery_gate_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    has_delivered = evidence.get("delivered") is not None
+    has_no_op = evidence.get("no_op") is not None
+    if has_delivered == has_no_op:
+        _delivery_gate_evidence_error("provide exactly one of evidence.delivered or evidence.no_op")
+    if has_delivered:
+        return {"delivered": _json_serializable_object(evidence["delivered"], "delivered")}
+
+    no_op = _json_serializable_object(evidence["no_op"], "no_op")
+    reason = no_op.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        _delivery_gate_evidence_error("evidence.no_op.reason must be a non-empty string")
+    if no_op.get("checked") is not True:
+        _delivery_gate_evidence_error("evidence.no_op.checked must be the JSON boolean true")
+    no_op["reason"] = reason.strip()
+    return {"no_op": no_op}
+
+
+def _normalize_completion_evidence(
+    evidence: Optional[Dict[str, Any]],
+    *,
+    delivery_gate: bool = False,
+) -> Optional[Dict[str, Any]]:
     if evidence is None:
         return None
     if not isinstance(evidence, dict):
         raise CompletionEvidenceError(f"The completion-evidence check is a shape/plausibility filter (self-reported claim, not verified provenance). completion evidence must be a JSON object. {COMPLETED_EVIDENCE_NEXT_STEP}")
     normalized: Dict[str, Any] = {}
+    delivery_gate_evidence: Dict[str, Any] = {}
+    if delivery_gate:
+        delivery_gate_evidence = _normalize_delivery_gate_evidence(evidence)
+        normalized.update(delivery_gate_evidence)
     for key in _COMPLETION_EVIDENCE_KEYS + _COMPLETION_EVIDENCE_CONTEXT_KEYS:
         value = evidence.get(key)
         if value is None:
@@ -338,7 +393,11 @@ def _normalize_completion_evidence(evidence: Optional[Dict[str, Any]]) -> Option
     outbound_actions = _normalize_outbound_actions(evidence)
     if outbound_actions is not None:
         normalized["outbound_actions"] = outbound_actions
-    if not any(key in normalized for key in _COMPLETION_EVIDENCE_KEYS) and "outbound_actions" not in normalized:
+    if (
+        not delivery_gate_evidence
+        and not any(key in normalized for key in _COMPLETION_EVIDENCE_KEYS)
+        and "outbound_actions" not in normalized
+    ):
         raise CompletionEvidenceError(
             "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. completed status requires evidence with at least one of: "
             f"commit_sha, gate_run_id, production_observation, or outbound_actions with signoff gate_pass provenance. Optional repo=OWNER/REPO selects the GitHub repository for commit verification. {COMPLETED_EVIDENCE_NEXT_STEP}"
@@ -393,18 +452,25 @@ def _normalize_non_success_terminal_evidence(
     return normalized
 
 
-def _validate_terminal_status_write(status: str, evidence: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _validate_terminal_status_write(
+    status: str,
+    evidence: Optional[Dict[str, Any]],
+    *,
+    delivery_gate: bool = False,
+) -> Optional[Dict[str, Any]]:
     if status not in _VALID_TASK_STATUSES:
         raise CompletionEvidenceError(
             f"invalid status {status!r}; must be one of {sorted(_VALID_TASK_STATUSES)}"
         )
     if status == "completed" and evidence is None:
+        if delivery_gate:
+            _delivery_gate_evidence_error("missing evidence")
         raise CompletionEvidenceError(
             "completed status requires evidence with at least one of: "
             f"commit_sha, gate_run_id, production_observation. {COMPLETED_EVIDENCE_NEXT_STEP}"
         )
     if status == "completed":
-        return _normalize_completion_evidence(evidence)
+        return _normalize_completion_evidence(evidence, delivery_gate=delivery_gate)
     if status in ("failed", "interrupted"):
         return _normalize_non_success_terminal_evidence(status, evidence)
     if evidence is not None:
@@ -3072,7 +3138,8 @@ def update_task_status(task_id: str, status: str, owner: str = "",
         if terminal_status:
             existing = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
-                RETURN t.task_type AS task_type
+                RETURN t.task_type AS task_type,
+                       coalesce(t.delivery_gate, false) AS delivery_gate
             """, task_id=task_id).single()
             if existing is not None and existing.get("task_type") == "human-review":
                 raise CompletionEvidenceError(
@@ -3080,7 +3147,14 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                     f"not by setting terminal status {status!r} through the task status API. "
                     + _human_review_answer_next_step("{question_id}")
                 )
-        completion_evidence_value = _validate_terminal_status_write(status, completion_evidence)
+            delivery_gate = bool(existing.get("delivery_gate")) if existing is not None else False
+        else:
+            delivery_gate = False
+        completion_evidence_value = _validate_terminal_status_write(
+            status,
+            completion_evidence,
+            delivery_gate=delivery_gate,
+        )
         completed_by_value = completed_by or owner or ""
         completion_verification_value = (
             verify_completion_evidence(completion_evidence_value, producer=completed_by_value)
