@@ -961,6 +961,53 @@ def _process_worker_liveness_expirations(
     return sent
 
 
+def _process_task_reconciliations(
+    r,
+    dedup_ttl_sec: int,
+    *,
+    task_id_prefix: Optional[str] = None,
+    project_id_prefix: Optional[str] = None,
+) -> int:
+    from fleet_orchestrator.task_reconciliation import reconcile_stale_tasks
+
+    result = reconcile_stale_tasks(
+        task_id_prefix=task_id_prefix,
+        project_id_prefix=project_id_prefix,
+    )
+    sent = 0
+    for task in result.get("reconciled", []):
+        task_id = str(task.get("task_id") or "").strip()
+        supervisor = str(task.get("supervisor") or "").strip()
+        if not task_id or not supervisor:
+            continue
+        dedup_key = orch_key("task-reconciled", supervisor, task_id)
+        if r.exists(dedup_key):
+            continue
+        kind = str(task.get("reconciliation_kind") or "stale_task")
+        if _target_stop_decision_allows_stop(supervisor, "TASK_RECONCILED", task_id):
+            log.info("Reconciled stale task without wake: supervisor=%s task=%s kind=%s",
+                     supervisor, task_id, kind)
+            r.set(dedup_key, "1", ex=dedup_ttl_sec)
+            continue
+        body = (
+            f"[TASK_RECONCILED] task={task_id} kind={kind} status={task.get('status')} "
+            f"reason={task.get('reason')}. Re-check current/next work; this stale task "
+            "no longer counts as live work."
+        )
+        if _send_wake(
+            r,
+            supervisor,
+            body,
+            priority="normal",
+            msg_id=f"orch-watch-task-reconciled-{supervisor}-{task_id}-{int(time.time())}",
+        ):
+            r.set(dedup_key, "1", ex=dedup_ttl_sec)
+            sent += 1
+            log.info("Sent TASK_RECONCILED wake: supervisor=%s task=%s kind=%s",
+                     supervisor, task_id, kind)
+    return sent
+
+
 def _process_idle_owner_graph_work(
     r,
     dedup_ttl_sec: int,
@@ -1367,6 +1414,7 @@ def main():
             sweep_count = 0
             try:
                 _process_handoff_timeouts(r)
+                _process_task_reconciliations(r, args.dedup_ttl_sec)
                 _process_worker_liveness_expirations(r, args.dedup_ttl_sec)
                 _process_idle_owner_graph_work(r, args.dedup_ttl_sec)
                 for k in r.scan_iter(match=current_task_scan_pattern()):
@@ -1384,6 +1432,7 @@ def main():
         if not message or message.get("type") not in ("pmessage", "message"):
             try:
                 _process_handoff_timeouts(r)
+                _process_task_reconciliations(r, args.dedup_ttl_sec)
                 _process_worker_liveness_expirations(r, args.dedup_ttl_sec)
                 _process_idle_owner_graph_work(r, args.dedup_ttl_sec)
             except Exception as exc:
