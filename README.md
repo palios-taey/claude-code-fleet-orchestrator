@@ -341,21 +341,18 @@ curl -s http://127.0.0.1:5002/health
 
 The ship gate runs acceptance scripts under [tests/](tests/), including stop decisions, human-review gates, ref safety, wake packets, public read-only behavior, and task completion evidence.
 
-The acceptance tests are standalone scripts (not `unittest`/`pytest` modules) — each is run individually, exactly as the ship gate does. Install the test extra (the tests use the FastAPI TestClient, which needs `httpx`), then run any test as a script. Most need a reachable Neo4j and the same environment as the API; some set `ORCH_TEST_NAMESPACE` to isolate their data. The authoritative list of tests and their per-test environment is [.github/workflows/ship-gate.yml](.github/workflows/ship-gate.yml).
+The acceptance tests are standalone scripts (not `unittest`/`pytest` modules) — each is run individually, exactly as the ship gate does. Install the test extra (the tests use the FastAPI TestClient, which needs `httpx`), then run any test as a script. Hermetic tests can run directly. Store-backed agent tests must not point at the operator's live Neo4j/Redis, even with a namespace; run them through [scripts/orch-acceptance-isolated](scripts/orch-acceptance-isolated), which starts throwaway no-auth Neo4j plus separate orchestrator and notify Redis containers on non-live loopback ports, sets `ORCH_DOTENV=empty`, and exports an acceptance namespace/prefix. The authoritative list of tests and their per-test environment is [.github/workflows/ship-gate.yml](.github/workflows/ship-gate.yml).
 
 ```bash
 pip install -e ".[test]"
 # Acceptance scripts are standalone (run each directly, not via unittest/pytest).
 # Defaults-contract probes suppress deployment .env so local runs match clean CI.
 ORCH_DOTENV=empty python tests/env_contract_acceptance.py
-ORCH_DOTENV=empty ORCH_NEO4J_URI=bolt://127.0.0.1:7687 ORCH_NEO4J_DB=neo4j ORCH_REDIS_HOST=127.0.0.1 ORCH_REDIS_PORT=6379 python tests/standalone_sessions_acceptance.py
-# Each talks to your orchestrator's Neo4j/Redis and needs a test namespace to
-# isolate its data. With your normal orchestrator env active (ORCH_NEO4J_URI
-# etc. from .env):
-ORCH_TEST_NAMESPACE=local-acceptance python tests/human_review_gate_acceptance.py
+scripts/orch-acceptance-isolated -- python tests/standalone_sessions_acceptance.py
+scripts/orch-acceptance-isolated -- python tests/human_review_gate_acceptance.py
 ```
 
-The authoritative list of acceptance scripts and the exact per-test environment is [.github/workflows/ship-gate.yml](.github/workflows/ship-gate.yml) — the ship gate runs each as its own step with an isolated environment. Run additional scripts the same way (one process each); give each its own `ORCH_TEST_NAMESPACE` to avoid cross-test data collisions.
+The authoritative list of acceptance scripts and the exact per-test environment is [.github/workflows/ship-gate.yml](.github/workflows/ship-gate.yml) — the ship gate runs each as its own step against GitHub Actions service containers and marks that mode with `ORCH_AGENT_TEST_INFRA=ephemeral-ci`. Local agents use `scripts/orch-acceptance-isolated` for store-backed tests; it gives each process its own `ORCH_TEST_NAMESPACE` and `NOTIFY_KEY_PREFIX`, so live operator state stays untouched.
 
 ## More Docs
 

@@ -50,6 +50,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ORCH_REDIS_SENTINELS` / `ORCH_REDIS_SENTINEL_MASTER` | `""` / `orch-master` | Optional Redis Sentinel HA. |
 | `ORCH_DATA_DIR` / `ORCH_STATE_DIR` | platform dirs | Data / state directories. |
 | `ORCH_DOTENV` | auto-discover | Explicit dotenv path. Set to `empty` to suppress cwd/repo `.env` auto-loading for defaults-contract tests; normal operator runs can leave auto-discovery enabled. |
+| `ORCH_AGENT_TEST_INFRA` | unset | Test-only isolation marker. Local agent mutation tests must run through `scripts/orch-acceptance-isolated`, which sets this to `throwaway` after assigning non-live Redis/Neo4j ports. GitHub Actions service-container runs set `ephemeral-ci`. It is not a server auth or runtime security control. |
 | `ORCH_NOTIFY_CLI` / `ORCH_NOTIFY_LIB_ROOT` | `taey-notify` / auto | Notification CLI name + lib root. |
 | `ACCOUNTABILITY_LEDGER_PATH` | platform state dir | Location of the hash-chained accountability ledger. The ledger module is explicit that it is **tamper-evident, not tamper-proof**; an ephemeral path silently loses the record — point it at durable, operator-owned storage. |
 | `ACCOUNTABILITY_CI_AUDIT_PATH` | platform state dir | Location of the separate hash-chained CI merge audit ledger (`ci-audit.jsonl`). Use durable, operator-owned storage; this chain records completed CONTROL merges only when real gate results and durations are supplied. |
@@ -132,8 +133,10 @@ creating a real expiring pause and no expiry creating an indefinite pause until
 
 ## 8. Test-only (never read by the running server)
 
-`ORCH_TEST_NAMESPACE` (safety guard — acceptance tests refuse to run against a
-production Neo4j namespace), `EASY_SETUP_ACCEPTANCE_INJECT_FAIL` /
+`ORCH_AGENT_TEST_INFRA` (`throwaway` for `scripts/orch-acceptance-isolated`,
+`ephemeral-ci` for GitHub Actions service containers), `ORCH_TEST_NAMESPACE`
+(safety guard — acceptance tests refuse to run against a production Neo4j
+namespace), `EASY_SETUP_ACCEPTANCE_INJECT_FAIL` /
 `REF_ACCEPTANCE_INJECT_FAIL` (negative-control fault injectors — they make tests
 *fail*, cannot fake a green), `PROBE_CHECK_MODE` / `PROBE_HEAD_SHA` (pre-merge gate
 test scaffolding), `ORCH_NOTIFY_CLI` (also overridable in tests), `PATH`.

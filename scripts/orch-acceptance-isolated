@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from fleet_orchestrator.test_isolation import (  # noqa: E402
+    build_throwaway_env,
+    free_loopback_port,
+)
+
+
+def _run(args: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, text=True, capture_output=True, timeout=timeout, check=False)
+
+
+def _docker(args: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+    result = _run(["docker", *args], timeout=timeout)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"docker {' '.join(args)} failed: {detail}")
+    return result
+
+
+def _wait_redis(container: str, timeout_s: int) -> None:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        result = _run(["docker", "exec", container, "redis-cli", "ping"], timeout=5)
+        if result.returncode == 0 and "PONG" in result.stdout:
+            return
+        time.sleep(1)
+    raise RuntimeError(f"Redis container {container} did not become ready within {timeout_s}s")
+
+
+def _wait_neo4j(uri: str, timeout_s: int) -> None:
+    try:
+        from neo4j import GraphDatabase
+    except ImportError as exc:
+        raise RuntimeError("neo4j Python package is required; run `pip install -e .` first") from exc
+
+    deadline = time.time() + timeout_s
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        driver = None
+        try:
+            driver = GraphDatabase.driver(uri, auth=None)
+            driver.verify_connectivity()
+            return
+        except Exception as exc:  # readiness poll; final failure is raised below
+            last_error = exc
+            time.sleep(2)
+        finally:
+            if driver is not None:
+                driver.close()
+    raise RuntimeError(f"Neo4j did not become ready within {timeout_s}s: {last_error}")
+
+
+def _strip_separator(command: list[str]) -> list[str]:
+    if command and command[0] == "--":
+        return command[1:]
+    return command
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run a store-backed acceptance command against throwaway Neo4j, "
+            "orchestrator Redis, and notify Redis instances."
+        )
+    )
+    parser.add_argument("--namespace", help="ORCH_TEST_NAMESPACE/NOTIFY_KEY_PREFIX seed; default is random acceptance-*")
+    parser.add_argument("--neo4j-image", default="neo4j:5", help="Docker image for the throwaway Neo4j container")
+    parser.add_argument("--redis-image", default="redis:7", help="Docker image for throwaway Redis containers")
+    parser.add_argument("--timeout", type=int, default=90, help="Service readiness timeout in seconds")
+    parser.add_argument("--print-env", action="store_true", help="Print the generated isolated environment and exit")
+    parser.add_argument("command", nargs=argparse.REMAINDER, help="Command to run, usually `-- python tests/...py`")
+    args = parser.parse_args()
+
+    command = _strip_separator(args.command)
+    neo4j_port = free_loopback_port()
+    redis_port = free_loopback_port()
+    notify_redis_port = free_loopback_port()
+    env = build_throwaway_env(
+        neo4j_port=neo4j_port,
+        redis_port=redis_port,
+        notify_redis_port=notify_redis_port,
+        namespace=args.namespace,
+        repo_root=str(ROOT),
+    )
+
+    if args.print_env:
+        print(json.dumps({key: env[key] for key in sorted(env) if key.startswith(("ORCH_", "REDIS_", "NOTIFY_"))}, indent=2))
+        return 0
+
+    if not command:
+        parser.error("missing command; example: scripts/orch-acceptance-isolated -- python tests/task_identity_acceptance.py")
+
+    token = env["ORCH_TEST_NAMESPACE"].replace(":", "-").replace(".", "-").replace("_", "-")
+    redis_name = f"orch-acceptance-redis-{token}"
+    notify_name = f"orch-acceptance-notify-redis-{token}"
+    neo4j_name = f"orch-acceptance-neo4j-{token}"
+    containers = [redis_name, notify_name, neo4j_name]
+
+    try:
+        _docker(["version"], timeout=15)
+        _docker(["run", "--rm", "-d", "--name", redis_name, "-p", f"127.0.0.1:{redis_port}:6379", args.redis_image])
+        _docker(["run", "--rm", "-d", "--name", notify_name, "-p", f"127.0.0.1:{notify_redis_port}:6379", args.redis_image])
+        _docker(
+            [
+                "run",
+                "--rm",
+                "-d",
+                "--name",
+                neo4j_name,
+                "-e",
+                "NEO4J_AUTH=none",
+                "-p",
+                f"127.0.0.1:{neo4j_port}:7687",
+                args.neo4j_image,
+            ]
+        )
+        _wait_redis(redis_name, args.timeout)
+        _wait_redis(notify_name, args.timeout)
+        _wait_neo4j(env["ORCH_NEO4J_URI"], args.timeout)
+        print(
+            "orch-acceptance-isolated: running against "
+            f"neo4j={env['ORCH_NEO4J_URI']} orch_redis=127.0.0.1:{redis_port} "
+            f"notify_redis=127.0.0.1:{notify_redis_port} namespace={env['ORCH_TEST_NAMESPACE']}",
+            file=sys.stderr,
+        )
+        return subprocess.run(command, env=env).returncode
+    except FileNotFoundError as exc:
+        print(f"orch-acceptance-isolated: docker is required for throwaway stores: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        print(f"orch-acceptance-isolated: FAIL: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        for name in containers:
+            subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

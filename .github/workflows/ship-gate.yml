@@ -38,6 +38,7 @@ jobs:
     env:
       REDIS_HOST: 127.0.0.1
       REDIS_PORT: "6379"
+      ORCH_AGENT_TEST_INFRA: ephemeral-ci
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -521,6 +522,8 @@ jobs:
         run: python tests/singleton_init_race_acceptance.py
       - name: Ship-gate — no internal-service auth (Neo4j connects auth=None, no credential config)
         run: python tests/no_internal_auth_acceptance.py
+      - name: Ship-gate — agent mutation tests use throwaway stores
+        run: python tests/throwaway_db_layer_acceptance.py
       - name: Ship-gate — allowed ref roots auto-derive from supervisor session roots
         run: python tests/ref_roots_derive_from_sessions_acceptance.py
       - name: Ship-gate — loader captures all task dependencies (multi-depends not dropped)
