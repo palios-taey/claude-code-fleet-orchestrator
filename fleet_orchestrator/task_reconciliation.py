@@ -55,7 +55,34 @@ def _outcome_matches_task(outcome: Dict[str, Any], task_id: str) -> bool:
     return task_id in details
 
 
-def _matching_worker_terminal_outcome(r: Any, worker: str, task_id: str) -> Optional[Dict[str, Any]]:
+def _float_or_none(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fresh_in_progress_worker_liveness(task: Dict[str, Any], worker: str, current: Dict[str, Any]) -> bool:
+    if str(task.get("status") or "").strip() != "in_progress":
+        return False
+    if str(task.get("worker_liveness_worker") or "").strip() != worker:
+        return False
+    current_started = _float_or_none(current.get("started_at"))
+    liveness_started = _float_or_none(task.get("worker_liveness_started_at"))
+    liveness_heartbeat = _float_or_none(task.get("worker_liveness_heartbeat_at"))
+    if current_started is None:
+        return liveness_started is not None or liveness_heartbeat is not None
+    if liveness_started is not None and liveness_started >= current_started:
+        return True
+    if liveness_heartbeat is not None and liveness_heartbeat >= current_started:
+        return True
+    return False
+
+
+def _matching_worker_terminal_outcome(r: Any, worker: str, task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    task_id = str(task.get("task_id") or "").strip()
+    if not task_id:
+        return None
     current = _current_task_payload(r, worker)
     if not current or str(current.get("task_id") or "").strip() != task_id:
         return None
@@ -66,6 +93,14 @@ def _matching_worker_terminal_outcome(r: Any, worker: str, task_id: str) -> Opti
     if outcome_name not in _TERMINAL_OUTCOME_TO_STATUS:
         return None
     if not _outcome_matches_task(outcome, task_id):
+        return None
+    if _fresh_in_progress_worker_liveness(task, worker, current):
+        LOG.info(
+            "stale-task reconciliation skipped active retry task=%s worker=%s outcome=%s",
+            task_id,
+            worker,
+            outcome_name,
+        )
         return None
     return outcome
 
@@ -94,14 +129,18 @@ def _non_terminal_reconciliation_candidates(
             """
             MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE coalesce(t.status, 'pending') IN ['pending', 'in_progress']
+              AND NOT toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:'
               AND ($task_prefix = '' OR t.id STARTS WITH $task_prefix)
               AND ($project_prefix = '' OR p.id STARTS WITH $project_prefix)
             RETURN t.id AS task_id,
                    t.description AS description,
                    coalesce(t.status, 'pending') AS status,
+                   t.blocked_on AS blocked_on,
                    t.owner AS owner,
                    t.dispatched_to AS dispatched_to,
                    t.worker_liveness_worker AS worker_liveness_worker,
+                   t.worker_liveness_started_at AS worker_liveness_started_at,
+                   t.worker_liveness_heartbeat_at AS worker_liveness_heartbeat_at,
                    t.task_type AS task_type,
                    p.id AS project_id,
                    p.supervisor AS project_supervisor
@@ -155,7 +194,7 @@ def reconcile_terminal_outcome_tasks(
         if not task_id:
             continue
         for worker in _worker_candidates(task):
-            outcome = _matching_worker_terminal_outcome(r, worker, task_id)
+            outcome = _matching_worker_terminal_outcome(r, worker, task)
             if not outcome:
                 continue
             outcome_name = str(outcome.get("outcome") or "").strip().lower()

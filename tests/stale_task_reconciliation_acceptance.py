@@ -62,12 +62,16 @@ WORKER = f"{SUP}-codex"
 ERROR_WORKER = f"{SUP}-err-codex"
 DONE_WORKER = f"{SUP}-done-codex"
 MISMATCH_WORKER = f"{SUP}-mismatch-codex"
+AWAIT_WORKER = f"{SUP}-await-codex"
+FRESH_WORKER = f"{SUP}-fresh-codex"
 PROJECT = f"{PFX}-project"
 PHASE = f"{PROJECT}::phase"
 INTERRUPTED = f"{PROJECT}::interrupted"
 ERROR_TASK = f"{PROJECT}::error"
 DONE_TASK = f"{PROJECT}::done"
 MISMATCH = f"{PROJECT}::mismatch"
+AWAIT_TASK = f"{PROJECT}::await-parked"
+FRESH_RETRY = f"{PROJECT}::fresh-retry"
 PR_AUDIT = f"{PROJECT}::r5-audit-green"
 PR_RED = f"{PROJECT}::r5-audit-red"
 PR_PLAIN = f"{PROJECT}::plain-pr-mention"
@@ -108,6 +112,43 @@ def _bind(worker: str, task_id: str, outcome: str, details: str, *, include_task
     if include_task_id:
         payload["task_id"] = task_id
     r.set(_state_key(worker, "last_outcome"), json.dumps(payload))
+
+
+def _bind_fresh_retry_with_stale_outcome(worker: str, task_id: str) -> None:
+    fresh_started_at = 999999.0
+    r = _redis()
+    r.set(
+        _state_key(worker, "current_task"),
+        json.dumps({
+            "task_id": task_id,
+            "description": "fresh retry active",
+            "supervisor": SUP,
+            "started_at": fresh_started_at,
+        }),
+    )
+    r.set(
+        _state_key(worker, "last_outcome"),
+        json.dumps({
+            "outcome": "error",
+            "task_id": task_id,
+            "details": "stale error from previous attempt",
+        }),
+    )
+    with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+        session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            SET t.worker_liveness_worker = $worker,
+                t.worker_liveness_supervisor = $supervisor,
+                t.worker_liveness_started_at = $started_at,
+                t.worker_liveness_heartbeat_at = $started_at,
+                t.worker_liveness_ttl_secs = 300
+            """,
+            task_id=task_id,
+            worker=worker,
+            supervisor=SUP,
+            started_at=fresh_started_at,
+        )
 
 
 def _current_task_id(worker: str) -> str:
@@ -174,14 +215,20 @@ def _setup() -> None:
     create_task(phase_id=PHASE, task_id=ERROR_TASK, description="in-progress error zombie", owner=ERROR_WORKER, priority=10, wake_owner_if_ready=False, config=CFG)
     create_task(phase_id=PHASE, task_id=DONE_TASK, description="done outcome awaits supervisor control", owner=DONE_WORKER, priority=10, wake_owner_if_ready=False, config=CFG)
     create_task(phase_id=PHASE, task_id=MISMATCH, description="mismatched terminal outcome is not proof", owner=MISMATCH_WORKER, priority=10, wake_owner_if_ready=False, config=CFG)
+    create_task(phase_id=PHASE, task_id=AWAIT_TASK, description="AWAIT parked task must not be reaped", owner=AWAIT_WORKER, priority=10, wake_owner_if_ready=False, config=CFG)
+    create_task(phase_id=PHASE, task_id=FRESH_RETRY, description="fresh active retry must not be reaped by stale outcome", owner=FRESH_WORKER, priority=10, wake_owner_if_ready=False, config=CFG)
     create_task(phase_id=PHASE, task_id=PR_AUDIT, description="R5 audit for PR #17", owner=SUP, priority=10, wake_owner_if_ready=False, config=CFG)
     create_task(phase_id=PHASE, task_id=PR_RED, description="Gatekeeper review for PR #18", owner=SUP, priority=10, wake_owner_if_ready=False, config=CFG)
     create_task(phase_id=PHASE, task_id=PR_PLAIN, description="Implementation notes mention PR #17 in prose only", owner=SUP, priority=10, wake_owner_if_ready=False, config=CFG)
     update_task_status(ERROR_TASK, "in_progress", owner=ERROR_WORKER, config=CFG)
+    update_task_status(AWAIT_TASK, "in_progress", owner=AWAIT_WORKER, blocked_on="AWAIT:external-signal:acceptance", config=CFG)
+    update_task_status(FRESH_RETRY, "in_progress", owner=FRESH_WORKER, config=CFG)
     _bind(WORKER, INTERRUPTED, "interrupted", f"interrupted by restart [task_id={INTERRUPTED}]")
     _bind(ERROR_WORKER, ERROR_TASK, "error", f"tool failed [task_id={ERROR_TASK}]")
     _bind(DONE_WORKER, DONE_TASK, "done", f"done [task_id={DONE_TASK}]")
     _bind(MISMATCH_WORKER, MISMATCH, "interrupted", "interrupted different task", include_task_id=False)
+    _bind(AWAIT_WORKER, AWAIT_TASK, "interrupted", f"await parked [task_id={AWAIT_TASK}]")
+    _bind_fresh_retry_with_stale_outcome(FRESH_WORKER, FRESH_RETRY)
 
 
 def main() -> int:
@@ -226,6 +273,8 @@ def main() -> int:
         error_task = get_task(ERROR_TASK, config=CFG)
         done_task = get_task(DONE_TASK, config=CFG)
         mismatch = get_task(MISMATCH, config=CFG)
+        await_task = get_task(AWAIT_TASK, config=CFG)
+        fresh_retry = get_task(FRESH_RETRY, config=CFG)
         pr_audit = get_task(PR_AUDIT, config=CFG)
         pr_red = get_task(PR_RED, config=CFG)
         pr_plain = get_task(PR_PLAIN, config=CFG)
@@ -236,6 +285,9 @@ def main() -> int:
         _check("error zombie terminalized as failed", error_task.get("status") == "failed", error_task)
         _check("done outcome is not auto-completed by reconciliation", done_task.get("status") == "pending", done_task)
         _check("mismatched terminal outcome is not proof", mismatch.get("status") == "pending", mismatch)
+        _check("structured AWAIT task is not terminalized by stale outcome", await_task.get("status") == "in_progress", await_task)
+        _check("fresh in-progress retry is not terminalized by stale outcome", fresh_retry.get("status") == "in_progress", fresh_retry)
+        _check("fresh retry current_task remains bound", _current_task_id(FRESH_WORKER) == FRESH_RETRY, _current_task_id(FRESH_WORKER))
         _check(
             "merged PR audit auto-closes only with verified gates",
             pr_audit.get("status") == "completed"
