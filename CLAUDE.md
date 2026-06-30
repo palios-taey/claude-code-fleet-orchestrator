@@ -104,25 +104,25 @@ taey-question answer <question-id> "approved"
 
 Use the smallest gate that proves the touched invariant, then include the command and result in your report.
 
-First establish the environment. Some checks are hermetic, but many acceptance scripts talk to live Neo4j and Redis using `ORCH_NEO4J_URI`, `ORCH_NEO4J_DB`, `ORCH_REDIS_HOST`, and `ORCH_REDIS_PORT`. Bootstrap those stores with the README quickstart or point the variables at your own test stores before running store-backed tests. Do not run destructive or state-mutating acceptance tests against an operator's live database. Use a throwaway `ORCH_NEO4J_DB` when available, and set `ORCH_TEST_NAMESPACE` to a value containing `test`, `ci`, or `acceptance` for tests that require it. Several tests also isolate Redis keys with `NOTIFY_KEY_PREFIX`.
+First establish the environment. Some checks are hermetic, but many acceptance scripts mutate Neo4j and Redis through `ORCH_NEO4J_URI`, `ORCH_NEO4J_DB`, `ORCH_REDIS_HOST`, and `ORCH_REDIS_PORT`. Do not point those variables at an operator's live stores for agent-run tests, whether loopback or non-loopback. Store-backed acceptance must run through `scripts/orch-acceptance-isolated -- python tests/<name>_acceptance.py`, which starts throwaway Neo4j plus separate orchestrator and notify Redis instances on non-live loopback ports, sets `ORCH_DOTENV=empty`, and provides isolated `ORCH_TEST_NAMESPACE` / `NOTIFY_KEY_PREFIX` values. GitHub Actions service-container runs are the only `ORCH_AGENT_TEST_INFRA=ephemeral-ci` path.
 
 Useful local checks:
 
 ```bash
 python3 scripts/verify-doc-cli-drift.py
 python3 tests/localbind_acceptance.py
-python3 tests/task_completion_evidence_acceptance.py
-python3 tests/human_review_gate_acceptance.py
-python3 tests/human_review_stop_acceptance.py
-python3 tests/wake_packet_acceptance.py
-python3 tests/standalone_sessions_acceptance.py
-python3 tests/ready_definition_acceptance.py
-python3 tests/stop_decision_acceptance.py
-python3 tests/stop_supervisor_dispatch_acceptance.py
-python3 tests/dispatch_wake_atomic_acceptance.py
+scripts/orch-acceptance-isolated -- python3 tests/task_completion_evidence_acceptance.py
+scripts/orch-acceptance-isolated -- python3 tests/human_review_gate_acceptance.py
+scripts/orch-acceptance-isolated -- python3 tests/human_review_stop_acceptance.py
+scripts/orch-acceptance-isolated -- python3 tests/wake_packet_acceptance.py
+scripts/orch-acceptance-isolated -- python3 tests/standalone_sessions_acceptance.py
+scripts/orch-acceptance-isolated -- python3 tests/ready_definition_acceptance.py
+scripts/orch-acceptance-isolated -- python3 tests/stop_decision_acceptance.py
+scripts/orch-acceptance-isolated -- python3 tests/stop_supervisor_dispatch_acceptance.py
+scripts/orch-acceptance-isolated -- python3 tests/dispatch_wake_atomic_acceptance.py
 ```
 
-For docs-only changes, still run `python3 scripts/verify-doc-cli-drift.py` and `git diff --check`. For network posture changes, run `python3 tests/localbind_acceptance.py`; for public dashboard changes, also run `python3 tests/standalone_sessions_acceptance.py` and `python3 scripts/verify-public-readonly.py`. For task-state changes, run the relevant evidence or human-review tests. For readiness changes, run `python3 tests/ready_definition_acceptance.py`; for stop-discipline changes, run `python3 tests/stop_decision_acceptance.py`, `python3 tests/stop_supervisor_dispatch_acceptance.py`, and any human-review stop test that matches the change. For dispatch claim/bind changes, run `python3 tests/dispatch_wake_atomic_acceptance.py`.
+For docs-only changes, still run `python3 scripts/verify-doc-cli-drift.py` and `git diff --check`. For network posture changes, run `python3 tests/localbind_acceptance.py`; for public dashboard changes, also run `scripts/orch-acceptance-isolated -- python3 tests/standalone_sessions_acceptance.py` and `python3 scripts/verify-public-readonly.py`. For task-state changes, run the relevant evidence or human-review tests through `scripts/orch-acceptance-isolated` when they touch stores. For readiness changes, run `scripts/orch-acceptance-isolated -- python3 tests/ready_definition_acceptance.py`; for stop-discipline changes, run `scripts/orch-acceptance-isolated -- python3 tests/stop_decision_acceptance.py`, `scripts/orch-acceptance-isolated -- python3 tests/stop_supervisor_dispatch_acceptance.py`, and any matching human-review stop test. For dispatch claim/bind changes, run `scripts/orch-acceptance-isolated -- python3 tests/dispatch_wake_atomic_acceptance.py`.
 
 Risky paths listed in `.github/r5-risky-paths` require both external audit statuses in the R5 workflow. Do not self-merge those changes.
 
