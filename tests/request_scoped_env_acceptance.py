@@ -16,7 +16,7 @@ import fleet_orchestrator.context_assembler as assembler  # noqa: E402
 
 
 FAILURES: list[str] = []
-ENV_KEYS = ("ORCH_RULES_ROOT", "ORCH_SESSION_ROOTS")
+ENV_KEYS = ("ORCH_MEMORY_ROOT", "ORCH_RULES_ROOT", "ORCH_SESSION_ROOTS")
 
 
 def _check(label: str, cond: bool, extra: object = "") -> None:
@@ -55,6 +55,10 @@ def _rules_text(context: dict[str, object]) -> str:
     return "\n".join(str(rule.get("text", "")) for rule in context.get("rules") or [])
 
 
+def _memory_text(context: dict[str, object]) -> str:
+    return "\n".join(str(item.get("content", "")) for item in context.get("memory") or [])
+
+
 def _write_rule(root: Path, session: str, text: str) -> None:
     global_path = root / "global.md"
     if not global_path.exists():
@@ -63,6 +67,15 @@ def _write_rule(root: Path, session: str, text: str) -> None:
     path = root / "supervisors" / f"{session}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text + "\n", encoding="utf-8")
+
+
+def _write_memory(root: Path, session: str, text: str) -> None:
+    path = root / "supervisors" / f"{session}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\nname: {session} memory\ndescription: scoped memory\n---\n{text}\n",
+        encoding="utf-8",
+    )
 
 
 def _scoped_rules_override_operator_global() -> None:
@@ -86,6 +99,29 @@ def _scoped_rules_override_operator_global() -> None:
     text = _rules_text(context)
     _check("session ORCH_RULES_ROOT overrides operator global only for this request", "SCOPED_ALPHA_RULE" in text and "OPERATOR_ALPHA_RULE" not in text, text)
     _check("scoped rules request does not mutate os.environ", after == before, {"before": {k: before.get(k) for k in ENV_KEYS}, "after": {k: after.get(k) for k in ENV_KEYS}})
+
+
+def _scoped_memory_root_override_operator_global() -> None:
+    with _preserved_env(), tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        session_root = tmp / "alpha-session"
+        session_root.mkdir()
+        operator_memory = tmp / "operator-memory"
+        scoped_memory = tmp / "scoped-memory"
+        _write_memory(operator_memory, "alpha", "OPERATOR_ALPHA_MEMORY")
+        _write_memory(scoped_memory, "alpha", "SCOPED_ALPHA_MEMORY")
+        (session_root / ".env").write_text(f"ORCH_MEMORY_ROOT={scoped_memory}\n", encoding="utf-8")
+
+        os.environ["ORCH_SESSION_ROOTS"] = json.dumps({"alpha": str(session_root)})
+        os.environ["ORCH_MEMORY_ROOT"] = str(operator_memory)
+        before = dict(os.environ)
+        with _context_mocks():
+            context = assembler.select_context("alpha-codex", cli="codex")
+        after = dict(os.environ)
+
+    text = _memory_text(context)
+    _check("session ORCH_MEMORY_ROOT overrides operator global only for this request", "SCOPED_ALPHA_MEMORY" in text and "OPERATOR_ALPHA_MEMORY" not in text, text)
+    _check("scoped memory request does not mutate os.environ", after == before, {"before": {k: before.get(k) for k in ENV_KEYS}, "after": {k: after.get(k) for k in ENV_KEYS}})
 
 
 def _no_rules_root_leaks_to_next_session() -> None:
@@ -157,6 +193,7 @@ def _session_roots_are_request_scoped() -> None:
 
 def main() -> int:
     _scoped_rules_override_operator_global()
+    _scoped_memory_root_override_operator_global()
     _no_rules_root_leaks_to_next_session()
     _session_roots_are_request_scoped()
     if FAILURES:

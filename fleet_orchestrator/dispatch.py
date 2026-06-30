@@ -73,6 +73,7 @@ from .notify_state import state_key as _notify_state_key
 from .decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from .handoff_validation import mark_superseded_for_task
 from .hook_installation import hook_installation_status
+from .memory_tier import get_memory
 from .rules_tier import get_rules
 from .worker_liveness import register_worker_task_liveness
 
@@ -557,6 +558,11 @@ def _rules_root_from_env() -> Optional[Path]:
     return Path(raw).expanduser().resolve(strict=False) if raw else None
 
 
+def _memory_root_from_env() -> Optional[Path]:
+    raw = os.environ.get("ORCH_MEMORY_ROOT", "").strip()
+    return Path(raw).expanduser().resolve(strict=False) if raw else None
+
+
 def _minimal_dispatch_context(worker: str, task_id: str, description: str,
                               supervisor: Optional[str], cli: str) -> dict[str, Any]:
     session = _base_session_name(worker)
@@ -569,7 +575,7 @@ def _minimal_dispatch_context(worker: str, task_id: str, description: str,
         "task_refs": [],
         "identity": {},
         "supervisor_affordance": {},
-        "memory": [],
+        "memory": get_memory(session, project=project, memory_root=_memory_root_from_env()),
         "rules": get_rules(session, project=project, rules_root=_rules_root_from_env()),
         "rules_meta": {},
         "budget_used": 0,

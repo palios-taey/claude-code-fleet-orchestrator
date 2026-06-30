@@ -81,11 +81,28 @@ def _dispatch_body(*, worker: str, supervisor: str, prompt_body: str | None,
             "PROJECT_RULE_MANDATORY_DISPATCH",
             encoding="utf-8",
         )
+        memory_root = Path(raw) / "memory"
+        (memory_root / "supervisors").mkdir(parents=True)
+        (memory_root / "projects").mkdir(parents=True)
+        (memory_root / "global.md").write_text(
+            "---\nname: global dispatch memory\ndescription: dispatch global\n---\nGLOBAL_MEMORY_MANDATORY_DISPATCH\n",
+            encoding="utf-8",
+        )
+        (memory_root / "supervisors" / f"{worker.removesuffix('-codex')}.md").write_text(
+            "---\nname: supervisor dispatch memory\ndescription: dispatch supervisor\n---\nSUPERVISOR_MEMORY_MANDATORY_DISPATCH\n",
+            encoding="utf-8",
+        )
+        (memory_root / "projects" / f"{project_id}.md").write_text(
+            "---\nname: project dispatch memory\ndescription: dispatch project\n---\nPROJECT_MEMORY_MANDATORY_DISPATCH\n",
+            encoding="utf-8",
+        )
 
         old_rules_root = os.environ.get("ORCH_RULES_ROOT")
+        old_memory_root = os.environ.get("ORCH_MEMORY_ROOT")
         old_endpoint = os.environ.get("ORCH_WAKE_PACKET_ENDPOINT_ENABLED")
         old_roots = os.environ.get("ORCH_SESSION_ROOTS")
         os.environ["ORCH_RULES_ROOT"] = str(rules_root)
+        os.environ["ORCH_MEMORY_ROOT"] = str(memory_root)
         os.environ.pop("ORCH_SESSION_ROOTS", None)
         if endpoint_enabled is None:
             os.environ.pop("ORCH_WAKE_PACKET_ENDPOINT_ENABLED", None)
@@ -126,6 +143,10 @@ def _dispatch_body(*, worker: str, supervisor: str, prompt_body: str | None,
                 os.environ.pop("ORCH_RULES_ROOT", None)
             else:
                 os.environ["ORCH_RULES_ROOT"] = old_rules_root
+            if old_memory_root is None:
+                os.environ.pop("ORCH_MEMORY_ROOT", None)
+            else:
+                os.environ["ORCH_MEMORY_ROOT"] = old_memory_root
             if old_endpoint is None:
                 os.environ.pop("ORCH_WAKE_PACKET_ENDPOINT_ENABLED", None)
             else:
@@ -144,6 +165,9 @@ def _assert_mandatory_packet(label: str, body: str, expected_dispatch_text: str)
     _check(f"{label}: global rule injected", "GLOBAL_RULE_MANDATORY_DISPATCH" in body, body)
     _check(f"{label}: supervisor rule injected", "SUPERVISOR_RULE_MANDATORY_DISPATCH" in body, body)
     _check(f"{label}: project rule injected", "PROJECT_RULE_MANDATORY_DISPATCH" in body, body)
+    _check(f"{label}: global memory injected", "GLOBAL_MEMORY_MANDATORY_DISPATCH" in body, body)
+    _check(f"{label}: supervisor memory injected", "SUPERVISOR_MEMORY_MANDATORY_DISPATCH" in body, body)
+    _check(f"{label}: project memory injected", "PROJECT_MEMORY_MANDATORY_DISPATCH" in body, body)
     _check(f"{label}: dispatch prompt preserved inside packet", expected_dispatch_text in body, body)
     _check(f"{label}: record_outcome footer preserved", "record_outcome" in body, body)
 

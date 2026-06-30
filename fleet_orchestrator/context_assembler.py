@@ -28,6 +28,7 @@ from fleet_orchestrator.orch_schema import (
     get_task_project,
 )
 from fleet_orchestrator.paths import repo_root
+from fleet_orchestrator.memory_tier import get_memory
 from fleet_orchestrator.rules_tier import RULES_ROOT, get_rules
 
 
@@ -120,7 +121,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
     task_text = _task_text(work, summary, task_id)
     refs = _select_refs(summary, work, task_id, session_key)
     memory_files = _read_memory_files(_memory_dirs(session_key, work, summary, roots, aliases))
-    selected_memory = _rank_memory(memory_files, task_text, max_memory=max_memory)
+    selected_memory = _select_memory(session_key, work, summary, task_text, memory_files, scoped_env, max_memory)
     repo_head = _git_head()
     rules_selection = _select_rules(session_key, work, summary, task_text, scoped_env=scoped_env)
     rules = rules_selection["rules"]
@@ -364,7 +365,7 @@ def _operating_source(work: Dict[str, Any], task_id: Optional[str]) -> str:
     return "none"
 
 
-SESSION_ENV_ALLOWLIST = {"ORCH_RULES_ROOT", "ORCH_SESSION_ROOTS"}
+SESSION_ENV_ALLOWLIST = {"ORCH_MEMORY_ROOT", "ORCH_RULES_ROOT", "ORCH_SESSION_ROOTS"}
 
 
 def _scoped_env_value(scoped_env: Optional[Dict[str, str]], key: str) -> str:
@@ -607,6 +608,55 @@ def _rank_memory(items: List[Dict[str, Any]], task_text: str, max_memory: int) -
     ranked.sort(key=lambda row: (-row[0], row[1]))
     selected = [row[2] for row in ranked[:max(0, max_memory)]]
     return [_public_memory_item(item) for item in selected]
+
+
+def _select_memory(session: str, work: Dict[str, Any], summary: Optional[Dict[str, Any]],
+                   task_text: str, memory_files: List[Dict[str, Any]],
+                   scoped_env: Optional[Dict[str, str]], max_memory: int) -> List[Dict[str, Any]]:
+    tier_memory = get_memory(
+        session,
+        project=_memory_project_key(work, summary),
+        memory_root=_memory_root(scoped_env),
+        max_items=max_memory,
+    )
+    ranked_legacy = _rank_memory(memory_files, task_text, max_memory=max_memory)
+    return _dedupe_memory(tier_memory + ranked_legacy, max_memory=max_memory)
+
+
+def _memory_project_key(work: Dict[str, Any], summary: Optional[Dict[str, Any]]) -> Optional[str]:
+    project = (
+        work.get("project_id")
+        or ((summary or {}).get("project") or {}).get("id")
+        or work.get("project_name")
+        or ((summary or {}).get("project") or {}).get("name")
+    )
+    return str(project) if project else None
+
+
+def _memory_root(scoped_env: Optional[Dict[str, str]] = None) -> Optional[Path]:
+    raw = _scoped_env_value(scoped_env, "ORCH_MEMORY_ROOT").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve(strict=False)
+
+
+def _dedupe_memory(items: List[Dict[str, Any]], max_memory: int) -> List[Dict[str, Any]]:
+    selected: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        key = str(item.get("path") or item.get("sha256") or _sha256_json({
+            "name": item.get("name", ""),
+            "type": item.get("type", ""),
+            "description": item.get("description", ""),
+            "content": item.get("content", ""),
+        }))
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(dict(item))
+        if len(selected) >= max(0, max_memory):
+            break
+    return selected
 
 
 def _public_memory_item(item: Dict[str, Any]) -> Dict[str, Any]:

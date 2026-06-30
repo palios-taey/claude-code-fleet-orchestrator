@@ -144,6 +144,7 @@ Fleet and context:
 - `ORCH_SESSION_ROOTS`: JSON or comma-separated `session=/repo/root` map used by the context assembler to find each session's `MEMORY.md` and repo rules. These repo roots are also auto-derived as allowed ref roots, so refs can work without `ORCH_REF_ALLOWED_ROOT` when session roots are configured.
 - `ORCH_WAKE_PACKET_ENDPOINT_ENABLED`: default `1`; set `0` to disable only the wake-packet API endpoint. Deprecated alias: `ORCH_WAKE_PACKET_ENABLED`.
 - `ORCH_RULES_ROOT`: optional rules directory used by the context assembler.
+- `ORCH_MEMORY_ROOT`: optional memory directory used by the context assembler and dispatch fallback. See `memory/README.md`.
 - `ORCH_IDENTITY_ROOT`: optional trusted identity directory. Companion sessions load full operator-supplied identity from this root; engineering sessions use the built-in lean role core.
 - `ORCH_COMPANION_SESSIONS`: optional comma-separated companion session ids. Defaults to `taey,companion`.
 - `ORCH_SHIP_GATES`: comma-separated task-id suffixes that must be complete before a project can receive a successful ship verdict.
