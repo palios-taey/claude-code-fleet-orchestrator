@@ -32,6 +32,7 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
     create_project, create_phase, create_task, update_task_status,
     _raw_stop_decision, init_schema, get_neo4j_driver, _state_key,
     _PEER_HEARTBEAT_STALE_SEC, set_project_user_stop_conditions,
+    add_dependency,
 )
 from fleet_orchestrator.config import OrchConfig  # noqa: E402
 from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
@@ -61,6 +62,7 @@ _SUP = f"{_PFX}-sup"
 _PEER = f"{_SUP}-codex"
 _UNRELATED = f"{_PFX}-hands"
 _UNRELATED_PEER = f"{_UNRELATED}-codex"
+_LINKEDIN = f"{_PFX}-linkedin"
 _FAILURES: list[str] = []
 
 
@@ -128,6 +130,7 @@ def _cleanup(drv) -> None:
     _clear_peer(_PEER)
     _clear_peer(_UNRELATED)
     _clear_peer(_UNRELATED_PEER)
+    _clear_peer(_LINKEDIN)
     with drv.session(database=CFG.neo4j_db) as s:
         s.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=_PFX)
 
@@ -246,6 +249,31 @@ def main() -> int:
                d.get("block") is True and d.get("task_id") == owned, str(d))
         update_task_status(owned, "completed", owner=_UNRELATED,
                            completion_evidence={"production_observation": "child-owned work preserved"}, config=CFG)
+
+        # 5d. executor-owned depends-chain must self-advance even when no Redis
+        # parent/current_task context survives the prior step completion.
+        step_one = mktask(P, "linkedin-step-1", _LINKEDIN)
+        step_two = mktask(P, "linkedin-step-2", _LINKEDIN)
+        add_dependency(step_two, step_one, config=CFG)
+        _clear_peer(_LINKEDIN)
+        d = _raw_stop_decision(_LINKEDIN, config=CFG)
+        _check("executor without parent context still receives first owned ready step",
+               d.get("block") is True and d.get("task_id") == step_one and d.get("project_id") == P, str(d))
+        update_task_status(step_one, "in_progress", owner=_LINKEDIN, config=CFG)
+        _R.set(_state_key(_LINKEDIN, "current_task"),
+               json.dumps({"task_id": step_one, "started_at": time.time()}))
+        update_task_status(step_one, "completed", owner=_LINKEDIN, completed_by=_LINKEDIN,
+                           completion_evidence={"production_observation": "executor chain step one done"},
+                           config=CFG)
+        d = _raw_stop_decision(_LINKEDIN, config=CFG)
+        _check("executor completion advances to next owned ready step after current_task clears",
+               d.get("block") is True and d.get("task_id") == step_two and d.get("project_id") == P, str(d))
+        update_task_status(step_two, "completed", owner=_LINKEDIN, completed_by=_LINKEDIN,
+                           completion_evidence={"production_observation": "executor chain drained"},
+                           config=CFG)
+        d = _raw_stop_decision(_LINKEDIN, config=CFG)
+        _check("executor chain is bounded once no owned ready step remains",
+               d.get("wake_type") == "ALLOW_STOP" and d.get("task_id") is None, str(d))
 
         C = f"{_PFX}-child-supervised"
         create_project(project_id=C, name=C, supervisor=_UNRELATED, config=CFG)
