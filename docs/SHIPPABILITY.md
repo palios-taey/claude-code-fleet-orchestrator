@@ -76,6 +76,26 @@ The helper resolves the PR head SHA, verifies `r5-audit-gate` and
 `ship-gate-acceptance` are green on that SHA through `gh api`, then refuses unless
 the supplied OrchTask is `completed` with `completion_evidence.commit_sha`
 matching the head SHA and either `gate_run_id` or `production_observation`.
+For PR-based runs it also detaches clean peer worktrees that still have the PR
+head branch checked out before the branch-delete step. Dirty peer worktrees or
+non-peer checkouts fail loud instead of silently discarding work.
+
+Merged remote branches can be cleaned explicitly with:
+
+```bash
+scripts/orch-prune-merged-branches \
+  --repo <local-checkout> \
+  --pattern 'codex/*' \
+  --github-repo OWNER/REPO \
+  --delete-merged
+```
+
+The cleanup verifies each matching remote branch is already merged into
+`origin/main` before deleting it. For squash-merged PRs, `--github-repo` allows
+GitHub's merged PR state to prove the merge only when the PR head SHA still
+matches the current remote branch SHA. Unmerged branches are skipped and listed.
+Dirty peer worktrees pinning an otherwise merged branch are also skipped and
+listed so local work is not discarded during cleanup.
 
 After the actual CONTROL merge completes, append the merge to the separate
 hash-chained CI audit ledger only with real gate verdicts and durations:

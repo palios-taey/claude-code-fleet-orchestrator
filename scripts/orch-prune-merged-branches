@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from fleet_orchestrator.git_branch_cleanup import DEFAULT_REMOTE_BRANCH_PATTERNS, cleanup_merged_remote_branches  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Prune peer worktree refs and optionally delete merged remote branches."
+    )
+    parser.add_argument("--repo", default=".", help="Local repository path; defaults to cwd.")
+    parser.add_argument("--remote", default="origin", help="Remote name; default origin.")
+    parser.add_argument("--base", default="origin/main", help="Base ref that branches must be merged into.")
+    parser.add_argument("--base-branch", default="main", help="GitHub base branch name for merged PR proof.")
+    parser.add_argument(
+        "--github-repo",
+        help="OWNER/REPO used to prove squash-merged branches via merged PR state and matching head SHA.",
+    )
+    parser.add_argument(
+        "--pattern",
+        action="append",
+        help="Remote branch glob without remote prefix. Repeatable; default codex/*.",
+    )
+    parser.add_argument(
+        "--peer-worktree-root",
+        action="append",
+        help="Allowed peer worktree root. Repeatable; defaults to ORCH_PEER_WORKTREE_ROOTS or ~/.peer-worktrees.",
+    )
+    parser.add_argument("--delete-merged", action="store_true", help="Delete merged matching remote branches.")
+    parser.add_argument("--no-fetch", action="store_true", help="Do not fetch --prune before evaluating branches.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    args = parser.parse_args()
+
+    try:
+        rows = cleanup_merged_remote_branches(
+            args.repo,
+            remote=args.remote,
+            base=args.base,
+            base_branch=args.base_branch,
+            patterns=args.pattern or DEFAULT_REMOTE_BRANCH_PATTERNS,
+            delete_merged=args.delete_merged,
+            peer_roots=args.peer_worktree_root,
+            fetch=not args.no_fetch,
+            github_repo=args.github_repo,
+        )
+    except Exception as exc:
+        print(f"orch-prune-merged-branches: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+
+    for row in rows:
+        status = "deleted" if row.get("deleted") else f"skipped:{row.get('skipped_reason')}"
+        actions = row.get("worktree_actions") or []
+        suffix = f" worktree_actions={len(actions)}" if actions else ""
+        print(f"{status} {row['branch']} merged_into={row.get('merged_into')}{suffix}")
+    if not rows:
+        print("no matching remote branches")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

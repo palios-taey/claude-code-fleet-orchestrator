@@ -15,6 +15,8 @@ sys.path.insert(0, str(ROOT))
 
 REQUIRED_CHECKS = ("r5-audit-gate", "ship-gate-acceptance")
 
+from fleet_orchestrator.git_branch_cleanup import detach_branch_worktree_refs  # noqa: E402
+
 
 def _gh_api(path: str) -> Any:
     result = subprocess.run(
@@ -39,16 +41,21 @@ def _repo_from_gh() -> str:
     return repo
 
 
-def _resolve_head_sha(repo: str, args: argparse.Namespace) -> str:
+def _resolve_head(repo: str, args: argparse.Namespace) -> Tuple[str, Optional[str]]:
     if args.sha:
-        return args.sha.strip()
+        return args.sha.strip(), None
     if args.pr is None:
         raise RuntimeError("pass either --sha or --pr")
     payload = _gh_api(f"repos/{repo}/pulls/{args.pr}")
-    sha = (((payload or {}).get("head") or {}).get("sha") or "").strip()
+    head = ((payload or {}).get("head") or {})
+    sha = (head.get("sha") or "").strip()
     if not sha:
         raise RuntimeError(f"could not resolve head SHA for PR #{args.pr}")
-    return sha
+    branch = (head.get("ref") or "").strip()
+    head_repo = (((head.get("repo") or {}).get("full_name")) or "").strip()
+    if head_repo and head_repo != repo:
+        branch = ""
+    return sha, branch or None
 
 
 def _required_checks(args: argparse.Namespace) -> Tuple[str, ...]:
@@ -156,6 +163,21 @@ def main() -> int:
     parser.add_argument("--sha", help="Head SHA to check directly")
     parser.add_argument("--gate-task", required=True, help="Closed OrchTask id containing committed gate evidence")
     parser.add_argument(
+        "--local-repo",
+        default=str(ROOT),
+        help="Local checkout whose peer worktree refs should be pruned before branch delete. Defaults to this repo.",
+    )
+    parser.add_argument(
+        "--peer-worktree-root",
+        action="append",
+        help="Allowed peer worktree root. Repeatable; defaults to ORCH_PEER_WORKTREE_ROOTS or ~/.peer-worktrees.",
+    )
+    parser.add_argument(
+        "--skip-worktree-prune",
+        action="store_true",
+        help="Skip PR head branch worktree pruning. Intended only for diagnosis.",
+    )
+    parser.add_argument(
         "--required-check",
         action="append",
         help="Required GitHub check/status context. Repeatable; defaults to r5-audit-gate + ship-gate-acceptance.",
@@ -164,10 +186,17 @@ def main() -> int:
 
     try:
         repo = args.repo or _repo_from_gh()
-        sha = _resolve_head_sha(repo, args)
+        sha, branch = _resolve_head(repo, args)
         checks = _required_checks(args)
         failures = _verify_ci(repo, sha, checks)
         failures.extend(_verify_gate_task(args.gate_task, sha))
+        worktree_actions: List[Dict[str, Any]] = []
+        if not failures and branch and not args.skip_worktree_prune:
+            worktree_actions = detach_branch_worktree_refs(
+                args.local_repo,
+                branch,
+                peer_roots=args.peer_worktree_root,
+            )
     except Exception as exc:
         print(f"PRE-MERGE GATE FAIL: {exc}", file=sys.stderr)
         return 1
@@ -180,7 +209,7 @@ def main() -> int:
 
     print(
         f"PRE-MERGE GATE PASS repo={repo} sha={sha} gate_task={args.gate_task} "
-        f"checks={','.join(checks)}"
+        f"checks={','.join(checks)} worktree_pruned={len(worktree_actions)}"
     )
     return 0
 
