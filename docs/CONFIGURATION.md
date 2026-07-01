@@ -84,7 +84,9 @@ force a pass), `ORCH_PRE_MERGE_REQUIRED_CHECKS` (consumed by the pre-merge gate
 and as the fallback completed-task verification context list),
 `ORCH_COMPLETION_GITHUB_REPO`, `ORCH_COMPLETION_ALLOWED_REPOS`,
 `ORCH_COMPLETION_REQUIRED_CHECKS`, `ORCH_COMPLETION_TRUSTED_CHECK_RUN_APPS`,
-`ORCH_COMPLETION_TRUSTED_STATUS_CREATORS`.
+`ORCH_COMPLETION_TRUSTED_STATUS_CREATORS`, `ORCH_CAREERS_CANONICAL_STATUS_PATHS`
+(comma-separated relative canonical careers-state paths checked for untracked
+drift by loop-proof completion verification; default `foundations/careers`).
 
 ## 5. Feature toggles
 
