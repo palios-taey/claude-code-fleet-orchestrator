@@ -67,6 +67,7 @@ from .context_assembler import (
     build_packet as build_wake_packet,
     select_context as select_wake_context,
     size_report as wake_size_report,
+    task_ref_receipt,
 )
 from .notify_state import redis_connect as _notify_redis_connect
 from .notify_state import state_key as _notify_state_key
@@ -636,10 +637,12 @@ def _assemble_dispatch_prompt(worker: str, task_id: str, description: str,
         dispatch_record["context_warning"] = warning
     packet.setdefault("human", {}).setdefault("replies_since_last", []).append(dispatch_record)
     rendered = assemble_wake_packet(packet, cli)
+    receipt = task_ref_receipt(packet)
     return rendered, {
         "cli": cli,
         "packet_id": packet.get("packet_id", ""),
         "provenance_hash": packet.get("provenance_hash", ""),
+        "injection_receipt": receipt,
         "size_report": wake_size_report(rendered, packet),
         "rules": [
             {"scope": rule.get("scope", ""), "path": rule.get("path", "")}
@@ -797,7 +800,10 @@ def dispatch(
             },
             "target": worker,
             "task_id": task_id,
-            "next_contract": "worker records outcome when the dispatched task is complete",
+            "next_contract": (
+                f"worker first replies `{packet_meta.get('injection_receipt', {}).get('line', 'loaded refs: none')}`; "
+                "worker records outcome when the dispatched task is complete"
+            ),
         },
     )
 
