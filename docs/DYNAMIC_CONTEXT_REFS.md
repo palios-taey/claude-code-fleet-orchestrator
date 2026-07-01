@@ -99,8 +99,9 @@ The assembler works when refs are present:
 
 - `get_project_summary()` returns `ref_tiers` for overall, supervisor, project, phase, and task context.
 - `_select_refs()` copies the matching tier entries into `overall_refs`, `supervisor_refs`, `project_refs`, `phase_refs`, and `task_refs`.
-- `_render_packet()` renders all five tiers and prints `- none` for any empty tier.
+- `_render_packet()` renders all five tiers and prints `- none` for any empty tier. When a packet resolves a task, its Operating section also gives the executor a first-action receipt line: `loaded refs: ...` lists the rendered task refs only, after the same per-tier render cap.
 - `tests/wake_packet_acceptance.py` verifies empty ref arrays are accepted and that overall/supervisor refs render when supplied.
+- `tests/injection_receipt_acceptance.py` verifies the receipt excludes non-task tiers, honors render caps, and is surfaced in endpoint and dispatch metadata.
 
 If a packet has no refs, attach refs to the plan or API-created project/phase/task first, and make sure allowed roots from `ORCH_REF_ALLOWED_ROOT` or `ORCH_SESSION_ROOTS` allow the referenced files. Empty refs mean no refs attached; unreadable refs render warnings in `ref_context`.
 
