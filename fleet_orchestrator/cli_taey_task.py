@@ -13,6 +13,7 @@ Usage:
     taey-task status <task-id>        # Check a task's status
     taey-task dispatch <task-id> <peer>  # Claim/bind/wake peer work
     taey-task dispatch <task-id> <peer> --force  # Explicitly replace a peer's live current_task
+    taey-task remove-dependency <task-id> <depends-on-task-id>
     taey-task update <task-id> completed --evidence '{"commit_sha":"abc123","repo":"OWNER/REPO","production_observation":"verified live"}'
     taey-task update <task-id> failed --evidence '{"reason":"blocked by missing dependency"}'
 """
@@ -219,6 +220,16 @@ def cmd_update(args):
         sys.exit(1)
 
 
+def cmd_remove_dependency(args):
+    """Remove a manual DEPENDS_ON edge through the API."""
+    result = api_call("DELETE", f"/api/tasks/{args.task_id}/dependencies/{args.depends_on_id}")
+    if result.get("ok"):
+        print(f"OK: removed dependency {result.get('task_id')} -> {result.get('depends_on_id')}")
+    else:
+        print(f"ERROR: {result.get('error', 'unknown')}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Create and manage OrchTasks via the dashboard API"
@@ -245,6 +256,10 @@ def main():
     p_dispatch.add_argument("--force", action="store_true",
                             help="Replace an existing live current_task binding for the peer")
 
+    p_remove_dependency = sub.add_parser("remove-dependency", help="Remove a manual task dependency edge")
+    p_remove_dependency.add_argument("task_id", help="Task ID")
+    p_remove_dependency.add_argument("depends_on_id", help="Task ID currently depended on")
+
     p_update = sub.add_parser("update", help="Update task status")
     p_update.add_argument("task_id", help="Task ID")
     p_update.add_argument("status", choices=UPDATE_STATUSES)
@@ -263,6 +278,8 @@ def main():
         cmd_status(args)
     elif args.command == "dispatch":
         cmd_dispatch(args)
+    elif args.command == "remove-dependency":
+        cmd_remove_dependency(args)
     elif args.command == "update":
         cmd_update(args)
     else:

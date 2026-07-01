@@ -23,6 +23,7 @@ The execution tracker indexes markdown plans into `OrchProject`, `OrchPhase`, an
 - Zero or one `## User Stop Conditions` section at project scope.
 - `order` and `priority` are integers; lower `priority` values are selected earlier from ready-task queues.
 - `owner`, `tags`, and `depends` are optional.
+- `depends` edges created by plan ingest are plan-managed. Re-ingesting the markdown reconciles each markdown-sourced task's plan-managed dependencies to the current file: removed or renamed `[depends: ...]` entries are removed from the graph, while manual dependencies added through task primitives remain manual.
 - `status` metadata is ignored on ingest with a warning. Markdown plans cannot set task status; tasks are created or updated through ingest without taking status from `[status:...]`, and status changes must go through the evidence-gated task API.
 - `delivery_gate: true` marks a task as a delivery-gated step. Completing that task requires evidence with exactly one delivery outcome: `{"delivered":{...}}` for a concrete mechanical delivery proof, or `{"no_op":{"reason":"<why nothing was delivered, at least 8 chars>","checked":true}}` for a checked no-op. Standard completion evidence alone does not close delivery-gated tasks.
 - `recurring: true` marks a completed task as re-claimable by `dispatch()` for the next cycle. This is for markdown-tracked repeated work items, not the cron-factory `kind=recurring` reservation in `docs/SCHEMA.md`. A scheduled `orch-cron` registry entry with `task_id` can drive that cadence by dispatching the same recurring task id when its wall-clock trigger fires; the task still completes through the normal evidence-gated task API before the next re-claim.
@@ -76,9 +77,10 @@ taey-task list
 taey-task status <task-id>
 taey-task update <task-id> <status>
 taey-task dispatch <task-id> <peer>
+taey-task remove-dependency <task-id> <depends-on-task-id>
 ```
 
-Use `taey-plan` for project / phase / task structures sourced from markdown. Use `taey-task` for direct task creation, ranking, inspection, status updates, and peer dispatch through the API.
+Use `taey-plan` for project / phase / task structures sourced from markdown. Use `taey-task` for direct task creation, ranking, inspection, status updates, peer dispatch, and manual dependency removal through the API. To remove a plan-managed dependency, edit the markdown `[depends: ...]` entry and re-ingest the plan; `taey-task remove-dependency` refuses plan-only edges.
 
 ## API surface
 
@@ -89,6 +91,7 @@ Use `taey-plan` for project / phase / task structures sourced from markdown. Use
 - `POST /api/projects/{id}/phases`
 - `POST /api/projects/{id}/user-stop-conditions`
 - `POST /api/projects/load-md`
+- `DELETE /api/tasks/{task_id}/dependencies/{depends_on_id}`
 - `GET /api/sessions/{session}/current`
 - `GET /api/sessions/{session}/next-ready`
 

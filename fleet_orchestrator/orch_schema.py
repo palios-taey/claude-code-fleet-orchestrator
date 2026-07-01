@@ -3089,13 +3089,82 @@ def add_dependency(task_id: str, depends_on_id: str,
             OPTIONAL MATCH (t:OrchTask {id: $task_id})
             OPTIONAL MATCH (dep:OrchTask {id: $depends_on_id})
             FOREACH (_ IN CASE WHEN t IS NOT NULL AND dep IS NOT NULL THEN [1] ELSE [] END |
-                MERGE (t)-[:DEPENDS_ON]->(dep)
+                MERGE (t)-[r:DEPENDS_ON]->(dep)
+                ON CREATE SET r.created_at = datetime()
+                SET r.manual_dependency = true,
+                    r.dependency_source = CASE
+                        WHEN coalesce(r.plan_dependency, false) THEN 'manual+plan'
+                        ELSE 'manual'
+                    END,
+                    r.updated_at = datetime()
             )
             RETURN (t IS NOT NULL) AS t_exists,
                    (dep IS NOT NULL) AS dep_exists
         """, task_id=task_id, depends_on_id=depends_on_id)
         record = result.single()
         return bool(record and record["t_exists"] and record["dep_exists"])
+
+
+def remove_dependency(task_id: str, depends_on_id: str,
+                      config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    """Remove a manual DEPENDS_ON relationship without erasing plan-managed deps."""
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            OPTIONAL MATCH (t:OrchTask {id: $task_id})
+            OPTIONAL MATCH (dep:OrchTask {id: $depends_on_id})
+            OPTIONAL MATCH (t)-[r:DEPENDS_ON]->(dep)
+            RETURN (t IS NOT NULL) AS task_exists,
+                   (dep IS NOT NULL) AS dep_exists,
+                   (r IS NOT NULL) AS dependency_exists,
+                   coalesce(r.plan_dependency, false) AS plan_dependency,
+                   coalesce(r.manual_dependency, false) AS manual_dependency
+        """, task_id=task_id, depends_on_id=depends_on_id).single()
+        task_exists = bool(row and row["task_exists"])
+        dep_exists = bool(row and row["dep_exists"])
+        dependency_exists = bool(row and row["dependency_exists"])
+        plan_dependency = bool(row and row["plan_dependency"])
+        manual_dependency = bool(row and row["manual_dependency"])
+        if not task_exists or not dep_exists or not dependency_exists:
+            return {
+                "task_exists": task_exists,
+                "dep_exists": dep_exists,
+                "dependency_exists": dependency_exists,
+                "removed": False,
+                "plan_dependency": plan_dependency,
+                "manual_dependency": manual_dependency,
+            }
+        if plan_dependency and not manual_dependency:
+            return {
+                "task_exists": True,
+                "dep_exists": True,
+                "dependency_exists": True,
+                "removed": False,
+                "plan_dependency": True,
+                "manual_dependency": False,
+                "reason": "plan_managed",
+            }
+        if plan_dependency:
+            session.run("""
+                MATCH (:OrchTask {id: $task_id})-[r:DEPENDS_ON]->(:OrchTask {id: $depends_on_id})
+                SET r.manual_dependency = false,
+                    r.dependency_source = 'plan',
+                    r.updated_at = datetime()
+            """, task_id=task_id, depends_on_id=depends_on_id).consume()
+        else:
+            session.run("""
+                MATCH (:OrchTask {id: $task_id})-[r:DEPENDS_ON]->(:OrchTask {id: $depends_on_id})
+                DELETE r
+            """, task_id=task_id, depends_on_id=depends_on_id).consume()
+        return {
+            "task_exists": True,
+            "dep_exists": True,
+            "dependency_exists": True,
+            "removed": True,
+            "plan_dependency": plan_dependency,
+            "manual_dependency": manual_dependency,
+        }
 
 
 def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
