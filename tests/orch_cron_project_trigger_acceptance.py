@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Acceptance: orch-cron project triggers reset a project and dispatch its entry task."""
+"""Acceptance: orch-cron project triggers dispatch next-ready without reset."""
 from __future__ import annotations
 
 import json
@@ -40,6 +40,7 @@ from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
 from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     _state_key,
+    add_dependency,
     create_phase,
     create_project,
     create_task,
@@ -91,6 +92,12 @@ def _complete(task_id: str) -> None:
     )
 
 
+def _mark_recurring(*task_ids: str) -> None:
+    with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+        for task_id in task_ids:
+            session.run("MATCH (t:OrchTask {id: $task_id}) SET t.recurring = true", task_id=task_id)
+
+
 def _records(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -131,8 +138,9 @@ def main() -> int:
         create_phase(PROJECT, PHASE, "Phase", config=CFG)
         create_task(PHASE, ENTRY, "entry task", priority=1, owner=WORKER, wake_owner_if_ready=False, config=CFG)
         create_task(PHASE, FOLLOW, "follow task", priority=20, owner=WORKER, wake_owner_if_ready=False, config=CFG)
+        add_dependency(FOLLOW, ENTRY, config=CFG)
+        _mark_recurring(ENTRY, FOLLOW)
         _complete(ENTRY)
-        _complete(FOLLOW)
 
         now = datetime.now(ZoneInfo("UTC")).replace(second=0, microsecond=0)
         registry = tmp / "project-registry.json"
@@ -154,6 +162,7 @@ def main() -> int:
         dry_fires = cron.tick(str(registry), _redis(), dry_run=True, now_override=now)
         _check("project trigger dry-run does not count as fire", dry_fires == 0, dry_fires)
         _check("project trigger dry-run does not reset entry", get_task(ENTRY, config=CFG).get("status") == "completed", get_task(ENTRY, config=CFG))
+        _check("project trigger dry-run does not change next task", get_task(FOLLOW, config=CFG).get("status") == "pending", get_task(FOLLOW, config=CFG))
         _check("project trigger dry-run writes no state", _records(state_file) == [], _records(state_file))
 
         with mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
@@ -166,12 +175,39 @@ def main() -> int:
         current = json.loads(current_raw) if current_raw else {}
         records = _records(state_file)
         _check("project trigger fires once", fires == 1, fires)
-        _check("project reset makes project active", _project_status() == "active", _project_status())
-        _check("project trigger dispatches entry task", entry.get("status") == "in_progress" and entry.get("dispatched_to") == WORKER, entry)
-        _check("project trigger resets sibling task to pending", follow.get("status") == "pending", follow)
-        _check("project trigger binds current_task", current.get("task_id") == ENTRY, current)
+        _check("project remains active without reset", _project_status() == "active", _project_status())
+        _check("project trigger preserves completed entry", entry.get("status") == "completed", entry)
+        _check("project trigger dispatches next pending task", follow.get("status") == "in_progress" and follow.get("dispatched_to") == WORKER, follow)
+        _check("project trigger binds current_task", current.get("task_id") == FOLLOW, current)
         _check(
             "project trigger records project state",
+            records
+            and records[-1].get("trigger_mode") == "project"
+            and records[-1].get("project") == PROJECT
+            and records[-1].get("task_id") == FOLLOW
+            and records[-1].get("result") == "dispatched",
+            records,
+        )
+
+        _complete(FOLLOW)
+        _redis().delete(_state_key(WORKER, "current_task"))
+        trigger["id"] = "project-cycle-next"
+        _write_registry(registry, trigger)
+        with mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
+             mock.patch.object(dispatch_module.subprocess, "run", side_effect=_ok_run):
+            next_fires = cron.tick(str(registry), _redis(), now_override=now)
+
+        entry = get_task(ENTRY, config=CFG)
+        follow = get_task(FOLLOW, config=CFG)
+        current_raw = _redis().get(_state_key(WORKER, "current_task"))
+        current = json.loads(current_raw) if current_raw else {}
+        records = _records(state_file)
+        _check("project trigger reclaims completed recurring entry after chain drains", next_fires == 1, next_fires)
+        _check("completed recurring entry is in_progress", entry.get("status") == "in_progress" and entry.get("dispatched_to") == WORKER, entry)
+        _check("project trigger does not reset completed downstream step", follow.get("status") == "completed", follow)
+        _check("project trigger binds reclaimed entry", current.get("task_id") == ENTRY, current)
+        _check(
+            "project trigger records reclaimed recurring task",
             records
             and records[-1].get("trigger_mode") == "project"
             and records[-1].get("project") == PROJECT
@@ -192,7 +228,7 @@ def main() -> int:
     if FAILURES:
         print(f"\nFAIL -- {len(FAILURES)}: {FAILURES}")
         return 1
-    print("\nPASS -- orch-cron project triggers reset projects and dispatch entry tasks.")
+    print("\nPASS -- orch-cron project triggers dispatch next-ready without reset.")
     return 0
 
 
