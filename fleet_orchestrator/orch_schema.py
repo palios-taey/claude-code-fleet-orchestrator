@@ -3723,6 +3723,7 @@ def get_session_current_work(session_id: str,
                    t.owner AS owner,
                    t.dispatched_to AS dispatched_to,
                    t.status AS status,
+                   t.task_type AS task_type,
                    t.blocked_on AS blocked_on,
                    t.source_path AS task_source_path,
                    t.refs AS task_refs
