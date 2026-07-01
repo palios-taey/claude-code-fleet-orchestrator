@@ -370,6 +370,13 @@ def _operating_source(work: Dict[str, Any], task_id: Optional[str]) -> str:
 SESSION_ENV_ALLOWLIST = {"ORCH_MEMORY_ROOT", "ORCH_RULES_ROOT", "ORCH_SESSION_ROOTS"}
 
 
+def _session_env_value(raw_value: str) -> str:
+    value = raw_value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
 def _scoped_env_value(scoped_env: Optional[Dict[str, str]], key: str) -> str:
     if scoped_env is not None and key in scoped_env:
         return str(scoped_env.get(key) or "")
@@ -389,13 +396,13 @@ def _read_session_env(session_aliases: Iterable[str], session_roots: Dict[str, s
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key = key.replace("export ", "").strip()
+        key = re.sub(r"^export\s+", "", key).strip()
         # Defense-in-depth: a per-session repo .env must never override shared
         # store/network config in this process. Only context-assembly hints pass.
         # (Internal auth keys no longer exist at all -- see config.py -- so this is
         # belt-and-suspenders, not the primary guard.)
         if key in SESSION_ENV_ALLOWLIST:
-            values[key] = value.strip()
+            values[key] = _session_env_value(value)
     return values
 
 
