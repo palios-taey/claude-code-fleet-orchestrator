@@ -137,6 +137,8 @@ jobs:
         run: python tests/nonloopback_override_acceptance.py
       - name: Ship-gate — session .env context hints are request-scoped
         run: python tests/request_scoped_env_acceptance.py
+      - name: Ship-gate — registered sessions without roots fail loud in wake packets
+        run: python tests/session_root_missing_warning_acceptance.py
       - name: Ship-gate — gate runner shell trust boundary is explicit
         run: python tests/gate_runner_trust_boundary_acceptance.py
       - name: Ship-gate — public readonly redacts colon-delimited secrets
