@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .careers_loop_proof import normalize_loop_proof_evidence
 from .config import OrchConfig, get_neo4j_driver
 from .evidence_verification import UNVERIFIED, VERIFIED, verify_completion_evidence
 from .inflight import PEER_HEARTBEAT_STALE_SEC as _DEFAULT_PEER_HEARTBEAT_STALE_SEC
@@ -393,14 +394,23 @@ def _normalize_completion_evidence(
     outbound_actions = _normalize_outbound_actions(evidence)
     if outbound_actions is not None:
         normalized["outbound_actions"] = outbound_actions
+    try:
+        loop_proof = normalize_loop_proof_evidence(evidence.get("loop_proof")) if "loop_proof" in evidence else None
+    except ValueError as exc:
+        raise CompletionEvidenceError(
+            f"completion evidence loop_proof is not well-formed: {exc}. {COMPLETED_EVIDENCE_NEXT_STEP}"
+        ) from exc
+    if loop_proof is not None:
+        normalized["loop_proof"] = loop_proof
     if (
         not delivery_gate_evidence
         and not any(key in normalized for key in _COMPLETION_EVIDENCE_KEYS)
         and "outbound_actions" not in normalized
+        and "loop_proof" not in normalized
     ):
         raise CompletionEvidenceError(
             "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. completed status requires evidence with at least one of: "
-            f"commit_sha, gate_run_id, production_observation, or outbound_actions with signoff gate_pass provenance. Optional repo=OWNER/REPO selects the GitHub repository for commit verification. {COMPLETED_EVIDENCE_NEXT_STEP}"
+            f"commit_sha, gate_run_id, production_observation, loop_proof, or outbound_actions with signoff gate_pass provenance. Optional repo=OWNER/REPO selects the GitHub repository for commit verification. {COMPLETED_EVIDENCE_NEXT_STEP}"
         )
     return normalized
 
