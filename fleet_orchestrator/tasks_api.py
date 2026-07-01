@@ -40,6 +40,7 @@ from fleet_orchestrator.context_assembler import (
     build_packet as build_wake_packet,
     select_context as select_wake_context,
     size_report as wake_size_report,
+    task_ref_receipt,
 )
 from fleet_orchestrator.decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from fleet_orchestrator.easy_setup import api_host
@@ -1802,6 +1803,7 @@ def session_wake_packet(
         packet = build_wake_packet(session_id, context)
         rendered = assemble_wake_packet(packet, cli_key, budget_bytes=budget_bytes)
         report = wake_size_report(rendered, packet, budget_bytes=budget_bytes)
+        injection_receipt = task_ref_receipt(packet)
         maybe_emit_decision_receipt(
             "wake_packet_assembly",
             {
@@ -1818,6 +1820,7 @@ def session_wake_packet(
                     "packet_id": packet.get("packet_id", ""),
                     "provenance_hash": packet.get("provenance_hash", ""),
                     "size_report": report,
+                    "injection_receipt": injection_receipt,
                     "snapshot": packet.get("snapshot") or {},
                 },
                 "session": session_id,
@@ -1825,7 +1828,10 @@ def session_wake_packet(
                 "packet_id": packet.get("packet_id", ""),
                 "provenance_hash": packet.get("provenance_hash", ""),
                 "blocked_on": (packet.get("stop") or {}).get("blocked_on"),
-                "next_contract": (packet.get("stop") or {}).get("next_contract"),
+                "next_contract": (
+                    f"first executor action echoes `{injection_receipt.get('line', 'loaded refs: none')}`; "
+                    f"{(packet.get('stop') or {}).get('next_contract') or 'continue from Operating section'}"
+                ),
             },
         )
         return {
@@ -1839,6 +1845,7 @@ def session_wake_packet(
                 "provenance_hash": packet.get("provenance_hash", ""),
                 "generated_at_commit": packet.get("generated_at_commit", ""),
                 "snapshot": packet.get("snapshot") or {},
+                "injection_receipt": injection_receipt,
                 "size_report": report,
             },
         }

@@ -982,7 +982,7 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
         "",
         "## Operating",
     ]
-    lines.extend(_render_operating_section(packet))
+    lines.extend(_render_operating_section(packet, max_refs_per_tier=max_refs_per_tier))
     lines.extend([
         "",
         "## Identity",
@@ -1034,7 +1034,10 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
     return "\n".join(lines)
 
 
-def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
+def _render_operating_section(
+    packet: Dict[str, Any],
+    max_refs_per_tier: int = DEFAULT_MAX_REFS_PER_TIER,
+) -> List[str]:
     resolved = ((packet.get("snapshot") or {}).get("resolved_work") or {})
     source = str(resolved.get("source") or "none").strip()
     status = str(resolved.get("status") or "").strip().lower()
@@ -1044,6 +1047,7 @@ def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
     blocked_on = _operating_value(resolved.get("blocked_on"), default="")
     access_lines = _render_supervisor_access_affordance(packet)
     step_lines = _render_step_governance_lines(resolved)
+    receipt_lines = _render_injection_receipt_lines(packet, max_refs_per_tier=max_refs_per_tier)
 
     if source == "none" or not resolved.get("task_id"):
         return access_lines + [
@@ -1053,20 +1057,20 @@ def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
         ]
 
     if blocked_on:
-        return access_lines + step_lines + [
+        return access_lines + receipt_lines + step_lines + [
             f"- `{task_id}` is blocked on `{blocked_on}`.",
             "- Dependency-gated downstream work releases only when deps are `completed`; `interrupted`/`failed` do not satisfy it.",
         ]
 
     if source in {"pending", "session_next_ready"} or status == "pending":
-        return access_lines + [
+        return access_lines + receipt_lines + [
             f"- Next task is UNBOUND: `{task_id}`.",
             "- Dispatch it: `taey-task dispatch <task-id> <peer>`; this BINDS owner+current_task and wakes the peer.",
             "- Bare `taey-notify` does NOT bind; the engine flags it undispatched. One task per peer at a time.",
         ]
 
     if source == "peer_reported_done":
-        return access_lines + [
+        return access_lines + receipt_lines + [
             f"- Peer {owner} is no longer actively working `{task_id}` (reported done or stalled).",
             f"- verify their work; if complete, close it: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"<obs>\"}}'`.",
             "- Peers cannot self-complete supervised tasks. Advance the chain.",
@@ -1086,7 +1090,7 @@ def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
                     f"- Report review-ready work to `{supervisor}` with branch, SHA, and verify command.",
                     f"- Then call `record_outcome('<your-session>', 'done', '<short summary>')`; CONTROL closes `{task_id}`.",
                 ]
-            return access_lines + step_lines + lines
+            return access_lines + receipt_lines + step_lines + lines
         lines = [
             f"- Drive `{task_id}` to terminal; inspect current state with `taey-task status {task_id}`.",
             f"- Close with evidence: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"<obs>\"}}'`.",
@@ -1099,12 +1103,59 @@ def _render_operating_section(packet: Dict[str, Any]) -> List[str]:
                 f"- Close with evidence: `taey-task update {task_id} completed --evidence '{{\"commit_sha\":\"<sha>\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"<obs>\"}}'`.",
                 "- Evidence-less terminal writes are REJECTED.",
             ]
-        return access_lines + step_lines + lines
+        return access_lines + receipt_lines + step_lines + lines
 
-    return access_lines + [
+    return access_lines + receipt_lines + [
         f"- Resolved task `{task_id}`. Inspect it: `taey-task status {task_id}`.",
         "- If it is ready, dispatch with `taey-task dispatch <task-id> <peer>`; if terminal, use `--evidence`.",
     ]
+
+
+def task_ref_receipt(packet: Dict[str, Any], max_refs_per_tier: int = DEFAULT_MAX_REFS_PER_TIER) -> Dict[str, Any]:
+    refs = _receipt_task_refs(packet, max_refs_per_tier=max_refs_per_tier)
+    tokens = [_ref_receipt_token(ref) for ref in refs]
+    line = f"loaded refs: {','.join(tokens) if tokens else 'none'}"
+    return {
+        "line": line,
+        "task_refs": tokens,
+        "count": len(tokens),
+    }
+
+
+def _render_injection_receipt_lines(packet: Dict[str, Any], max_refs_per_tier: int) -> List[str]:
+    line = task_ref_receipt(packet, max_refs_per_tier=max_refs_per_tier).get("line", "loaded refs: none")
+    return [f"- First action before work/status: reply exactly `{line}`."]
+
+
+def _receipt_task_refs(packet: Dict[str, Any], *, max_refs_per_tier: int) -> List[Dict[str, Any]]:
+    context = packet.get("context") if isinstance(packet.get("context"), dict) else {}
+    refs = context.get("task_refs") if isinstance(context, dict) else []
+    if not isinstance(refs, list):
+        return []
+    return [dict(ref) for ref in refs[:max(0, max_refs_per_tier)] if isinstance(ref, dict)]
+
+
+def _ref_receipt_token(ref: Dict[str, Any]) -> str:
+    label = _operating_value(ref.get("label"), default="")
+    if label:
+        return _receipt_token(label)
+    path = _operating_value(ref.get("path") or "unknown-ref", default="unknown-ref")
+    l_start = _receipt_int(ref.get("l_start"))
+    l_end = _receipt_int(ref.get("l_end"))
+    pointer = f"{path}:L{l_start}-L{l_end}" if l_start > 0 and l_end >= l_start else path
+    return _receipt_token(pointer)
+
+
+def _receipt_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _receipt_token(value: str) -> str:
+    token = re.sub(r"[\s,]+", "_", str(value or "").strip())
+    return token[:80] or "unknown-ref"
 
 
 def _render_step_governance_lines(resolved: Dict[str, Any]) -> List[str]:
