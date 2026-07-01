@@ -25,8 +25,9 @@ if "ORCH_DOTENV" not in os.environ:
         if candidate.is_file():
             os.environ["ORCH_DOTENV"] = str(candidate)
             break
-os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
-os.environ.setdefault("ORCH_REDIS_PORT", "6379")
+from fleet_orchestrator.test_isolation import assert_acceptance_redis_isolated  # noqa: E402
+
+assert_acceptance_redis_isolated()
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver, get_redis_sync  # noqa: E402
 import fleet_orchestrator.dispatch as dispatch_mod  # noqa: E402

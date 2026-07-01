@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -62,6 +63,69 @@ def _wait_neo4j(uri: str, timeout_s: int) -> None:
             if driver is not None:
                 driver.close()
     raise RuntimeError(f"Neo4j did not become ready within {timeout_s}s: {last_error}")
+
+
+def _live_redis_snapshot() -> set[str]:
+    try:
+        import redis
+    except ImportError as exc:
+        raise RuntimeError("redis Python package is required for the live Redis guard") from exc
+
+    host = os.environ.get("ORCH_LIVE_REDIS_GUARD_HOST", "127.0.0.1")
+    port = int(os.environ.get("ORCH_LIVE_REDIS_GUARD_PORT", "6379"))
+    client = redis.Redis(host=host, port=port, decode_responses=True)
+    client.ping()
+    cursor = 0
+    keys: set[str] = set()
+    while True:
+        cursor, batch = client.scan(cursor=cursor, count=500)
+        keys.update(str(key) for key in batch)
+        if cursor == 0:
+            return keys
+
+
+def _acceptance_attributable_live_keys(keys: set[str], env: dict[str, str]) -> set[str]:
+    namespace = env.get("ORCH_TEST_NAMESPACE", "")
+    notify_prefix = env.get("NOTIFY_KEY_PREFIX", "")
+    explicit_needles = {value for value in (namespace, notify_prefix) if value}
+    result: set[str] = set()
+    for key in keys:
+        lowered = key.lower()
+        if any(needle and needle in key for needle in explicit_needles):
+            result.add(key)
+            continue
+        if key.startswith("taey:") and any(marker in lowered for marker in ("acceptance", "-ci-", ":ci-", "test")):
+            result.add(key)
+            continue
+        if key.startswith(("taey:orch-stop-gate:", "taey:worker-task-liveness:", "taey:notify-daemon-watchdog-stuck-inbox:")):
+            result.add(key)
+    return result
+
+
+def _run_with_live_redis_guard(command: list[str], env: dict[str, str]) -> int:
+    before = _live_redis_snapshot()
+    result = subprocess.run(command, env=env)
+    after = _live_redis_snapshot()
+    changed = before ^ after
+    leaked = _acceptance_attributable_live_keys(changed, env)
+    if leaked:
+        print(
+            "orch-acceptance-isolated: FAIL: live Redis 127.0.0.1:6379 changed "
+            "acceptance-attributable keys:",
+            file=sys.stderr,
+        )
+        for key in sorted(leaked):
+            print(f"  {key}", file=sys.stderr)
+        return result.returncode or 1
+    if changed:
+        print(
+            "orch-acceptance-isolated: live Redis guard saw non-acceptance key changes "
+            f"and ignored them: {len(changed)}",
+            file=sys.stderr,
+        )
+    else:
+        print("orch-acceptance-isolated: live Redis guard passed (no new live keys)", file=sys.stderr)
+    return result.returncode
 
 
 def _strip_separator(command: list[str]) -> list[str]:
@@ -137,7 +201,7 @@ def main() -> int:
             f"notify_redis=127.0.0.1:{notify_redis_port} namespace={env['ORCH_TEST_NAMESPACE']}",
             file=sys.stderr,
         )
-        return subprocess.run(command, env=env).returncode
+        return _run_with_live_redis_guard(command, env)
     except FileNotFoundError as exc:
         print(f"orch-acceptance-isolated: docker is required for throwaway stores: {exc}", file=sys.stderr)
         return 2

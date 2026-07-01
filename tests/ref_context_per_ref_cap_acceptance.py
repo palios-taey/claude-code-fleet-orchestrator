@@ -38,8 +38,9 @@ def _require_test_namespace() -> str:
 NAMESPACE = _require_test_namespace()
 PFX = f"{NAMESPACE}-refcap-{uuid.uuid4().hex[:8]}"
 os.environ["NOTIFY_KEY_PREFIX"] = PFX
-os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
-os.environ.setdefault("ORCH_REDIS_PORT", "6379")
+from fleet_orchestrator.test_isolation import assert_acceptance_redis_isolated  # noqa: E402
+
+assert_acceptance_redis_isolated()
 
 from fleet_orchestrator import context_assembler as assembler  # noqa: E402
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
