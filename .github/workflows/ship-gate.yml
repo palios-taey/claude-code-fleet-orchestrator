@@ -204,6 +204,8 @@ jobs:
           ORCH_REDIS_PORT: "6379"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
         run: python tests/completion_evidence_verification_acceptance.py
+      - name: Ship-gate — careers loop-proof receipts re-verify canonical state
+        run: python tests/careers_loop_proof_verification_acceptance.py
       - name: Ship-gate — malformed task update bodies teach 4xx
         run: python tests/task_update_body_acceptance.py
       - name: Ship-gate — shippability requires completed gate evidence

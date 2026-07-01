@@ -6,6 +6,8 @@ import os
 import subprocess
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from .careers_loop_proof import verify_loop_proof_receipt
+
 
 DEFAULT_REQUIRED_GITHUB_CHECKS = ("r5-audit-gate", "ship-gate-acceptance")
 DEFAULT_TRUSTED_CHECK_RUN_APPS = ("github-actions",)
@@ -224,6 +226,8 @@ def verify_completion_evidence(
 ) -> Optional[Dict[str, Any]]:
     if not isinstance(evidence, dict) or not evidence:
         return None
+    if "loop_proof" in evidence:
+        return verify_loop_proof_receipt(evidence, producer=producer)
     checks = required_github_checks()
     commit_sha = str(evidence.get("commit_sha") or "").strip()
     if not commit_sha:
