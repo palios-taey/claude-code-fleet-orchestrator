@@ -2,8 +2,9 @@
 """orch-cron — recurring task runner with file-tracked state.
 
 Reads an operator-controlled JSON registry of recurring triggers. A trigger
-can wake a session with a prompt file, dispatch an OrchTask by id, reset and
-dispatch a project, or run an operator-authored command directly on the cadence.
+can wake a session with a prompt file, dispatch an OrchTask by id, dispatch the
+next ready task in a project, or run an operator-authored command directly on
+the cadence.
 The optional ``state_file`` turns each recurring fire into a first-class
 "process tracked through files" — the supervisor can grep the state_file to
 see the task's full history without context-switching into the worker pane.
@@ -40,7 +41,7 @@ JSON registry (path passed via ``--registry``)::
           "id": "linkedin-plan-cycle",
           "session": "treasurer",
           "supervisor": "treasurer",
-          "project": "linkedin-plan",        // Project reset + next-ready dispatch mode
+          "project": "linkedin-plan",        // Project next-ready dispatch mode; no reset
           "description": "Run the LinkedIn recurring plan",
           "tz": "America/New_York",
           "minute": 39,
@@ -130,7 +131,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from fleet_orchestrator.config import OrchConfig
+from fleet_orchestrator.config import OrchConfig, get_neo4j_driver
 
 logging.basicConfig(
     level=logging.INFO,
@@ -270,6 +271,42 @@ def _project_prompt_body(trig: dict, project_id: str, task_id: str, description:
     )
 
 
+def _completed_recurring_project_next_ready(session_id: str, project_id: str) -> Optional[dict]:
+    cfg = OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run(
+            """
+            MATCH (proj:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE t.status = 'completed'
+              AND coalesce(t.recurring, false) = true
+              AND coalesce(t.owner, '') = $session_id
+              AND coalesce(t.blocked_on, '') = ''
+              AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress', 'completed']
+              AND NOT EXISTS {
+                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+                  WHERE dep.status <> 'completed'
+              }
+            RETURN t.id AS task_id,
+                   t.description AS description,
+                   t.priority AS priority,
+                   t.owner AS owner,
+                   ph.id AS phase_id,
+                   ph.name AS phase_name,
+                   proj.id AS project_id,
+                   proj.name AS project_name
+            ORDER BY toInteger(coalesce(t.reclaim_count, 0)) ASC,
+                     toInteger(coalesce(t.priority, 999999999)) ASC,
+                     t.created_at ASC,
+                     t.id ASC
+            LIMIT 1
+            """,
+            project_id=project_id,
+            session_id=session_id,
+        ).single()
+    return dict(row) if row else None
+
+
 def _fire_task_trigger(r, trig: dict, now_local: datetime, dry_run: bool = False) -> str:
     trig_id = trig.get("id") or trig.get("task_id") or trig.get("session", "?")
     session = str(trig.get("session") or "").strip()
@@ -322,22 +359,24 @@ def _fire_project_trigger(r, trig: dict, now_local: datetime, dry_run: bool = Fa
 
     fire_id = f"{trig_id}-{now_local:%Y%m%d-%H%M}"
     if dry_run:
-        log.info("[DRY] would reset project trigger %s @ %s project=%s session=%s",
+        log.info("[DRY] would dispatch project next-ready trigger %s @ %s project=%s session=%s",
                  trig_id, fire_id, project_id, session)
         return "dry_run"
     if not _dedup_fire(r, fire_id):
         return "skipped:already_fired"
 
     from fleet_orchestrator.dispatch import OrchTaskNotReady, WorkerBusy, dispatch
-    from fleet_orchestrator.orch_schema import get_session_next_ready, project_cycle_in_flight, reset_project
+    from fleet_orchestrator.orch_schema import get_session_next_ready, project_cycle_in_flight
 
     cycle_state = project_cycle_in_flight(project_id)
-    if cycle_state.get("in_flight"):
+    if int(cycle_state.get("active_count") or 0) > 0:
         log.info("SKIP project trigger %s project=%s session=%s: skipped:cycle_in_flight %s",
                  trig_id, project_id, session, cycle_state)
         return "skipped:cycle_in_flight"
-    reset_project(project_id, reset_by=f"orch-cron:{trig_id}")
-    next_ready = get_session_next_ready(session, project_id=project_id)
+    next_ready = (
+        get_session_next_ready(session, project_id=project_id)
+        or _completed_recurring_project_next_ready(session, project_id)
+    )
     task_id = str((next_ready or {}).get("task_id") or (next_ready or {}).get("id") or "").strip()
     if not task_id:
         log.info("SKIP project trigger %s project=%s session=%s: no ready task",
