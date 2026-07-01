@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import inspect
+import http.server
 import shlex
+import socketserver
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -91,6 +95,37 @@ def _verify(receipt: dict) -> dict:
     return evidence_verification.verify_completion_evidence(normalized, producer="acceptance") or {}
 
 
+class _CountingHTTPHandler(http.server.BaseHTTPRequestHandler):
+    hits: dict[str, int] = {}
+
+    def do_GET(self) -> None:
+        self.__class__.hits[self.path] = self.__class__.hits.get(self.path, 0) + 1
+        if self.path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", "/ok")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+
+def _local_server() -> tuple[_ThreadingHTTPServer, str]:
+    _CountingHTTPHandler.hits = {}
+    server = _ThreadingHTTPServer(("127.0.0.1", 0), _CountingHTTPHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    return server, f"http://{host}:{port}"
+
+
 def main() -> int:
     valid_repo = _repo("job-seeker", 3)
     valid_receipt = _receipt(valid_repo, lines=3)
@@ -145,6 +180,56 @@ def main() -> int:
         stray_result,
     )
 
+    server, base_url = _local_server()
+    try:
+        ssrf = _receipt(
+            valid_repo,
+            lines=3,
+            extra_checks=[
+                {
+                    "name": "http_200",
+                    "command": f"GET {base_url}/ok",
+                    "expected": "HTTP200",
+                    "observed": 200,
+                    "pass": True,
+                }
+            ],
+        )
+        ssrf_result = _verify(ssrf)
+        _check(
+            "loopback http_200 is blocked before request",
+            ssrf_result.get("status") == "UNVERIFIED"
+            and "blocked non-public" in ssrf_result.get("reason", "")
+            and not _CountingHTTPHandler.hits,
+            {"result": ssrf_result, "hits": dict(_CountingHTTPHandler.hits)},
+        )
+
+        redirect = _receipt(
+            valid_repo,
+            lines=3,
+            extra_checks=[
+                {
+                    "name": "http_200",
+                    "command": f"GET {base_url}/redirect",
+                    "expected": "HTTP200",
+                    "observed": 200,
+                    "pass": True,
+                }
+            ],
+        )
+        with mock.patch.object(careers_loop_proof, "_public_http_url_error", return_value=""):
+            redirect_result = _verify(redirect)
+        _check(
+            "http_200 does not follow redirects",
+            redirect_result.get("status") == "UNVERIFIED"
+            and _CountingHTTPHandler.hits.get("/redirect") == 1
+            and _CountingHTTPHandler.hits.get("/ok", 0) == 0,
+            {"result": redirect_result, "hits": dict(_CountingHTTPHandler.hits)},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
     source = inspect.getsource(careers_loop_proof)
     _check("verifier never enables shell execution", "shell=True" not in source, "shell=True found")
 
@@ -157,4 +242,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

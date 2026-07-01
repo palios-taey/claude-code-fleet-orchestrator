@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import os
 import re
 import shlex
+import socket
 import subprocess
+import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +28,7 @@ _EXFIL_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"),
     re.compile(r"\bPALIOS\b"),
 )
+_BLOCKED_HOST_SUFFIXES = (".localhost", ".local")
 
 
 @dataclass(frozen=True)
@@ -316,16 +321,82 @@ def _http_200(tokens: List[str], check: Dict[str, Any], _root: Path, _cycle_id: 
     if len(tokens) != 2 or tokens[0] not in {"GET", "http_200"}:
         return CheckResult(check_type, command, expected, "", False, "command must match: GET <http-url>", SOURCE)
     url = tokens[1]
-    if not (url.startswith("http://") or url.startswith("https://")):
-        return CheckResult(check_type, command, expected, "", False, "URL must be http or https", SOURCE)
+    url_error = _public_http_url_error(url)
+    if url_error:
+        return CheckResult(check_type, command, expected, "", False, url_error, SOURCE)
     try:
         request = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(request, timeout=_TIMEOUT_SEC) as response:
+        opener = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=_TIMEOUT_SEC) as response:
             observed = int(response.status)
+    except urllib.error.HTTPError as exc:
+        observed = int(exc.code)
     except Exception as exc:
         return CheckResult(check_type, command, expected, "", False, str(exc), SOURCE)
     ok, detail = _expected_matches(expected, observed)
     return CheckResult(check_type, command, expected, observed, ok, detail, SOURCE)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+def _public_http_url_error(url: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError as exc:
+        return f"URL is invalid: {exc}"
+    if parsed.scheme not in {"http", "https"}:
+        return "URL must be http or https"
+    if parsed.username or parsed.password:
+        return "URL must not include userinfo"
+    host = parsed.hostname
+    if not host:
+        return "URL host is required"
+    try:
+        ascii_host = host.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        return f"URL host is invalid: {exc}"
+    if ascii_host == "localhost" or ascii_host.endswith(_BLOCKED_HOST_SUFFIXES):
+        return "URL host resolves to a local-only name"
+    port = parsed.port
+    if port is not None and not 1 <= port <= 65535:
+        return "URL port is out of range"
+    return _resolved_public_ip_error(ascii_host, port or (443 if parsed.scheme == "https" else 80))
+
+
+def _resolved_public_ip_error(host: str, port: int) -> str:
+    try:
+        addrinfos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        return f"URL host could not be resolved: {exc}"
+    if not addrinfos:
+        return "URL host resolved to no addresses"
+    blocked: List[str] = []
+    seen: set[str] = set()
+    for _family, _socktype, _proto, _canonname, sockaddr in addrinfos:
+        ip_text = str(sockaddr[0])
+        if ip_text in seen:
+            continue
+        seen.add(ip_text)
+        try:
+            ip = ipaddress.ip_address(ip_text)
+        except ValueError:
+            blocked.append(ip_text)
+            continue
+        if any((
+            ip.is_loopback,
+            ip.is_private,
+            ip.is_link_local,
+            ip.is_multicast,
+            ip.is_reserved,
+            ip.is_unspecified,
+        )):
+            blocked.append(ip_text)
+    if blocked:
+        return "URL host resolves to blocked non-public address(es): " + ", ".join(sorted(blocked))
+    return ""
 
 
 def _gh_readme_substring(tokens: List[str], check: Dict[str, Any], _root: Path, _cycle_id: str) -> CheckResult:
