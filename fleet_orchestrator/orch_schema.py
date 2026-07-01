@@ -870,8 +870,8 @@ def _read_ref_context(refs: List[Dict[str, Any]], source_path: Optional[str],
                       line_cap: int = 200) -> Dict[str, Any]:
     resolved: List[Dict[str, Any]] = []
     warnings: List[str] = []
-    remaining_lines = line_cap
     for ref in _normalize_refs(refs):
+        remaining_lines = line_cap
         path = str(ref.get("path") or "")
         sections = list(ref.get("sections") or [])
         first_section = sections[0] if sections else {"l_start": 0, "l_end": 0}
@@ -892,9 +892,9 @@ def _read_ref_context(refs: List[Dict[str, Any]], source_path: Optional[str],
                 ref_entry["sections"].append({
                     "l_start": section["l_start"],
                     "l_end": section["l_end"],
-                    "warning": "ref truncated by aggregate line cap",
+                    "warning": "ref truncated by per-ref line cap",
                 })
-            ref_entry["warning"] = "ref truncated by aggregate line cap"
+            ref_entry["warning"] = "ref truncated by per-ref line cap"
             resolved.append(ref_entry)
             continue
         resolved_path, resolve_warning = resolve_ref_path(path, source_path)
@@ -976,8 +976,8 @@ def _read_ref_context(refs: List[Dict[str, Any]], source_path: Optional[str],
             section_entry["content"] = "\n".join(slice_lines[:allowed])
             section_entry["truncated"] = allowed < len(slice_lines)
             if section_entry["truncated"]:
-                section_entry["warning"] = "ref truncated by aggregate line cap"
-                ref_entry["warning"] = "ref truncated by aggregate line cap"
+                section_entry["warning"] = "ref truncated by per-ref line cap"
+                ref_entry["warning"] = "ref truncated by per-ref line cap"
             remaining_lines -= allowed
             if "content" not in ref_entry:
                 ref_entry["content"] = section_entry["content"]
