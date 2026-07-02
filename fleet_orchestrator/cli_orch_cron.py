@@ -41,7 +41,8 @@ JSON registry (path passed via ``--registry``)::
           "id": "linkedin-plan-cycle",
           "session": "treasurer",
           "supervisor": "treasurer",
-          "project": "linkedin-plan",        // Project next-ready dispatch mode; no reset
+          "project": "linkedin-plan",        // Project next-ready dispatch mode
+          "mode": "reset",                   // OPTIONAL: advance (default) or reset
           "description": "Run the LinkedIn recurring plan",
           "tz": "America/New_York",
           "minute": 39,
@@ -63,11 +64,19 @@ JSON registry (path passed via ``--registry``)::
       ]
     }
 
-Trigger modes are mutually exclusive. A trigger with more than one of
+Route modes are mutually exclusive. A trigger with more than one of
 ``command``, ``task_id``, ``project``, or ``prompt_file`` is skipped as ambiguous
 instead of using silent precedence. Commands are trusted operator registry input
 and may use shell syntax; never interpolate non-registry data into command
 strings.
+
+Project triggers support an optional ``mode`` field. ``advance`` is the default:
+dispatch the current next-ready task without resetting state, then reclaim
+completed recurring steps by lowest reclaim count after the dependency chain
+drains. ``reset`` resets every project task to pending before selecting
+next-ready, so each fire starts at the chain entry. Use ``reset`` only for
+cadences that must repeat the whole project from step one on every scheduled
+fire.
 
 State file format (jsonl, one record per fire)::
 
@@ -84,7 +93,7 @@ State file format (jsonl, one record per fire)::
 
     {"ts": 1779800000, "fire_id": "linkedin-plan-20260526-2039",
      "trigger_mode": "project", "project": "linkedin-plan",
-     "task_id": "linkedin-plan::step-0", "session": "treasurer",
+     "project_mode": "reset", "task_id": "linkedin-plan::step-0", "session": "treasurer",
      "result": "dispatched" }
 
 Operators (e.g., the WAKE_PROMPT.txt-driven posting loop) can grep the
@@ -157,6 +166,9 @@ NOTIFY_KEY_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
 COMMAND_TIMEOUT_DEFAULT_SEC = 600.0
 COMMAND_OUTPUT_LIMIT = 4000
 DEFAULT_WEEKDAYS = (1, 2, 3, 4, 5, 6, 7)
+PROJECT_TRIGGER_MODE_ADVANCE = "advance"
+PROJECT_TRIGGER_MODE_RESET = "reset"
+PROJECT_TRIGGER_MODES = {PROJECT_TRIGGER_MODE_ADVANCE, PROJECT_TRIGGER_MODE_RESET}
 TRIGGER_STARVATION_SKIP_THRESHOLD = 3
 TRIGGER_STARVATION_STALE_TOOL_SEC = 15 * 60
 TRIGGER_STARVATION_STATE_TTL_SEC = 3 * 24 * 60 * 60
@@ -255,6 +267,10 @@ def _clear_dedup(redis_client: Any, fire_id: str) -> None:
 
 def _trigger_route_fields(trig: dict) -> list[str]:
     return [field for field in ("command", "task_id", "project", "prompt_file") if field in trig]
+
+
+def _project_trigger_mode(trig: dict) -> str:
+    return str(trig.get("mode") or PROJECT_TRIGGER_MODE_ADVANCE).strip().lower()
 
 
 def _starvation_state_key(trig_id: str, project_id: str) -> str:
@@ -701,21 +717,32 @@ def _fire_project_trigger(r, trig: dict, now_local: datetime, dry_run: bool = Fa
     trig_id = trig.get("id") or trig.get("project") or trig.get("session", "?")
     session = str(trig.get("session") or "").strip()
     project_id = str(trig.get("project") or "").strip()
+    mode = _project_trigger_mode(trig)
     if not session:
         return "skipped:no_session"
     if not project_id:
         return "skipped:no_project"
+    if mode not in PROJECT_TRIGGER_MODES:
+        log.warning(
+            "SKIP project trigger %s project=%s session=%s: bad mode=%r expected one of %s",
+            trig_id,
+            project_id,
+            session,
+            trig.get("mode"),
+            sorted(PROJECT_TRIGGER_MODES),
+        )
+        return "skipped:bad_project_mode"
 
     fire_id = f"{trig_id}-{now_local:%Y%m%d-%H%M}"
     if dry_run:
-        log.info("[DRY] would dispatch project next-ready trigger %s @ %s project=%s session=%s",
-                 trig_id, fire_id, project_id, session)
+        log.info("[DRY] would dispatch project trigger %s @ %s project=%s session=%s mode=%s",
+                 trig_id, fire_id, project_id, session, mode)
         return "dry_run"
     if not _dedup_fire(r, fire_id):
         return "skipped:already_fired"
 
     from fleet_orchestrator.dispatch import OrchTaskNotReady, WorkerBusy, dispatch
-    from fleet_orchestrator.orch_schema import get_session_next_ready, project_cycle_in_flight
+    from fleet_orchestrator.orch_schema import get_session_next_ready, project_cycle_in_flight, reset_project
 
     cycle_state = project_cycle_in_flight(project_id)
     if int(cycle_state.get("active_count") or 0) > 0:
@@ -730,9 +757,17 @@ def _fire_project_trigger(r, trig: dict, now_local: datetime, dry_run: bool = Fa
         log.info("SKIP project trigger %s project=%s session=%s: skipped:cycle_in_flight %s",
                  trig_id, project_id, session, cycle_state)
         return result
+    if mode == PROJECT_TRIGGER_MODE_RESET:
+        reset_result = reset_project(project_id, reset_by=f"orch-cron:{trig_id}")
+        log.info("RESET project trigger %s project=%s session=%s result=%s",
+                 trig_id, project_id, session, reset_result.get("ok"))
     next_ready = (
         get_session_next_ready(session, project_id=project_id)
-        or _completed_recurring_project_next_ready(session, project_id)
+        or (
+            _completed_recurring_project_next_ready(session, project_id)
+            if mode == PROJECT_TRIGGER_MODE_ADVANCE
+            else None
+        )
     )
     task_id = str((next_ready or {}).get("task_id") or (next_ready or {}).get("id") or "").strip()
     if not task_id:
@@ -772,9 +807,10 @@ def _fire_project_trigger(r, trig: dict, now_local: datetime, dry_run: bool = Fa
         return "skipped:task_not_ready"
 
     trig["_orch_cron_project_task_id"] = task_id
+    trig["_orch_cron_project_mode"] = mode
     _clear_starvation_state(r, str(trig_id), project_id)
-    log.info("FIRE project trigger %s session=%s project=%s task=%s",
-             trig_id, session, project_id, task_id)
+    log.info("FIRE project trigger %s session=%s project=%s mode=%s task=%s",
+             trig_id, session, project_id, mode, task_id)
     return "dispatched"
 
 
@@ -943,6 +979,7 @@ def trigger_payload_hash(trig: dict) -> str:
                 "project": trig.get("project"),
                 "session": trig.get("session") or "",
                 "description": trig.get("description") or "",
+                "mode": _project_trigger_mode(trig),
             },
             sort_keys=True,
         )
@@ -1045,6 +1082,10 @@ def tick(registry_path: str, redis_client, dry_run: bool = False,
                     "result": result,
                     "hostname": socket.gethostname(),
                 }
+                if trig.get("project"):
+                    record["project_mode"] = (
+                        trig.get("_orch_cron_project_mode") or _project_trigger_mode(trig)
+                    )
                 append_state_file(trig.get("state_file"), record)
                 fires += 1
             elif "command" in trig and result.startswith("command:"):
