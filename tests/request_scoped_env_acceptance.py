@@ -191,11 +191,35 @@ def _session_roots_are_request_scoped() -> None:
     _check("scoped session roots request does not mutate os.environ", after == before, {"before": {k: before.get(k) for k in ENV_KEYS}, "after": {k: after.get(k) for k in ENV_KEYS}})
 
 
+def _quoted_export_session_roots_parse_like_base_env() -> None:
+    with _preserved_env(), tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        bootstrap_root = tmp / "bootstrap-session"
+        actual_root = tmp / "actual-session"
+        bootstrap_root.mkdir()
+        actual_root.mkdir()
+        scoped_roots = {"delta": str(actual_root)}
+        raw_roots = json.dumps(scoped_roots)
+        (bootstrap_root / ".env").write_text(
+            f"export ORCH_SESSION_ROOTS='{raw_roots}'\n",
+            encoding="utf-8",
+        )
+
+        scoped_env = assembler._read_session_env(["delta"], {"delta": str(bootstrap_root)})
+        parsed_scoped = assembler._load_session_roots(scoped_env)
+        os.environ["ORCH_SESSION_ROOTS"] = raw_roots
+        parsed_base = assembler._load_session_roots()
+
+    _check("quoted export ORCH_SESSION_ROOTS reader strips shell quotes", scoped_env.get("ORCH_SESSION_ROOTS") == raw_roots, scoped_env)
+    _check("quoted export ORCH_SESSION_ROOTS parses like base env", parsed_scoped == parsed_base == scoped_roots, {"scoped": parsed_scoped, "base": parsed_base})
+
+
 def main() -> int:
     _scoped_rules_override_operator_global()
     _scoped_memory_root_override_operator_global()
     _no_rules_root_leaks_to_next_session()
     _session_roots_are_request_scoped()
+    _quoted_export_session_roots_parse_like_base_env()
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
         return 1
