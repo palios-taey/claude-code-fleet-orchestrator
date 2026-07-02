@@ -5636,26 +5636,39 @@ def _resolve_chat_question(question_id: str, *,
     pipe.execute()
 
 
-def _notify_human_review_gate(reviewer: str, prompt: str, *, requested_by: str,
-                              task_id: str, question_id: str,
-                              config: Optional[OrchConfig] = None) -> None:
-    if not reviewer:
-        return
+def _alert_human_review_delivery_failure_to_configured_target(prompt: str, *, requested_by: str,
+                                                              task_id: str, question_id: str,
+                                                              reviewer: str,
+                                                              error: Exception,
+                                                              config: Optional[OrchConfig] = None) -> tuple[bool, str]:
     cfg = config or OrchConfig()
+    target = str(getattr(cfg, "human_review_alert_target", "") or "").strip()
+    if not target:
+        _LOG.error("human-review delivery failure alert skipped: ORCH_HUMAN_REVIEW_ALERT_TARGET is unset")
+        return False, ""
     body = (
-        f"HUMAN REVIEW NEEDED [{task_id}]\n"
+        f"HUMAN REVIEW DELIVERY FAILED [{task_id}]\n"
         f"question_id: {question_id}\n"
+        f"reviewer: {reviewer or 'unknown'}\n"
+        f"requested_by: {requested_by or 'unknown'}\n"
+        f"error: {error}\n\n"
         f"{prompt}"
     )
-    result = subprocess.run(
-        [cfg.notify_cli_path, reviewer, body, "--from", requested_by or "orch-human-review",
-         "--type", "escalation", "--priority", "high"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [cfg.notify_cli_path, target, body, "--from", "orch-human-review",
+             "--type", "escalation", "--priority", "high"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _LOG.error("human-review delivery failure alert subprocess failed: %s", exc)
+        return False, target
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"{cfg.notify_cli_path} failed")
+        _LOG.error("human-review delivery failure alert failed: %s", result.stderr.strip() or result.stdout.strip())
+        return False, target
+    return True, target
 
 
 def create_question(question_id: str, text: str, context: str = "",
@@ -5902,6 +5915,7 @@ def create_human_review_gate(
     notify: bool = True,
     config: Optional[OrchConfig] = None,
 ) -> Dict[str, Any]:
+    cfg = config or OrchConfig()
     task = create_task(
         phase_id=phase_id,
         task_id=task_id,
@@ -5912,7 +5926,7 @@ def create_human_review_gate(
         task_type="human-review",
         refs=refs,
         wake_owner_if_ready=False,
-        config=config,
+        config=cfg,
     )
     question = create_question(
         question_id=question_id,
@@ -5925,12 +5939,42 @@ def create_human_review_gate(
         question_type="human_review_gate",
         gate_task_id=task,
         refs=refs,
-        surface=True,
-        config=config,
+        surface=False,
+        config=cfg,
     )
-    if notify:
-        _notify_human_review_gate(reviewer, prompt, requested_by=requested_by,
-                                  task_id=task, question_id=question, config=config)
+    try:
+        _surface_question_to_chat({
+            "id": question,
+            "text": prompt,
+            "task_id": task,
+            "gate_task_id": task,
+            "asked_by": requested_by,
+            "reviewer": reviewer,
+            "lineage": reviewer,
+        }, config=cfg)
+    except Exception as exc:
+        alert_sent, alert_target = _alert_human_review_delivery_failure_to_configured_target(
+            prompt,
+            requested_by=requested_by,
+            task_id=task,
+            question_id=question,
+            reviewer=reviewer,
+            error=exc,
+            config=cfg,
+        )
+        alert_note = (
+            f"Configured alert target '{alert_target}' was notified."
+            if alert_sent
+            else "No delivery-failure alert target was notified; set ORCH_HUMAN_REVIEW_ALERT_TARGET to enable one."
+        )
+        raise RuntimeError(
+            f"human-review gate '{task}' could not surface in dashboard chat for reviewer '{reviewer}'. "
+            f"{alert_note} Inspect /ui/ or GET /api/chat/{{reviewer}}; "
+            "retry POST /api/human-review-gates after dashboard/Redis delivery is healthy. "
+            f"original error: {exc}"
+        ) from exc
+    # `notify` remains accepted for API/CLI compatibility; dashboard chat is the delivery channel.
+    _ = notify
     return {"task_id": task, "question_id": question, "reviewer": reviewer}
 
 
