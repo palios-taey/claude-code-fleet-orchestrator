@@ -228,7 +228,7 @@ The hooks close the loop:
 - `SessionStart` and `UserPromptSubmit` hooks fetch the current wake packet so sessions arrive with scoped state.
 - `PreToolUse` / `PostToolUse` activity hooks keep liveness fresh.
 - The Stop hook asks the orchestrator whether the session may stop.
-- `orch-watch` listens for Redis state transitions and wakes supervisors when a stopped or idle session has actionable work. It also watches delegated notification delivery: the notify router service, daemon heartbeat freshness, and stuck-inbox SLO, with direct out-of-band tmux alerts when delivery is at risk.
+- `orch-watch` listens for Redis state transitions and wakes supervisors when a stopped or idle session has actionable work. It also watches delegated notification delivery: the notify router service, daemon heartbeat freshness, and stuck-inbox SLO. Service or heartbeat liveness failures use direct out-of-band tmux alerts; stuck-inbox SLO incidents first reconcile usage-limit idle state and then alert the configured watchdog inbox once per stuck message if still unresolved.
 
 ## API And Dashboard
 

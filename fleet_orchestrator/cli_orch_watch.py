@@ -137,6 +137,24 @@ DEFAULT_NOTIFY_DAEMON_ALERT_DEDUP_TTL_SEC = 300
 DEFAULT_STUCK_INBOX_MAX_AGE_SEC = 600
 DEFAULT_NOTIFY_ROUTER_SERVICE = "conductor-notify-router"
 DEFAULT_NOTIFY_DAEMON_ALERT_TARGET = "conductor"
+USAGE_LIMIT_IDLE_MARKERS = (
+    "you've hit your session limit",
+    "you have hit your session limit",
+    "you've reached your session limit",
+    "you have reached your session limit",
+    "you've hit your weekly limit",
+    "you have hit your weekly limit",
+    "you've reached your weekly limit",
+    "you have reached your weekly limit",
+    "you've hit your usage limit",
+    "you have hit your usage limit",
+    "you've reached your usage limit",
+    "you have reached your usage limit",
+)
+USAGE_LIMIT_TRANSIENT_EXCLUSIONS = (
+    "not your usage limit",
+)
+USAGE_LIMIT_RESTING_REGION_NONBLANK_LINES = 3
 
 
 def state_key(node_id: str, suffix: str) -> str:
@@ -384,6 +402,112 @@ def _send_notify_daemon_desktop_alert(
         log.error("notify-send failed for notify-daemon watchdog alert: %s", exc)
 
 
+def _local_tmux_sessions() -> set[str]:
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.debug("tmux session inventory failed during stuck-inbox remediation: %s", exc)
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def _tmux_pane_tail(session_name: str, *, lines: int = 80) -> str:
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-t", session_name, "-S", f"-{lines}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.debug("tmux pane capture failed during stuck-inbox remediation for %s: %s",
+                  session_name, exc)
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout or ""
+
+
+def _usage_limit_resting_region(pane_text: str) -> str:
+    nonblank_lines = [line.strip() for line in (pane_text or "").splitlines() if line.strip()]
+    return "\n".join(nonblank_lines[-USAGE_LIMIT_RESTING_REGION_NONBLANK_LINES:])
+
+
+def _pane_shows_usage_limit_resting_state(pane_text: str) -> bool:
+    normalized = " ".join(_usage_limit_resting_region(pane_text).lower().split())
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in USAGE_LIMIT_TRANSIENT_EXCLUSIONS):
+        return False
+    return any(marker in normalized for marker in USAGE_LIMIT_IDLE_MARKERS)
+
+
+def _reconcile_stranded_idle_for_stuck_inbox(r, node_id: str) -> bool:
+    if r.get(state_key(node_id, "idle")):
+        return False
+    if r.exists(state_key(node_id, "tool_running")):
+        return False
+    if node_id not in _local_tmux_sessions():
+        return False
+    if not _pane_shows_usage_limit_resting_state(_tmux_pane_tail(node_id)):
+        return False
+    r.set(state_key(node_id, "idle"), "1")
+    log.warning("Reconciled idle=1 for %s before stuck-inbox alert", node_id)
+    return True
+
+
+def _stuck_inbox_dedup_key(node_id: str, msg_id: object) -> str:
+    return orch_key("notify-daemon-watchdog-stuck-inbox", node_id, str(msg_id or "unknown"))
+
+
+def _stuck_inbox_dedup_pattern(node_id: str = "*") -> str:
+    return orch_key("notify-daemon-watchdog-stuck-inbox", node_id, "*")
+
+
+def _clear_drained_stuck_inbox_dedup_keys(r) -> int:
+    cleared = 0
+    for key_name in list(r.scan_iter(match=_stuck_inbox_dedup_pattern())):
+        key = str(key_name)
+        parts = key.split(":")
+        if len(parts) < 4:
+            continue
+        node_id = parts[-2]
+        try:
+            if r.lrange(notify_key(f"{node_id}:inbox", prefix=NOTIFY_KEY_PREFIX), 0, -1):
+                continue
+            cleared += r.delete(key)
+        except redis_lib.RedisError as exc:
+            log.error("stuck inbox watchdog dedup cleanup failed for %s: %s", key, exc)
+    return cleared
+
+
+def _send_stuck_inbox_conductor_alert(r, body: str, *, oldest: dict[str, object],
+                                      now: float) -> bool:
+    msg_id = f"orch-watch-stuck-inbox-{oldest['node_id']}-{oldest['msg_id']}"
+    payload = {
+        "from": "orch-watch",
+        "type": "MESSAGE",
+        "priority": "high",
+        "timestamp": now,
+        "msg_id": msg_id,
+        "body": body,
+    }
+    try:
+        r.lpush(notify_key(f"{DEFAULT_NOTIFY_DAEMON_ALERT_TARGET}:inbox", prefix=NOTIFY_KEY_PREFIX),
+                json.dumps(payload))
+    except redis_lib.RedisError as exc:
+        log.error("stuck inbox conductor alert enqueue failed: %s", exc)
+        return False
+    return True
+
+
 def check_notify_daemon_liveness(
     r,
     *,
@@ -534,11 +658,20 @@ def check_stuck_inbox_delivery(
     dedup_ttl_sec: int = DEFAULT_NOTIFY_DAEMON_ALERT_DEDUP_TTL_SEC,
 ) -> dict[str, object]:
     current_time = _redis_now(r) if now is None else float(now)
+    _clear_drained_stuck_inbox_dedup_keys(r)
     oldest = _oldest_queued_inbox_message(r, now=current_time)
     if not oldest or float(oldest["age_sec"]) <= max_age_sec:
         return {"ok": True, "alerted": False, "oldest": oldest}
 
-    dedup_key = orch_key("notify-daemon-watchdog-stuck-inbox", str(oldest["node_id"]))
+    if _reconcile_stranded_idle_for_stuck_inbox(r, str(oldest["node_id"])):
+        return {
+            "ok": True,
+            "alerted": False,
+            "remediated": True,
+            "oldest": _oldest_queued_inbox_message(r, now=current_time),
+        }
+
+    dedup_key = _stuck_inbox_dedup_key(str(oldest["node_id"]), oldest["msg_id"])
     reason = (
         f"{oldest['key']} has undelivered message age={float(oldest['age_sec']):.1f}s "
         f"from={oldest['from']} type={oldest['type']} msg_id={oldest['msg_id']}"
@@ -548,21 +681,19 @@ def check_stuck_inbox_delivery(
         f"{reason}. The notify daemon may be alive while delivery is stuck; "
         "investigate the recipient idle flag, hooks, and inbox drain path."
     )
-    log.critical("%s", banner)
 
-    if dedup_ttl_sec > 0 and r.exists(dedup_key):
+    del dedup_ttl_sec
+    if r.exists(dedup_key):
         return {"ok": False, "alerted": False, "deduped": True, "reason": reason, "oldest": oldest}
 
-    tmux_alerted = _send_notify_daemon_tmux_alert(alert_target, banner)
-    _send_notify_daemon_desktop_alert(
-        reason,
-        title="CRITICAL: notify delivery SLO failed",
-    )
+    del alert_target
+    log.critical("%s", banner)
+    alerted = _send_stuck_inbox_conductor_alert(r, banner, oldest=oldest, now=current_time)
     try:
-        r.set(dedup_key, "1", ex=dedup_ttl_sec)
+        r.set(dedup_key, "1")
     except redis_lib.RedisError as exc:
         log.error("stuck inbox watchdog dedup write failed: %s", exc)
-    return {"ok": False, "alerted": tmux_alerted, "reason": reason, "oldest": oldest}
+    return {"ok": False, "alerted": alerted, "reason": reason, "oldest": oldest}
 
 
 def _target_stop_decision_allows_stop(target: str, wake_reason: str,

@@ -101,7 +101,7 @@ drift by loop-proof completion verification; default `foundations/careers`).
 | `ORCH_DECISION_RECEIPTS_ENABLED` | **ON** | Best-effort decision-receipt explainability records. They are written to Redis stream `orch:streams:decision_receipts` and surfaced by `taey-receipts list`; nothing blocks on them. |
 | `ORCH_LOOPS_ENABLED` | **ON** | The additive signal/clock/task-state loop API routes. When disabled, loop operations return `ok:false`, `enabled:false`, and `reason:"loops disabled"`; core stop/dispatch integration is deliberately not wired in this phase. |
 | `ORCH_GATE_TEMPLATE_ENABLED` | **ON** | Applies the forced sub-role gate template when a plan explicitly requests that template. |
-| `ORCH_NOTIFY_DAEMON_WATCHDOG` | **ON** | Enables the `orch-watch` notify-daemon watchdog: delegated service liveness, heartbeat freshness, and stuck-inbox delivery SLO checks with direct out-of-band alerts. |
+| `ORCH_NOTIFY_DAEMON_WATCHDOG` | **ON** | Enables the `orch-watch` notify-daemon watchdog: delegated service liveness and heartbeat freshness with direct out-of-band alerts, plus stuck-inbox delivery SLO checks that first reconcile usage-limit idle state and then alert the conductor inbox once per stuck message if still unresolved. |
 
 ## 6. Handoff / stop discipline
 
@@ -112,7 +112,7 @@ drift by loop-proof completion verification; default `foundations/careers`).
 | `ORCH_NOTIFY_DAEMON_HEARTBEAT_MAX_AGE_SEC` | `15` | Maximum accepted age for `taey:_notify_daemon:heartbeat` before `orch-watch` treats the notify daemon as wedged. |
 | `ORCH_NOTIFY_DAEMON_STUCK_INBOX_MAX_AGE_SEC` | `600` | Maximum accepted age for a queued `${NOTIFY_KEY_PREFIX}:*:inbox` message before `orch-watch` raises the stuck-delivery SLO alert. |
 | `ORCH_NOTIFY_ROUTER_SERVICE` | `conductor-notify-router` | `systemctl --user is-active` service name checked by the notify-daemon watchdog. |
-| `ORCH_NOTIFY_DAEMON_ALERT_TARGET` | `conductor` | tmux session that receives direct out-of-band critical watchdog alerts. |
+| `ORCH_NOTIFY_DAEMON_ALERT_TARGET` | `conductor` | tmux session that receives direct out-of-band service and heartbeat liveness watchdog alerts. |
 
 In-progress stop blocking is always active. Handoff validation helper code
 remains available for explicit handoff records/receipts, but pending/unacked

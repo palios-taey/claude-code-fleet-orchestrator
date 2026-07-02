@@ -96,8 +96,44 @@ def _run_with_service(service_status: str, callback):
     return result, commands, delays
 
 
+def _run_with_tmux(callback, *, sessions: tuple[str, ...] = (), panes: dict[str, str] | None = None):
+    commands: list[list[str]] = []
+    panes = panes or {}
+
+    def fake_run(cmd, **kwargs):
+        del kwargs
+        command = [str(part) for part in cmd]
+        commands.append(command)
+        if command == ["tmux", "list-sessions", "-F", "#{session_name}"]:
+            return SimpleNamespace(returncode=0, stdout="\n".join(sessions) + ("\n" if sessions else ""), stderr="")
+        if command[:4] == ["tmux", "capture-pane", "-p", "-t"]:
+            session = command[4]
+            return SimpleNamespace(returncode=0, stdout=panes.get(session, ""), stderr="")
+        if command[:1] == ["tmux"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command[:1] == ["notify-send"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess command: {command}")
+
+    with mock.patch.object(watch.subprocess, "run", side_effect=fake_run):
+        with mock.patch.object(watch.shutil, "which", return_value="/usr/bin/notify-send"):
+            result = callback()
+    return result, commands
+
+
 def _tmux_commands(commands: list[list[str]]) -> list[list[str]]:
     return [cmd for cmd in commands if cmd[:1] == ["tmux"]]
+
+
+def _notify_send_commands(commands: list[list[str]]) -> list[list[str]]:
+    return [cmd for cmd in commands if cmd[:1] == ["notify-send"]]
+
+
+def _submit_commands(commands: list[list[str]]) -> list[list[str]]:
+    return [
+        cmd for cmd in _tmux_commands(commands)
+        if cmd[:4] == ["tmux", "send-keys", "-t"]
+    ]
 
 
 def _assert_oob_submit_sequence(label: str, commands: list[list[str]], delays: list[float]) -> None:
@@ -192,21 +228,20 @@ def test_healthy_daemon_no_alert() -> None:
     _check("healthy check does not sleep for alert submit", delays == [], delays)
 
 
-def test_stale_inbox_delivery_alerts_even_when_daemon_healthy() -> None:
+def test_stale_inbox_delivery_self_remediates_usage_limit_idle() -> None:
     r = FakeRedis()
     r.lpush(
-        f"{watch.NOTIFY_KEY_PREFIX}:infra:inbox",
+        f"{watch.NOTIFY_KEY_PREFIX}:gatekeeper:inbox",
         json.dumps({
             "from": "conductor",
             "type": "command",
-            "body": "disk-96 follow-up",
+            "body": "please review",
             "timestamp": 100.0,
-            "msg_id": "disk-96",
+            "msg_id": "review-17",
         }),
     )
 
-    result, commands, delays = _run_with_service(
-        "active",
+    result, commands = _run_with_tmux(
         lambda: watch.check_stuck_inbox_delivery(
             r,
             now=1000.0,
@@ -214,11 +249,102 @@ def test_stale_inbox_delivery_alerts_even_when_daemon_healthy() -> None:
             alert_target="conductor",
             dedup_ttl_sec=0,
         ),
+        sessions=("gatekeeper",),
+        panes={
+            "gatekeeper": "\n".join([
+                "working notes",
+                "You've hit your session limit. It resets later today.",
+            ])
+        },
     )
 
-    _check("old queued inbox message fires OOB alert", result["alerted"] is True, result)
-    _check("stuck handoff alert names recipient inbox", f"{watch.NOTIFY_KEY_PREFIX}:infra:inbox" in result["reason"], result)
-    _assert_oob_submit_sequence("stuck handoff alert", commands, delays)
+    _check("stranded stale inbox is remediated", result["remediated"] is True, result)
+    _check("remediation sets idle flag", r.get(watch.state_key("gatekeeper", "idle")) == "1", r.store)
+    _check("remediation does not alert conductor inbox",
+           r.lrange(f"{watch.NOTIFY_KEY_PREFIX}:conductor:inbox", 0, -1) == [],
+           r.store)
+    _check("remediation does not tmux-submit an alert", _submit_commands(commands) == [], commands)
+    _check("remediation does not desktop alert", _notify_send_commands(commands) == [], commands)
+
+
+def test_stale_inbox_delivery_alerts_conductor_once_without_desktop() -> None:
+    r = FakeRedis()
+    inbox_key = f"{watch.NOTIFY_KEY_PREFIX}:infra:inbox"
+    payload = json.dumps({
+        "from": "conductor",
+        "type": "command",
+        "body": "disk-96 follow-up",
+        "timestamp": 100.0,
+        "msg_id": "disk-96",
+    })
+    r.lpush(inbox_key, payload)
+
+    first, first_commands = _run_with_tmux(
+        lambda: watch.check_stuck_inbox_delivery(
+            r,
+            now=1000.0,
+            max_age_sec=600,
+            alert_target="conductor",
+            dedup_ttl_sec=0,
+        ),
+        sessions=("infra",),
+        panes={"infra": "Claude Code ready\n$"},
+    )
+    second, second_commands = _run_with_tmux(
+        lambda: watch.check_stuck_inbox_delivery(
+            r,
+            now=1001.0,
+            max_age_sec=600,
+            alert_target="conductor",
+            dedup_ttl_sec=0,
+        ),
+        sessions=("infra",),
+        panes={"infra": "Claude Code ready\n$"},
+    )
+
+    conductor_alerts = r.lrange(f"{watch.NOTIFY_KEY_PREFIX}:conductor:inbox", 0, -1)
+    _check("unhealable stuck inbox alerts conductor", first["alerted"] is True, first)
+    _check("stuck handoff alert names recipient inbox", inbox_key in first["reason"], first)
+    _check("same stuck message is deduped", second.get("deduped") is True and second["alerted"] is False, second)
+    _check("stuck handoff creates exactly one conductor alert", len(conductor_alerts) == 1, conductor_alerts)
+    _check("stuck handoff conductor alert is explicit",
+           "CRITICAL NOTIFY DELIVERY SLO FAILURE" in json.loads(conductor_alerts[0])["body"],
+           conductor_alerts)
+    _check("stuck handoff does not tmux-submit an alert",
+           _submit_commands(first_commands + second_commands) == [],
+           first_commands + second_commands)
+    _check("stuck handoff does not desktop alert",
+           _notify_send_commands(first_commands + second_commands) == [],
+           first_commands + second_commands)
+
+    r.delete(inbox_key)
+    _run_with_tmux(
+        lambda: watch.check_stuck_inbox_delivery(
+            r,
+            now=1002.0,
+            max_age_sec=600,
+            alert_target="conductor",
+            dedup_ttl_sec=0,
+        ),
+        sessions=("infra",),
+        panes={"infra": "Claude Code ready\n$"},
+    )
+    r.lpush(inbox_key, payload)
+    third, _third_commands = _run_with_tmux(
+        lambda: watch.check_stuck_inbox_delivery(
+            r,
+            now=1003.0,
+            max_age_sec=600,
+            alert_target="conductor",
+            dedup_ttl_sec=0,
+        ),
+        sessions=("infra",),
+        panes={"infra": "Claude Code ready\n$"},
+    )
+    _check("draining inbox clears incident dedup", third["alerted"] is True, third)
+    _check("new incident after drain alerts once more",
+           len(r.lrange(f"{watch.NOTIFY_KEY_PREFIX}:conductor:inbox", 0, -1)) == 2,
+           r.store)
 
 
 def main() -> None:
@@ -226,7 +352,8 @@ def main() -> None:
     test_killed_service_alerts()
     test_stale_heartbeat_alerts()
     test_healthy_daemon_no_alert()
-    test_stale_inbox_delivery_alerts_even_when_daemon_healthy()
+    test_stale_inbox_delivery_self_remediates_usage_limit_idle()
+    test_stale_inbox_delivery_alerts_conductor_once_without_desktop()
     if FAILURES:
         raise SystemExit("\nFAILURES:\n" + "\n".join(FAILURES))
     print("\nPASS -- notify-daemon watchdog catches dead service, stale heartbeat, and stuck handoff delivery.")
