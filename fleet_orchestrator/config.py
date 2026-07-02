@@ -131,14 +131,16 @@ def _int_env(name: str, default: Optional[int] = None) -> int:
 # every _optional_env call. (ws1-grok-audit Check-3 resolution, 2026-06-11: the
 # distinction was correct in behavior but implicit; this makes it explicit.)
 #
-# REQUIRED — _require_env / _int_env(no default): absence raises OrchConfigError.
-# These are connectivity-critical; a silent default would point the product at
-# the wrong store and corrupt state.
+# REQUIRED — _require_env / _int_env(no default) / explicit fail-loud runtime
+# contract. These are connectivity- or delivery-critical; a silent default
+# would point the product at the wrong store or local operator script and
+# corrupt state/drop work.
 REQUIRED_ENV = (
     "ORCH_REDIS_HOST",      # _require via redis_host
     "ORCH_REDIS_PORT",      # _int_env (no default) via redis_port
     "ORCH_NEO4J_URI",       # _require via neo4j_uri
     "ORCH_NEO4J_DB",        # _require via neo4j_db
+    "ORCH_PEER_RESPAWN_SCRIPT",  # explicit fail-loud contract via orch-cron project trigger delivery
 )
 # OPTIONAL — _optional_env with a documented default. Absent => the named mode,
 # which is a fully supported operating state, NOT a silent fallback for missing

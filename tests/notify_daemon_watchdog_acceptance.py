@@ -267,6 +267,50 @@ def test_stale_inbox_delivery_self_remediates_usage_limit_idle() -> None:
     _check("remediation does not desktop alert", _notify_send_commands(commands) == [], commands)
 
 
+def test_stale_inbox_delivery_self_remediates_resting_prompt_idle() -> None:
+    r = FakeRedis()
+    r.lpush(
+        f"{watch.NOTIFY_KEY_PREFIX}:gatekeeper:inbox",
+        json.dumps({
+            "from": "conductor",
+            "type": "command",
+            "body": "please review",
+            "timestamp": 100.0,
+            "msg_id": "review-18",
+        }),
+    )
+
+    result, commands = _run_with_tmux(
+        lambda: watch.check_stuck_inbox_delivery(
+            r,
+            now=1000.0,
+            max_age_sec=600,
+            alert_target="conductor",
+            dedup_ttl_sec=0,
+        ),
+        sessions=("gatekeeper",),
+        panes={
+            "gatekeeper": "\n".join([
+                "previous response",
+                "--------------------------------------------------------",
+                "\u276f",
+                "--------------------------------------------------------",
+                "  bypass permissions on (shift+tab to cycle) <- for agents",
+            ])
+        },
+    )
+
+    _check("normal resting prompt stale inbox is remediated", result["remediated"] is True, result)
+    _check("resting prompt remediation sets idle flag",
+           r.get(watch.state_key("gatekeeper", "idle")) == "1",
+           r.store)
+    _check("resting prompt remediation does not alert conductor inbox",
+           r.lrange(f"{watch.NOTIFY_KEY_PREFIX}:conductor:inbox", 0, -1) == [],
+           r.store)
+    _check("resting prompt remediation does not tmux-submit an alert", _submit_commands(commands) == [], commands)
+    _check("resting prompt remediation does not desktop alert", _notify_send_commands(commands) == [], commands)
+
+
 def test_stale_inbox_delivery_alerts_conductor_once_without_desktop() -> None:
     r = FakeRedis()
     inbox_key = f"{watch.NOTIFY_KEY_PREFIX}:infra:inbox"
@@ -288,7 +332,7 @@ def test_stale_inbox_delivery_alerts_conductor_once_without_desktop() -> None:
             dedup_ttl_sec=0,
         ),
         sessions=("infra",),
-        panes={"infra": "Claude Code ready\n$"},
+        panes={"infra": "* Working (3m 39s - esc to interrupt)\n\u203a Explain this codebase"},
     )
     second, second_commands = _run_with_tmux(
         lambda: watch.check_stuck_inbox_delivery(
@@ -299,10 +343,14 @@ def test_stale_inbox_delivery_alerts_conductor_once_without_desktop() -> None:
             dedup_ttl_sec=0,
         ),
         sessions=("infra",),
-        panes={"infra": "Claude Code ready\n$"},
+        panes={"infra": "* Working (3m 39s - esc to interrupt)\n\u203a Explain this codebase"},
     )
 
     conductor_alerts = r.lrange(f"{watch.NOTIFY_KEY_PREFIX}:conductor:inbox", 0, -1)
+    _check("actively working stale inbox is not force-idled",
+           r.get(watch.state_key("infra", "idle")) is None,
+           r.store)
+    _check("actively working stale inbox is not remediated", first.get("remediated") is not True, first)
     _check("unhealable stuck inbox alerts conductor", first["alerted"] is True, first)
     _check("stuck handoff alert names recipient inbox", inbox_key in first["reason"], first)
     _check("same stuck message is deduped", second.get("deduped") is True and second["alerted"] is False, second)
@@ -339,7 +387,7 @@ def test_stale_inbox_delivery_alerts_conductor_once_without_desktop() -> None:
             dedup_ttl_sec=0,
         ),
         sessions=("infra",),
-        panes={"infra": "Claude Code ready\n$"},
+        panes={"infra": "* Working (3m 39s - esc to interrupt)\n\u203a Explain this codebase"},
     )
     _check("draining inbox clears incident dedup", third["alerted"] is True, third)
     _check("new incident after drain alerts once more",
@@ -353,6 +401,7 @@ def main() -> None:
     test_stale_heartbeat_alerts()
     test_healthy_daemon_no_alert()
     test_stale_inbox_delivery_self_remediates_usage_limit_idle()
+    test_stale_inbox_delivery_self_remediates_resting_prompt_idle()
     test_stale_inbox_delivery_alerts_conductor_once_without_desktop()
     if FAILURES:
         raise SystemExit("\nFAILURES:\n" + "\n".join(FAILURES))
