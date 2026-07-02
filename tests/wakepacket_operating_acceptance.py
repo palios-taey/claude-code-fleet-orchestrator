@@ -156,12 +156,21 @@ def _resolver_contract() -> None:
          mock.patch.object(assembler, "get_session_current_work", return_value=current), \
          mock.patch.object(assembler, "get_session_supervised_projects", return_value=[project]), \
          mock.patch.object(assembler, "get_supervisor_dispatchable_peer_task", return_value=peer_pending), \
+         mock.patch.object(assembler, "get_supervisor_inflight_peer_task", return_value=peer_done), \
+         mock.patch.object(assembler, "get_task_step_governance", return_value={}):
+        work = assembler._resolve_work("sup", None)
+    _check("resolver surfaces current work before pending", work.get("source") == "in_progress_own" and work.get("task_id") == "sup::current", work)
+
+    with mock.patch.object(assembler, "get_session_next_ready", return_value=ready), \
+         mock.patch.object(assembler, "get_session_current_work", return_value=None), \
+         mock.patch.object(assembler, "get_session_supervised_projects", return_value=[project]), \
+         mock.patch.object(assembler, "get_supervisor_dispatchable_peer_task", return_value=peer_pending), \
          mock.patch.object(assembler, "get_supervisor_inflight_peer_task", return_value=peer_done):
         work = assembler._resolve_work("sup", None)
-    _check("resolver surfaces pending before current work", work.get("source") == "pending" and work.get("task_id") == "sup::ready", work)
+    _check("resolver still surfaces pending when no current work exists", work.get("source") == "pending" and work.get("task_id") == "sup::ready", work)
 
     with mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
-         mock.patch.object(assembler, "get_session_current_work", return_value=current), \
+         mock.patch.object(assembler, "get_session_current_work", return_value=None), \
          mock.patch.object(assembler, "get_session_supervised_projects", return_value=[project]), \
          mock.patch.object(assembler, "get_supervisor_dispatchable_peer_task", return_value=peer_pending), \
          mock.patch.object(assembler, "get_supervisor_inflight_peer_task", return_value=peer_done):
@@ -169,7 +178,7 @@ def _resolver_contract() -> None:
     _check("resolver surfaces peer-dispatchable work", work.get("source") == "pending" and work.get("task_id") == "p::peer", work)
 
     with mock.patch.object(assembler, "get_session_next_ready", return_value=None), \
-         mock.patch.object(assembler, "get_session_current_work", return_value=current), \
+         mock.patch.object(assembler, "get_session_current_work", return_value=None), \
          mock.patch.object(assembler, "get_session_supervised_projects", return_value=[project]), \
          mock.patch.object(assembler, "get_supervisor_dispatchable_peer_task", return_value=None), \
          mock.patch.object(assembler, "get_supervisor_inflight_peer_task", return_value=peer_done):
