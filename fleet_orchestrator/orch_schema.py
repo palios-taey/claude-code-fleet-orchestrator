@@ -5114,13 +5114,23 @@ def project_cycle_in_flight(project_id: str,
             OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WITH p,
                  count(t) AS total,
-                 sum(CASE WHEN t.status IN ['in_progress', 'dispatched'] THEN 1 ELSE 0 END) AS active_count,
+                 sum(CASE
+                     WHEN t.status IN ['in_progress', 'dispatched']
+                       AND NOT toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:'
+                     THEN 1 ELSE 0
+                 END) AS active_count,
+                 sum(CASE
+                     WHEN t.status IN ['in_progress', 'dispatched']
+                       AND toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:'
+                     THEN 1 ELSE 0
+                 END) AS awaiting_count,
                  sum(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
                  sum(CASE WHEN t.status IN ['completed', 'failed', 'interrupted'] THEN 1 ELSE 0 END) AS terminal_count
             RETURN p.id AS project_id,
                    p.status AS project_status,
                    total AS total,
                    active_count AS active_count,
+                   awaiting_count AS awaiting_count,
                    pending_count AS pending_count,
                    terminal_count AS terminal_count
         """, project_id=project_id).single()
@@ -5128,6 +5138,7 @@ def project_cycle_in_flight(project_id: str,
         raise ProjectNotFoundError(f"project not found: {project_id}")
     data = dict(row)
     active_count = int(data.get("active_count") or 0)
+    awaiting_count = int(data.get("awaiting_count") or 0)
     pending_count = int(data.get("pending_count") or 0)
     terminal_count = int(data.get("terminal_count") or 0)
     in_flight = active_count > 0 or (pending_count > 0 and terminal_count > 0)
@@ -5136,6 +5147,7 @@ def project_cycle_in_flight(project_id: str,
         "project_status": str(data.get("project_status") or ""),
         "total": int(data.get("total") or 0),
         "active_count": active_count,
+        "awaiting_count": awaiting_count,
         "pending_count": pending_count,
         "terminal_count": terminal_count,
         "in_flight": in_flight,
