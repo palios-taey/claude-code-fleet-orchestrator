@@ -10,6 +10,7 @@ from .careers_loop_proof import verify_loop_proof_receipt
 
 
 DEFAULT_REQUIRED_GITHUB_CHECKS = ("r5-audit-gate", "ship-gate-acceptance")
+MERGED_PR_HEAD_PROVENANCE_CHECKS = ("r5-audit-gate",)
 DEFAULT_TRUSTED_CHECK_RUN_APPS = ("github-actions",)
 DEFAULT_TRUSTED_STATUS_CREATORS = ("github-actions[bot]",)
 VERIFIED = "VERIFIED"
@@ -204,11 +205,118 @@ def _commit_exists(repo: str, sha: str) -> None:
         raise RuntimeError(f"GitHub commit lookup for {sha!r} did not return a commit")
 
 
-def _open_pull_requests_for_commit(repo: str, sha: str) -> List[Dict[str, Any]]:
+def _pull_requests_for_commit(repo: str, sha: str) -> List[Dict[str, Any]]:
     payload = _gh_api(f"repos/{repo}/commits/{sha}/pulls?per_page=100")
     if not isinstance(payload, list):
         raise RuntimeError("GitHub commit pulls response did not include a list")
-    return [pr for pr in payload if isinstance(pr, dict) and str(pr.get("state") or "").lower() == "open"]
+    return [pr for pr in payload if isinstance(pr, dict)]
+
+
+def _open_pull_requests_for_commit(repo: str, sha: str) -> List[Dict[str, Any]]:
+    return [
+        pr for pr in _pull_requests_for_commit(repo, sha)
+        if str(pr.get("state") or "").lower() == "open"
+    ]
+
+
+def _same_sha(left: str, right: str) -> bool:
+    return left.strip().lower() == right.strip().lower()
+
+
+def _check_missing(observation: Dict[str, Any]) -> bool:
+    return str(observation.get("detail") or "").strip().lower().startswith("missing ")
+
+
+def _merged_source_pr_heads(repo: str, merge_sha: str) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    for pr_ref in _pull_requests_for_commit(repo, merge_sha):
+        number = pr_ref.get("number")
+        pr = pr_ref
+        if number:
+            detail = _gh_api(f"repos/{repo}/pulls/{number}")
+            if isinstance(detail, dict):
+                pr = detail
+        if not isinstance(pr, dict):
+            continue
+        merged = pr.get("merged") is True or bool(pr.get("merged_at"))
+        if not merged:
+            continue
+        pr_merge_sha = str(pr.get("merge_commit_sha") or "").strip()
+        if pr_merge_sha and not _same_sha(pr_merge_sha, merge_sha):
+            continue
+        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        head_sha = str(head.get("sha") or "").strip()
+        head_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+        head_repo_name = str(head_repo.get("full_name") or "").strip()
+        if not head_sha or not head_repo_name or head_repo_name.lower() != repo.lower():
+            continue
+        candidates.append({
+            "pr_number": number,
+            "pr_url": pr.get("html_url"),
+            "head_sha": head_sha,
+            "head_repo": head_repo_name,
+        })
+    return candidates
+
+
+def _with_pr_head_provenance(
+    observation: Dict[str, Any],
+    *,
+    merge_sha: str,
+    source: Dict[str, Any],
+) -> Dict[str, Any]:
+    enriched = dict(observation)
+    enriched.update({
+        "source": "merged-pr-head",
+        "merge_commit_sha": merge_sha,
+        "source_commit_sha": source.get("head_sha"),
+        "source_repo": source.get("head_repo"),
+        "source_pr": source.get("pr_number"),
+        "source_pr_url": source.get("pr_url"),
+    })
+    return enriched
+
+
+def _merged_pr_head_check_state(repo: str, merge_sha: str, check: str) -> Tuple[bool, Dict[str, Any]]:
+    sources = _merged_source_pr_heads(repo, merge_sha)
+    if not sources:
+        return False, {
+            "name": check,
+            "kind": "merged-pr-head",
+            "ok": False,
+            "detail": "no merged same-repo source PR head found for cited merge commit",
+        }
+    failures: List[Dict[str, Any]] = []
+    for source in sources:
+        head_sha = str(source.get("head_sha") or "").strip()
+        run_ok, run_observation = _check_run_state(repo, head_sha, check)
+        run_observation = _with_pr_head_provenance(run_observation, merge_sha=merge_sha, source=source)
+        if run_ok:
+            return True, run_observation
+        status_ok, status_observation = _status_state(repo, head_sha, check)
+        status_observation = _with_pr_head_provenance(status_observation, merge_sha=merge_sha, source=source)
+        if status_ok:
+            return True, status_observation
+        failures.extend([run_observation, status_observation])
+    return False, {
+        "name": check,
+        "kind": "merged-pr-head",
+        "ok": False,
+        "detail": "merged same-repo source PR head did not satisfy required gate",
+        "candidates": failures,
+    }
+
+
+def _can_use_merged_pr_head_provenance(
+    check: str,
+    run_observation: Dict[str, Any],
+    status_observation: Dict[str, Any],
+) -> bool:
+    return (
+        check in MERGED_PR_HEAD_PROVENANCE_CHECKS
+        and _check_missing(run_observation)
+        and _check_missing(status_observation)
+    )
 
 
 def _unverified(
@@ -301,7 +409,9 @@ def verify_completion_evidence(
             )
         observations: List[Dict[str, Any]] = []
         failures: List[str] = []
+        merged_pr_head_provenance_used = False
         for check in checks:
+            pr_head_observation: Optional[Dict[str, Any]] = None
             run_ok, run_observation = _check_run_state(repo, commit_sha, check)
             if run_ok:
                 observations.append(run_observation)
@@ -310,8 +420,20 @@ def verify_completion_evidence(
             if status_ok:
                 observations.append(status_observation)
                 continue
+            if _can_use_merged_pr_head_provenance(check, run_observation, status_observation):
+                pr_head_ok, pr_head_observation = _merged_pr_head_check_state(repo, commit_sha, check)
+                if pr_head_ok:
+                    observations.append(pr_head_observation)
+                    merged_pr_head_provenance_used = True
+                    continue
+                observations.append(pr_head_observation)
             observations.extend([run_observation, status_observation])
-            failures.append(f"{check}: {run_observation.get('detail')}; {status_observation.get('detail')}")
+            fallback_detail = ""
+            if pr_head_observation is not None:
+                fallback_detail = f"; merged-pr-head: {pr_head_observation.get('detail')}"
+            failures.append(
+                f"{check}: {run_observation.get('detail')}; {status_observation.get('detail')}{fallback_detail}"
+            )
         if failures:
             return _unverified(
                 "required GitHub gates did not pass: " + "; ".join(failures),
@@ -331,7 +453,11 @@ def verify_completion_evidence(
             "required_checks": list(checks),
             "producer": producer,
             "verifier": "github-required-checks",
-            "reason": "GitHub commit exists and all required gate contexts passed for this exact commit_sha",
+            "reason": (
+                "GitHub commit exists and all required gate contexts passed for this exact commit_sha"
+                if not merged_pr_head_provenance_used
+                else "GitHub merge commit exists, non-R5 gates passed for this exact commit_sha, and missing R5 provenance was satisfied by the merged same-repo PR head"
+            ),
             "checks": observations,
         }
     except RuntimeError as exc:

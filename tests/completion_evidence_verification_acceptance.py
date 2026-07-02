@@ -32,6 +32,10 @@ ATTACKER_SHA = "4444444444444444444444444444444444444444"
 UNTRUSTED_STATUS_SHA = "5555555555555555555555555555555555555555"
 UNTRUSTED_CHECK_SHA = "6666666666666666666666666666666666666666"
 OPEN_PR_SHA = "7777777777777777777777777777777777777777"
+SQUASH_MERGE_SHA = "8888888888888888888888888888888888888888"
+SQUASH_HEAD_SHA = "9999999999999999999999999999999999999999"
+SQUASH_FAILED_R5_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+SQUASH_UNTRUSTED_R5_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 MISSING_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 if "ORCH_DOTENV" not in os.environ:
@@ -104,6 +108,10 @@ def _write_fake_gh(directory: Path) -> None:
                 ("{ORCH_REPO}", "{RED_SHA}"): "red",
                 ("{ORCH_REPO}", "{UNTRUSTED_STATUS_SHA}"): "untrusted-status",
                 ("{ORCH_REPO}", "{UNTRUSTED_CHECK_SHA}"): "untrusted-check",
+                ("{ORCH_REPO}", "{SQUASH_MERGE_SHA}"): "squash-merge",
+                ("{ORCH_REPO}", "{SQUASH_HEAD_SHA}"): "squash-head",
+                ("{ORCH_REPO}", "{SQUASH_FAILED_R5_SHA}"): "squash-failed-r5",
+                ("{ORCH_REPO}", "{SQUASH_UNTRUSTED_R5_SHA}"): "squash-untrusted-r5",
                 ("{CONDUCTOR_REPO}", "{CONDUCTOR_SHA}"): "green",
                 ("{ATTACKER_REPO}", "{ATTACKER_SHA}"): "green",
                 ("{ORCH_REPO}", "{OPEN_PR_SHA}"): "open-pr",
@@ -117,32 +125,105 @@ def _write_fake_gh(directory: Path) -> None:
                         print(json.dumps([
                             {{"number": 246, "state": "open", "html_url": "https://example.invalid/pr/246"}}
                         ]))
+                    elif mode == "squash-merge":
+                        print(json.dumps([
+                            {{
+                                "number": 252,
+                                "state": "closed",
+                                "merged_at": "2026-07-02T11:52:00Z",
+                                "html_url": "https://example.invalid/pr/252",
+                            }}
+                        ]))
+                    elif mode in {{"squash-failed-r5", "squash-untrusted-r5"}}:
+                        number = 253 if mode == "squash-failed-r5" else 254
+                        print(json.dumps([
+                            {{
+                                "number": number,
+                                "state": "closed",
+                                "merged_at": "2026-07-02T11:54:00Z",
+                                "html_url": f"https://example.invalid/pr/{{number}}",
+                            }}
+                        ]))
                     else:
                         print(json.dumps([]))
                     sys.exit(0)
+                if path == f"repos/{{repo}}/pulls/252" and mode == "squash-merge":
+                    print(json.dumps({{
+                        "number": 252,
+                        "state": "closed",
+                        "merged": True,
+                        "merged_at": "2026-07-02T11:52:00Z",
+                        "merge_commit_sha": "{SQUASH_MERGE_SHA}",
+                        "html_url": "https://example.invalid/pr/252",
+                        "head": {{
+                            "sha": "{SQUASH_HEAD_SHA}",
+                            "repo": {{"full_name": "{ORCH_REPO}"}},
+                        }},
+                    }}))
+                    sys.exit(0)
+                if mode in {{"squash-failed-r5", "squash-untrusted-r5"}}:
+                    number = 253 if mode == "squash-failed-r5" else 254
+                    if path == f"repos/{{repo}}/pulls/{{number}}":
+                        print(json.dumps({{
+                            "number": number,
+                            "state": "closed",
+                            "merged": True,
+                            "merged_at": "2026-07-02T11:54:00Z",
+                            "merge_commit_sha": sha,
+                            "html_url": f"https://example.invalid/pr/{{number}}",
+                            "head": {{
+                                "sha": "{SQUASH_HEAD_SHA}",
+                                "repo": {{"full_name": "{ORCH_REPO}"}},
+                            }},
+                        }}))
+                        sys.exit(0)
                 if path == f"repos/{{repo}}/commits/{{sha}}/check-runs?per_page=100":
                     conclusion = "success" if mode == "green" else "failure"
                     app_slug = "evil-ci" if mode == "untrusted-check" else "github-actions"
-                    if mode in {{"untrusted-status", "untrusted-check"}}:
+                    if mode in {{
+                        "untrusted-status",
+                        "untrusted-check",
+                        "squash-merge",
+                        "squash-head",
+                        "squash-failed-r5",
+                        "squash-untrusted-r5",
+                    }}:
                         conclusion = "success"
-                    print(json.dumps({{
-                        "check_runs": [
+                    runs = [
+                        {{
+                            "name": "ship-gate-acceptance",
+                            "status": "completed",
+                            "conclusion": conclusion,
+                            "completed_at": "2026-06-26T00:00:01Z",
+                            "app": {{"slug": app_slug}},
+                        }}
+                    ]
+                    if mode == "squash-head":
+                        runs = [
                             {{
-                                "name": "ship-gate-acceptance",
+                                "name": "r5-audit-gate",
                                 "status": "completed",
-                                "conclusion": conclusion,
-                                "completed_at": "2026-06-26T00:00:01Z",
-                                "app": {{"slug": app_slug}},
+                                "conclusion": "success",
+                                "completed_at": "2026-07-02T11:51:00Z",
+                                "app": {{"slug": "github-actions"}},
                             }}
                         ]
-                    }}))
+                    print(json.dumps({{"check_runs": runs}}))
                     sys.exit(0)
                 if path == f"repos/{{repo}}/commits/{{sha}}/statuses?per_page=100":
-                    creator = "attacker-bot" if mode == "untrusted-status" else "github-actions[bot]"
+                    if mode == "squash-merge":
+                        print(json.dumps([]))
+                        sys.exit(0)
+                    if mode == "squash-failed-r5":
+                        state = "failure"
+                        creator = "github-actions[bot]"
+                    else:
+                        state = "success"
+                        creator = "attacker-bot" if mode in {{"untrusted-status", "squash-untrusted-r5"}} else "github-actions[bot]"
                     print(json.dumps([
                         {{
                             "context": "r5-audit-gate",
-                            "state": "success",
+                            "state": state,
                             "created_at": "2026-06-26T00:00:00Z",
                             "creator": {{"login": creator}},
                         }}
@@ -360,6 +441,67 @@ def main() -> int:
             and green_payload.get("completion_evidence_verification", {}).get("repo") == ORCH_REPO,
             f"update={green_update} payload={green_payload}",
         )
+        squash_task = _seed_task("squash-merge")
+        squash_update = _complete(
+            client,
+            squash_task,
+            {
+                "commit_sha": SQUASH_MERGE_SHA,
+                "repo": ORCH_REPO,
+                "production_observation": "squash merge commit with r5 on merged PR head",
+            },
+        )
+        squash_payload = client.get(f"/api/tasks/{squash_task}").json()
+        squash_verification = squash_payload.get("completion_evidence_verification", {})
+        squash_checks = squash_verification.get("checks") or []
+        check(
+            "squash merge evidence verifies via merged PR head r5 provenance",
+            squash_update.get("completion_evidence_verification_status") == "VERIFIED"
+            and squash_payload.get("completion_evidence_verification_status") == "VERIFIED"
+            and squash_payload.get("completion_evidence_verified") is True
+            and "merged same-repo PR head" in squash_verification.get("reason", "")
+            and any(
+                item.get("name") == "r5-audit-gate"
+                and item.get("source") == "merged-pr-head"
+                and item.get("source_commit_sha") == SQUASH_HEAD_SHA
+                and item.get("merge_commit_sha") == SQUASH_MERGE_SHA
+                and item.get("source_pr") == 252
+                for item in squash_checks
+            )
+            and any(
+                item.get("name") == "ship-gate-acceptance"
+                and item.get("kind") == "check-run"
+                and item.get("source") != "merged-pr-head"
+                for item in squash_checks
+            ),
+            json.dumps(squash_verification, sort_keys=True),
+        )
+        for suffix, merge_sha, label in (
+            ("squash-failed-r5", SQUASH_FAILED_R5_SHA, "failed"),
+            ("squash-untrusted-r5", SQUASH_UNTRUSTED_R5_SHA, "untrusted"),
+        ):
+            guarded_task = _seed_task(suffix)
+            guarded_update = _complete(
+                client,
+                guarded_task,
+                {
+                    "commit_sha": merge_sha,
+                    "repo": ORCH_REPO,
+                    "production_observation": f"squash merge commit with {label} r5 on merge commit",
+                },
+            )
+            guarded_payload = client.get(f"/api/tasks/{guarded_task}").json()
+            guarded_verification = guarded_payload.get("completion_evidence_verification", {})
+            guarded_checks = guarded_verification.get("checks") or []
+            check(
+                f"squash merge with {label} cited r5 is not rescued by PR-head provenance",
+                guarded_update.get("completion_evidence_verification_status") == "UNVERIFIED"
+                and guarded_payload.get("completion_evidence_verification_status") == "UNVERIFIED"
+                and guarded_payload.get("completion_evidence_verified") is False
+                and "r5-audit-gate" in guarded_verification.get("reason", "")
+                and not any(item.get("source") == "merged-pr-head" for item in guarded_checks),
+                json.dumps(guarded_verification, sort_keys=True),
+            )
         open_pr_task = _seed_task("open-pr")
         open_pr_response = client.patch(
             f"/api/task/{open_pr_task}",
