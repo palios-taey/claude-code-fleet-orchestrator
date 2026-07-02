@@ -18,6 +18,10 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from fleet_orchestrator.test_isolation import assert_acceptance_redis_isolated  # noqa: E402
+
+assert_acceptance_redis_isolated(require_notify=False)
+
 
 def _require_test_namespace() -> str:
     raw = (os.environ.get("ORCH_TEST_NAMESPACE") or "").strip()
@@ -34,8 +38,6 @@ def _require_test_namespace() -> str:
 
 PFX = f"{_require_test_namespace()}-wake-current-{uuid.uuid4().hex[:8]}"
 os.environ["NOTIFY_KEY_PREFIX"] = PFX
-os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
-os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
 from fleet_orchestrator import context_assembler as assembler  # noqa: E402
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
