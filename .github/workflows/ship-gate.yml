@@ -376,6 +376,8 @@ jobs:
           ORCH_REDIS_PORT: "6379"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
         run: python tests/pre_merge_gate_acceptance.py
+      - name: Ship-gate — CONTROL branch cleanup detaches peer worktrees before delete
+        run: python tests/worktree_branch_cleanup_acceptance.py
       - name: Ship-gate — merge audit ledger is hash-chained and fail-loud
         run: python tests/accountability_merge_ledger_acceptance.py
       - name: Ship-gate — refs are stored and rendered with allowed roots
