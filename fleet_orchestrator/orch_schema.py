@@ -5202,6 +5202,8 @@ def reset_project(project_id: str, *, reset_by: str = "unknown",
         session.run("""
             MATCH (p:OrchProject {id: $project_id})
             OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE NOT toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:'
+              AND NOT coalesce(t.task_type, '') = 'human-review'
             SET t.status = 'pending',
                 t.blocked_on = NULL,
                 t.result = NULL,
