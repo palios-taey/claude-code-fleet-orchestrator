@@ -185,6 +185,9 @@ def _write_fake_gh(directory: Path) -> None:
                 if path == f"repos/{REPO}/commits/{{sha}}":
                     print(json.dumps({{"sha": sha}}))
                     sys.exit(0)
+                if path == f"repos/{REPO}/commits/{{sha}}/pulls?per_page=100":
+                    print(json.dumps([]))
+                    sys.exit(0)
                 if path == f"repos/{REPO}/commits/{{sha}}/check-runs?per_page=100":
                     conclusion = "success" if mode == "green" else "failure"
                     print(json.dumps({{
