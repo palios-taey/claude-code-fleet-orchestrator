@@ -66,6 +66,7 @@ from fleet_orchestrator.loop_engine import (
 from fleet_orchestrator.shippability import evaluate_shippability
 from fleet_orchestrator.dispatch import (
     BugLockActive,
+    ChangesRequestedError,
     HooksNotInstalled,
     OrchTaskNotReady,
     WorkerBusy,
@@ -73,6 +74,7 @@ from fleet_orchestrator.dispatch import (
     clear_current_task,
     dispatch as dispatch_task,
     record_outcome,
+    request_changes,
 )
 from fleet_orchestrator.orch_schema import (
     CompletionEvidenceError,
@@ -787,13 +789,68 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
                     "next_step": _task_update_body_next_step(task_id),
                 },
             )
-        status = data.get("status", "pending")
+        status = data.get("record_outcome") or data.get("status", "pending")
         sender = data.get("from", "")
         result = data.get("result", "")
 
         cfg = _cfg()
         task_id = resolve_task_id(task_id, config=cfg)  # bare id -> canonical namespaced node
         task_before = _load_task(task_id, cfg)
+        if status == "changes_requested":
+            reason = (
+                data.get("reason")
+                or data.get("details")
+                or data.get("result")
+                or ""
+            )
+            try:
+                rework = request_changes(
+                    task_id,
+                    requested_by=sender,
+                    reason=reason,
+                    worker=data.get("peer") or data.get("worker") or data.get("dispatched_to"),
+                    priority=str(data.get("priority") or "high"),
+                )
+            except ChangesRequestedError as exc:
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "ok": False,
+                        "error": str(exc),
+                        "next_step": (
+                            f"Retry with PATCH /api/task/{task_id} body "
+                            "{\"record_outcome\":\"changes_requested\",\"from\":\"<validator>\","
+                            "\"reason\":\"<audit rejection reason>\",\"peer\":\"<same-peer-if-not-inferred>\"}."
+                        ),
+                    },
+                )
+            except (BugLockActive, HooksNotInstalled, OrchTaskNotReady, WorkerBusy, RuntimeError) as exc:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "ok": False,
+                        "error": f"changes_requested redispatch failed: {exc}",
+                        "next_step": (
+                            f"Inspect `taey-task status {task_id}`; the task is left pending/re-dispatchable "
+                            "if the wake could not be delivered."
+                        ),
+                    },
+                )
+            task_after = load_task_record(task_id, config=cfg) or {}
+            return {
+                "ok": True,
+                "task_id": task_id,
+                "status": task_after.get("status", rework.get("status", "in_progress")),
+                "owner": task_after.get("owner"),
+                "dispatched_to": task_after.get("dispatched_to") or rework.get("dispatched_to"),
+                "blocked_on": task_after.get("blocked_on"),
+                "changes_requested": {
+                    "requested_by": rework.get("requested_by"),
+                    "worker": rework.get("dispatched_to"),
+                    "reason": rework.get("reason"),
+                    "count": rework.get("count"),
+                },
+            }
         owner = data.get("owner")
         if owner is None:
             owner = task_before.get("owner", "")

@@ -118,6 +118,10 @@ class HooksNotInstalled(Exception):
     """Dispatch blocked because the target session has no managed notify hooks."""
 
 
+class ChangesRequestedError(Exception):
+    """Changes-requested rework could not be resolved to a concrete peer/task."""
+
+
 def _base_session_name(worker: str) -> str:
     for suffix in ("-codex", "-gemini", "-grok", "-claude"):
         if worker.endswith(suffix):
@@ -923,6 +927,160 @@ def _revert_outcome_claim(worker: str, task_id: str) -> None:
             task_id=task_id,
             worker=worker,
         )
+
+
+def _clean_str(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _load_rework_task(task_id: str) -> dict[str, Any]:
+    cfg = OrchConfig()
+    with get_neo4j_session(cfg) as session:
+        record = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            RETURN t
+            """,
+            task_id=task_id,
+        ).single()
+    if not record:
+        raise ChangesRequestedError(f"task not found: {task_id}")
+    return dict(record["t"])
+
+
+def _rework_worker_for_task(task: dict[str, Any], worker: Optional[str]) -> str:
+    candidates = (
+        worker,
+        task.get("dispatched_to"),
+        task.get("worker_liveness_worker"),
+    )
+    for candidate in candidates:
+        value = _clean_str(candidate)
+        if value:
+            return value
+    owner = _clean_str(task.get("owner"))
+    if owner.endswith(("-codex", "-gemini", "-grok", "-claude")):
+        return owner
+    task_id = _clean_str(task.get("id")) or "unknown-task"
+    raise ChangesRequestedError(
+        f"cannot infer peer for changes_requested task={task_id}; pass peer explicitly"
+    )
+
+
+def _mark_changes_requested_pending(task_id: str, worker: str, requested_by: str, reason: str) -> dict[str, Any]:
+    entry = json.dumps(
+        {
+            "task_id": task_id,
+            "worker": worker,
+            "requested_by": requested_by,
+            "reason": reason,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        },
+        sort_keys=True,
+    )
+    cfg = OrchConfig()
+    with get_neo4j_session(cfg) as session:
+        record = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            SET t.status = 'pending',
+                t.dispatched_to = NULL,
+                t.blocked_on = NULL,
+                t.last_changes_requested_at = datetime(),
+                t.last_changes_requested_by = $requested_by,
+                t.last_changes_requested_worker = $worker,
+                t.last_changes_requested_reason = $reason,
+                t.changes_requested_count = coalesce(t.changes_requested_count, 0) + 1,
+                t.changes_requested_log = coalesce(t.changes_requested_log, []) + [$entry],
+                t.updated_at = datetime()
+            RETURN t.id AS task_id,
+                   t.description AS description,
+                   t.status AS status,
+                   t.last_changes_requested_reason AS reason,
+                   t.last_changes_requested_worker AS worker,
+                   t.last_changes_requested_by AS requested_by,
+                   t.changes_requested_count AS count
+            """,
+            task_id=task_id,
+            worker=worker,
+            requested_by=requested_by,
+            reason=reason,
+            entry=entry,
+        ).single()
+    if not record:
+        raise ChangesRequestedError(f"task not found: {task_id}")
+    return dict(record)
+
+
+def _changes_requested_prompt(task_id: str, description: str, requested_by: str, reason: str) -> str:
+    return (
+        "CHANGES REQUESTED\n\n"
+        f"Task: {task_id}\n"
+        f"Description: {description}\n"
+        f"Validator: {requested_by}\n\n"
+        "The supervisor production/audit validation rejected the prior result. "
+        "Rework the same task; do not mark it complete until the requested change is addressed.\n\n"
+        f"Reason:\n{reason}\n"
+    )
+
+
+def request_changes(
+    task_id: str,
+    *,
+    requested_by: str,
+    reason: str,
+    worker: Optional[str] = None,
+    priority: str = "high",
+) -> dict[str, Any]:
+    """Supervisor-side primitive for audit-rejected peer work.
+
+    The validator requests changes without self-fixing. The same peer is
+    re-bound through the canonical dispatch path, so the task moves directly
+    from rejected in-flight work to a new in-progress worker wake.
+    """
+    clean_task_id = _clean_str(task_id)
+    clean_requested_by = _clean_str(requested_by)
+    clean_reason = _clean_str(reason)
+    if not clean_task_id:
+        raise ChangesRequestedError("changes_requested requires task_id")
+    if not clean_requested_by:
+        raise ChangesRequestedError("changes_requested requires requested_by/from")
+    if not clean_reason:
+        raise ChangesRequestedError("changes_requested requires a non-empty reason")
+
+    task = _load_rework_task(clean_task_id)
+    rework_worker = _rework_worker_for_task(task, worker)
+    if clean_requested_by == rework_worker:
+        raise ChangesRequestedError(
+            "changes_requested must be requested by the validator/supervisor, not the worker being re-dispatched"
+        )
+
+    description = _clean_str(task.get("description"))
+    marked = _mark_changes_requested_pending(
+        clean_task_id,
+        rework_worker,
+        clean_requested_by,
+        clean_reason,
+    )
+    dispatch(
+        rework_worker,
+        clean_task_id,
+        description,
+        supervisor=clean_requested_by,
+        prompt_body=_changes_requested_prompt(clean_task_id, description, clean_requested_by, clean_reason),
+        priority=priority,
+    )
+    marked.update(
+        {
+            "ok": True,
+            "task_id": clean_task_id,
+            "status": "in_progress",
+            "dispatched_to": rework_worker,
+            "requested_by": clean_requested_by,
+            "reason": clean_reason,
+        }
+    )
+    return marked
 
 
 def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> None:
