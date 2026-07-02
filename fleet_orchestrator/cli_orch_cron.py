@@ -132,12 +132,20 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver
+from fleet_orchestrator.orch_schema import completed_task_satisfies_dependents_cypher
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [orch-cron] %(levelname)s %(message)s",
 )
 log = logging.getLogger(__name__)
+_DEPENDENCY_SATISFIED_CYPHER = completed_task_satisfies_dependents_cypher("dep")
+_DEPENDENCIES_READY_CYPHER = f"""
+NOT EXISTS {{
+    MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+    WHERE NOT {_DEPENDENCY_SATISFIED_CYPHER}
+}}
+"""
 
 # Dedup-via-Redis so two cron ticks within the same minute don't double-fire.
 # 120s TTL guards only the same-minute window; an hour later the slot is fresh.
@@ -276,17 +284,14 @@ def _completed_recurring_project_next_ready(session_id: str, project_id: str) ->
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         row = session.run(
-            """
-            MATCH (proj:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            f"""
+            MATCH (proj:OrchProject {{id: $project_id}})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status = 'completed'
               AND coalesce(t.recurring, false) = true
               AND coalesce(t.owner, '') = $session_id
               AND coalesce(t.blocked_on, '') = ''
               AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress', 'completed']
-              AND NOT EXISTS {
-                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                  WHERE dep.status <> 'completed'
-              }
+              AND {_DEPENDENCIES_READY_CYPHER}
             RETURN t.id AS task_id,
                    t.description AS description,
                    t.priority AS priority,

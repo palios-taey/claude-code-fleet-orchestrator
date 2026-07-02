@@ -27,7 +27,12 @@ from typing import Any, Dict, List, Optional
 
 from .careers_loop_proof import normalize_loop_proof_evidence
 from .config import OrchConfig, get_neo4j_driver
-from .evidence_verification import UNVERIFIED, VERIFIED, verify_completion_evidence
+from .evidence_verification import (
+    UNVERIFIED,
+    VERIFIED,
+    completion_evidence_verification_applies,
+    verify_completion_evidence,
+)
 from .inflight import PEER_HEARTBEAT_STALE_SEC as _DEFAULT_PEER_HEARTBEAT_STALE_SEC
 from .inflight import task_actively_in_flight
 from .notify_state import redis_connect as _notify_redis_connect
@@ -197,6 +202,7 @@ def _legacy_unverified_completion_verification(evidence: Dict[str, Any]) -> Dict
     return {
         "status": UNVERIFIED,
         "verified": False,
+        "applies": completion_evidence_verification_applies(evidence),
         "source": "legacy-or-direct-db-write",
         "repo": "",
         "commit_sha": str(evidence.get("commit_sha") or "").strip(),
@@ -216,11 +222,16 @@ def _attach_completion_evidence_verification(record: Dict[str, Any]) -> Dict[str
         verification = _legacy_unverified_completion_verification(evidence)
     if isinstance(verification, dict):
         status = _completion_verification_status(verification)
+        applies = record.get("completion_evidence_verification_applies")
+        if applies is None:
+            applies = bool(verification.get("applies") or completion_evidence_verification_applies(evidence))
         verification["status"] = status
         verification["verified"] = status == VERIFIED
+        verification["applies"] = bool(applies)
         record["completion_evidence_verification"] = verification
         record["completion_evidence_verification_status"] = status
         record["completion_evidence_verified"] = status == VERIFIED
+        record["completion_evidence_verification_applies"] = bool(applies)
     return record
 
 
@@ -1073,12 +1084,44 @@ def _project_record(project_id: str, config: Optional[OrchConfig] = None) -> Dic
     return _decode_project_node(dict(record["p"]))
 
 
-_READY_DEPENDENCIES_SATISFIED_CYPHER = """
-NOT EXISTS {
-    MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-    WHERE dep.status <> 'completed'
-}
+def _completion_evidence_verification_applies_cypher(alias: str) -> str:
+    evidence = f"coalesce(toString({alias}.completion_evidence), '')"
+    return f"""
+(
+    coalesce({alias}.completion_evidence_verification_applies, false) = true
+    OR (
+        {alias}.completion_evidence_verification_applies IS NULL
+        AND (
+            {evidence} CONTAINS '"commit_sha"'
+            OR {evidence} CONTAINS '"loop_proof"'
+        )
+    )
+)
 """
+
+
+def completed_task_satisfies_dependents_cypher(alias: str) -> str:
+    applies = _completion_evidence_verification_applies_cypher(alias)
+    return f"""
+(
+    coalesce({alias}.status, 'pending') = 'completed'
+    AND NOT (
+        {applies}
+        AND coalesce({alias}.completion_evidence_verified, false) <> true
+    )
+)
+"""
+
+
+_READY_DEPENDENCY_SATISFIED_CYPHER = completed_task_satisfies_dependents_cypher("dep")
+_READY_DEPENDENCIES_SATISFIED_CYPHER = f"""
+NOT EXISTS {{
+    MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+    WHERE NOT {_READY_DEPENDENCY_SATISFIED_CYPHER}
+}}
+"""
+
+_TASK_COMPLETION_SATISFIED_CYPHER = completed_task_satisfies_dependents_cypher("t")
 
 _READY_TASK_ORDER_CYPHER = (
     "toInteger(coalesce(t.priority, 999999999)) ASC, "
@@ -1942,16 +1985,13 @@ def get_supervisor_dispatchable_peer_task(supervisor: str, project_id: str,
                   }
               )
               AND coalesce(t.blocked_on, '') = ''
-              AND NOT EXISTS {
-                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                  WHERE dep.status <> 'completed'
-              }
+              AND __READY_DEPENDENCIES_SATISFIED_CYPHER__
               AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
             RETURN t.id AS task_id, t.description AS description, t.owner AS owner,
                    t.priority AS priority, ph.id AS phase_id, proj.id AS project_id
             ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, t.created_at ASC
             LIMIT 1
-            """,
+            """.replace("__READY_DEPENDENCIES_SATISFIED_CYPHER__", _READY_DEPENDENCIES_SATISFIED_CYPHER),
             project_id=project_id, peer_owners=peer_owners,
             human_review_task_type=HUMAN_REVIEW_TASK_TYPE,
             human_review_question_type=HUMAN_REVIEW_QUESTION_TYPE,
@@ -3248,6 +3288,16 @@ def update_task_status(task_id: str, status: str, owner: str = "",
             if isinstance(completion_verification_value, dict)
             else None
         )
+        completion_verification_applies = (
+            completion_evidence_verification_applies(completion_evidence_value)
+            if status == "completed"
+            else None
+        )
+        if isinstance(completion_verification_value, dict):
+            completion_verification_value["applies"] = bool(completion_verification_applies)
+            if completion_verification_value.get("reject_completion"):
+                reason = str(completion_verification_value.get("reason") or "completion evidence was rejected")
+                raise CompletionEvidenceError(f"completed status rejected: {reason}. {COMPLETED_EVIDENCE_NEXT_STEP}")
         if result is None:
             rec = session.run("""
                 MATCH (t:OrchTask {id: $task_id})
@@ -3289,6 +3339,10 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                         WHEN $status = 'completed' THEN $completion_evidence_verified
                         ELSE NULL
                     END,
+                    t.completion_evidence_verification_applies = CASE
+                        WHEN $status = 'completed' THEN $completion_evidence_verification_applies
+                        ELSE NULL
+                    END,
                     t.completed_by = CASE
                         WHEN $status = 'completed' THEN $completed_by
                         ELSE NULL
@@ -3308,6 +3362,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                  completion_evidence_verification=_json_encode(completion_verification_value) if completion_verification_value else None,
                  completion_evidence_verification_status=completion_verification_status,
                  completion_evidence_verified=completion_verification_status == VERIFIED,
+                 completion_evidence_verification_applies=completion_verification_applies,
                  terminal_status=terminal_status,
                  completed_by=completed_by_value)
         else:
@@ -3352,6 +3407,10 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                         WHEN $status = 'completed' THEN $completion_evidence_verified
                         ELSE NULL
                     END,
+                    t.completion_evidence_verification_applies = CASE
+                        WHEN $status = 'completed' THEN $completion_evidence_verification_applies
+                        ELSE NULL
+                    END,
                     t.completed_by = CASE
                         WHEN $status = 'completed' THEN $completed_by
                         ELSE NULL
@@ -3372,6 +3431,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
                  completion_evidence_verification=_json_encode(completion_verification_value) if completion_verification_value else None,
                  completion_evidence_verification_status=completion_verification_status,
                  completion_evidence_verified=completion_verification_status == VERIFIED,
+                 completion_evidence_verification_applies=completion_verification_applies,
                  terminal_status=terminal_status,
                  completed_by=completed_by_value)
         task_row = rec.single()
@@ -3531,11 +3591,11 @@ def check_phase_complete(phase_id: str,
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
-        result = session.run("""
-            MATCH (ph:OrchPhase {id: $phase_id})-[:HAS_TASK]->(t:OrchTask)
+        result = session.run(f"""
+            MATCH (ph:OrchPhase {{id: $phase_id}})-[:HAS_TASK]->(t:OrchTask)
             WITH ph,
                  count(t) AS total,
-                 sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS done
+                 sum(CASE WHEN {_TASK_COMPLETION_SATISFIED_CYPHER} THEN 1 ELSE 0 END) AS done
             WHERE total > 0 AND total = done AND ph.status <> 'completed'
             SET ph.status = 'completed', ph.completed_at = datetime()
             RETURN ph.id AS id
@@ -3642,6 +3702,7 @@ def get_project_summary(project_id: str,
                              completion_evidence_verification: t.completion_evidence_verification,
                              completion_evidence_verification_status: t.completion_evidence_verification_status,
                              completion_evidence_verified: t.completion_evidence_verified,
+                             completion_evidence_verification_applies: t.completion_evidence_verification_applies,
                              completed_by: t.completed_by,
                              completed_at: t.completed_at,
                              refs: t.refs,
@@ -5061,11 +5122,11 @@ def complete_project(project_id: str, *, force: bool = False,
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
-        record = session.run("""
-            MATCH (p:OrchProject {id: $project_id})
+        record = session.run(f"""
+            MATCH (p:OrchProject {{id: $project_id}})
             OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WITH p, sum(CASE
-                WHEN t IS NOT NULL AND coalesce(t.status, 'pending') <> 'completed' THEN 1
+                WHEN t IS NOT NULL AND NOT {_TASK_COMPLETION_SATISFIED_CYPHER} THEN 1
                 ELSE 0
             END) AS incomplete_tasks
             WHERE $force OR incomplete_tasks = 0

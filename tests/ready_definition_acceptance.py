@@ -14,11 +14,22 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+if "ORCH_DOTENV" not in os.environ:
+    for candidate in (
+        ROOT / ".env",
+        Path.home() / "claude-code-fleet-orchestrator/.env",
+    ):
+        if candidate.is_file():
+            os.environ["ORCH_DOTENV"] = str(candidate)
+            break
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
+    _READY_DEPENDENCIES_SATISFIED_CYPHER,
     _ZERO_DEP_READY_CYPHER,
     add_dependency,
     create_phase,
@@ -147,13 +158,10 @@ def _current_zero(task_id: str) -> dict | None:
 def _contract_ready_ids() -> list[str]:
     with _driver().session(database=CFG.neo4j_db) as session:
         rows = session.run(
-            """
-            MATCH (t:OrchTask {status: 'pending'})
+            f"""
+            MATCH (t:OrchTask {{status: 'pending'}})
             WHERE t.id STARTS WITH $prefix
-              AND NOT EXISTS {
-                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                  WHERE dep.status <> 'completed'
-            }
+              AND {_READY_DEPENDENCIES_SATISFIED_CYPHER}
             RETURN t.id AS id
             ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC,
                      t.created_at ASC,
@@ -194,16 +202,13 @@ def _owned_active_ready_ids_from_list() -> list[str]:
 def _contract_next(project_id: str | None = None) -> str | None:
     with _driver().session(database=CFG.neo4j_db) as session:
         row = session.run(
-            """
+            f"""
             MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status = 'pending'
               AND coalesce(t.owner, '') = $sess
               AND coalesce(t.blocked_on, '') = ''
               AND ($project_id IS NULL OR proj.id = $project_id)
-              AND NOT EXISTS {
-                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                  WHERE dep.status <> 'completed'
-              }
+              AND {_READY_DEPENDENCIES_SATISFIED_CYPHER}
               AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
             RETURN t.id AS task_id
             ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC,
@@ -220,15 +225,12 @@ def _contract_next(project_id: str | None = None) -> str | None:
 def _contract_project_ready_ids() -> list[str]:
     with _driver().session(database=CFG.neo4j_db) as session:
         rows = session.run(
-            """
-            MATCH (p:OrchProject {id: $project_id})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            f"""
+            MATCH (p:OrchProject {{id: $project_id}})-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status = 'pending'
               AND coalesce(t.owner, '') = $owner
               AND coalesce(t.blocked_on, '') = ''
-              AND NOT EXISTS {
-                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                  WHERE dep.status <> 'completed'
-              }
+              AND {_READY_DEPENDENCIES_SATISFIED_CYPHER}
             RETURN t.id AS id
             ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC,
                      t.created_at ASC,
