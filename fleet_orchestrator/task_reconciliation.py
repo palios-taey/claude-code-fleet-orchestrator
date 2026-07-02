@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, get_neo4j_driver
-from .evidence_verification import VERIFIED, github_repo_from_environment_or_gh, verify_completion_evidence
+from .evidence_verification import VERIFIED, verify_completion_evidence
 from .notify_state import redis_connect as notify_redis_connect
 from .notify_state import state_key
 
@@ -18,15 +17,6 @@ _TERMINAL_OUTCOME_TO_STATUS = {
     "error": "failed",
     "interrupted": "interrupted",
 }
-_FOLLOW_UP_RE = re.compile(
-    r"\b(?:r5|audit|gatekeeper|grok|review|follow[- ]?up|gate)\b",
-    re.IGNORECASE,
-)
-_PR_NUMBER_RE = re.compile(r"\b(?:PR|pull request)\s*#\s*(\d+)\b", re.IGNORECASE)
-_PR_URL_RE = re.compile(
-    r"https?://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/(\d+)",
-    re.IGNORECASE,
-)
 
 
 def _json_dict(raw: Any) -> Optional[Dict[str, Any]]:
@@ -138,6 +128,10 @@ def _non_terminal_reconciliation_candidates(
                    t.blocked_on AS blocked_on,
                    t.owner AS owner,
                    t.dispatched_to AS dispatched_to,
+                   t[$dispatched_pr_repo_key] AS dispatched_pr_repo,
+                   t[$dispatched_pr_number_key] AS dispatched_pr_number,
+                   t[$produced_pr_repo_key] AS produced_pr_repo,
+                   t[$produced_pr_number_key] AS produced_pr_number,
                    t.worker_liveness_worker AS worker_liveness_worker,
                    t.worker_liveness_started_at AS worker_liveness_started_at,
                    t.worker_liveness_heartbeat_at AS worker_liveness_heartbeat_at,
@@ -147,6 +141,10 @@ def _non_terminal_reconciliation_candidates(
             """,
             task_prefix=task_prefix,
             project_prefix=project_prefix,
+            dispatched_pr_repo_key="dispatched_pr_repo",
+            dispatched_pr_number_key="dispatched_pr_number",
+            produced_pr_repo_key="produced_pr_repo",
+            produced_pr_number_key="produced_pr_number",
         )]
 
 
@@ -254,39 +252,26 @@ def _gh_api(path: str) -> Any:
         raise RuntimeError(f"gh api {path!r} returned invalid JSON: {exc}") from exc
 
 
-def _default_github_repo() -> Optional[str]:
-    try:
-        return github_repo_from_environment_or_gh()
-    except RuntimeError as exc:
-        LOG.warning("task reconciliation cannot infer GitHub repo for PR auto-close: %s", exc)
+def _positive_int_or_none(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
         return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
-def _pr_references(text: str, *, default_repo: Optional[str]) -> List[Tuple[str, int]]:
-    refs: List[Tuple[str, int]] = []
-    seen: set[Tuple[str, int]] = set()
-    for match in _PR_URL_RE.finditer(text):
-        repo = match.group(1)
-        number = int(match.group(2))
-        key = (repo, number)
-        if key not in seen:
-            refs.append(key)
-            seen.add(key)
-    if default_repo:
-        for match in _PR_NUMBER_RE.finditer(text):
-            key = (default_repo, int(match.group(1)))
-            if key not in seen:
-                refs.append(key)
-                seen.add(key)
-    return refs
-
-
-def _looks_like_pr_followup_task(task: Dict[str, Any]) -> bool:
-    text = " ".join(
-        str(task.get(key) or "")
-        for key in ("task_id", "description")
-    )
-    return bool(_FOLLOW_UP_RE.search(text))
+def _linked_pr_reference(task: Dict[str, Any]) -> Optional[tuple[str, int]]:
+    for repo_key, number_key in (
+        ("dispatched_pr_repo", "dispatched_pr_number"),
+        ("produced_pr_repo", "produced_pr_number"),
+    ):
+        repo = str(task.get(repo_key) or "").strip()
+        number = _positive_int_or_none(task.get(number_key))
+        if repo and number is not None:
+            return repo, number
+    return None
 
 
 def _merged_pr_head_sha(repo: str, number: int) -> Optional[str]:
@@ -314,7 +299,7 @@ def _verified_pr_evidence(repo: str, number: int, sha: str) -> Optional[Dict[str
     if isinstance(verification, dict) and verification.get("status") == VERIFIED and verification.get("verified") is True:
         return evidence
     LOG.info(
-        "PR follow-up task not auto-closed: repo=%s pr=%s sha=%s verification=%s",
+        "explicit PR-linked task not auto-closed: repo=%s pr=%s sha=%s verification=%s",
         repo,
         number,
         sha,
@@ -333,8 +318,8 @@ def reconcile_merged_pr_followup_tasks(
     from .orch_schema import update_task_status
 
     cfg = config or OrchConfig()
-    repo = str(default_repo or "").strip() or None
-    repo_resolved = repo is not None
+    # Kept for API compatibility; PR auto-close must not infer links from task prose.
+    _ = default_repo
     reconciled: List[Dict[str, Any]] = []
     for task in _non_terminal_reconciliation_candidates(
         config=cfg,
@@ -344,54 +329,46 @@ def reconcile_merged_pr_followup_tasks(
         if str(task.get("task_type") or "") == "human-review":
             continue
         task_id = str(task.get("task_id") or "").strip()
-        description = str(task.get("description") or "")
-        text = f"{task_id} {description}"
-        if not _looks_like_pr_followup_task(task):
+        ref = _linked_pr_reference(task)
+        if not ref:
             continue
-        refs = _pr_references(text, default_repo=repo)
-        if not refs and _PR_NUMBER_RE.search(text):
-            if not repo_resolved:
-                repo = _default_github_repo()
-                repo_resolved = True
-            refs = _pr_references(text, default_repo=repo)
-        for pr_repo, pr_number in refs:
-            try:
-                sha = _merged_pr_head_sha(pr_repo, pr_number)
-            except RuntimeError as exc:
-                LOG.warning("PR follow-up reconciliation lookup failed task=%s repo=%s pr=%s: %s",
-                            task_id, pr_repo, pr_number, exc)
-                continue
-            if not sha:
-                continue
-            evidence = _verified_pr_evidence(pr_repo, pr_number, sha)
-            if not evidence:
-                continue
-            result = (
-                f"stale-task reconciliation: auto-closed PR follow-up after merged PR "
-                f"{pr_repo}#{pr_number} passed required gates at {sha}"
-            )
-            if update_task_status(
-                task_id,
-                "completed",
-                result=result,
-                completion_evidence=evidence,
-                completed_by="stale-task-reconciliation",
-                config=cfg,
-            ):
-                item = dict(task)
-                item.update({
-                    "task_id": task_id,
-                    "worker": task.get("dispatched_to") or task.get("owner") or "",
-                    "status": "completed",
-                    "repo": pr_repo,
-                    "pr_number": pr_number,
-                    "commit_sha": sha,
-                    "reason": result,
-                    "supervisor": task.get("project_supervisor") or task.get("owner") or "",
-                    "reconciliation_kind": "merged_pr_followup",
-                })
-                reconciled.append(item)
-            break
+        pr_repo, pr_number = ref
+        try:
+            sha = _merged_pr_head_sha(pr_repo, pr_number)
+        except RuntimeError as exc:
+            LOG.warning("explicit PR-linked reconciliation lookup failed task=%s repo=%s pr=%s: %s",
+                        task_id, pr_repo, pr_number, exc)
+            continue
+        if not sha:
+            continue
+        evidence = _verified_pr_evidence(pr_repo, pr_number, sha)
+        if not evidence:
+            continue
+        result = (
+            f"stale-task reconciliation: auto-closed explicit PR-linked task after merged PR "
+            f"{pr_repo}#{pr_number} passed required gates at {sha}"
+        )
+        if update_task_status(
+            task_id,
+            "completed",
+            result=result,
+            completion_evidence=evidence,
+            completed_by="stale-task-reconciliation",
+            config=cfg,
+        ):
+            item = dict(task)
+            item.update({
+                "task_id": task_id,
+                "worker": task.get("dispatched_to") or task.get("owner") or "",
+                "status": "completed",
+                "repo": pr_repo,
+                "pr_number": pr_number,
+                "commit_sha": sha,
+                "reason": result,
+                "supervisor": task.get("project_supervisor") or task.get("owner") or "",
+                "reconciliation_kind": "merged_pr_followup",
+            })
+            reconciled.append(item)
     return reconciled
 
 
