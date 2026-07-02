@@ -14,10 +14,10 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 235.
-- Teaches: 99.
+- Enumerated surfaces: 241.
+- Teaches: 103.
 - Needs-fix baseline debt: 53.
-- Exempt reviewed rows: 83.
+- Exempt reviewed rows: 84.
 
 <!-- ai-native-surfaces:start -->
 | File | Function | Kind | Ordinal | Line Hint | Fingerprint | Classification | Teaching Evidence | Rationale | Review |
@@ -48,6 +48,7 @@ Summary:
 | fleet_orchestrator/cli_taey_task.py | cmd_dispatch | cli_failure_message | 4 | 154 | 755ac58892c02c46 | teaches | taey-task | Static teaching assertion passes. | task-4332d8d5 |
 | fleet_orchestrator/cli_taey_task.py | cmd_dispatch | cli_failure_message | 5 | 177 | 4193eec112f298af | teaches | taey-task | Static teaching assertion passes. | task-4332d8d5 |
 | fleet_orchestrator/cli_taey_task.py | cmd_list | cli_empty_state_message | 1 | 93 | fcad575660346a31 | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
+| fleet_orchestrator/cli_taey_task.py | cmd_remove_dependency | cli_failure_message | 1 | 229 | 0f1cd4262a1ee9a8 | exempt |  | Thin CLI wrapper relays the API error body from remove_task_dependency; the endpoint rows carry the actionable next-step text. | task-ea95c040:thin-cli-wrapper |
 | fleet_orchestrator/cli_taey_task.py | cmd_status | cli_failure_message | 1 | 106 | 15ac09e58ff7b290 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 1 | 191 | 899355c6a0e4a5d7 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 2 | 194 | 968a4d6cd4a87440 | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
@@ -229,6 +230,10 @@ Summary:
 | fleet_orchestrator/tasks_api.py | patch_project_endpoint | http_exception_detail | 3 | 1359 | c7abf8c1de4052d5 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | pause_session_endpoint | http_exception_detail | 1 | 1419 | c76409965486615c | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | reset_project_endpoint | http_exception_detail | 1 | 1229 | c7abf8c1de4052d5 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/tasks_api.py | remove_task_dependency | http_exception_detail | 1 | 634 | c11c1d86ca62c072 | teaches | taey-task | Missing task rejection names `taey-task list`, `GET /api/tasks`, `taey-task status`, and `taey-plan show` next steps through _task_not_found_detail. | task-ea95c040 |
+| fleet_orchestrator/tasks_api.py | remove_task_dependency | http_exception_detail | 2 | 636 | addd37a86847f3d8 | teaches | taey-task | Missing dependency task rejection reuses _task_not_found_detail with task listing, task status, and project inspection next steps. | task-ea95c040 |
+| fleet_orchestrator/tasks_api.py | remove_task_dependency | http_exception_detail | 3 | 638 | 2fe02a211c492ce7 | teaches | taey-task | Missing edge rejection tells the agent to inspect `taey-task status <task-id>` or add the dependency first. | task-ea95c040 |
+| fleet_orchestrator/tasks_api.py | remove_task_dependency | http_exception_detail | 4 | 646 | 4641966cd184003d | teaches | taey-plan | Plan-managed edge rejection gives the exact repair: remove the markdown `[depends: ...]` entry and re-ingest the plan. | task-ea95c040 |
 | fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 1 | 1474 | 10789411811a64cf | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 2 | 1488 | 2a638aa2f069ce00 | teaches | taey-notify | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 3 | 1498 | d235f23d0cd8ae89 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
