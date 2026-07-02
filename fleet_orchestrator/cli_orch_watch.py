@@ -155,6 +155,14 @@ USAGE_LIMIT_TRANSIENT_EXCLUSIONS = (
     "not your usage limit",
 )
 USAGE_LIMIT_RESTING_REGION_NONBLANK_LINES = 3
+PANE_RESTING_REGION_NONBLANK_LINES = 8
+PANE_WORKING_INDICATOR_MARKERS = (
+    "esc to interrupt",
+    "escape to interrupt",
+    "ctrl c to interrupt",
+    "ctrl+c to interrupt",
+)
+PANE_RESTING_PROMPT_LINES = {"$", ">", "\u276f", "\u203a"}
 
 
 def state_key(node_id: str, suffix: str) -> str:
@@ -435,18 +443,50 @@ def _tmux_pane_tail(session_name: str, *, lines: int = 80) -> str:
     return result.stdout or ""
 
 
-def _usage_limit_resting_region(pane_text: str) -> str:
+def _recent_nonblank_pane_lines(pane_text: str, *, limit: int) -> list[str]:
     nonblank_lines = [line.strip() for line in (pane_text or "").splitlines() if line.strip()]
-    return "\n".join(nonblank_lines[-USAGE_LIMIT_RESTING_REGION_NONBLANK_LINES:])
+    return nonblank_lines[-limit:]
+
+
+def _normalize_pane_region(pane_text: str) -> str:
+    lowered = (pane_text or "").lower().replace("-", " ")
+    return " ".join(lowered.split())
+
+
+def _usage_limit_resting_region(pane_text: str) -> str:
+    return "\n".join(_recent_nonblank_pane_lines(
+        pane_text,
+        limit=USAGE_LIMIT_RESTING_REGION_NONBLANK_LINES,
+    ))
 
 
 def _pane_shows_usage_limit_resting_state(pane_text: str) -> bool:
-    normalized = " ".join(_usage_limit_resting_region(pane_text).lower().split())
+    normalized = _normalize_pane_region(_usage_limit_resting_region(pane_text))
     if not normalized:
         return False
     if any(marker in normalized for marker in USAGE_LIMIT_TRANSIENT_EXCLUSIONS):
         return False
     return any(marker in normalized for marker in USAGE_LIMIT_IDLE_MARKERS)
+
+
+def _pane_shows_working_indicator(pane_text: str) -> bool:
+    normalized = _normalize_pane_region(pane_text)
+    return any(marker in normalized for marker in PANE_WORKING_INDICATOR_MARKERS)
+
+
+def _pane_shows_resting_input_prompt(pane_text: str) -> bool:
+    recent_lines = _recent_nonblank_pane_lines(
+        pane_text,
+        limit=PANE_RESTING_REGION_NONBLANK_LINES,
+    )
+    if not recent_lines:
+        return False
+    recent_region = "\n".join(recent_lines)
+    if _pane_shows_working_indicator(recent_region):
+        return False
+    if _pane_shows_usage_limit_resting_state(recent_region):
+        return True
+    return any(line.strip() in PANE_RESTING_PROMPT_LINES for line in recent_lines)
 
 
 def _reconcile_stranded_idle_for_stuck_inbox(r, node_id: str) -> bool:
@@ -456,7 +496,7 @@ def _reconcile_stranded_idle_for_stuck_inbox(r, node_id: str) -> bool:
         return False
     if node_id not in _local_tmux_sessions():
         return False
-    if not _pane_shows_usage_limit_resting_state(_tmux_pane_tail(node_id)):
+    if not _pane_shows_resting_input_prompt(_tmux_pane_tail(node_id)):
         return False
     r.set(state_key(node_id, "idle"), "1")
     log.warning("Reconciled idle=1 for %s before stuck-inbox alert", node_id)
