@@ -5,6 +5,7 @@ Endpoints:
   GET  /api/tasks/ranked           — same, LVP-ranked (falls back to priority)
   GET  /api/tasks/{task_id}        — one task's full state
   POST /api/task/create            — create a task
+  DELETE /api/tasks/{task_id}/dependencies/{depends_on_id} — remove a manual dependency edge
   PATCH /api/task/{task_id}        — update status/owner
 
 Run:
@@ -106,6 +107,7 @@ from fleet_orchestrator.orch_schema import (
     get_session_current_work,
     get_session_liveness,
     list_dashboard_sessions,
+    remove_dependency,
     resolve_task_id,
     get_task as load_task_record,
     get_session_stop_decision,
@@ -621,6 +623,42 @@ def get_task(task_id: str) -> Dict[str, Any]:
     if not task:
         raise HTTPException(status_code=404, detail=_task_not_found_detail(task_id))
     return task
+
+
+@app.delete("/api/tasks/{task_id}/dependencies/{depends_on_id}")
+def remove_task_dependency(task_id: str, depends_on_id: str) -> Dict[str, Any]:
+    cfg = _cfg()
+    resolved_task_id = resolve_task_id(task_id, config=cfg)
+    resolved_dep_id = resolve_task_id(depends_on_id, config=cfg)
+    result = remove_dependency(resolved_task_id, resolved_dep_id, config=cfg)
+    if not result.get("task_exists"):
+        raise HTTPException(status_code=404, detail=_task_not_found_detail(resolved_task_id))
+    if not result.get("dep_exists"):
+        raise HTTPException(status_code=404, detail=_task_not_found_detail(resolved_dep_id))
+    if not result.get("dependency_exists"):
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"dependency edge not found: {resolved_task_id} depends on {resolved_dep_id}. "
+                "Next step: inspect `taey-task status <task-id>` or add the dependency first."
+            ),
+        )
+    if not result.get("removed") and result.get("reason") == "plan_managed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"dependency {resolved_task_id} -> {resolved_dep_id} is managed by the markdown plan. "
+                "Next step: remove the `[depends: ...]` entry from the plan and re-ingest it."
+            ),
+        )
+    return {
+        "ok": True,
+        "task_id": resolved_task_id,
+        "depends_on_id": resolved_dep_id,
+        "removed": True,
+        "plan_dependency": bool(result.get("plan_dependency")),
+        "manual_dependency": bool(result.get("manual_dependency")),
+    }
 
 
 @app.post("/api/task/create")

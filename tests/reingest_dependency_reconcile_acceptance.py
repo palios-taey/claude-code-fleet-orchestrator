@@ -30,7 +30,13 @@ os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
 os.environ.setdefault("ORCH_REDIS_PORT", "6379")
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
-from fleet_orchestrator.orch_schema import get_session_next_ready, init_schema, update_task_status  # noqa: E402
+from fleet_orchestrator.orch_schema import (  # noqa: E402
+    add_dependency,
+    create_task,
+    get_session_next_ready,
+    init_schema,
+    update_task_status,
+)
 from fleet_orchestrator.plan_loader import load_plan_from_text  # noqa: E402
 
 CFG = OrchConfig()
@@ -112,17 +118,33 @@ def main() -> int:
         first = _ingest("b", "b")
         _check("initial ingest has no loader errors", first.get("errors") == [], first)
         _check("A initially depends only on B", _deps(_task_id("a")) == [_task_id("b")], _deps(_task_id("a")))
+        manual_dep = _task_id("manual")
+        create_task(
+            phase_id=_task_id("work"),
+            task_id=manual_dep,
+            description="manual ad-hoc dependency",
+            owner=WORKER,
+            wake_owner_if_ready=False,
+            config=CFG,
+        )
+        _check("manual dependency primitive creates edge", add_dependency(_task_id("a"), manual_dep, config=CFG), _deps(_task_id("a")))
 
         _set_status(_task_id("b"), "interrupted")
         second = _ingest("c", "c")
         _check("rename re-ingest has no loader errors", second.get("errors") == [], second)
         _check("rename re-ingest reports old B stale", _task_id("b") in second.get("stale_tasks", []), second)
-        _check("A now depends only on C", _deps(_task_id("a")) == [_task_id("c")], _deps(_task_id("a")))
+        _check("A now depends on current plan C plus manual dep", _deps(_task_id("a")) == sorted([manual_dep, _task_id("c")]), _deps(_task_id("a")))
 
         update_task_status(
             _task_id("c"),
             "completed",
             completion_evidence={"production_observation": "reingest dependency reconcile acceptance"},
+            config=CFG,
+        )
+        update_task_status(
+            manual_dep,
+            "completed",
+            completion_evidence={"production_observation": "manual dependency preserved through reingest"},
             config=CFG,
         )
         ready = get_session_next_ready(WORKER, config=CFG)
