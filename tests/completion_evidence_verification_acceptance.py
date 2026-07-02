@@ -31,6 +31,7 @@ CONDUCTOR_SHA = "3333333333333333333333333333333333333333"
 ATTACKER_SHA = "4444444444444444444444444444444444444444"
 UNTRUSTED_STATUS_SHA = "5555555555555555555555555555555555555555"
 UNTRUSTED_CHECK_SHA = "6666666666666666666666666666666666666666"
+OPEN_PR_SHA = "7777777777777777777777777777777777777777"
 MISSING_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 if "ORCH_DOTENV" not in os.environ:
@@ -105,10 +106,19 @@ def _write_fake_gh(directory: Path) -> None:
                 ("{ORCH_REPO}", "{UNTRUSTED_CHECK_SHA}"): "untrusted-check",
                 ("{CONDUCTOR_REPO}", "{CONDUCTOR_SHA}"): "green",
                 ("{ATTACKER_REPO}", "{ATTACKER_SHA}"): "green",
+                ("{ORCH_REPO}", "{OPEN_PR_SHA}"): "open-pr",
             }}
             for (repo, sha), mode in existing.items():
                 if path == f"repos/{{repo}}/commits/{{sha}}":
                     print(json.dumps({{"sha": sha}}))
+                    sys.exit(0)
+                if path == f"repos/{{repo}}/commits/{{sha}}/pulls?per_page=100":
+                    if mode == "open-pr":
+                        print(json.dumps([
+                            {{"number": 246, "state": "open", "html_url": "https://example.invalid/pr/246"}}
+                        ]))
+                    else:
+                        print(json.dumps([]))
                     sys.exit(0)
                 if path == f"repos/{{repo}}/commits/{{sha}}/check-runs?per_page=100":
                     conclusion = "success" if mode == "green" else "failure"
@@ -236,6 +246,7 @@ def main() -> int:
             explicit_unset is not None
             and explicit_unset.get("status") == "UNVERIFIED"
             and explicit_unset.get("verified") is False
+            and explicit_unset.get("applies") is True
             and "ORCH_COMPLETION_ALLOWED_REPOS" in explicit_unset.get("reason", ""),
             json.dumps(explicit_unset, sort_keys=True),
         )
@@ -248,6 +259,7 @@ def main() -> int:
             inferred_unset is not None
             and inferred_unset.get("status") == "UNVERIFIED"
             and inferred_unset.get("verified") is False
+            and inferred_unset.get("applies") is True
             and inferred_unset.get("repo") == CONDUCTOR_REPO
             and "ORCH_COMPLETION_ALLOWED_REPOS" in inferred_unset.get("reason", ""),
             json.dumps(inferred_unset, sort_keys=True),
@@ -279,6 +291,8 @@ def main() -> int:
             "local completion without commit_sha is UNVERIFIED",
             local_payload.get("completion_evidence_verification_status") == "UNVERIFIED"
             and local_payload.get("completion_evidence_verified") is False
+            and local_payload.get("completion_evidence_verification_applies") is False
+            and local_payload.get("completion_evidence_verification", {}).get("applies") is False
             and "no commit_sha" in local_payload.get("completion_evidence_verification", {}).get("reason", ""),
             json.dumps(local_payload.get("completion_evidence_verification"), sort_keys=True),
         )
@@ -293,6 +307,7 @@ def main() -> int:
         check(
             "evidence without repo falls back to configured runtime repo",
             conductor_payload.get("completion_evidence_verification_status") == "VERIFIED"
+            and conductor_payload.get("completion_evidence_verification_applies") is True
             and conductor_payload.get("completion_evidence_verification", {}).get("repo") == CONDUCTOR_REPO,
             json.dumps(conductor_payload.get("completion_evidence_verification"), sort_keys=True),
         )
@@ -308,7 +323,8 @@ def main() -> int:
             "fabricated commit completes but is UNVERIFIED",
             missing_update.get("completion_evidence_verification_status") == "UNVERIFIED"
             and missing_payload.get("completion_evidence_verification_status") == "UNVERIFIED"
-            and missing_payload.get("completion_evidence_verified") is False,
+            and missing_payload.get("completion_evidence_verified") is False
+            and missing_payload.get("completion_evidence_verification_applies") is True,
             f"update={missing_update} payload={missing_payload}",
         )
 
@@ -322,6 +338,7 @@ def main() -> int:
         check(
             "existing commit without all required gates is UNVERIFIED",
             red_payload.get("completion_evidence_verification_status") == "UNVERIFIED"
+            and red_payload.get("completion_evidence_verification_applies") is True
             and "ship-gate-acceptance" in red_payload.get("completion_evidence_verification", {}).get("reason", ""),
             json.dumps(red_payload.get("completion_evidence_verification"), sort_keys=True),
         )
@@ -338,9 +355,31 @@ def main() -> int:
             green_update.get("completion_evidence_verification_status") == "VERIFIED"
             and green_payload.get("completion_evidence_verification_status") == "VERIFIED"
             and green_payload.get("completion_evidence_verified") is True
+            and green_payload.get("completion_evidence_verification_applies") is True
             and green_payload.get("completion_evidence", {}).get("repo") == ORCH_REPO
             and green_payload.get("completion_evidence_verification", {}).get("repo") == ORCH_REPO,
             f"update={green_update} payload={green_payload}",
+        )
+        open_pr_task = _seed_task("open-pr")
+        open_pr_response = client.patch(
+            f"/api/task/{open_pr_task}",
+            json={
+                "status": "completed",
+                "from": "tester-api",
+                "evidence": {
+                    "commit_sha": OPEN_PR_SHA,
+                    "repo": ORCH_REPO,
+                    "production_observation": "open PR completion must not be accepted",
+                },
+            },
+        )
+        open_pr_payload = client.get(f"/api/tasks/{open_pr_task}").json()
+        check(
+            "open pull request commit evidence is rejected before completion",
+            open_pr_response.status_code == 400
+            and "open pull request" in open_pr_response.text
+            and open_pr_payload.get("status") == "pending",
+            f"{open_pr_response.status_code} {open_pr_response.text} payload={open_pr_payload}",
         )
         wrong_repo_task = _seed_task("wrong-repo")
         _complete(

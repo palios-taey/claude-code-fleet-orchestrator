@@ -96,6 +96,14 @@ def repo_from_completion_evidence(evidence: Dict[str, Any]) -> str:
     return str(evidence.get("repo") or "").strip()
 
 
+def completion_evidence_verification_applies(evidence: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(evidence, dict) or not evidence:
+        return False
+    if str(evidence.get("commit_sha") or "").strip():
+        return True
+    return "loop_proof" in evidence
+
+
 def _repo_allowed_for_completion_evidence(repo: str) -> bool:
     return repo.strip().lower() in {allowed.lower() for allowed in allowed_completion_repos()}
 
@@ -196,6 +204,13 @@ def _commit_exists(repo: str, sha: str) -> None:
         raise RuntimeError(f"GitHub commit lookup for {sha!r} did not return a commit")
 
 
+def _open_pull_requests_for_commit(repo: str, sha: str) -> List[Dict[str, Any]]:
+    payload = _gh_api(f"repos/{repo}/commits/{sha}/pulls?per_page=100")
+    if not isinstance(payload, list):
+        raise RuntimeError("GitHub commit pulls response did not include a list")
+    return [pr for pr in payload if isinstance(pr, dict) and str(pr.get("state") or "").lower() == "open"]
+
+
 def _unverified(
     reason: str,
     *,
@@ -204,10 +219,13 @@ def _unverified(
     required_checks: Iterable[str] = DEFAULT_REQUIRED_GITHUB_CHECKS,
     producer: str = "",
     checks: Optional[List[Dict[str, Any]]] = None,
+    applies: bool = True,
+    reject_completion: bool = False,
 ) -> Dict[str, Any]:
-    return {
+    payload = {
         "status": UNVERIFIED,
         "verified": False,
+        "applies": bool(applies),
         "source": "github-required-checks",
         "repo": repo,
         "commit_sha": commit_sha,
@@ -217,6 +235,9 @@ def _unverified(
         "reason": reason,
         "checks": checks or [],
     }
+    if reject_completion:
+        payload["reject_completion"] = True
+    return payload
 
 
 def verify_completion_evidence(
@@ -227,7 +248,9 @@ def verify_completion_evidence(
     if not isinstance(evidence, dict) or not evidence:
         return None
     if "loop_proof" in evidence:
-        return verify_loop_proof_receipt(evidence, producer=producer)
+        verification = verify_loop_proof_receipt(evidence, producer=producer)
+        verification["applies"] = True
+        return verification
     checks = required_github_checks()
     commit_sha = str(evidence.get("commit_sha") or "").strip()
     if not commit_sha:
@@ -237,6 +260,7 @@ def verify_completion_evidence(
             repo=repo,
             required_checks=checks,
             producer=producer,
+            applies=False,
         )
     repo = repo_from_completion_evidence(evidence)
     try:
@@ -260,6 +284,21 @@ def verify_completion_evidence(
                     producer=producer,
                 )
         _commit_exists(repo, commit_sha)
+        open_prs = _open_pull_requests_for_commit(repo, commit_sha)
+        if open_prs:
+            refs = ", ".join(
+                f"#{pr.get('number')}" if pr.get("number") else str(pr.get("html_url") or "open-pr")
+                for pr in open_prs[:5]
+            )
+            return _unverified(
+                f"completion evidence commit_sha is still attached to open pull request(s): {refs}; "
+                "merge the PR or cite a commit that is no longer on an open PR before completing the task",
+                commit_sha=commit_sha,
+                repo=repo,
+                required_checks=checks,
+                producer=producer,
+                reject_completion=True,
+            )
         observations: List[Dict[str, Any]] = []
         failures: List[str] = []
         for check in checks:
@@ -285,6 +324,7 @@ def verify_completion_evidence(
         return {
             "status": VERIFIED,
             "verified": True,
+            "applies": True,
             "source": "github-required-checks",
             "repo": repo,
             "commit_sha": commit_sha,

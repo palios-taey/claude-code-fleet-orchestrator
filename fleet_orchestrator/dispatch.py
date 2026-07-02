@@ -75,6 +75,7 @@ from .decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
 from .handoff_validation import mark_superseded_for_task
 from .hook_installation import hook_installation_status
 from .memory_tier import get_memory
+from .orch_schema import completed_task_satisfies_dependents_cypher
 from .rules_tier import get_rules
 from .worker_liveness import register_worker_task_liveness
 from .current_task_binding import (
@@ -92,6 +93,13 @@ logger = logging.getLogger(__name__)
 _WATCH_MAX_ATTEMPTS = 8
 _WATCH_BACKOFF_S = 0.02
 _TERMINAL_TASK_STATUSES = {"completed", "failed", "interrupted"}
+_DEPENDENCY_SATISFIED_CYPHER = completed_task_satisfies_dependents_cypher("dep")
+_DEPENDENCIES_READY_CYPHER = f"""
+NOT EXISTS {{
+    MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
+    WHERE NOT {_DEPENDENCY_SATISFIED_CYPHER}
+}}
+"""
 
 
 class BugLockActive(Exception):
@@ -293,18 +301,15 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
     owner = _base_session_name(worker)
     with get_neo4j_session(cfg) as session:
         record = session.run(
-            """
-            MATCH (t:OrchTask {id: $task_id})
+            f"""
+            MATCH (t:OrchTask {{id: $task_id}})
             SET t._claim_lock = true
             WITH t, coalesce(t.status, 'pending') AS prior_status
             WHERE (
                   prior_status = 'pending'
                   OR (prior_status = 'completed' AND coalesce(t.recurring, false) = true)
               )
-              AND NOT EXISTS {
-                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                  WHERE dep.status <> 'completed'
-              }
+              AND {_DEPENDENCIES_READY_CYPHER}
             SET t.status = 'in_progress',
                 t.owner = $owner,
                 t.dispatched_to = $worker,
@@ -329,11 +334,11 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
             return
 
         detail = session.run(
-            """
-            MATCH (t:OrchTask {id: $task_id})
+            f"""
+            MATCH (t:OrchTask {{id: $task_id}})
             OPTIONAL MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
             RETURN coalesce(t.status, 'pending') AS status,
-                   count(CASE WHEN dep.status <> 'completed' THEN 1 END) AS incomplete_deps
+                   count(CASE WHEN dep IS NOT NULL AND NOT {_DEPENDENCY_SATISFIED_CYPHER} THEN 1 END) AS incomplete_deps
             """,
             task_id=task_id,
         ).single()
@@ -508,15 +513,12 @@ def _mark_in_progress_best_effort(task_id: str, worker: str) -> bool:
     owner = _base_session_name(worker)
     with get_neo4j_session(cfg) as session:
         record = session.run(
-            """
-            MATCH (t:OrchTask {id: $task_id})
+            f"""
+            MATCH (t:OrchTask {{id: $task_id}})
             SET t._claim_lock = true
             WITH t
             WHERE coalesce(t.status, 'pending') = 'pending'
-              AND NOT EXISTS {
-                  MATCH (t)-[:DEPENDS_ON]->(dep:OrchTask)
-                  WHERE dep.status <> 'completed'
-              }
+              AND {_DEPENDENCIES_READY_CYPHER}
             SET t.status = 'in_progress',
                 t.owner = $owner,
                 t.dispatched_to = $worker,

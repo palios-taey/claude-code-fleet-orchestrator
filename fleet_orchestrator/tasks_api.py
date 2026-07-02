@@ -857,6 +857,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             "completion_evidence_verification": task_after.get("completion_evidence_verification"),
             "completion_evidence_verification_status": task_after.get("completion_evidence_verification_status"),
             "completion_evidence_verified": task_after.get("completion_evidence_verified"),
+            "completion_evidence_verification_applies": task_after.get("completion_evidence_verification_applies"),
             "phase_completed": phase_completed,
         }
     except CompletionEvidenceError as e:

@@ -14,8 +14,8 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 242.
-- Teaches: 103.
+- Enumerated surfaces: 243.
+- Teaches: 104.
 - Needs-fix baseline debt: 53.
 - Exempt reviewed rows: 85.
 
@@ -160,6 +160,7 @@ Summary:
 | fleet_orchestrator/orch_schema.py | set_supervisor_refs | orch_raise_error | 1 | 2538 | e4efc41d4fcc04d3 | exempt |  | Core helper error is caught or enriched by the API-facing caller, or is not currently exposed as an autonomous workflow surface. | anbr-fix-exempt:internal-only-helper |
 | fleet_orchestrator/orch_schema.py | update_project_priority | orch_raise_error | 1 | 3583 | cbfb142442cacd0c | teaches | PATCH /api/projects/{} | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/orch_schema.py | update_task_status | orch_raise_error | 1 | 2681 | 268ece876fa26b41 | teaches | POST /api/ui/questions/{}/answer | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/orch_schema.py | update_task_status | orch_raise_error | 2 | 3300 | 70ccbda7a78b9aad | teaches | taey-task | Completion-verification rejection includes the evidence contract, CLI update example, and PATCH /api/task example. | task-4b6ceca4:reject-completion |
 | fleet_orchestrator/orch_schema.py | validate_source_path_for_refs | orch_return_none_error | 1 | 592 | 2fa8eabf2359aa69 | exempt |  | Static extractor treated an exit wrapper or non-error tuple as a user-facing message; the row is not an independent runtime surface. | anbr-fix-exempt:analyzer-artifact |
 | fleet_orchestrator/orch_schema.py | validate_source_path_for_refs | orch_return_none_error | 2 | 596 | 489823ea7b06396f | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/orch_schema.py | validate_source_path_for_refs | orch_return_none_error | 3 | 598 | 5e504430131fcf5e | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
