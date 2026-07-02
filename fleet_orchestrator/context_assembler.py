@@ -290,6 +290,10 @@ def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
                     } | _step_governance_for_work(task_id, task.get("status"))
         raise ValueError(f"task missing from project summary: {task_id}")
 
+    current_work = get_session_current_work(session)
+    if current_work:
+        return _current_work_row(current_work, session)
+
     next_ready = get_session_next_ready(session)
     if next_ready:
         row = dict(next_ready)
@@ -316,18 +320,30 @@ def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
             row["project_name"] = project.get("name")
             return row
 
-    current_work = get_session_current_work(session)
-    if current_work:
-        row = dict(current_work)
-        row["source"] = "in_progress_own"
-        row["status"] = "in_progress"
-        row["task_id"] = row.get("top_task_id")
-        row["description"] = row.get("top_task_desc")
-        row["owner"] = row.get("owner") or session
-        row.update(_step_governance_for_work(row.get("task_id"), row.get("status")))
-        return row
-
     return {"source": "none", "project_id": None, "description": "", "task_id": None, "status": None}
+
+
+def _current_work_row(current_work: Dict[str, Any], session: str) -> Dict[str, Any]:
+    row = dict(current_work)
+    task_id = row.get("top_task_id") or row.get("task_id")
+    status = row.get("status") or "in_progress"
+    row.update({
+        "source": "in_progress_own",
+        "task_id": task_id,
+        "description": row.get("top_task_desc") or row.get("description", ""),
+        "status": status,
+        "owner": row.get("owner") or session,
+        "dispatched_to": row.get("dispatched_to"),
+        "task_type": row.get("task_type"),
+        "blocked_on": row.get("blocked_on"),
+        "phase_id": row.get("phase_id"),
+        "phase_name": row.get("phase_name"),
+        "project_id": row.get("project_id"),
+        "project_name": row.get("project_name", ""),
+        "project_source_path": row.get("project_source_path", ""),
+    })
+    row.update(_step_governance_for_work(task_id, status))
+    return row
 
 
 def _step_governance_for_work(task_id: Any, status: Any) -> Dict[str, Any]:
@@ -370,6 +386,13 @@ def _operating_source(work: Dict[str, Any], task_id: Optional[str]) -> str:
 SESSION_ENV_ALLOWLIST = {"ORCH_MEMORY_ROOT", "ORCH_RULES_ROOT", "ORCH_SESSION_ROOTS"}
 
 
+def _session_env_value(raw_value: str) -> str:
+    value = raw_value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
 def _scoped_env_value(scoped_env: Optional[Dict[str, str]], key: str) -> str:
     if scoped_env is not None and key in scoped_env:
         return str(scoped_env.get(key) or "")
@@ -389,13 +412,13 @@ def _read_session_env(session_aliases: Iterable[str], session_roots: Dict[str, s
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key = key.replace("export ", "").strip()
+        key = re.sub(r"^export\s+", "", key).strip()
         # Defense-in-depth: a per-session repo .env must never override shared
         # store/network config in this process. Only context-assembly hints pass.
         # (Internal auth keys no longer exist at all -- see config.py -- so this is
         # belt-and-suspenders, not the primary guard.)
         if key in SESSION_ENV_ALLOWLIST:
-            values[key] = value.strip()
+            values[key] = _session_env_value(value)
     return values
 
 
