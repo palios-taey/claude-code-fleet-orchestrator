@@ -132,7 +132,10 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver
-from fleet_orchestrator.orch_schema import completed_task_satisfies_dependents_cypher
+from fleet_orchestrator.current_task_binding import clear_matching_current_task
+from fleet_orchestrator.notify_state import state_key as notify_state_key
+from fleet_orchestrator.orch_schema import HUMAN_REVIEW_TASK_TYPE, completed_task_satisfies_dependents_cypher
+from fleet_orchestrator.worker_liveness import worker_task_liveness_key
 
 logging.basicConfig(
     level=logging.INFO,
@@ -154,11 +157,32 @@ NOTIFY_KEY_PREFIX = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
 COMMAND_TIMEOUT_DEFAULT_SEC = 600.0
 COMMAND_OUTPUT_LIMIT = 4000
 DEFAULT_WEEKDAYS = (1, 2, 3, 4, 5, 6, 7)
+TRIGGER_STARVATION_SKIP_THRESHOLD = 3
+TRIGGER_STARVATION_STALE_TOOL_SEC = 15 * 60
+TRIGGER_STARVATION_STATE_TTL_SEC = 3 * 24 * 60 * 60
+TRIGGER_STARVATION_RELEASE_DEDUP_TTL_SEC = 60 * 60
 _BAD_WEEKDAY_WARNING_KEYS: set[str] = set()
 
 
 def orch_key(namespace: str, *parts: str) -> str:
     return ":".join([NOTIFY_KEY_PREFIX, namespace, *[str(part) for part in parts]])
+
+
+def _state_key(node_id: str, suffix: str) -> str:
+    return notify_state_key(node_id, suffix)
+
+
+def _redis_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value)
+
+
+def _truthy_redis_flag(value: Any) -> bool:
+    text = _redis_text(value).strip().lower()
+    return bool(text) and text not in {"0", "false", "no", "off"}
 
 
 def load_registry(path: str) -> dict:
@@ -231,6 +255,326 @@ def _clear_dedup(redis_client: Any, fire_id: str) -> None:
 
 def _trigger_route_fields(trig: dict) -> list[str]:
     return [field for field in ("command", "task_id", "project", "prompt_file") if field in trig]
+
+
+def _starvation_state_key(trig_id: str, project_id: str) -> str:
+    return orch_key("orch-cron-starvation", trig_id, project_id)
+
+
+def _starvation_release_dedup_key(task_id: str) -> str:
+    return orch_key("orch-cron-starvation-released", task_id)
+
+
+def _session_idle_stale(r: Any, session_id: str, now_ts: float) -> Optional[dict[str, Any]]:
+    if not session_id:
+        return None
+    try:
+        if not _truthy_redis_flag(r.get(_state_key(session_id, "idle"))):
+            return None
+        last_raw = r.get(_state_key(session_id, "last_tool_activity"))
+    except Exception as exc:
+        log.warning("trigger-starvation session state read failed session=%s: %s", session_id, exc)
+        return None
+    try:
+        last_tool_activity = float(_redis_text(last_raw).strip())
+    except (TypeError, ValueError):
+        return None
+    age = max(0.0, now_ts - last_tool_activity)
+    if age < TRIGGER_STARVATION_STALE_TOOL_SEC:
+        return None
+    return {
+        "session": session_id,
+        "last_tool_activity": last_tool_activity,
+        "age_seconds": int(age),
+    }
+
+
+def _task_session_candidates(task: dict[str, Any], fallback_session: str) -> list[str]:
+    sessions: list[str] = []
+    for value in (
+        task.get("dispatched_to"),
+        task.get("worker_liveness_worker"),
+        task.get("owner"),
+    ):
+        session = str(value or "").strip()
+        if session and session not in sessions:
+            sessions.append(session)
+    if not sessions:
+        fallback = str(fallback_session or "").strip()
+        if fallback:
+            sessions.append(fallback)
+    return sessions
+
+
+def _project_trigger_stale_blockers(
+    r: Any,
+    *,
+    project_id: str,
+    trigger_session: str,
+    now_ts: float,
+) -> list[dict[str, Any]]:
+    cfg = OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        rows = [dict(record) for record in session.run(
+            """
+            MATCH (p:OrchProject {id: $project_id})-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
+            WHERE t.status IN ['in_progress', 'dispatched']
+              AND NOT toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:'
+              AND coalesce(t.task_type, '') <> $human_review_task_type
+            RETURN t.id AS task_id,
+                   t.description AS description,
+                   t.status AS status,
+                   t.owner AS owner,
+                   t.dispatched_to AS dispatched_to,
+                   t.blocked_on AS blocked_on,
+                   t.worker_liveness_worker AS worker_liveness_worker,
+                   p.supervisor AS project_supervisor
+            ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC, t.created_at ASC, t.id ASC
+            LIMIT 25
+            """,
+            project_id=project_id,
+            human_review_task_type=HUMAN_REVIEW_TASK_TYPE,
+        )]
+
+    stale: list[dict[str, Any]] = []
+    for row in rows:
+        for session_id in _task_session_candidates(row, trigger_session):
+            session_state = _session_idle_stale(r, session_id, now_ts)
+            if not session_state:
+                continue
+            item = dict(row)
+            item["stale_session"] = session_state["session"]
+            item["stale_last_tool_activity"] = session_state["last_tool_activity"]
+            item["stale_age_seconds"] = session_state["age_seconds"]
+            stale.append(item)
+            break
+    return stale
+
+
+def _record_starvation_skip(
+    r: Any,
+    *,
+    trig_id: str,
+    project_id: str,
+    result: str,
+    blockers: list[dict[str, Any]],
+) -> int:
+    key = _starvation_state_key(trig_id, project_id)
+    blocker_ids = sorted(str(item.get("task_id") or "") for item in blockers if item.get("task_id"))
+    try:
+        current = json.loads(_redis_text(r.get(key)) or "{}")
+    except Exception:
+        current = {}
+    same_signature = (
+        isinstance(current, dict)
+        and current.get("result") == result
+        and current.get("blocker_task_ids") == blocker_ids
+    )
+    count = int(current.get("count") or 0) + 1 if same_signature else 1
+    payload = {
+        "result": result,
+        "count": count,
+        "project_id": project_id,
+        "trigger_id": trig_id,
+        "blocker_task_ids": blocker_ids,
+        "updated_at": int(time.time()),
+    }
+    try:
+        r.set(key, json.dumps(payload, separators=(",", ":")), ex=TRIGGER_STARVATION_STATE_TTL_SEC)
+    except Exception as exc:
+        log.warning("trigger-starvation state write failed trigger=%s project=%s: %s",
+                    trig_id, project_id, exc)
+        return 1
+    return count
+
+
+def _clear_starvation_state(r: Any, trig_id: str, project_id: str) -> None:
+    if r is None:
+        return
+    try:
+        r.delete(_starvation_state_key(trig_id, project_id))
+    except Exception as exc:
+        log.warning("trigger-starvation state clear failed trigger=%s project=%s: %s",
+                    trig_id, project_id, exc)
+
+
+def _release_trigger_starvation_task(
+    r: Any,
+    *,
+    blocker: dict[str, Any],
+    trig_id: str,
+    project_id: str,
+    trigger_session: str,
+    skip_result: str,
+    skip_count: int,
+) -> Optional[dict[str, Any]]:
+    task_id = str(blocker.get("task_id") or "").strip()
+    if not task_id:
+        return None
+    dedup_key = _starvation_release_dedup_key(task_id)
+    try:
+        if r.exists(dedup_key):
+            return None
+    except Exception as exc:
+        log.warning("trigger-starvation dedup read failed task=%s: %s", task_id, exc)
+        return None
+
+    cfg = OrchConfig()
+    now_ts = time.time()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run(
+            """
+            MATCH (p:OrchProject {id: $project_id})-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            WHERE t.status IN ['in_progress', 'dispatched']
+              AND NOT toUpper(trim(coalesce(t.blocked_on, ''))) STARTS WITH 'AWAIT:'
+              AND coalesce(t.task_type, '') <> $human_review_task_type
+            WITH t, p, t.blocked_on AS previous_blocked_on
+            SET t.status = 'pending',
+                t.dispatched_to = NULL,
+                t.blocked_on = NULL,
+                t.needs_attention = true,
+                t.worker_liveness_escalated_at = $now,
+                t.worker_liveness_escalation_reason = 'trigger-starvation',
+                t.trigger_starvation_released_at = $now,
+                t.trigger_starvation_trigger_id = $trig_id,
+                t.trigger_starvation_skip_result = $skip_result,
+                t.trigger_starvation_skip_count = $skip_count,
+                t.updated_at = datetime()
+            RETURN t.id AS task_id,
+                   t.description AS description,
+                   t.status AS status,
+                   t.owner AS owner,
+                   previous_blocked_on AS previous_blocked_on,
+                   p.supervisor AS project_supervisor
+            """,
+            project_id=project_id,
+            task_id=task_id,
+            human_review_task_type=HUMAN_REVIEW_TASK_TYPE,
+            now=float(now_ts),
+            trig_id=trig_id,
+            skip_result=skip_result,
+            skip_count=skip_count,
+        ).single()
+    if record is None:
+        return None
+
+    cleared_sessions: list[str] = []
+    for session_id in _task_session_candidates(blocker, trigger_session):
+        if clear_matching_current_task(
+            session_id,
+            task_id,
+            redis_client=r,
+            reason="trigger-starvation",
+        ):
+            cleared_sessions.append(session_id)
+    try:
+        r.delete(worker_task_liveness_key(task_id))
+    except Exception as exc:
+        log.warning("trigger-starvation liveness sidecar cleanup failed task=%s: %s", task_id, exc)
+
+    result = dict(record)
+    result.update({
+        "trigger_id": trig_id,
+        "project_id": project_id,
+        "trigger_session": trigger_session,
+        "skip_result": skip_result,
+        "skip_count": skip_count,
+        "stale_session": blocker.get("stale_session"),
+        "stale_age_seconds": blocker.get("stale_age_seconds"),
+        "cleared_current_task_sessions": cleared_sessions,
+    })
+    try:
+        r.set(dedup_key, json.dumps(result, default=str, separators=(",", ":")),
+              ex=TRIGGER_STARVATION_RELEASE_DEDUP_TTL_SEC)
+    except Exception as exc:
+        log.warning("trigger-starvation release dedup write failed task=%s: %s", task_id, exc)
+    return result
+
+
+def _notify_trigger_starvation_release(released: dict[str, Any], supervisor: str) -> None:
+    if not supervisor:
+        return
+    cli = OrchConfig().notify_cli_path
+    cli_path = shutil.which(cli) or (cli if os.path.isfile(cli) and os.access(cli, os.X_OK) else None)
+    if cli_path is None:
+        log.error("trigger-starvation notification skipped; notify CLI not found: %s", cli)
+        return
+    body = (
+        f"[TRIGGER_STARVATION_RELEASE] recurring trigger={released.get('trigger_id')} "
+        f"project={released.get('project_id')} saw {released.get('skip_count')} consecutive "
+        f"{released.get('skip_result')} fires while task={released.get('task_id')} was in_progress "
+        f"on idle stale session={released.get('stale_session')} "
+        f"(last_tool_activity age={released.get('stale_age_seconds')}s). "
+        "The task was returned to pending with needs_attention=true and reason=trigger-starvation; "
+        "re-check current/next work and redispatch or investigate."
+    )
+    result = subprocess.run(
+        [cli_path, supervisor, body, "--from", "orch-cron", "--type", "wake", "--priority", "high"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log.error("trigger-starvation notification failed supervisor=%s task=%s: %s",
+                  supervisor, released.get("task_id"), result.stderr.strip() or result.stdout.strip())
+
+
+def _handle_project_trigger_starvation_skip(
+    r: Any,
+    *,
+    trig: dict,
+    project_id: str,
+    session: str,
+    result: str,
+) -> Optional[dict[str, Any]]:
+    if r is None:
+        return None
+    trig_id = str(trig.get("id") or trig.get("project") or session or "?")
+    now_ts = time.time()
+    blockers = _project_trigger_stale_blockers(
+        r,
+        project_id=project_id,
+        trigger_session=session,
+        now_ts=now_ts,
+    )
+    if not blockers:
+        _clear_starvation_state(r, trig_id, project_id)
+        return None
+    count = _record_starvation_skip(
+        r,
+        trig_id=trig_id,
+        project_id=project_id,
+        result=result,
+        blockers=blockers,
+    )
+    if count < TRIGGER_STARVATION_SKIP_THRESHOLD:
+        return None
+    for blocker in blockers:
+        released = _release_trigger_starvation_task(
+            r,
+            blocker=blocker,
+            trig_id=trig_id,
+            project_id=project_id,
+            trigger_session=session,
+            skip_result=result,
+            skip_count=count,
+        )
+        if released:
+            _clear_starvation_state(r, trig_id, project_id)
+            supervisor = (
+                str(trig.get("supervisor") or "").strip()
+                or str(released.get("project_supervisor") or "").strip()
+                or session
+            )
+            _notify_trigger_starvation_release(released, supervisor)
+            log.warning(
+                "trigger-starvation released task=%s project=%s trigger=%s skip_result=%s count=%s stale_session=%s",
+                released.get("task_id"), project_id, trig_id, result, count, released.get("stale_session"),
+            )
+            return released
+    return None
 
 
 def _truncate_output(value: Any, limit: int = COMMAND_OUTPUT_LIMIT) -> str:
@@ -375,18 +719,34 @@ def _fire_project_trigger(r, trig: dict, now_local: datetime, dry_run: bool = Fa
 
     cycle_state = project_cycle_in_flight(project_id)
     if int(cycle_state.get("active_count") or 0) > 0:
+        result = "skipped:cycle_in_flight"
+        _handle_project_trigger_starvation_skip(
+            r,
+            trig=trig,
+            project_id=project_id,
+            session=session,
+            result=result,
+        )
         log.info("SKIP project trigger %s project=%s session=%s: skipped:cycle_in_flight %s",
                  trig_id, project_id, session, cycle_state)
-        return "skipped:cycle_in_flight"
+        return result
     next_ready = (
         get_session_next_ready(session, project_id=project_id)
         or _completed_recurring_project_next_ready(session, project_id)
     )
     task_id = str((next_ready or {}).get("task_id") or (next_ready or {}).get("id") or "").strip()
     if not task_id:
+        result = "skipped:no_ready_task"
+        _handle_project_trigger_starvation_skip(
+            r,
+            trig=trig,
+            project_id=project_id,
+            session=session,
+            result=result,
+        )
         log.info("SKIP project trigger %s project=%s session=%s: no ready task",
                  trig_id, project_id, session)
-        return "skipped:no_ready_task"
+        return result
 
     description = str(
         trig.get("description")
@@ -406,11 +766,13 @@ def _fire_project_trigger(r, trig: dict, now_local: datetime, dry_run: bool = Fa
         )
     except (OrchTaskNotReady, WorkerBusy) as exc:
         _clear_dedup(r, fire_id)
+        _clear_starvation_state(r, str(trig_id), project_id)
         log.info("SKIP project trigger %s project=%s session=%s task=%s: %s",
                  trig_id, project_id, session, task_id, exc)
         return "skipped:task_not_ready"
 
     trig["_orch_cron_project_task_id"] = task_id
+    _clear_starvation_state(r, str(trig_id), project_id)
     log.info("FIRE project trigger %s session=%s project=%s task=%s",
              trig_id, session, project_id, task_id)
     return "dispatched"
