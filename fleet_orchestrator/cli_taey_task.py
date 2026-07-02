@@ -17,6 +17,7 @@ Usage:
     taey-task remove-dependency <task-id> <depends-on-task-id>
     taey-task update <task-id> completed --evidence '{"commit_sha":"abc123","repo":"OWNER/REPO","production_observation":"verified live"}'
     taey-task update <task-id> failed --evidence '{"reason":"blocked by missing dependency"}'
+    taey-task update <task-id> changes_requested --reason "audit rejection reason"
 """
 import argparse
 import json
@@ -31,7 +32,8 @@ from fleet_orchestrator.cli_http import api_json_or_exit
 from fleet_orchestrator.evidence_contract import TERMINAL_STATUSES
 
 DASHBOARD_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002")
-UPDATE_STATUSES = tuple(sorted(TERMINAL_STATUSES | {"in_progress"}))
+CHANGES_REQUESTED_STATUS = "changes_requested"
+UPDATE_STATUSES = tuple(sorted(TERMINAL_STATUSES | {"in_progress", CHANGES_REQUESTED_STATUS}))
 
 
 def detect_from_node():
@@ -195,11 +197,27 @@ def cmd_dispatch(args):
 def cmd_update(args):
     """Update a task's status via PATCH /api/task/{id}."""
     sender = detect_from_node()
+    changes_requested = args.status == CHANGES_REQUESTED_STATUS
     if args.status in TERMINAL_STATUSES and args.evidence is None:
         print(f"ERROR: {args.status} status requires --evidence JSON", file=sys.stderr)
         sys.exit(1)
     if args.status not in TERMINAL_STATUSES and args.evidence is not None:
         print("ERROR: --evidence is only valid with terminal statuses", file=sys.stderr)
+        sys.exit(1)
+    if changes_requested and not str(args.reason or "").strip():
+        print(
+            f"ERROR: changes_requested requires --reason '<audit rejection reason>'. "
+            f"Retry: taey-task update {args.task_id} changes_requested --reason '<audit rejection reason>'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if changes_requested and (args.blocked_on is not None or args.clear_blocked_on):
+        print(
+            f"ERROR: --blocked-on is not valid with changes_requested. "
+            f"Retry without --blocked-on: taey-task update {args.task_id} changes_requested "
+            "--reason '<audit rejection reason>'",
+            file=sys.stderr,
+        )
         sys.exit(1)
     data = {
         "status": args.status,
@@ -211,13 +229,26 @@ def cmd_update(args):
         data["blocked_on"] = args.blocked_on
     if args.evidence is not None:
         data["evidence"] = parse_evidence_arg(args.evidence)
+    if changes_requested:
+        data["record_outcome"] = CHANGES_REQUESTED_STATUS
+        data["reason"] = args.reason.strip()
+        if args.peer:
+            data["peer"] = args.peer
     result = api_call("PATCH", f"/api/task/{args.task_id}", data)
     if result.get("ok"):
+        if changes_requested:
+            target = result.get("dispatched_to") or (result.get("changes_requested") or {}).get("worker") or "peer"
+            print(f"OK: {args.task_id} → changes_requested; re-dispatched to {target} (by {sender})")
+            return
         blocked_on = result.get("blocked_on")
         suffix = f" blocked_on={blocked_on}" if blocked_on else ""
         print(f"OK: {args.task_id} → {args.status} (by {sender}){suffix}")
     else:
-        print(f"ERROR: {result.get('error', 'unknown')}", file=sys.stderr)
+        print(
+            f"ERROR: {result.get('error', 'unknown')}. "
+            f"Inspect with `taey-task status {args.task_id}` or retry the update command.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -282,6 +313,8 @@ def main():
                           help="Clear the task's blocked_on marker")
     p_update.add_argument("--evidence",
                           help="JSON object with completion evidence, e.g. '{\"commit_sha\":\"abc123\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"verified live\"}'")
+    p_update.add_argument("--reason", help="Audit rejection reason; required with changes_requested")
+    p_update.add_argument("--peer", help="Explicit peer to re-dispatch when the task no longer records one")
 
     args = parser.parse_args()
     if args.command == "create":
