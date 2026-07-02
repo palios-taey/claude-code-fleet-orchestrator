@@ -46,6 +46,7 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
     create_task,
     get_task,
     init_schema,
+    project_cycle_in_flight,
     update_task_status,
 )
 
@@ -55,6 +56,7 @@ WORKER = f"{PFX}-treasurer"
 PROJECT = f"{PFX}-project"
 PHASE = f"{PROJECT}::phase"
 ENTRY = f"{PROJECT}::step-0"
+AWAITING = f"{PROJECT}::awaiting-review"
 FOLLOW = f"{PROJECT}::step-1"
 FAILURES: list[str] = []
 
@@ -137,10 +139,18 @@ def main() -> int:
         )
         create_phase(PROJECT, PHASE, "Phase", config=CFG)
         create_task(PHASE, ENTRY, "entry task", priority=1, owner=WORKER, wake_owner_if_ready=False, config=CFG)
+        create_task(PHASE, AWAITING, "awaiting review", priority=10, owner=WORKER, wake_owner_if_ready=False, config=CFG)
         create_task(PHASE, FOLLOW, "follow task", priority=20, owner=WORKER, wake_owner_if_ready=False, config=CFG)
         add_dependency(FOLLOW, ENTRY, config=CFG)
-        _mark_recurring(ENTRY, FOLLOW)
+        _mark_recurring(ENTRY, AWAITING, FOLLOW)
         _complete(ENTRY)
+        update_task_status(
+            AWAITING,
+            "in_progress",
+            owner=WORKER,
+            blocked_on="AWAIT:external-signal:acceptance parked task",
+            config=CFG,
+        )
 
         now = datetime.now(ZoneInfo("UTC")).replace(second=0, microsecond=0)
         registry = tmp / "project-registry.json"
@@ -164,19 +174,28 @@ def main() -> int:
         _check("project trigger dry-run does not reset entry", get_task(ENTRY, config=CFG).get("status") == "completed", get_task(ENTRY, config=CFG))
         _check("project trigger dry-run does not change next task", get_task(FOLLOW, config=CFG).get("status") == "pending", get_task(FOLLOW, config=CFG))
         _check("project trigger dry-run writes no state", _records(state_file) == [], _records(state_file))
+        cycle_state = project_cycle_in_flight(PROJECT, config=CFG)
+        _check(
+            "await-blocked task is counted separately from active cycle work",
+            cycle_state.get("active_count") == 0 and cycle_state.get("awaiting_count") == 1,
+            cycle_state,
+        )
 
         with mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
              mock.patch.object(dispatch_module.subprocess, "run", side_effect=_ok_run):
             fires = cron.tick(str(registry), _redis(), now_override=now)
 
         entry = get_task(ENTRY, config=CFG)
+        awaiting = get_task(AWAITING, config=CFG)
         follow = get_task(FOLLOW, config=CFG)
         current_raw = _redis().get(_state_key(WORKER, "current_task"))
         current = json.loads(current_raw) if current_raw else {}
         records = _records(state_file)
+        project_status = _project_status()
         _check("project trigger fires once", fires == 1, fires)
-        _check("project remains active without reset", _project_status() == "active", _project_status())
+        _check("project remains open without reset", project_status in {"active", "in_progress"}, project_status)
         _check("project trigger preserves completed entry", entry.get("status") == "completed", entry)
+        _check("project trigger preserves awaiting sibling hold", awaiting.get("blocked_on") == "AWAIT:external-signal:acceptance parked task", awaiting)
         _check("project trigger dispatches next pending task", follow.get("status") == "in_progress" and follow.get("dispatched_to") == WORKER, follow)
         _check("project trigger binds current_task", current.get("task_id") == FOLLOW, current)
         _check(
