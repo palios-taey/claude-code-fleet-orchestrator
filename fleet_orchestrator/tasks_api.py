@@ -70,6 +70,7 @@ from fleet_orchestrator.dispatch import (
     OrchTaskNotReady,
     WorkerBusy,
     bind_current_task,
+    clear_current_task,
     dispatch as dispatch_task,
     record_outcome,
 )
@@ -1588,6 +1589,20 @@ async def clear_pause_session_endpoint(session_id: str, req: Request) -> Dict[st
     data = await req.json() if req.headers.get("content-type", "").startswith("application/json") else {}
     meta = clear_session_pause(session_id, cleared_by=data.get("cleared_by") or data.get("from") or session_id, config=_cfg())
     return {"ok": True, "pause_meta": meta}
+
+
+@app.delete("/api/sessions/{session_id}/current-task")
+def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
+    clear_current_task(session_id)
+    return {
+        "ok": True,
+        "session": session_id,
+        "unbound": True,
+        "next_step": (
+            f"Retry dispatch or inspect the session with GET /api/sessions/{session_id}/current "
+            f"and `taey-task status <task-id>`."
+        ),
+    }
 
 
 @app.post("/api/sessions/{target}/notify")

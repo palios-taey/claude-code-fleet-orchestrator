@@ -186,6 +186,7 @@ An agent checks and updates tasks:
 ```bash
 taey-task status demo::build-1
 taey-task update demo::build-1 completed --evidence '{"commit_sha":"abc123","repo":"OWNER/REPO","gate":"curl /health","production_observation":"HTTP 200 ok true"}'
+taey-task unbind worker-codex  # manually clear inspected stale current_task state
 ```
 
 A human-review gate records a question that must be answered by a person:

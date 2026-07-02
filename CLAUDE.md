@@ -87,6 +87,12 @@ Dispatch ready peer-owned task work through the canonical claim/bind/wake path:
 taey-task dispatch <task-id> <peer-session>
 ```
 
+Manually clear inspected stale session state:
+
+```bash
+taey-task unbind <peer-session>
+```
+
 Complete a normal task with evidence:
 
 ```bash

@@ -77,6 +77,12 @@ from .hook_installation import hook_installation_status
 from .memory_tier import get_memory
 from .rules_tier import get_rules
 from .worker_liveness import register_worker_task_liveness
+from .current_task_binding import (
+    clear_session_current_task,
+    decode_current_task,
+    is_live_binding_status,
+    task_status as _binding_task_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,25 +143,11 @@ def _state_key(node_id: str, suffix: str) -> str:
 
 
 def _decode_current_task(raw: Optional[str]) -> Optional[dict[str, Any]]:
-    if not raw:
-        return None
-    try:
-        value = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    return value if isinstance(value, dict) else None
+    return decode_current_task(raw)
 
 
 def _current_task_status(task_id: str) -> Optional[str]:
-    if not task_id or not _orch_task_exists(task_id):
-        return None
-    cfg = OrchConfig()
-    with get_neo4j_session(cfg) as session:
-        row = session.run(
-            "MATCH (t:OrchTask {id: $task_id}) RETURN coalesce(t.status, 'pending') AS status",
-            task_id=task_id,
-        ).single()
-    return str(row["status"]) if row else None
+    return _binding_task_status(task_id)
 
 
 def _busy_current_task_error(worker: str, existing: Optional[dict[str, Any]],
@@ -169,7 +161,7 @@ def _busy_current_task_error(worker: str, existing: Optional[dict[str, Any]],
     if existing_dispatcher == incoming_dispatcher and existing_task_id == incoming_task_id:
         return None
     status = _current_task_status(existing_task_id)
-    if status in _TERMINAL_TASK_STATUSES:
+    if status is not None and not is_live_binding_status(status):
         return None
     display_status = status or "unknown"
     dispatcher_label = existing_dispatcher or "unknown"
@@ -188,16 +180,22 @@ def _bind_current_task_checked(r: Any, worker: str, current_task: dict[str, Any]
         with r.pipeline() as pipe:
             try:
                 pipe.watch(key)
+                existing = _decode_current_task(pipe.get(key))
+                stale_existing: Optional[dict[str, Any]] = None
                 if not force:
                     busy = _busy_current_task_error(
                         worker,
-                        _decode_current_task(pipe.get(key)),
+                        existing,
                         dispatcher,
                         str(current_task["task_id"]),
                     )
                     if busy:
                         pipe.unwatch()
                         raise busy
+                    existing_task_id = str((existing or {}).get("task_id") or "").strip()
+                    existing_status = _current_task_status(existing_task_id) if existing_task_id else None
+                    if existing_task_id and existing_status is not None and not is_live_binding_status(existing_status):
+                        stale_existing = {"task_id": existing_task_id, "status": existing_status}
                 pipe.multi()
                 pipe.delete(_state_key(worker, "last_outcome"))
                 pipe.delete(_state_key("orch-watch-stuck", f"{worker}:{current_task['task_id']}"))
@@ -205,6 +203,14 @@ def _bind_current_task_checked(r: Any, worker: str, current_task: dict[str, Any]
                 if set_parent and supervisor:
                     pipe.set(_state_key(worker, "parent"), supervisor)
                 pipe.execute()
+                if stale_existing:
+                    logger.warning(
+                        "stale current_task binding cleared during dispatch worker=%s stale_task=%s status=%s new_task=%s",
+                        worker,
+                        stale_existing["task_id"],
+                        stale_existing["status"],
+                        current_task["task_id"],
+                    )
                 return
             except WatchError:
                 if attempt == _WATCH_MAX_ATTEMPTS - 1:
@@ -923,18 +929,16 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
     ``outcome`` MUST be one of ``done``, ``error``, ``interrupted``. Any
     other value raises ``ValueError``. The enum is load-bearing: every
     terminal outcome records ``last_outcome`` and immediately wakes the
-    binding supervisor. The Stop hook clears the worker's current_task ONLY
-    when outcome == ``done``. Any other outcome (or absent record_outcome
-    call entirely) leaves current_task persisting as the "previous dispatch
-    did not complete cleanly" signal for the next dispatcher.
+    binding supervisor. Outcomes that move the OrchTask out of in_progress
+    also clear the matching current_task binding so later dispatches do not
+    treat a pending task as a live worker slot.
 
     Semantics:
     - ``done`` — task completed successfully. Supervisor can move on.
-    - ``error`` — task hit an unrecoverable error. current_task persists;
-      supervisor sees outcome=error in peer_idle body and decides retry
-      vs investigation.
-    - ``interrupted`` — Ctrl-C, timeout, or external cancel. current_task
-      persists; supervisor knows the task was not given a fair shot.
+    - ``error`` — task hit an unrecoverable error. The task returns to
+      pending, last_outcome preserves the failure, and current_task clears.
+    - ``interrupted`` — Ctrl-C, timeout, or external cancel. The task returns
+      to pending, last_outcome preserves the interruption, and current_task clears.
 
     Workers that stop without calling this end up with outcome=``unknown``
     in the peer_idle body, which is also load-bearing: the supervisor
@@ -983,6 +987,17 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
         try:
             if current_task_id and outcome != "done":
                 _revert_outcome_claim(worker, current_task_id)
+                from .worker_liveness import clear_worker_task_liveness
+
+                clear_worker_task_liveness(current_task_id)
+                from .current_task_binding import clear_matching_current_task
+
+                clear_matching_current_task(
+                    worker,
+                    current_task_id,
+                    redis_client=r,
+                    reason=f"record_outcome:{outcome}",
+                )
         finally:
             _notify_supervisor_response_ready(worker, current_task, payload)
 
@@ -1034,6 +1049,4 @@ def clear_current_task(worker: str) -> None:
     "I've seen the previous task's outcome, I'm moving on" acknowledgment
     — call it after investigating or after deciding to cancel.
     """
-    r = _redis_connect()
-    r.delete(_state_key(worker, "current_task"))
-    r.delete(_state_key(worker, "last_outcome"))
+    clear_session_current_task(worker, redis_client=_redis_connect())

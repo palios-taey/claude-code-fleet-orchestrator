@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import io
+import logging
 import os
 import stat
 import sys
@@ -60,6 +62,14 @@ def main() -> int:
             row = session.run("MATCH (t:OrchTask {id:$id}) RETURN t.status AS status", id=tid).single()
         return str(row["status"]) if row else None
 
+    def direct_task_status_change(tid: str, status: str) -> None:
+        with driver.session(database=cfg.neo4j_db) as session:
+            session.run(
+                "MATCH (t:OrchTask {id:$id}) SET t.status = $status REMOVE t.dispatched_to",
+                id=tid,
+                status=status,
+            ).consume()
+
     def current_task() -> dict:
         raw = redis_client.get(D._state_key(WORKER, "current_task"))
         return json.loads(raw) if raw else {}
@@ -80,7 +90,7 @@ def main() -> int:
         try:
             create_project(project_id=PFX, name="dispatch clobber guard", supervisor=SUP_A, config=cfg)
             create_phase(project_id=PFX, phase_id=task_id("phase"), name="phase", config=cfg)
-            for name in ("first", "same-second", "second", "forced", "terminal-next"):
+            for name in ("first", "same-second", "stale-next", "second", "forced", "terminal-next"):
                 create_task(
                     phase_id=task_id("phase"),
                     task_id=task_id(name),
@@ -110,13 +120,22 @@ def main() -> int:
             notify_lines = notify_log.read_text(encoding="utf-8").splitlines()
             _check("same dispatcher refusal does not notify worker", len(notify_lines) == 1, notify_lines)
 
-            update_task_status(task_id("first"), "pending", owner=WORKER, config=cfg)
-            D.dispatch(WORKER, task_id("first"), "first rebind", supervisor=SUP_A)
+            direct_task_status_change(task_id("first"), "pending")
+            log_stream = io.StringIO()
+            log_handler = logging.StreamHandler(log_stream)
+            D.logger.addHandler(log_handler)
+            try:
+                D.dispatch(WORKER, task_id("stale-next"), "stale-next", supervisor=SUP_A)
+            finally:
+                D.logger.removeHandler(log_handler)
             rebound = current_task()
-            _check("same dispatcher same task rebind is allowed", rebound.get("task_id") == task_id("first"), rebound)
-            _check("same dispatcher same task rebind updates nonce", rebound.get("started_at") != first_binding.get("started_at"), rebound)
-            _check("same dispatcher same task rebind leaves task in_progress", task_status(task_id("first")) == "in_progress", task_status(task_id("first")))
-            _check("same dispatcher same task rebind notifies worker", len(notify_log.read_text(encoding="utf-8").splitlines()) == 2, notify_log.read_text(encoding="utf-8"))
+            expected = f"worker busy with {SUP_A}:{task_id('stale-next')} (in_progress)"
+            _check("stale pending binding allows different task dispatch", rebound.get("task_id") == task_id("stale-next"), rebound)
+            _check("stale binding clear is logged", "stale current_task binding cleared during dispatch" in log_stream.getvalue(), log_stream.getvalue())
+            _check("stale dispatch updates nonce", rebound.get("started_at") != first_binding.get("started_at"), rebound)
+            _check("stale next task is in_progress", task_status(task_id("stale-next")) == "in_progress", task_status(task_id("stale-next")))
+            _check("stale previous task stays pending", task_status(task_id("first")) == "pending", task_status(task_id("first")))
+            _check("stale clear dispatch notifies worker", len(notify_log.read_text(encoding="utf-8").splitlines()) == 2, notify_log.read_text(encoding="utf-8"))
 
             refused = None
             try:
@@ -126,7 +145,7 @@ def main() -> int:
 
             _check("second dispatcher is refused with busy message", refused == expected, refused)
             preserved = current_task()
-            _check("refused dispatch preserves first current_task", preserved == rebound, preserved)
+            _check("refused dispatch preserves current_task", preserved == rebound, preserved)
             _check("refused dispatch rolls second task back to pending", task_status(task_id("second")) == "pending", task_status(task_id("second")))
             notify_lines = notify_log.read_text(encoding="utf-8").splitlines()
             _check("refused dispatch does not notify worker", len(notify_lines) == 2, notify_lines)
