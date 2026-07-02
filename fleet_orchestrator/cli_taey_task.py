@@ -205,10 +205,19 @@ def cmd_update(args):
         print("ERROR: --evidence is only valid with terminal statuses", file=sys.stderr)
         sys.exit(1)
     if changes_requested and not str(args.reason or "").strip():
-        print("ERROR: changes_requested requires --reason '<audit rejection reason>'", file=sys.stderr)
+        print(
+            f"ERROR: changes_requested requires --reason '<audit rejection reason>'. "
+            f"Retry: taey-task update {args.task_id} changes_requested --reason '<audit rejection reason>'",
+            file=sys.stderr,
+        )
         sys.exit(1)
     if changes_requested and (args.blocked_on is not None or args.clear_blocked_on):
-        print("ERROR: --blocked-on is not valid with changes_requested", file=sys.stderr)
+        print(
+            f"ERROR: --blocked-on is not valid with changes_requested. "
+            f"Retry without --blocked-on: taey-task update {args.task_id} changes_requested "
+            "--reason '<audit rejection reason>'",
+            file=sys.stderr,
+        )
         sys.exit(1)
     data = {
         "status": args.status,
@@ -235,7 +244,11 @@ def cmd_update(args):
         suffix = f" blocked_on={blocked_on}" if blocked_on else ""
         print(f"OK: {args.task_id} → {args.status} (by {sender}){suffix}")
     else:
-        print(f"ERROR: {result.get('error', 'unknown')}", file=sys.stderr)
+        print(
+            f"ERROR: {result.get('error', 'unknown')}. "
+            f"Inspect with `taey-task status {args.task_id}` or retry the update command.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 

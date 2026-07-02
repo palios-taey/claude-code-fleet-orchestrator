@@ -14,9 +14,9 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 243.
-- Teaches: 104.
-- Needs-fix baseline debt: 53.
+- Enumerated surfaces: 247.
+- Teaches: 110.
+- Needs-fix baseline debt: 52.
 - Exempt reviewed rows: 85.
 
 <!-- ai-native-surfaces:start -->
@@ -53,7 +53,9 @@ Summary:
 | fleet_orchestrator/cli_taey_task.py | cmd_unbind | cli_failure_message | 1 | 240 | 0f1cd4262a1ee9a8 | exempt |  | Thin CLI wrapper relays the API error body from clear_current_task; the endpoint rows carry the actionable next-step text. | task-98b37864:thin-cli-wrapper |
 | fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 1 | 191 | 899355c6a0e4a5d7 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 2 | 194 | 968a4d6cd4a87440 | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
-| fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 3 | 212 | 0f1cd4262a1ee9a8 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
+| fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 3 | 208 | 85e489b78cdf383d | teaches | taey-task | Static teaching assertion passes. | task-b50d9355-pr257 |
+| fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 4 | 215 | 5c6e5cefeb8383d2 | teaches | taey-task | Static teaching assertion passes. | task-b50d9355-pr257 |
+| fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 5 | 247 | 6542c2eda870d601 | teaches | taey-task | Static teaching assertion passes. | task-b50d9355-pr257 |
 | fleet_orchestrator/cli_taey_task.py | parse_evidence_arg | cli_failure_message | 1 | 62 | 25c98ca4c6f95876 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_task.py | parse_evidence_arg | cli_failure_message | 2 | 65 | 7c6e8e65b8cc161c | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
 | fleet_orchestrator/context_assembler.py | _render_operating_section | wake_operating_line | 1 | 906 | 29e15a489d9eef00 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
@@ -262,7 +264,9 @@ Summary:
 | fleet_orchestrator/tasks_api.py | ui_resolve_human_review_hold_endpoint | json_response_error | 2 | 1028 | a40ba0877882c1b9 | exempt |  | Raw persistence/notify/internal failure is logged and returned as a 500 operator concern, not a client-correctable AI workflow surface. | task-e01ac5b9 |
 | fleet_orchestrator/tasks_api.py | update | json_response_error | 1 | 667 | f64c93f2129a0ecd | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | update | json_response_error | 2 | 676 | a7e4e83c6bf59785 | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
-| fleet_orchestrator/tasks_api.py | update | json_response_error | 3 | 706 | d6c61be575531467 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
-| fleet_orchestrator/tasks_api.py | update | json_response_error | 4 | 752 | 90ccf2be5ade8d12 | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
-| fleet_orchestrator/tasks_api.py | update | json_response_error | 5 | 769 | ace60ea8e3e7a0f5 | exempt |  | Raw subprocess/persistence/unhandled server failure is an operator/logging concern, not a client-correctable AI workflow surface. | anbr-fix-exempt:internal-transport-or-500 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 3 | 815 | 19b4febc70e7140a | teaches | PATCH /api/task/{} | Static teaching assertion passes. | task-b50d9355-pr257 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 4 | 828 | 863252f36b86e208 | teaches | taey-task | Static teaching assertion passes. | task-b50d9355-pr257 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 5 | 869 | d6c61be575531467 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 6 | 921 | 90ccf2be5ade8d12 | teaches | next_step | Static teaching assertion passes. | task-b50d9355-pr257 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 7 | 938 | ace60ea8e3e7a0f5 | exempt |  | Raw subprocess/persistence/unhandled server failure is an operator/logging concern, not a client-correctable AI workflow surface. | anbr-fix-exempt:internal-transport-or-500 |
 <!-- ai-native-surfaces:end -->
