@@ -66,6 +66,7 @@ def _seed_gate_task(evidence_sha: str = HEAD_SHA) -> str:
         completed_by="tester-codex",
         completion_evidence={
             "commit_sha": evidence_sha,
+            "repo": REPO,
             "gate_run_id": f"{PREFIX}-gate-run",
             "production_observation": "isolated pre-merge gate probe",
         },

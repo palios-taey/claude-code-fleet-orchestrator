@@ -13,6 +13,10 @@ DEFAULT_REQUIRED_GITHUB_CHECKS = ("r5-audit-gate", "ship-gate-acceptance")
 MERGED_PR_HEAD_PROVENANCE_CHECKS = ("r5-audit-gate",)
 DEFAULT_TRUSTED_CHECK_RUN_APPS = ("github-actions",)
 DEFAULT_TRUSTED_STATUS_CREATORS = ("github-actions[bot]",)
+GATED_REPO_PROFILE = "gated"
+GATELESS_REPO_PROFILE = "gateless"
+DEFAULT_REPO_PROFILE = GATED_REPO_PROFILE
+SUPPORTED_REPO_PROFILES = frozenset({GATED_REPO_PROFILE, GATELESS_REPO_PROFILE})
 VERIFIED = "VERIFIED"
 UNVERIFIED = "UNVERIFIED"
 _GH_TIMEOUT_SEC = 10
@@ -36,8 +40,44 @@ def _csv_env_values(name: str, defaults: Iterable[str]) -> Tuple[str, ...]:
 
 def allowed_completion_repos() -> Tuple[str, ...]:
     raw = os.environ.get("ORCH_COMPLETION_ALLOWED_REPOS", "")
-    values = [part.strip() for part in raw.split(",") if part.strip()]
+    values = []
+    for part in raw.split(","):
+        parsed = _parse_completion_repo_entry(part)
+        if parsed:
+            values.append(parsed[0])
     return tuple(dict.fromkeys(values))
+
+
+def _parse_completion_repo_entry(entry: str) -> Optional[Tuple[str, str]]:
+    text = entry.strip()
+    if not text:
+        return None
+    repo = text
+    profile = DEFAULT_REPO_PROFILE
+    for separator in ("=", ":"):
+        if separator not in text:
+            continue
+        candidate_repo, candidate_profile = text.rsplit(separator, 1)
+        if "/" not in candidate_repo:
+            continue
+        repo = candidate_repo.strip()
+        profile = candidate_profile.strip().lower() or DEFAULT_REPO_PROFILE
+        break
+    if not repo:
+        return None
+    return repo, profile
+
+
+def completion_repo_profiles() -> Dict[str, str]:
+    raw = os.environ.get("ORCH_COMPLETION_ALLOWED_REPOS", "")
+    profiles: Dict[str, str] = {}
+    for part in raw.split(","):
+        parsed = _parse_completion_repo_entry(part)
+        if not parsed:
+            continue
+        repo, profile = parsed
+        profiles[repo.lower()] = profile
+    return profiles
 
 
 def warn_if_completion_allowlist_unset(logger: Optional[logging.Logger] = None) -> bool:
@@ -106,7 +146,11 @@ def completion_evidence_verification_applies(evidence: Optional[Dict[str, Any]])
 
 
 def _repo_allowed_for_completion_evidence(repo: str) -> bool:
-    return repo.strip().lower() in {allowed.lower() for allowed in allowed_completion_repos()}
+    return repo.strip().lower() in completion_repo_profiles()
+
+
+def _repo_profile_for_completion_evidence(repo: str) -> str:
+    return completion_repo_profiles().get(repo.strip().lower(), "")
 
 
 def _repo_not_allowed_reason(repo: str, *, inferred: bool = False) -> str:
@@ -118,7 +162,8 @@ def _repo_not_allowed_reason(repo: str, *, inferred: bool = False) -> str:
         )
     return (
         f"{source} {repo!r} cannot satisfy VERIFIED provenance because ORCH_COMPLETION_ALLOWED_REPOS is unset; "
-        "set ORCH_COMPLETION_ALLOWED_REPOS=OWNER/REPO[,OWNER/REPO...] to enable verified completions"
+        "set ORCH_COMPLETION_ALLOWED_REPOS=OWNER/REPO[:gated|:gateless][,OWNER/REPO[:gated|:gateless]...] "
+        "to enable verified completions"
     )
 
 
@@ -203,6 +248,26 @@ def _commit_exists(repo: str, sha: str) -> None:
     payload = _gh_api(f"repos/{repo}/commits/{sha}")
     if not isinstance(payload, dict) or not payload.get("sha"):
         raise RuntimeError(f"GitHub commit lookup for {sha!r} did not return a commit")
+
+
+def _default_branch_for_repo(repo: str) -> str:
+    payload = _gh_api(f"repos/{repo}")
+    default_branch = str(payload.get("default_branch") or "").strip() if isinstance(payload, dict) else ""
+    if not default_branch:
+        raise RuntimeError(f"GitHub repository lookup for {repo!r} did not include default_branch")
+    return default_branch
+
+
+def _commit_on_default_branch(repo: str, sha: str) -> Tuple[str, str]:
+    default_branch = _default_branch_for_repo(repo)
+    payload = _gh_api(f"repos/{repo}/compare/{sha}...{default_branch}")
+    status = str(payload.get("status") or "").strip() if isinstance(payload, dict) else ""
+    if status not in {"ahead", "identical"}:
+        raise RuntimeError(
+            f"GitHub commit {sha!r} is not on default branch {default_branch!r} for {repo!r}; "
+            f"compare status={status or 'missing'}"
+        )
+    return default_branch, status
 
 
 def _pull_requests_for_commit(repo: str, sha: str) -> List[Dict[str, Any]]:
@@ -371,27 +436,59 @@ def verify_completion_evidence(
             applies=False,
         )
     repo = repo_from_completion_evidence(evidence)
+    if not repo:
+        return _unverified(
+            "completion evidence with commit_sha must include completion_evidence.repo; "
+            "the verifier will not infer a default repo because wrong-repo verification is worse than no verification",
+            commit_sha=commit_sha,
+            required_checks=checks,
+            producer=producer,
+            reject_completion=True,
+        )
     try:
-        if repo:
-            if not _repo_allowed_for_completion_evidence(repo):
-                return _unverified(
-                    _repo_not_allowed_reason(repo),
-                    commit_sha=commit_sha,
-                    repo=repo,
-                    required_checks=checks,
-                    producer=producer,
-                )
-        else:
-            repo = github_repo_from_environment_or_gh()
-            if not _repo_allowed_for_completion_evidence(repo):
-                return _unverified(
-                    _repo_not_allowed_reason(repo, inferred=True),
-                    commit_sha=commit_sha,
-                    repo=repo,
-                    required_checks=checks,
-                    producer=producer,
-                )
+        if not _repo_allowed_for_completion_evidence(repo):
+            return _unverified(
+                _repo_not_allowed_reason(repo),
+                commit_sha=commit_sha,
+                repo=repo,
+                required_checks=checks,
+                producer=producer,
+            )
+        profile = _repo_profile_for_completion_evidence(repo)
+        if profile not in SUPPORTED_REPO_PROFILES:
+            return _unverified(
+                f"completion evidence repo {repo!r} has unsupported verification profile {profile!r}; "
+                f"supported profiles are {', '.join(sorted(SUPPORTED_REPO_PROFILES))}",
+                commit_sha=commit_sha,
+                repo=repo,
+                required_checks=checks,
+                producer=producer,
+                reject_completion=True,
+            )
         _commit_exists(repo, commit_sha)
+        if profile == GATELESS_REPO_PROFILE:
+            default_branch, compare_status = _commit_on_default_branch(repo, commit_sha)
+            return {
+                "status": VERIFIED,
+                "verified": True,
+                "applies": True,
+                "source": "github-default-branch",
+                "repo": repo,
+                "commit_sha": commit_sha,
+                "required_checks": [],
+                "producer": producer,
+                "verifier": "github-default-branch",
+                "profile": GATELESS_REPO_PROFILE,
+                "default_branch": default_branch,
+                "compare_status": compare_status,
+                "reason": "GitHub commit exists in the allowed gateless repo and is reachable from its default branch",
+                "checks": [{
+                    "name": "default-branch-containment",
+                    "kind": "github-compare",
+                    "ok": True,
+                    "detail": f"commit is on default branch {default_branch} (compare status={compare_status})",
+                }],
+            }
         open_prs = _open_pull_requests_for_commit(repo, commit_sha)
         if open_prs:
             refs = ", ".join(

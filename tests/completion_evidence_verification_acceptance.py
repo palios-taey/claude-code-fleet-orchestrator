@@ -23,11 +23,14 @@ sys.path.insert(0, str(ROOT))
 PREFIX = f"truth-{uuid.uuid4().hex[:8]}"
 ORCH_REPO = "palios-taey/claude-code-fleet-orchestrator"
 CONDUCTOR_REPO = "palios-taey/the-conductor"
+TAEYS_HANDS_REPO = "palios-taey/taeys-hands"
 WRONG_REPO = "palios-taey/not-the-repo"
 ATTACKER_REPO = "attacker-acct/evil-fork"
 GREEN_SHA = "1111111111111111111111111111111111111111"
 RED_SHA = "2222222222222222222222222222222222222222"
 CONDUCTOR_SHA = "3333333333333333333333333333333333333333"
+TAEYS_HANDS_SHA = "3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a"
+TAEYS_HANDS_BRANCH_SHA = "3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b"
 ATTACKER_SHA = "4444444444444444444444444444444444444444"
 UNTRUSTED_STATUS_SHA = "5555555555555555555555555555555555555555"
 UNTRUSTED_CHECK_SHA = "6666666666666666666666666666666666666666"
@@ -103,6 +106,17 @@ def _write_fake_gh(directory: Path) -> None:
                 print(json.dumps({{"full_name": "{CONDUCTOR_REPO}"}}))
                 sys.exit(0)
 
+            repos = {{
+                "{ORCH_REPO}": {{"default_branch": "main"}},
+                "{CONDUCTOR_REPO}": {{"default_branch": "main"}},
+                "{TAEYS_HANDS_REPO}": {{"default_branch": "main"}},
+                "{ATTACKER_REPO}": {{"default_branch": "main"}},
+            }}
+            if path in {{f"repos/{{repo}}" for repo in repos}}:
+                repo = path.removeprefix("repos/")
+                print(json.dumps({{"full_name": repo, **repos[repo]}}))
+                sys.exit(0)
+
             existing = {{
                 ("{ORCH_REPO}", "{GREEN_SHA}"): "green",
                 ("{ORCH_REPO}", "{RED_SHA}"): "red",
@@ -113,12 +127,18 @@ def _write_fake_gh(directory: Path) -> None:
                 ("{ORCH_REPO}", "{SQUASH_FAILED_R5_SHA}"): "squash-failed-r5",
                 ("{ORCH_REPO}", "{SQUASH_UNTRUSTED_R5_SHA}"): "squash-untrusted-r5",
                 ("{CONDUCTOR_REPO}", "{CONDUCTOR_SHA}"): "green",
+                ("{TAEYS_HANDS_REPO}", "{TAEYS_HANDS_SHA}"): "gateless-main",
+                ("{TAEYS_HANDS_REPO}", "{TAEYS_HANDS_BRANCH_SHA}"): "gateless-branch",
                 ("{ATTACKER_REPO}", "{ATTACKER_SHA}"): "green",
                 ("{ORCH_REPO}", "{OPEN_PR_SHA}"): "open-pr",
             }}
             for (repo, sha), mode in existing.items():
                 if path == f"repos/{{repo}}/commits/{{sha}}":
                     print(json.dumps({{"sha": sha}}))
+                    sys.exit(0)
+                if path == f"repos/{{repo}}/compare/{{sha}}...main":
+                    status = "ahead" if mode == "gateless-main" else "diverged"
+                    print(json.dumps({{"status": status, "base_commit": {{"sha": sha}}}}))
                     sys.exit(0)
                 if path == f"repos/{{repo}}/commits/{{sha}}/pulls?per_page=100":
                     if mode == "open-pr":
@@ -331,23 +351,33 @@ def main() -> int:
             and "ORCH_COMPLETION_ALLOWED_REPOS" in explicit_unset.get("reason", ""),
             json.dumps(explicit_unset, sort_keys=True),
         )
-        inferred_unset = evidence_verification.verify_completion_evidence(
+        missing_repo_unset = evidence_verification.verify_completion_evidence(
             {"commit_sha": CONDUCTOR_SHA, "production_observation": "unset allowlist inferred repo probe"},
             producer="tester-api",
         )
         check(
-            "unset completion repo allowlist keeps inferred repo UNVERIFIED",
-            inferred_unset is not None
-            and inferred_unset.get("status") == "UNVERIFIED"
-            and inferred_unset.get("verified") is False
-            and inferred_unset.get("applies") is True
-            and inferred_unset.get("repo") == CONDUCTOR_REPO
-            and "ORCH_COMPLETION_ALLOWED_REPOS" in inferred_unset.get("reason", ""),
-            json.dumps(inferred_unset, sort_keys=True),
+            "commit evidence without repo fails before fallback inference",
+            missing_repo_unset is not None
+            and missing_repo_unset.get("status") == "UNVERIFIED"
+            and missing_repo_unset.get("verified") is False
+            and missing_repo_unset.get("applies") is True
+            and missing_repo_unset.get("reject_completion") is True
+            and "completion_evidence.repo" in missing_repo_unset.get("reason", ""),
+            json.dumps(missing_repo_unset, sort_keys=True),
         )
-        os.environ["ORCH_COMPLETION_ALLOWED_REPOS"] = f"{ORCH_REPO},{CONDUCTOR_REPO}"
+        os.environ["ORCH_COMPLETION_ALLOWED_REPOS"] = f"{ORCH_REPO},{CONDUCTOR_REPO},{TAEYS_HANDS_REPO}:gateless"
         os.environ["ORCH_COMPLETION_TRUSTED_CHECK_RUN_APPS"] = "github-actions"
         os.environ["ORCH_COMPLETION_TRUSTED_STATUS_CREATORS"] = "github-actions[bot]"
+        check(
+            "completion repo allowlist keeps repo names separate from profiles",
+            evidence_verification.allowed_completion_repos() == (ORCH_REPO, CONDUCTOR_REPO, TAEYS_HANDS_REPO),
+            repr(evidence_verification.allowed_completion_repos()),
+        )
+        check(
+            "completion repo allowlist marks taeys-hands gateless",
+            evidence_verification.completion_repo_profiles().get(TAEYS_HANDS_REPO.lower()) == "gateless",
+            repr(evidence_verification.completion_repo_profiles()),
+        )
 
         repo_only_task = _seed_task("repo-only")
         repo_only_response = client.patch(
@@ -378,19 +408,68 @@ def main() -> int:
             json.dumps(local_payload.get("completion_evidence_verification"), sort_keys=True),
         )
 
-        conductor_task = _seed_task("conductor")
+        missing_repo_task = _seed_task("missing-repo")
+        missing_repo_response = client.patch(
+            f"/api/task/{missing_repo_task}",
+            json={
+                "status": "completed",
+                "from": "tester-api",
+                "evidence": {
+                    "commit_sha": CONDUCTOR_SHA,
+                    "production_observation": "missing repo must fail loud",
+                },
+            },
+        )
+        missing_repo_payload = client.get(f"/api/tasks/{missing_repo_task}").json()
+        check(
+            "commit evidence without repo is rejected loudly",
+            missing_repo_response.status_code == 400
+            and "completion_evidence.repo" in missing_repo_response.text
+            and missing_repo_payload.get("status") == "pending",
+            f"{missing_repo_response.status_code} {missing_repo_response.text} payload={missing_repo_payload}",
+        )
+
+        taeys_task = _seed_task("taeys-hands")
+        taeys_update = _complete(
+            client,
+            taeys_task,
+            {
+                "commit_sha": TAEYS_HANDS_SHA,
+                "repo": TAEYS_HANDS_REPO,
+                "production_observation": "gateless repo merge reached production consult validation",
+            },
+        )
+        taeys_payload = client.get(f"/api/tasks/{taeys_task}").json()
+        taeys_verification = taeys_payload.get("completion_evidence_verification", {})
+        check(
+            "gateless repo commit on default branch verifies without gate contexts",
+            taeys_update.get("completion_evidence_verification_status") == "VERIFIED"
+            and taeys_payload.get("completion_evidence_verification_status") == "VERIFIED"
+            and taeys_payload.get("completion_evidence_verified") is True
+            and taeys_verification.get("repo") == TAEYS_HANDS_REPO
+            and taeys_verification.get("profile") == "gateless"
+            and taeys_verification.get("verifier") == "github-default-branch"
+            and taeys_verification.get("required_checks") == [],
+            json.dumps(taeys_verification, sort_keys=True),
+        )
+
+        taeys_branch_task = _seed_task("taeys-hands-branch")
         _complete(
             client,
-            conductor_task,
-            {"commit_sha": CONDUCTOR_SHA, "production_observation": "fallback runtime repo probe"},
+            taeys_branch_task,
+            {
+                "commit_sha": TAEYS_HANDS_BRANCH_SHA,
+                "repo": TAEYS_HANDS_REPO,
+                "production_observation": "gateless repo feature branch probe",
+            },
         )
-        conductor_payload = client.get(f"/api/tasks/{conductor_task}").json()
+        taeys_branch_payload = client.get(f"/api/tasks/{taeys_branch_task}").json()
         check(
-            "evidence without repo falls back to configured runtime repo",
-            conductor_payload.get("completion_evidence_verification_status") == "VERIFIED"
-            and conductor_payload.get("completion_evidence_verification_applies") is True
-            and conductor_payload.get("completion_evidence_verification", {}).get("repo") == CONDUCTOR_REPO,
-            json.dumps(conductor_payload.get("completion_evidence_verification"), sort_keys=True),
+            "gateless repo commit not on default branch is UNVERIFIED",
+            taeys_branch_payload.get("completion_evidence_verification_status") == "UNVERIFIED"
+            and taeys_branch_payload.get("completion_evidence_verified") is False
+            and "not on default branch" in taeys_branch_payload.get("completion_evidence_verification", {}).get("reason", ""),
+            json.dumps(taeys_branch_payload.get("completion_evidence_verification"), sort_keys=True),
         )
 
         missing_task = _seed_task("missing")
