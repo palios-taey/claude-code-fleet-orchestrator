@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Acceptance: orch-cron project triggers dispatch next-ready without reset."""
+"""Acceptance: orch-cron project triggers honor advance/reset modes."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,7 @@ import re
 import sys
 import tempfile
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -58,6 +58,10 @@ PHASE = f"{PROJECT}::phase"
 ENTRY = f"{PROJECT}::step-0"
 AWAITING = f"{PROJECT}::awaiting-review"
 FOLLOW = f"{PROJECT}::step-1"
+RESET_PROJECT = f"{PFX}-reset-project"
+RESET_PHASE = f"{RESET_PROJECT}::phase"
+RESET_ENTRY = f"{RESET_PROJECT}::step-1-comment"
+RESET_FOLLOW = f"{RESET_PROJECT}::step-2"
 FAILURES: list[str] = []
 
 
@@ -203,6 +207,7 @@ def main() -> int:
             records
             and records[-1].get("trigger_mode") == "project"
             and records[-1].get("project") == PROJECT
+            and records[-1].get("project_mode") == "advance"
             and records[-1].get("task_id") == FOLLOW
             and records[-1].get("result") == "dispatched",
             records,
@@ -211,6 +216,7 @@ def main() -> int:
         _complete(FOLLOW)
         _redis().delete(_state_key(WORKER, "current_task"))
         trigger["id"] = "project-cycle-next"
+        trigger["mode"] = "advance"
         _write_registry(registry, trigger)
         with mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
              mock.patch.object(dispatch_module.subprocess, "run", side_effect=_ok_run):
@@ -230,10 +236,13 @@ def main() -> int:
             records
             and records[-1].get("trigger_mode") == "project"
             and records[-1].get("project") == PROJECT
+            and records[-1].get("project_mode") == "advance"
             and records[-1].get("task_id") == ENTRY
             and records[-1].get("result") == "dispatched",
             records,
         )
+        _complete(ENTRY)
+        _redis().delete(_state_key(WORKER, "current_task"))
 
         ambiguous = cron.fire_trigger(
             _redis(),
@@ -241,13 +250,137 @@ def main() -> int:
             now,
         )
         _check("project trigger remains mutually exclusive", ambiguous == "skipped:ambiguous_trigger", ambiguous)
+
+        bad_mode = cron.fire_trigger(
+            _redis(),
+            {
+                "id": "bad-project-mode",
+                "session": WORKER,
+                "project": PROJECT,
+                "mode": "sideways",
+                "enabled": True,
+            },
+            now,
+        )
+        _check("project trigger rejects unknown project mode", bad_mode == "skipped:bad_project_mode", bad_mode)
+
+        create_project(
+            RESET_PROJECT,
+            "Reset recurring project cadence",
+            supervisor=WORKER,
+            ingested_by=WORKER,
+            config=CFG,
+        )
+        create_phase(RESET_PROJECT, RESET_PHASE, "Reset phase", config=CFG)
+        create_task(
+            RESET_PHASE,
+            RESET_ENTRY,
+            "comment-floor chain entry",
+            priority=1,
+            owner=WORKER,
+            wake_owner_if_ready=False,
+            config=CFG,
+        )
+        create_task(
+            RESET_PHASE,
+            RESET_FOLLOW,
+            "downstream step",
+            priority=20,
+            owner=WORKER,
+            wake_owner_if_ready=False,
+            config=CFG,
+        )
+        add_dependency(RESET_FOLLOW, RESET_ENTRY, config=CFG)
+        _mark_recurring(RESET_ENTRY, RESET_FOLLOW)
+        _complete(RESET_ENTRY)
+        _complete(RESET_FOLLOW)
+
+        reset_state_file = tmp / "project-reset-state.jsonl"
+        reset_trigger = {
+            "id": "linkedin-reset-cycle",
+            "session": WORKER,
+            "supervisor": WORKER,
+            "project": RESET_PROJECT,
+            "mode": "reset",
+            "description": "Run LinkedIn-style hourly reset project",
+            "tz": "UTC",
+            "minute": now.minute,
+            "hours": [now.hour, (now + timedelta(hours=1)).hour],
+            "state_file": str(reset_state_file),
+            "enabled": True,
+        }
+        _write_registry(registry, reset_trigger)
+        reset_dry_fires = cron.tick(str(registry), _redis(), dry_run=True, now_override=now)
+        _check("reset-mode dry-run does not count as fire", reset_dry_fires == 0, reset_dry_fires)
+        _check(
+            "reset-mode dry-run does not reset completed entry",
+            get_task(RESET_ENTRY, config=CFG).get("status") == "completed",
+            get_task(RESET_ENTRY, config=CFG),
+        )
+
+        with mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
+             mock.patch.object(dispatch_module.subprocess, "run", side_effect=_ok_run):
+            reset_fires = cron.tick(str(registry), _redis(), now_override=now)
+
+        reset_entry = get_task(RESET_ENTRY, config=CFG)
+        reset_follow = get_task(RESET_FOLLOW, config=CFG)
+        current_raw = _redis().get(_state_key(WORKER, "current_task"))
+        current = json.loads(current_raw) if current_raw else {}
+        reset_records = _records(reset_state_file)
+        _check("reset-mode project trigger fires once", reset_fires == 1, reset_fires)
+        _check(
+            "reset-mode dispatches chain entry",
+            reset_entry.get("status") == "in_progress" and reset_entry.get("dispatched_to") == WORKER,
+            reset_entry,
+        )
+        _check("reset-mode resets downstream completed step", reset_follow.get("status") == "pending", reset_follow)
+        _check("reset-mode binds reset entry", current.get("task_id") == RESET_ENTRY, current)
+        _check(
+            "reset-mode records project mode and entry task",
+            reset_records
+            and reset_records[-1].get("trigger_mode") == "project"
+            and reset_records[-1].get("project") == RESET_PROJECT
+            and reset_records[-1].get("project_mode") == "reset"
+            and reset_records[-1].get("task_id") == RESET_ENTRY
+            and reset_records[-1].get("result") == "dispatched",
+            reset_records,
+        )
+
+        _complete(RESET_ENTRY)
+        _complete(RESET_FOLLOW)
+        _redis().delete(_state_key(WORKER, "current_task"))
+        now_next = now + timedelta(hours=1)
+        with mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
+             mock.patch.object(dispatch_module.subprocess, "run", side_effect=_ok_run):
+            reset_next_fires = cron.tick(str(registry), _redis(), now_override=now_next)
+
+        reset_entry = get_task(RESET_ENTRY, config=CFG)
+        reset_follow = get_task(RESET_FOLLOW, config=CFG)
+        current_raw = _redis().get(_state_key(WORKER, "current_task"))
+        current = json.loads(current_raw) if current_raw else {}
+        reset_records = _records(reset_state_file)
+        _check("reset-mode second hourly fire runs", reset_next_fires == 1, reset_next_fires)
+        _check(
+            "reset-mode second hourly fire dispatches chain entry again",
+            reset_entry.get("status") == "in_progress" and reset_entry.get("dispatched_to") == WORKER,
+            reset_entry,
+        )
+        _check("reset-mode second hourly fire resets downstream again", reset_follow.get("status") == "pending", reset_follow)
+        _check("reset-mode second hourly fire binds entry", current.get("task_id") == RESET_ENTRY, current)
+        _check(
+            "reset-mode log shows chain entry each hour",
+            len(reset_records) == 2
+            and all(record.get("project_mode") == "reset" for record in reset_records)
+            and [record.get("task_id") for record in reset_records] == [RESET_ENTRY, RESET_ENTRY],
+            reset_records,
+        )
     finally:
         _cleanup()
 
     if FAILURES:
         print(f"\nFAIL -- {len(FAILURES)}: {FAILURES}")
         return 1
-    print("\nPASS -- orch-cron project triggers dispatch next-ready without reset.")
+    print("\nPASS -- orch-cron project triggers honor advance/reset modes.")
     return 0
 
 
