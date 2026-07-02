@@ -316,6 +316,7 @@ def _release_ingest_holds(task_ids: Set[str], cfg: OrchConfig) -> None:
 
 
 def _reconcile_task_dependencies(task_id: str, depends_on_ids: List[str],
+                                 source_path: str = "",
                                  config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     cfg = config or OrchConfig()
     wanted = list(dict.fromkeys(depends_on_ids))
@@ -333,16 +334,46 @@ def _reconcile_task_dependencies(task_id: str, depends_on_ids: List[str],
         missing = [dep_id for dep_id in wanted if dep_id not in found]
         if not task_exists or missing:
             return {"task_exists": task_exists, "missing": missing}
+        stale = session.run("""
+            MATCH (t:OrchTask {id: $task_id})
+            OPTIONAL MATCH (t)-[old:DEPENDS_ON]->(old_dep:OrchTask)
+            WHERE NOT old_dep.id IN $depends_on_ids
+              AND (
+                  coalesce(old.plan_dependency, false) = true
+                  OR (old.plan_dependency IS NULL AND old.manual_dependency IS NULL)
+              )
+            WITH old, coalesce(old.manual_dependency, false) AS manual_dependency
+            FOREACH (_ IN CASE WHEN manual_dependency THEN [1] ELSE [] END |
+                SET old.plan_dependency = false,
+                    old.dependency_source = 'manual',
+                    old.plan_source_path = NULL,
+                    old.updated_at = datetime()
+            )
+            WITH old, manual_dependency
+            FOREACH (_ IN CASE WHEN NOT manual_dependency THEN [1] ELSE [] END |
+                DELETE old
+            )
+            RETURN count(old) AS reconciled_count
+        """, task_id=task_id, depends_on_ids=wanted).single()
         session.run("""
             MATCH (t:OrchTask {id: $task_id})
-            OPTIONAL MATCH (t)-[old:DEPENDS_ON]->(:OrchTask)
-            DELETE old
-            WITH t
             UNWIND $depends_on_ids AS depends_on_id
             MATCH (dep:OrchTask {id: depends_on_id})
-            MERGE (t)-[:DEPENDS_ON]->(dep)
-        """, task_id=task_id, depends_on_ids=wanted).consume()
-    return {"task_exists": True, "missing": []}
+            MERGE (t)-[r:DEPENDS_ON]->(dep)
+            ON CREATE SET r.created_at = datetime()
+            SET r.plan_dependency = true,
+                r.plan_source_path = $source_path,
+                r.dependency_source = CASE
+                    WHEN coalesce(r.manual_dependency, false) THEN 'manual+plan'
+                    ELSE 'plan'
+                END,
+                r.updated_at = datetime()
+        """, task_id=task_id, depends_on_ids=wanted, source_path=source_path).consume()
+    return {
+        "task_exists": True,
+        "missing": [],
+        "reconciled_count": int((stale or {}).get("reconciled_count") or 0),
+    }
 
 
 def _collect_ref_warnings(parsed: Dict[str, Any], source_path: str) -> List[str]:
@@ -763,7 +794,7 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
             dependency_map[task["id"]] = list(task.get("depends", []))
 
     for task_id, depends_on_ids in dependency_map.items():
-        reconcile = _reconcile_task_dependencies(task_id, depends_on_ids, config=cfg)
+        reconcile = _reconcile_task_dependencies(task_id, depends_on_ids, source_path=source_path, config=cfg)
         if not reconcile.get("task_exists"):
             held_task_ids.discard(task_id)
             errors.append(
