@@ -1,8 +1,8 @@
 """Ship-gate e2e — generic operator env contract stays minimal and explicit.
 
-Env required to instantiate OrchConfig should be only the core Redis + Neo4j
-connectivity values. Dashboard URL, notify library path, and refs root are
-supported optional modes.
+Env declared required should be only the core Redis + Neo4j connectivity values
+plus delivery-critical local executable paths. Dashboard URL, notify library
+path, and refs root are supported optional modes.
 
 This script sets `ORCH_DOTENV=empty` for its default probes and runs them from
 a cwd containing a poisoned `.env`, so local deployment config cannot make the
@@ -134,8 +134,14 @@ def main() -> int:
     _check("interior quotes are preserved", quotes["INNER_QUOTE"] == "it's-kept", quotes)
 
     _check(
-        "REQUIRED_ENV is only core Redis + Neo4j connectivity",
-        required == {"ORCH_REDIS_HOST", "ORCH_REDIS_PORT", "ORCH_NEO4J_URI", "ORCH_NEO4J_DB"},
+        "REQUIRED_ENV is only core connectivity plus delivery-critical executable paths",
+        required == {
+            "ORCH_REDIS_HOST",
+            "ORCH_REDIS_PORT",
+            "ORCH_NEO4J_URI",
+            "ORCH_NEO4J_DB",
+            "ORCH_PEER_RESPAWN_SCRIPT",
+        },
         probe["required"],
     )
     _check("ORCH_DASHBOARD_URL is optional", "ORCH_DASHBOARD_URL" in optional and "ORCH_DASHBOARD_URL" not in required, probe)
