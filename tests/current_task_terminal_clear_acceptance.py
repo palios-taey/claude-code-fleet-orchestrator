@@ -1,9 +1,10 @@
-"""Ship-gate e2e — terminal task writes clear only the matching owner current_task.
+"""Ship-gate e2e — non-live task writes clear only the matching owner current_task.
 
 Supervisor-side task closure can move an OrchTask to a terminal status without
 the worker's Stop hook running. The status transition is therefore the canonical
 place to reconcile Redis session state: clear taey:<owner>:current_task iff it
-still points at the terminal task, and preserve it if the session has moved on.
+still points at a task moved out of in_progress, and preserve it if the session
+has moved on.
 """
 from __future__ import annotations
 
@@ -53,6 +54,7 @@ PHASE = f"{PROJECT}::phase"
 MATCHING = f"{PROJECT}::matching"
 OTHER = f"{PROJECT}::other"
 INTERRUPTED = f"{PROJECT}::interrupted"
+PENDING = f"{PROJECT}::pending"
 REDIS_DOWN = f"{PROJECT}::redis-down"
 FAILURES: list[str] = []
 
@@ -102,7 +104,7 @@ def main() -> int:
         init_schema(config=CFG)
         create_project(project_id=PROJECT, name=PROJECT, supervisor=SUP, priority=1, config=CFG)
         create_phase(project_id=PROJECT, phase_id=PHASE, name="phase", config=CFG)
-        for task_id in (MATCHING, OTHER, INTERRUPTED, REDIS_DOWN):
+        for task_id in (MATCHING, OTHER, INTERRUPTED, PENDING, REDIS_DOWN):
             create_task(phase_id=PHASE, task_id=task_id, description=task_id, owner=OWNER, wake_owner_if_ready=False, config=CFG)
             update_task_status(task_id, "in_progress", owner=OWNER, config=CFG)
 
@@ -132,6 +134,10 @@ def main() -> int:
             config=CFG,
         )
         _check("interrupted clears matching owner current_task", _current_task_id() == "", _current_task_id())
+
+        _bind(PENDING)
+        update_task_status(PENDING, "pending", owner=OWNER, config=CFG)
+        _check("pending reset clears matching owner current_task", _current_task_id() == "", _current_task_id())
 
         _bind(OTHER)
         _redis().set(

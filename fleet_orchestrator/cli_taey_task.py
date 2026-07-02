@@ -13,6 +13,7 @@ Usage:
     taey-task status <task-id>        # Check a task's status
     taey-task dispatch <task-id> <peer>  # Claim/bind/wake peer work
     taey-task dispatch <task-id> <peer> --force  # Explicitly replace a peer's live current_task
+    taey-task unbind <peer>              # Clear a stale peer current_task binding
     taey-task remove-dependency <task-id> <depends-on-task-id>
     taey-task update <task-id> completed --evidence '{"commit_sha":"abc123","repo":"OWNER/REPO","production_observation":"verified live"}'
     taey-task update <task-id> failed --evidence '{"reason":"blocked by missing dependency"}'
@@ -230,6 +231,16 @@ def cmd_remove_dependency(args):
         sys.exit(1)
 
 
+def cmd_unbind(args):
+    """Clear one session's current_task binding through the API."""
+    result = api_call("DELETE", f"/api/sessions/{args.peer}/current-task")
+    if result.get("ok"):
+        print(f"OK: unbound current_task for {args.peer}")
+    else:
+        print(f"ERROR: {result.get('error', 'unknown')}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Create and manage OrchTasks via the dashboard API"
@@ -260,6 +271,9 @@ def main():
     p_remove_dependency.add_argument("task_id", help="Task ID")
     p_remove_dependency.add_argument("depends_on_id", help="Task ID currently depended on")
 
+    p_unbind = sub.add_parser("unbind", help="Clear a peer session's current_task binding")
+    p_unbind.add_argument("peer", help="Peer session to unbind")
+
     p_update = sub.add_parser("update", help="Update task status")
     p_update.add_argument("task_id", help="Task ID")
     p_update.add_argument("status", choices=UPDATE_STATUSES)
@@ -280,6 +294,8 @@ def main():
         cmd_dispatch(args)
     elif args.command == "remove-dependency":
         cmd_remove_dependency(args)
+    elif args.command == "unbind":
+        cmd_unbind(args)
     elif args.command == "update":
         cmd_update(args)
     else:

@@ -14,10 +14,10 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 241.
+- Enumerated surfaces: 242.
 - Teaches: 103.
 - Needs-fix baseline debt: 53.
-- Exempt reviewed rows: 84.
+- Exempt reviewed rows: 85.
 
 <!-- ai-native-surfaces:start -->
 | File | Function | Kind | Ordinal | Line Hint | Fingerprint | Classification | Teaching Evidence | Rationale | Review |
@@ -50,6 +50,7 @@ Summary:
 | fleet_orchestrator/cli_taey_task.py | cmd_list | cli_empty_state_message | 1 | 93 | fcad575660346a31 | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_task.py | cmd_remove_dependency | cli_failure_message | 1 | 229 | 0f1cd4262a1ee9a8 | exempt |  | Thin CLI wrapper relays the API error body from remove_task_dependency; the endpoint rows carry the actionable next-step text. | task-ea95c040:thin-cli-wrapper |
 | fleet_orchestrator/cli_taey_task.py | cmd_status | cli_failure_message | 1 | 106 | 15ac09e58ff7b290 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
+| fleet_orchestrator/cli_taey_task.py | cmd_unbind | cli_failure_message | 1 | 240 | 0f1cd4262a1ee9a8 | exempt |  | Thin CLI wrapper relays the API error body from clear_current_task; the endpoint rows carry the actionable next-step text. | task-98b37864:thin-cli-wrapper |
 | fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 1 | 191 | 899355c6a0e4a5d7 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 2 | 194 | 968a4d6cd4a87440 | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 3 | 212 | 0f1cd4262a1ee9a8 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |

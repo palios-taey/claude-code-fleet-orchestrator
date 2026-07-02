@@ -3186,40 +3186,23 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
 
 
 def _clear_matching_current_task(owner: str, task_id: str, config: Optional[OrchConfig] = None) -> bool:
-    if not owner or not task_id:
-        return False
-    from redis import RedisError, WatchError
+    from redis import RedisError
+
+    from .current_task_binding import clear_matching_current_task
 
     try:
-        r = _fleet_state_redis()
-        key = _state_key(owner, "current_task")
-        for attempt in range(5):
-            with r.pipeline() as pipe:
-                try:
-                    pipe.watch(key)
-                    raw = pipe.get(key)
-                    if not raw:
-                        pipe.unwatch()
-                        return False
-                    try:
-                        current = json.loads(raw)
-                    except Exception:
-                        pipe.unwatch()
-                        return False
-                    if not isinstance(current, dict) or str(current.get("task_id") or "") != task_id:
-                        pipe.unwatch()
-                        return False
-                    pipe.multi()
-                    pipe.delete(key)
-                    pipe.execute()
-                    return True
-                except WatchError:
-                    time.sleep(0.01 * (attempt + 1))
-                    continue
-        return False
+        redis_client = _fleet_state_redis()
     except RedisError as exc:
-        _LOG.warning("best-effort current_task clear failed owner=%s task=%s: %s", owner, task_id, exc)
+        _LOG.warning("current_task clear failed worker=%s task=%s: %s", owner, task_id, exc)
         return False
+
+    return clear_matching_current_task(
+        owner,
+        task_id,
+        redis_client=redis_client,
+        config=config,
+        reason="status-transition",
+    )
 
 
 def update_task_status(task_id: str, status: str, owner: str = "",
@@ -3420,7 +3403,7 @@ def update_task_status(task_id: str, status: str, owner: str = "",
             previous_owner=task_row.get("previous_owner"),
             config=cfg,
         )
-        if terminal_status:
+        if status != "in_progress":
             from .worker_liveness import clear_worker_task_liveness
 
             clear_worker_task_liveness(task_id, config=cfg)

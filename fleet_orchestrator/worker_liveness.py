@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, get_neo4j_driver
+from .current_task_binding import clear_matching_current_task
 from .inflight import active_inflight_signal, task_actively_in_flight
 from .notify_state import key as _notify_key
 from .notify_state import redis_connect as _notify_redis_connect
@@ -175,10 +176,12 @@ def _mark_liveness_heartbeat(task_id: str, worker: str, now: float, ttl_secs: in
 
 
 def _clear_matching_current_task(r, worker: str, task_id: str) -> None:
-    raw = r.get(_state_key(worker, "current_task"))
-    current = _json_dict(raw)
-    if current and str(current.get("task_id") or "") == task_id:
-        r.delete(_state_key(worker, "current_task"))
+    clear_matching_current_task(
+        worker,
+        task_id,
+        redis_client=r,
+        reason="worker-liveness-return-to-pending",
+    )
 
 
 def _task_out_of_band_workers(task: Dict[str, Any]) -> List[str]:

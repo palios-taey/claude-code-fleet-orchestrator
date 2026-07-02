@@ -192,8 +192,11 @@ exercise the cycle manually; it does not create an autonomous always-running sup
 2. **Dispatch** — hand it to a worker: `fleet_orchestrator.dispatch.dispatch(worker, task_id, description, ...)`.
    It claims the task (`in_progress`), writes the worker's `current_task`, and the notify daemon
    injects the prompt when that worker is idle. If another dispatcher already has a live
-   `current_task` bound to that worker, dispatch refuses with `worker busy with <dispatcher>:<task> (status)`;
-   use `taey-task dispatch --force` only when you deliberately intend to replace that binding.
+   graph-backed `current_task` bound to that worker, dispatch refuses with
+   `worker busy with <dispatcher>:<task> (status)`; a binding whose task has already moved
+   out of `in_progress`/`dispatched` is cleared and replaced. Use `taey-task dispatch --force`
+   only when you deliberately intend to replace a live binding; use `taey-task unbind <peer>`
+   after inspection when you need to clear stale session state manually.
 3. **Wake** — when the worker stops, its Stop hook notifies the supervisor; the daemon injects the
    result when the supervisor is idle. With hooks and the daemon healthy, no manual relay is needed
    for that wake.

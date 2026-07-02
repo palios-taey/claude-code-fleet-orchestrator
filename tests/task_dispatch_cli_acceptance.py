@@ -104,6 +104,8 @@ def _api_call(client: TestClient, method: str, endpoint: str, data=None):
         response = client.patch(endpoint, json=data)
     elif method == "POST":
         response = client.post(endpoint, json=data)
+    elif method == "DELETE":
+        response = client.delete(endpoint)
     else:
         raise AssertionError(f"unexpected CLI method {method}")
     if response.status_code >= 400:
@@ -189,6 +191,14 @@ def main() -> int:
             "undispatched" not in str(after_decision.get("reason") or ""),
             after_decision,
         )
+
+        _R.set(_state_key(_PEER, "last_outcome"), json.dumps({"outcome": "error", "task_id": _TASK}))
+        argv = ["taey-task", "unbind", _PEER]
+        with mock.patch.object(cli, "api_call", side_effect=lambda method, endpoint, data=None: _api_call(client, method, endpoint, data)), \
+             mock.patch.object(sys, "argv", argv):
+            cli.main()
+        _check("CLI unbind clears current_task", not _R.get(_state_key(_PEER, "current_task")), _current_task())
+        _check("CLI unbind clears last_outcome", not _R.get(_state_key(_PEER, "last_outcome")), _R.get(_state_key(_PEER, "last_outcome")))
     finally:
         _cleanup()
 

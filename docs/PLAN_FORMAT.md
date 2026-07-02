@@ -77,10 +77,11 @@ taey-task list
 taey-task status <task-id>
 taey-task update <task-id> <status>
 taey-task dispatch <task-id> <peer>
+taey-task unbind <peer>
 taey-task remove-dependency <task-id> <depends-on-task-id>
 ```
 
-Use `taey-plan` for project / phase / task structures sourced from markdown. Use `taey-task` for direct task creation, ranking, inspection, status updates, peer dispatch, and manual dependency removal through the API. To remove a plan-managed dependency, edit the markdown `[depends: ...]` entry and re-ingest the plan; `taey-task remove-dependency` refuses plan-only edges.
+Use `taey-plan` for project / phase / task structures sourced from markdown. Use `taey-task` for direct task creation, ranking, inspection, status updates, peer dispatch, manual session `current_task` unbinds, and manual dependency removal through the API. To remove a plan-managed dependency, edit the markdown `[depends: ...]` entry and re-ingest the plan; `taey-task remove-dependency` refuses plan-only edges.
 
 ## API surface
 

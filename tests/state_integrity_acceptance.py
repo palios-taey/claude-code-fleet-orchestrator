@@ -2,7 +2,7 @@
 
 Cases:
   F11: completing one in-progress sibling cannot demote the project while another sibling is still in progress.
-  F12: record_outcome(error/interrupted) writes Redis outcome and reverts the Neo4j claim to ready.
+  F12: record_outcome(error/interrupted) writes Redis outcome, reverts the Neo4j claim to ready, and clears current_task.
   F13: dispatch stores base ownership and the concrete worker in dispatched_to.
   F15: FastAPI startup runs init_schema and fails loud on schema errors.
   F16: Redis singleton clients reject a second, different config in the same process.
@@ -196,7 +196,7 @@ def _exercise_f13_and_f12() -> None:
     current_raw = redis_client.get(_state_key(WORKER, "current_task"))
     outcome = json.loads(outcome_raw) if outcome_raw else {}
     _check("F12 Redis last_outcome records error", outcome.get("outcome") == "error", outcome)
-    _check("F12 current_task persists for supervisor inspection", bool(current_raw), current_raw)
+    _check("F12 current_task clears after pending revert", not current_raw, current_raw)
     _check("F12 error outcome notifies supervisor response_ready",
            any(
                len(call) >= 2
