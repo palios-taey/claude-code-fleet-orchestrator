@@ -73,7 +73,7 @@ def _mode(env: Mapping[str, str]) -> str:
 def store_isolation_errors(env: Mapping[str, str] | None = None) -> list[str]:
     """Return fail-loud reasons an agent mutation test is not isolated."""
 
-    values = env or os.environ
+    values = os.environ if env is None else env
     mode = _mode(values)
     errors: list[str] = []
 
@@ -151,7 +151,7 @@ def acceptance_redis_isolation_errors(
 ) -> list[str]:
     """Return fail-loud reasons an acceptance test could touch live Redis."""
 
-    values = env or os.environ
+    values = os.environ if env is None else env
     mode = _mode(values)
     errors: list[str] = []
 
@@ -239,7 +239,7 @@ def build_throwaway_env(
     namespace: str | None = None,
     repo_root: str | None = None,
 ) -> dict[str, str]:
-    env = dict(base_env or os.environ)
+    env = dict(os.environ if base_env is None else base_env)
     ns = acceptance_namespace(namespace)
     env.update(
         {
