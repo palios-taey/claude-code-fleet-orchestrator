@@ -13,12 +13,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
-os.environ.setdefault("ORCH_REDIS_PORT", "6379")
-
 from fastapi.testclient import TestClient  # noqa: E402
 from fleet_orchestrator import cli_taey_task  # noqa: E402
 from fleet_orchestrator.config import OrchConfig, get_neo4j_driver  # noqa: E402
+from fleet_orchestrator.test_isolation import assert_acceptance_redis_isolated  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     add_dependency,
     create_phase,
@@ -28,6 +26,8 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
 )
 from fleet_orchestrator.plan_loader import load_plan_from_text  # noqa: E402
 from fleet_orchestrator.tasks_api import app  # noqa: E402
+
+assert_acceptance_redis_isolated(require_notify=False)
 
 PFX = f"remove-dep-{uuid.uuid4().hex[:8]}"
 SUPERVISOR = f"{PFX}-sup"

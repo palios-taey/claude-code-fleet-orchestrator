@@ -73,7 +73,7 @@ def _mode(env: Mapping[str, str]) -> str:
 def store_isolation_errors(env: Mapping[str, str] | None = None) -> list[str]:
     """Return fail-loud reasons an agent mutation test is not isolated."""
 
-    values = env or os.environ
+    values = os.environ if env is None else env
     mode = _mode(values)
     errors: list[str] = []
 
@@ -143,6 +143,73 @@ def store_isolation_errors(env: Mapping[str, str] | None = None) -> list[str]:
     return errors
 
 
+def acceptance_redis_isolation_errors(
+    env: Mapping[str, str] | None = None,
+    *,
+    require_orch: bool = True,
+    require_notify: bool = True,
+) -> list[str]:
+    """Return fail-loud reasons an acceptance test could touch live Redis."""
+
+    values = os.environ if env is None else env
+    mode = _mode(values)
+    errors: list[str] = []
+
+    if mode == EPHEMERAL_CI_MODE:
+        if not _truthy(values.get("GITHUB_ACTIONS")):
+            errors.append(
+                f"{ISOLATION_ENV}=ephemeral-ci is reserved for GitHub Actions service containers; "
+                "local acceptance tests must use scripts/orch-acceptance-isolated."
+            )
+    elif mode != THROWAWAY_MODE:
+        errors.append(
+            f"{ISOLATION_ENV}=throwaway is required for local Redis-backed acceptance tests; "
+            "run: scripts/orch-acceptance-isolated -- python tests/<name>_acceptance.py"
+        )
+
+    allow_live_loopback_ports = mode == EPHEMERAL_CI_MODE and _truthy(values.get("GITHUB_ACTIONS"))
+
+    def _check_redis_pair(label: str, host_key: str, port_key: str) -> None:
+        host = values.get(host_key)
+        port = _int_port(values.get(port_key))
+        if not host or port is None:
+            errors.append(f"{host_key}/{port_key} must point at a throwaway {label} Redis.")
+            return
+        if not allow_live_loopback_ports and not _loopback_host(host):
+            errors.append(
+                f"{host_key} {host!r} is non-loopback; "
+                "acceptance tests must use throwaway loopback Redis."
+            )
+            return
+        if not allow_live_loopback_ports and _loopback_host(host) and port in LIVE_REDIS_PORTS:
+            errors.append(
+                f"{host_key}/{port_key} point at loopback live Redis port {port}; "
+                "acceptance tests must use throwaway Redis and never default to 6379."
+            )
+
+    if require_orch:
+        _check_redis_pair("orchestrator", "ORCH_REDIS_HOST", "ORCH_REDIS_PORT")
+    if require_notify:
+        _check_redis_pair("notify", "REDIS_HOST", "REDIS_PORT")
+
+    return errors
+
+
+def assert_acceptance_redis_isolated(
+    env: Mapping[str, str] | None = None,
+    *,
+    require_orch: bool = True,
+    require_notify: bool = True,
+) -> None:
+    errors = acceptance_redis_isolation_errors(
+        env,
+        require_orch=require_orch,
+        require_notify=require_notify,
+    )
+    if errors:
+        raise SystemExit("acceptance Redis isolation failed:\n- " + "\n- ".join(errors))
+
+
 def assert_agent_test_store_isolated(env: Mapping[str, str] | None = None) -> None:
     errors = store_isolation_errors(env)
     if errors:
@@ -172,7 +239,7 @@ def build_throwaway_env(
     namespace: str | None = None,
     repo_root: str | None = None,
 ) -> dict[str, str]:
-    env = dict(base_env or os.environ)
+    env = dict(os.environ if base_env is None else base_env)
     ns = acceptance_namespace(namespace)
     env.update(
         {

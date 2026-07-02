@@ -35,8 +35,9 @@ def _require_test_namespace() -> str:
 PFX = f"{_require_test_namespace()}-linkedin-gov-{uuid.uuid4().hex[:8]}"
 os.environ["NOTIFY_KEY_PREFIX"] = PFX
 os.environ["ORCH_SESSION_IDS"] = f"{PFX}-treasurer,{PFX}-linkedin,{PFX}-normal"
-os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
-os.environ.setdefault("ORCH_REDIS_PORT", "6379")
+from fleet_orchestrator.test_isolation import assert_acceptance_redis_isolated  # noqa: E402
+
+assert_acceptance_redis_isolated()
 os.environ.setdefault("ORCH_NEO4J_URI", "bolt://127.0.0.1:7687")
 os.environ.setdefault("ORCH_NEO4J_DB", "neo4j")
 

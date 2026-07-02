@@ -25,6 +25,8 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from fleet_orchestrator.test_isolation import assert_acceptance_redis_isolated  # noqa: E402
+
 
 def _require_test_namespace() -> str:
     raw = (os.environ.get("ORCH_TEST_NAMESPACE") or "").strip()
@@ -38,16 +40,15 @@ def _require_test_namespace() -> str:
 
 
 def _require_divergent_redis() -> None:
+    assert_acceptance_redis_isolated()
     orch = (
         (os.environ.get("ORCH_REDIS_HOST") or "").strip(),
         (os.environ.get("ORCH_REDIS_PORT") or "").strip(),
     )
     notify = (
-        (os.environ.get("REDIS_HOST") or "127.0.0.1").strip(),
-        (os.environ.get("REDIS_PORT") or "6379").strip(),
+        (os.environ.get("REDIS_HOST") or "").strip(),
+        (os.environ.get("REDIS_PORT") or "").strip(),
     )
-    if not orch[0] or not orch[1]:
-        raise SystemExit("ORCH_REDIS_HOST/ORCH_REDIS_PORT are required")
     if orch == notify:
         raise SystemExit("handoff_confidence_liveness_acceptance requires divergent ORCH_REDIS and REDIS")
 

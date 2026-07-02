@@ -20,8 +20,9 @@ for candidate in (ROOT / ".env", Path.home() / "claude-code-fleet-orchestrator/.
     if "ORCH_DOTENV" not in os.environ and candidate.is_file():
         os.environ["ORCH_DOTENV"] = str(candidate)
         break
-os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
-os.environ.setdefault("ORCH_REDIS_PORT", "6379")
+from fleet_orchestrator.test_isolation import assert_acceptance_redis_isolated  # noqa: E402
+
+assert_acceptance_redis_isolated()
 os.environ.setdefault("ORCH_NEO4J_URI", "bolt://127.0.0.1:7687")
 os.environ.setdefault("ORCH_NEO4J_DB", "neo4j")
 os.environ.setdefault("ORCH_DASHBOARD_URL", "http://127.0.0.1:5002")

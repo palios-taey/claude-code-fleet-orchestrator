@@ -53,6 +53,12 @@ def _non_loopback_live_env() -> dict[str, str]:
 
 
 def main() -> int:
+    unset_errors = store_isolation_errors({})
+    unset_text = "\n".join(unset_errors)
+    _check("unset store env is rejected", "ORCH_NEO4J_URI is unset" in unset_text, unset_errors)
+    _check("unset orchestrator Redis env is rejected", "ORCH_REDIS_HOST/ORCH_REDIS_PORT" in unset_text, unset_errors)
+    _check("unset notify Redis env is rejected", "REDIS_HOST/REDIS_PORT" in unset_text, unset_errors)
+
     live_errors = store_isolation_errors(_live_defaults_env())
     live_text = "\n".join(live_errors)
     _check("live loopback Neo4j is rejected", "live Neo4j port 7687" in live_text, live_errors)
@@ -70,15 +76,20 @@ def main() -> int:
     _check("non-loopback orchestrator Redis is rejected in throwaway mode", "ORCH_REDIS_HOST" in non_loopback_text, non_loopback_errors)
     _check("non-loopback notify Redis is rejected in throwaway mode", "REDIS_HOST" in non_loopback_text, non_loopback_errors)
 
-    isolated = build_throwaway_env(
-        base_env={},
-        neo4j_port=17687,
-        redis_port=16379,
-        notify_redis_port=16380,
-        namespace="agent-test-isolation",
-        repo_root=str(ROOT),
-    )
+    os.environ["ORCH_TEST_AMBIENT_SENTINEL"] = "ambient"
+    try:
+        isolated = build_throwaway_env(
+            base_env={},
+            neo4j_port=17687,
+            redis_port=16379,
+            notify_redis_port=16380,
+            namespace="agent-test-isolation",
+            repo_root=str(ROOT),
+        )
+    finally:
+        os.environ.pop("ORCH_TEST_AMBIENT_SENTINEL", None)
     _check("isolated throwaway env passes guard", store_isolation_errors(isolated) == [], store_isolation_errors(isolated))
+    _check("explicit empty base env does not inherit ambient values", "ORCH_TEST_AMBIENT_SENTINEL" not in isolated, isolated)
     _check("isolated env suppresses deployment dotenv", isolated["ORCH_DOTENV"] == "empty", isolated)
     _check("isolated env separates ORCH and notify Redis", isolated["ORCH_REDIS_PORT"] != isolated["REDIS_PORT"], isolated)
     _check("isolated env namespace is visibly acceptance-scoped", "acceptance" in isolated["ORCH_TEST_NAMESPACE"], isolated)

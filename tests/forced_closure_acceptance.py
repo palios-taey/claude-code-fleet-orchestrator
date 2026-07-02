@@ -15,8 +15,9 @@ sys.path.insert(0, str(ROOT))
 BASE_NAMESPACE = os.environ.get("ORCH_TEST_NAMESPACE") or "forced-closure-ci"
 PREFIX = f"{BASE_NAMESPACE}-forced-closure-{uuid.uuid4().hex[:8]}"
 os.environ["NOTIFY_KEY_PREFIX"] = PREFIX
-os.environ.setdefault("ORCH_REDIS_HOST", "127.0.0.1")
-os.environ.setdefault("ORCH_REDIS_PORT", "6379")
+from fleet_orchestrator.test_isolation import assert_acceptance_redis_isolated  # noqa: E402
+
+assert_acceptance_redis_isolated()
 
 from fleet_orchestrator.config import OrchConfig  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
