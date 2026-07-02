@@ -788,6 +788,17 @@ def _fire_project_trigger(r, trig: dict, now_local: datetime, dry_run: bool = Fa
         or (next_ready or {}).get("description")
         or f"Recurring project cadence fire: {project_id}"
     )
+    from fleet_orchestrator.cli_orch_watch import _local_tmux_sessions
+    if session not in _local_tmux_sessions():
+        import subprocess
+        log.warning("Session %s is stopped. Attempting to RESPAWN it before dispatch wake.", session)
+        respawn_result = subprocess.run(["peer-respawn.sh", session], capture_output=True, text=True, check=False)
+        if respawn_result.returncode != 0:
+            _clear_starvation_state(r, str(trig_id), project_id)
+            log.error("FAIL project trigger %s project=%s session=%s task=%s: target session is fully stopped/dead and RESPAWN failed. Wake would drop silently.", trig_id, project_id, session, task_id)
+            return "failed:session_dead_respawn_failed"
+        log.info("Successfully respawned session %s.", session)
+
     try:
         dispatch(
             session,
