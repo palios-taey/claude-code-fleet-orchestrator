@@ -173,6 +173,7 @@ TRIGGER_STARVATION_SKIP_THRESHOLD = 3
 TRIGGER_STARVATION_STALE_TOOL_SEC = 15 * 60
 TRIGGER_STARVATION_STATE_TTL_SEC = 3 * 24 * 60 * 60
 TRIGGER_STARVATION_RELEASE_DEDUP_TTL_SEC = 60 * 60
+PEER_RESPAWN_TIMEOUT_SEC = 60
 _BAD_WEEKDAY_WARNING_KEYS: set[str] = set()
 
 
@@ -605,6 +606,110 @@ def _truncate_output(value: Any, limit: int = COMMAND_OUTPUT_LIMIT) -> str:
     return text[:limit] + f"...[truncated {len(text) - limit} chars]"
 
 
+def _peer_respawn_script_path() -> tuple[bool, str]:
+    script_path = (os.environ.get("ORCH_PEER_RESPAWN_SCRIPT") or "").strip()
+    if not script_path:
+        return False, "ORCH_PEER_RESPAWN_SCRIPT is required and must point to an absolute peer-respawn executable"
+    if not os.path.isabs(script_path):
+        return False, f"ORCH_PEER_RESPAWN_SCRIPT must be an absolute path, got: {script_path!r}"
+    return True, script_path
+
+
+def _respawn_stopped_session(session: str) -> tuple[bool, str]:
+    ok, script_path = _peer_respawn_script_path()
+    if not ok:
+        return False, script_path
+    try:
+        result = subprocess.run(
+            [script_path, session],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=PEER_RESPAWN_TIMEOUT_SEC,
+        )
+    except FileNotFoundError as exc:
+        return False, f"respawn script not found: {script_path}: {exc}"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"respawn script failed before exit: {script_path}: {exc}"
+
+    if result.returncode != 0:
+        detail = " ".join(
+            part for part in (
+                f"exit={result.returncode}",
+                f"stdout={_truncate_output(result.stdout, 1000)!r}" if result.stdout else "",
+                f"stderr={_truncate_output(result.stderr, 1000)!r}" if result.stderr else "",
+            )
+            if part
+        )
+        return False, f"{script_path} {detail}".strip()
+    return True, _truncate_output(result.stdout or result.stderr, 1000)
+
+
+def _notify_project_trigger_respawn_failure(
+    *,
+    trig_id: str,
+    project_id: str,
+    session: str,
+    task_id: str,
+    reason: str,
+) -> None:
+    cli = OrchConfig().notify_cli_path
+    cli_path = shutil.which(cli) or (cli if os.path.isfile(cli) and os.access(cli, os.X_OK) else None)
+    if cli_path is None:
+        log.error("project-trigger respawn failure alert skipped; notify CLI not found: %s", cli)
+        return
+    body = (
+        f"[PROJECT_TRIGGER_RESPAWN_FAILED] trigger={trig_id} project={project_id} "
+        f"session={session} task={task_id}: {reason}. Wake was not dispatched; "
+        "dedup/starvation state was cleared so the trigger can retry."
+    )
+    try:
+        result = subprocess.run(
+            [cli_path, "conductor", body, "--from", "orch-cron", "--type", "defect", "--priority", "high"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.error("project-trigger respawn failure alert errored trigger=%s session=%s: %s",
+                  trig_id, session, exc)
+        return
+    if result.returncode != 0:
+        log.error("project-trigger respawn failure alert failed trigger=%s session=%s: %s",
+                  trig_id, session, result.stderr.strip() or result.stdout.strip())
+
+
+def _fail_project_trigger_session_dead(
+    r: Any,
+    *,
+    fire_id: str,
+    trig_id: str,
+    project_id: str,
+    session: str,
+    task_id: str,
+    reason: str,
+) -> str:
+    _clear_dedup(r, fire_id)
+    _clear_starvation_state(r, trig_id, project_id)
+    _notify_project_trigger_respawn_failure(
+        trig_id=trig_id,
+        project_id=project_id,
+        session=session,
+        task_id=task_id,
+        reason=reason,
+    )
+    log.error(
+        "FAIL project trigger %s project=%s session=%s task=%s: target session is stopped/dead and respawn failed: %s",
+        trig_id,
+        project_id,
+        session,
+        task_id,
+        reason,
+    )
+    return "failed:session_dead_respawn_failed"
+
+
 def _command_timeout_sec(trig: dict) -> float:
     raw = trig.get("timeout_sec", COMMAND_TIMEOUT_DEFAULT_SEC)
     timeout = float(raw)
@@ -790,13 +895,28 @@ def _fire_project_trigger(r, trig: dict, now_local: datetime, dry_run: bool = Fa
     )
     from fleet_orchestrator.cli_orch_watch import _local_tmux_sessions
     if session not in _local_tmux_sessions():
-        import subprocess
-        log.warning("Session %s is stopped. Attempting to RESPAWN it before dispatch wake.", session)
-        respawn_result = subprocess.run(["peer-respawn.sh", session], capture_output=True, text=True, check=False)
-        if respawn_result.returncode != 0:
-            _clear_starvation_state(r, str(trig_id), project_id)
-            log.error("FAIL project trigger %s project=%s session=%s task=%s: target session is fully stopped/dead and RESPAWN failed. Wake would drop silently.", trig_id, project_id, session, task_id)
-            return "failed:session_dead_respawn_failed"
+        log.warning("Session %s is stopped. Attempting to respawn it before dispatch wake.", session)
+        ok, detail = _respawn_stopped_session(session)
+        if not ok:
+            return _fail_project_trigger_session_dead(
+                r,
+                fire_id=fire_id,
+                trig_id=str(trig_id),
+                project_id=project_id,
+                session=session,
+                task_id=task_id,
+                reason=detail,
+            )
+        if session not in _local_tmux_sessions():
+            return _fail_project_trigger_session_dead(
+                r,
+                fire_id=fire_id,
+                trig_id=str(trig_id),
+                project_id=project_id,
+                session=session,
+                task_id=task_id,
+                reason="respawn exited 0 but tmux session is still absent",
+            )
         log.info("Successfully respawned session %s.", session)
 
     try:
