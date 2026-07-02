@@ -175,7 +175,12 @@ def completion_evidence_verification_applies(evidence: Optional[Dict[str, Any]])
         return False
     if str(evidence.get("commit_sha") or "").strip():
         return True
-    return "loop_proof" in evidence or "supervisor_verification" in evidence
+    if "loop_proof" in evidence or "supervisor_verification" in evidence:
+        return True
+    gated, _repo = _no_commit_evidence_targets_gated_repo(evidence)
+    if gated:
+        return True
+    return False
 
 
 def _repo_allowed_for_completion_evidence(repo: str) -> bool:
@@ -184,6 +189,28 @@ def _repo_allowed_for_completion_evidence(repo: str) -> bool:
 
 def _repo_profile_for_completion_evidence(repo: str) -> str:
     return completion_repo_profiles().get(repo.strip().lower(), "")
+
+
+def _configured_runtime_completion_repo() -> str:
+    return (
+        os.environ.get("ORCH_COMPLETION_GITHUB_REPO", "").strip()
+        or os.environ.get("GITHUB_REPOSITORY", "").strip()
+    )
+
+
+def _no_commit_completion_repo(evidence: Dict[str, Any]) -> str:
+    return _configured_runtime_completion_repo() or repo_from_completion_evidence(evidence)
+
+
+def _no_commit_evidence_targets_gated_repo(evidence: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
+    if not isinstance(evidence, dict) or not evidence:
+        return False, ""
+    if str(evidence.get("commit_sha") or "").strip():
+        return False, ""
+    repo = _no_commit_completion_repo(evidence)
+    if not repo:
+        return False, ""
+    return _repo_profile_for_completion_evidence(repo) == GATED_REPO_PROFILE, repo
 
 
 def _repo_not_allowed_reason(repo: str, *, inferred: bool = False) -> str:
@@ -551,8 +578,22 @@ def verify_completion_evidence(
         supervisor_verification = _verify_supervisor_completion_evidence(evidence, producer=producer)
         if supervisor_verification is not None:
             return supervisor_verification
+        gated, no_commit_repo = _no_commit_evidence_targets_gated_repo(evidence)
+        if gated:
+            return _unverified(
+                f"completion evidence for gated repo {no_commit_repo!r} must include commit_sha and repo; "
+                "observation-only evidence cannot bypass open-PR and required-gate verification. "
+                "Use commit_sha+repo evidence after the PR is merged and required gates pass. "
+                "Observation-only completion remains valid only for gateless/local work with no gated GitHub verifier.",
+                repo=no_commit_repo,
+                required_checks=required_github_checks_for_repo(no_commit_repo),
+                producer=producer,
+                applies=True,
+                reject_completion=True,
+            )
+        repo = _no_commit_completion_repo(evidence)
         return _unverified(
-            "completion evidence has no commit_sha; local/non-repo completion remains a self-report",
+            "completion evidence has no commit_sha; gateless/local/non-repo completion remains a self-report",
             repo=repo,
             required_checks=checks,
             producer=producer,
