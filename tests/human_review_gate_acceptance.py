@@ -12,15 +12,19 @@ import os
 import re
 import sys
 import uuid
+from dataclasses import replace
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import fleet_orchestrator.orch_schema as orch_schema  # noqa: E402
 from fleet_orchestrator.config import OrchConfig, get_redis_sync  # noqa: E402
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     CompletionEvidenceError,
     add_dependency,
+    create_human_review_gate,
     create_phase,
     create_project,
     create_task,
@@ -53,6 +57,10 @@ PROJECT = f"{PFX}-project"
 PHASE = f"{PROJECT}::phase"
 GATE = f"{PROJECT}::human-review"
 QUESTION = f"{PFX}-question"
+OPERATOR_GATE = f"{PROJECT}::operator-human-review"
+OPERATOR_QUESTION = f"{PFX}-operator-question"
+BROKEN_GATE = f"{PROJECT}::broken-human-review"
+BROKEN_QUESTION = f"{PFX}-broken-question"
 GATE_TWO = f"{PROJECT}::human-review-two"
 QUESTION_TWO = f"{PFX}-question-two"
 DOWNSTREAM = f"{PROJECT}::downstream"
@@ -65,14 +73,15 @@ def _check(label: str, cond: bool, extra: object = "") -> None:
         FAILURES.append(label)
 
 
-def _redis_key(kind: str) -> str:
+def _redis_key(kind: str, lineage: str = REVIEWER) -> str:
     prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
-    return f"{prefix}:{kind}:{REVIEWER}"
+    return f"{prefix}:{kind}:{lineage}"
 
 
 def _cleanup() -> None:
     r = get_redis_sync(CFG)
     r.delete(_redis_key("openq"), _redis_key("needs_you"), _redis_key("chat"))
+    r.delete(_redis_key("openq", "operator"), _redis_key("needs_you", "operator"), _redis_key("chat", "operator"))
     with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
         session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=PFX)
 
@@ -96,9 +105,9 @@ def _question_row(question_id: str = QUESTION, task_id: str = GATE) -> dict:
     return dict(row) if row else {}
 
 
-def _chat_messages() -> list[dict]:
+def _chat_messages(lineage: str = REVIEWER) -> list[dict]:
     records: list[dict] = []
-    for raw in get_redis_sync(CFG).lrange(_redis_key("chat"), 0, -1):
+    for raw in get_redis_sync(CFG).lrange(_redis_key("chat", lineage), 0, -1):
         try:
             records.append(json.loads(raw))
         except Exception:
@@ -106,9 +115,9 @@ def _chat_messages() -> list[dict]:
     return records
 
 
-def _open_question_ids() -> set[str]:
+def _open_question_ids(lineage: str = REVIEWER) -> set[str]:
     ids: set[str] = set()
-    for raw in get_redis_sync(CFG).lrange(_redis_key("openq"), 0, -1):
+    for raw in get_redis_sync(CFG).lrange(_redis_key("openq", lineage), 0, -1):
         try:
             record = json.loads(raw)
         except Exception:
@@ -120,9 +129,9 @@ def _open_question_ids() -> set[str]:
     return ids
 
 
-def _chat_messages_for_question(question_id: str) -> list[dict]:
+def _chat_messages_for_question(question_id: str, lineage: str = REVIEWER) -> list[dict]:
     matches: list[dict] = []
-    for message in _chat_messages():
+    for message in _chat_messages(lineage):
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
         if question_id in {
             str(metadata.get("open_question_id") or ""),
@@ -140,6 +149,105 @@ def main() -> int:
         init_schema(config=CFG)
         create_project(project_id=PROJECT, name=PROJECT, supervisor=SUP, priority=1, config=CFG)
         create_phase(project_id=PROJECT, phase_id=PHASE, name="phase", config=CFG)
+        r = get_redis_sync(CFG)
+
+        notify_calls: list[object] = []
+        original_run = orch_schema.subprocess.run
+
+        def forbidden_notify(*args, **kwargs):
+            notify_calls.append(args)
+            raise AssertionError("human-review gate tried to notify a session inbox")
+
+        orch_schema.subprocess.run = forbidden_notify
+        try:
+            operator_response = client.post(
+                "/api/human-review-gates",
+                json={
+                    "phase_id": PHASE,
+                    "task_id": OPERATOR_GATE,
+                    "question_id": OPERATOR_QUESTION,
+                    "prompt": "Default reviewer should surface only in dashboard chat.",
+                    "from": SUP,
+                },
+            )
+        finally:
+            orch_schema.subprocess.run = original_run
+        _check("default operator reviewer creates gate without session notify", operator_response.status_code == 200 and operator_response.json().get("ok"), operator_response.text)
+        _check("phantom operator session notify is not called", not notify_calls, notify_calls)
+        _check("operator dashboard needs_you points at durable question", OPERATOR_QUESTION in (r.get(_redis_key("needs_you", "operator")) or ""), r.get(_redis_key("needs_you", "operator")))
+        _check("operator dashboard open_questions contains durable question", OPERATOR_QUESTION in _open_question_ids("operator"), r.lrange(_redis_key("openq", "operator"), 0, -1))
+        _check("operator dashboard chat message auto-posted once", len(_chat_messages_for_question(OPERATOR_QUESTION, "operator")) == 1, _chat_messages("operator"))
+
+        original_surface = orch_schema._surface_question_to_chat
+        original_alert = orch_schema._alert_human_review_delivery_failure_to_configured_target
+        alerts: list[dict] = []
+
+        def broken_surface(*args, **kwargs):
+            raise RuntimeError("dashboard redis unavailable")
+
+        def record_alert(prompt, *, requested_by, task_id, question_id, reviewer, error, config=None):
+            alerts.append({
+                "prompt": prompt,
+                "requested_by": requested_by,
+                "task_id": task_id,
+                "question_id": question_id,
+                "reviewer": reviewer,
+                "error": str(error),
+            })
+            return True, f"{PFX}-alert-target"
+
+        orch_schema._surface_question_to_chat = broken_surface
+        orch_schema._alert_human_review_delivery_failure_to_configured_target = record_alert
+        try:
+            try:
+                create_human_review_gate(
+                    phase_id=PHASE,
+                    task_id=BROKEN_GATE,
+                    question_id=BROKEN_QUESTION,
+                    prompt="This question cannot reach dashboard chat.",
+                    reviewer=REVIEWER,
+                    requested_by=SUP,
+                    config=CFG,
+                )
+                broken_error = ""
+            except RuntimeError as exc:
+                broken_error = str(exc)
+        finally:
+            orch_schema._surface_question_to_chat = original_surface
+            orch_schema._alert_human_review_delivery_failure_to_configured_target = original_alert
+        _check("undeliverable human-review fails loud", "dashboard redis unavailable" in broken_error, broken_error)
+        _check("undeliverable human-review alerts configured path", alerts and alerts[0]["task_id"] == BROKEN_GATE and alerts[0]["question_id"] == BROKEN_QUESTION and alerts[0]["requested_by"] == SUP and "dashboard redis unavailable" in alerts[0]["error"], alerts)
+
+        alert_calls: list[list[str]] = []
+
+        def record_run(args, **kwargs):
+            alert_calls.append(list(args))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        orch_schema.subprocess.run = record_run
+        try:
+            configured_sent, configured_target = orch_schema._alert_human_review_delivery_failure_to_configured_target(
+                "alert target comes from config",
+                requested_by=SUP,
+                task_id=BROKEN_GATE,
+                question_id=BROKEN_QUESTION,
+                reviewer=REVIEWER,
+                error=RuntimeError("dashboard redis unavailable"),
+                config=replace(CFG, human_review_alert_target=f"{PFX}-alert-target"),
+            )
+            unset_sent, unset_target = orch_schema._alert_human_review_delivery_failure_to_configured_target(
+                "no target configured",
+                requested_by=SUP,
+                task_id=BROKEN_GATE,
+                question_id=BROKEN_QUESTION,
+                reviewer=REVIEWER,
+                error=RuntimeError("dashboard redis unavailable"),
+                config=replace(CFG, human_review_alert_target=""),
+            )
+        finally:
+            orch_schema.subprocess.run = original_run
+        _check("human-review failure alert uses configured target", configured_sent is True and configured_target == f"{PFX}-alert-target" and alert_calls and alert_calls[0][1] == f"{PFX}-alert-target", alert_calls)
+        _check("unset human-review alert target does not session-notify", unset_sent is False and unset_target == "" and len(alert_calls) == 1, alert_calls)
 
         create_response = client.post(
             "/api/human-review-gates",
