@@ -99,6 +99,7 @@ _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
 _COMPLETION_EVIDENCE_CONTEXT_KEYS = ("repo",)
+_COMPLETION_SUPERVISOR_VERIFICATION_KEY = "supervisor_verification"
 _NON_SUCCESS_TERMINAL_EVIDENCE_KEYS = ("reason", "error", "production_observation")
 # Closed set of legal task statuses. Validated BEFORE any completed-specific logic so a
 # non-canonical spelling can never slip past the evidence gate.
@@ -108,6 +109,7 @@ HUMAN_REVIEW_TASK_TYPE = "human-review"
 HUMAN_REVIEW_QUESTION_TYPE = "human_review_gate"
 COMPLETED_EVIDENCE_NEXT_STEP = (
     'Completed writes require shape-valid evidence and record completion_evidence_verification. commit_sha evidence must include repo. VERIFIED means GitHub confirms the commit exists in a repo present in ORCH_COMPLETION_ALLOWED_REPOS and satisfies that repo verification profile: gated repos require independent gate contexts for the exact commit_sha from trusted GitHub actors/apps, while gateless repos require the commit to be reachable from the repo default branch. UNVERIFIED means a shape-valid self-report only. '
+    'For non-production research/prototype tasks, a distinct supervisor can verify with evidence.supervisor_verification={"mode":"research","verifier":"<supervisor-session>","observation":"<what was checked>"}; verifier must differ from the task producer and commit_sha evidence still uses the GitHub gate path. '
     'Use `taey-task update <task-id> completed --evidence '
     '\'{"commit_sha":"<sha>","repo":"OWNER/REPO","production_observation":"<what you verified>"}\'` '
     'or PATCH /api/task/<task-id> with body '
@@ -363,6 +365,36 @@ def _normalize_delivery_gate_evidence(evidence: Dict[str, Any]) -> Dict[str, Any
     return {"no_op": no_op}
 
 
+def _json_serializable_completion_object(value: Any, field: str) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        raise CompletionEvidenceError(
+            "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. "
+            f"completion evidence {field!r} must be a JSON object with mode, verifier, and observation. "
+            f"{COMPLETED_EVIDENCE_NEXT_STEP}"
+        )
+    if not value:
+        raise CompletionEvidenceError(
+            "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. "
+            f"completion evidence {field!r} must be a non-empty JSON object with mode, verifier, and observation. "
+            f"{COMPLETED_EVIDENCE_NEXT_STEP}"
+        )
+    try:
+        normalized = json.loads(json.dumps(value, separators=(",", ":"), sort_keys=True))
+    except (TypeError, ValueError) as exc:
+        raise CompletionEvidenceError(
+            "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. "
+            f"completion evidence {field!r} must be JSON-serializable: {exc}. "
+            f"{COMPLETED_EVIDENCE_NEXT_STEP}"
+        ) from exc
+    if not isinstance(normalized, dict) or not normalized:
+        raise CompletionEvidenceError(
+            "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. "
+            f"completion evidence {field!r} must remain a non-empty JSON object after JSON normalization. "
+            f"{COMPLETED_EVIDENCE_NEXT_STEP}"
+        )
+    return normalized
+
+
 def _normalize_completion_evidence(
     evidence: Optional[Dict[str, Any]],
     *,
@@ -405,6 +437,11 @@ def _normalize_completion_evidence(
     outbound_actions = _normalize_outbound_actions(evidence)
     if outbound_actions is not None:
         normalized["outbound_actions"] = outbound_actions
+    if _COMPLETION_SUPERVISOR_VERIFICATION_KEY in evidence:
+        normalized[_COMPLETION_SUPERVISOR_VERIFICATION_KEY] = _json_serializable_completion_object(
+            evidence.get(_COMPLETION_SUPERVISOR_VERIFICATION_KEY),
+            _COMPLETION_SUPERVISOR_VERIFICATION_KEY,
+        )
     try:
         loop_proof = normalize_loop_proof_evidence(evidence.get("loop_proof")) if "loop_proof" in evidence else None
     except ValueError as exc:
@@ -417,11 +454,12 @@ def _normalize_completion_evidence(
         not delivery_gate_evidence
         and not any(key in normalized for key in _COMPLETION_EVIDENCE_KEYS)
         and "outbound_actions" not in normalized
+        and _COMPLETION_SUPERVISOR_VERIFICATION_KEY not in normalized
         and "loop_proof" not in normalized
     ):
         raise CompletionEvidenceError(
             "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. completed status requires evidence with at least one of: "
-            f"commit_sha, gate_run_id, production_observation, loop_proof, or outbound_actions with signoff gate_pass provenance. Optional repo=OWNER/REPO selects the GitHub repository for commit verification. {COMPLETED_EVIDENCE_NEXT_STEP}"
+            f"commit_sha, gate_run_id, production_observation, loop_proof, supervisor_verification, or outbound_actions with signoff gate_pass provenance. Optional repo=OWNER/REPO selects the GitHub repository for commit verification. {COMPLETED_EVIDENCE_NEXT_STEP}"
         )
     return normalized
 
@@ -1094,6 +1132,7 @@ def _completion_evidence_verification_applies_cypher(alias: str) -> str:
         AND (
             {evidence} CONTAINS '"commit_sha"'
             OR {evidence} CONTAINS '"loop_proof"'
+            OR {evidence} CONTAINS '"supervisor_verification"'
         )
     )
 )

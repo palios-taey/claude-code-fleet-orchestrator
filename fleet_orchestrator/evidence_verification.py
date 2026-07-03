@@ -17,6 +17,8 @@ GATED_REPO_PROFILE = "gated"
 GATELESS_REPO_PROFILE = "gateless"
 DEFAULT_REPO_PROFILE = GATED_REPO_PROFILE
 SUPPORTED_REPO_PROFILES = frozenset({GATED_REPO_PROFILE, GATELESS_REPO_PROFILE})
+SUPERVISOR_VERIFICATION_SOURCE = "supervisor-verification"
+SUPERVISOR_VERIFICATION_MODES = frozenset({"prototype", "research"})
 VERIFIED = "VERIFIED"
 UNVERIFIED = "UNVERIFIED"
 _GH_TIMEOUT_SEC = 10
@@ -142,7 +144,7 @@ def completion_evidence_verification_applies(evidence: Optional[Dict[str, Any]])
         return False
     if str(evidence.get("commit_sha") or "").strip():
         return True
-    return "loop_proof" in evidence
+    return "loop_proof" in evidence or "supervisor_verification" in evidence
 
 
 def _repo_allowed_for_completion_evidence(repo: str) -> bool:
@@ -413,6 +415,93 @@ def _unverified(
     return payload
 
 
+def _supervisor_verification_unverified(
+    reason: str,
+    *,
+    producer: str = "",
+    verifier: str = "",
+    reject_completion: bool = True,
+) -> Dict[str, Any]:
+    payload = {
+        "status": UNVERIFIED,
+        "verified": False,
+        "applies": True,
+        "source": SUPERVISOR_VERIFICATION_SOURCE,
+        "repo": "",
+        "commit_sha": "",
+        "required_checks": [],
+        "producer": producer,
+        "verifier": verifier or "none",
+        "reason": reason,
+        "checks": [],
+    }
+    if reject_completion:
+        payload["reject_completion"] = True
+    return payload
+
+
+def _verify_supervisor_completion_evidence(evidence: Dict[str, Any], *, producer: str = "") -> Optional[Dict[str, Any]]:
+    if "supervisor_verification" not in evidence:
+        return None
+    raw = evidence.get("supervisor_verification")
+    if not isinstance(raw, dict):
+        return _supervisor_verification_unverified(
+            "supervisor_verification evidence must be a JSON object with mode, verifier, and observation",
+            producer=producer,
+        )
+    mode = str(raw.get("mode") or "").strip().lower()
+    verifier = str(raw.get("verifier") or "").strip()
+    observation = str(raw.get("observation") or "").strip()
+    producer_value = str(producer or "").strip()
+    if mode not in SUPERVISOR_VERIFICATION_MODES:
+        return _supervisor_verification_unverified(
+            "supervisor_verification.mode must be one of: prototype, research",
+            producer=producer_value,
+            verifier=verifier,
+        )
+    if not verifier:
+        return _supervisor_verification_unverified(
+            "supervisor_verification.verifier must name the distinct supervisor session that verified the work",
+            producer=producer_value,
+        )
+    if not producer_value:
+        return _supervisor_verification_unverified(
+            "supervisor_verification requires a non-empty completion producer so verifier!=producer can be enforced",
+            verifier=verifier,
+        )
+    if verifier.lower() == producer_value.lower():
+        return _supervisor_verification_unverified(
+            "supervisor_verification is self-attestation: verifier must differ from producer",
+            producer=producer_value,
+            verifier=verifier,
+        )
+    if len(observation) < 8:
+        return _supervisor_verification_unverified(
+            "supervisor_verification.observation must describe what the supervisor verified in at least 8 characters",
+            producer=producer_value,
+            verifier=verifier,
+        )
+    return {
+        "status": VERIFIED,
+        "verified": True,
+        "applies": True,
+        "source": SUPERVISOR_VERIFICATION_SOURCE,
+        "repo": "",
+        "commit_sha": "",
+        "required_checks": [],
+        "producer": producer_value,
+        "verifier": verifier,
+        "mode": mode,
+        "reason": "distinct supervisor session verified this non-production research/prototype completion",
+        "checks": [{
+            "name": SUPERVISOR_VERIFICATION_SOURCE,
+            "kind": "supervisor-attestation",
+            "ok": True,
+            "detail": f"{verifier} verified {mode} completion by {producer_value}: {observation}",
+        }],
+    }
+
+
 def verify_completion_evidence(
     evidence: Optional[Dict[str, Any]],
     *,
@@ -427,6 +516,9 @@ def verify_completion_evidence(
     checks = required_github_checks()
     commit_sha = str(evidence.get("commit_sha") or "").strip()
     if not commit_sha:
+        supervisor_verification = _verify_supervisor_completion_evidence(evidence, producer=producer)
+        if supervisor_verification is not None:
+            return supervisor_verification
         repo = repo_from_completion_evidence(evidence)
         return _unverified(
             "completion evidence has no commit_sha; local/non-repo completion remains a self-report",
