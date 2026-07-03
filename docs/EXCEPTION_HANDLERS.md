@@ -17,6 +17,8 @@ Reviewer note: `Ordinal` is positional within handlers that share the same file,
 
 | File | Function | Exception | Ordinal | Line Hint | Category | Rationale | Remediation |
 | --- | --- | --- | ---: | ---: | --- | --- | --- |
+| fleet_orchestrator/cli_orch_watch.py | _has_notify_session_state | Exception | 1 | 228 | harmless-best-effort | If notify-state reads fail, a local hostname cannot be proven to be a deliverable session. | Annotated in registry; no behavior change. |
+| fleet_orchestrator/cli_orch_watch.py | _supervisor_candidate | Exception | 1 | 243 | harmless-best-effort | If configured session IDs cannot be read, the local-hostname candidate still requires concrete notify or tmux session evidence. | Annotated in registry; no behavior change. |
 | fleet_orchestrator/cli_orch_watch.py | resolve_supervisor | Exception | 1 | 159 | harmless-best-effort | Parent Redis read can fail; suffix fallback keeps watch classification available. | Annotated in registry; no behavior change. |
 | fleet_orchestrator/cli_orch_watch.py | get_current_task | Exception | 1 | 183 | harmless-best-effort | Malformed current_task is returned as raw data for supervisor diagnosis. | Annotated in registry; no behavior change. |
 | fleet_orchestrator/cli_orch_watch.py | get_last_outcome | Exception | 1 | 194 | harmless-best-effort | Malformed last_outcome is surfaced as unknown with raw details. | Annotated in registry; no behavior change. |

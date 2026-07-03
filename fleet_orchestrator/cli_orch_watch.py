@@ -86,6 +86,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -209,18 +210,70 @@ SUBSCRIBE_PATTERNS = (
 _KEY_RE = re.compile(rf"^__keyspace@\d+__:{re.escape(NOTIFY_KEY_PREFIX)}:(.+):([a-z_]+)$")
 
 
-def resolve_supervisor(r, node_id: str) -> Optional[str]:
-    """Mirror fleet-notify's _resolve_supervisor: explicit override wins,
-    else suffix-strip, else None."""
+def _local_hostname() -> str:
+    try:
+        return socket.gethostname().strip()
+    except OSError:
+        return ""
+
+
+def _has_notify_session_state(r, session_id: str) -> bool:
+    try:
+        if r.exists(state_key(session_id, "current_task")):
+            return True
+        if r.exists(state_key(session_id, "idle")):
+            return True
+        if r.exists(state_key(session_id, "last_activity")):
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _supervisor_candidate(r, value: object) -> Optional[str]:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return None
+    host = _local_hostname()
+    if not host or candidate != host:
+        return candidate
+    try:
+        if candidate in set(OrchConfig().session_ids or []):
+            return candidate
+    except Exception:
+        pass
+    if _has_notify_session_state(r, candidate):
+        return candidate
+    if candidate in _local_tmux_sessions():
+        return candidate
+    log.debug("Ignoring non-session supervisor candidate %s (matches local host name)", candidate)
+    return None
+
+
+def resolve_supervisor(r, node_id: str, task: Optional[dict] = None) -> Optional[str]:
+    """Resolve the deliverable supervisor for a worker alert.
+
+    Current-task payloads are the dispatch contract, so their supervisor or
+    dispatcher wins over legacy parent/suffix fallback. A local hostname fallback
+    is ignored unless it is also configured or visible as a real local session.
+    """
+    candidates: list[object] = []
+    if isinstance(task, dict):
+        candidates.extend([task.get("supervisor"), task.get("dispatcher")])
     try:
         explicit = r.get(state_key(node_id, "parent"))
         if explicit:
-            return explicit
+            candidates.append(explicit)
     except Exception:
         pass
     for suffix in SUFFIX_SUPERVISOR_RULES:
         if node_id.endswith(suffix):
-            return node_id[: -len(suffix)]
+            candidates.append(node_id[: -len(suffix)])
+            break
+    for candidate in candidates:
+        resolved = _supervisor_candidate(r, candidate)
+        if resolved:
+            return resolved
     return None
 
 
@@ -1334,7 +1387,7 @@ def investigate(r, node_id: str, event_type: str,
         if task:
             _TASK_SNAPSHOTS[node_id] = {
                 "task": task,
-                "supervisor": task.get("supervisor") or resolve_supervisor(r, node_id),
+                "supervisor": resolve_supervisor(r, node_id, task),
             }
     else:
         task = None  # The key is gone; DEL handler uses the snapshot.
@@ -1417,7 +1470,7 @@ def investigate(r, node_id: str, event_type: str,
     if stuck_for < stuck_threshold_sec:
         return
 
-    supervisor = resolve_supervisor(r, node_id)
+    supervisor = resolve_supervisor(r, node_id, task)
     if not supervisor:
         log.debug("No supervisor for %s; skip stuck alert.", node_id)
         return
@@ -1522,7 +1575,7 @@ def main():
             if task:
                 _TASK_SNAPSHOTS[node] = {
                     "task": task,
-                    "supervisor": task.get("supervisor") or resolve_supervisor(r, node),
+                    "supervisor": resolve_supervisor(r, node, task),
                 }
 
     pubsub = r.pubsub()
