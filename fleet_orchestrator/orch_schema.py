@@ -3730,23 +3730,7 @@ def get_project_summary(project_id: str,
                  collect(
                      CASE
                          WHEN t IS NULL THEN NULL
-                         ELSE {
-                             id: t.id,
-                             description: t.description,
-                             status: t.status,
-                             owner: t.owner,
-                             priority: t.priority,
-                             blocked_on: t.blocked_on,
-                             completion_evidence: t.completion_evidence,
-                             completion_evidence_verification: t.completion_evidence_verification,
-                             completion_evidence_verification_status: t.completion_evidence_verification_status,
-                             completion_evidence_verified: t.completion_evidence_verified,
-                             completion_evidence_verification_applies: t.completion_evidence_verification_applies,
-                             completed_by: t.completed_by,
-                             completed_at: t.completed_at,
-                             refs: t.refs,
-                             source_path: t.source_path
-                         }
+                         ELSE properties(t)
                      END
                  ) AS tasks
             ORDER BY ph.order ASC, ph.name ASC
