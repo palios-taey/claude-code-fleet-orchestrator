@@ -61,7 +61,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .config import OrchConfig, get_neo4j_session, notify_cli
+from .config import OrchConfig, _parse_product_owner_map, get_neo4j_session, notify_cli
 from .context_assembler import (
     assemble as assemble_wake_packet,
     build_packet as build_wake_packet,
@@ -142,7 +142,7 @@ def _cli_for_worker(worker: str) -> str:
 
 
 def _resolve_product_id(worker: str) -> Optional[str]:
-    return OrchConfig().product_owner_map.get(_base_session_name(worker))
+    return _parse_product_owner_map().get(_base_session_name(worker))
 
 
 def _redis_connect():
@@ -757,7 +757,7 @@ def dispatch(
 
     mark_superseded_for_task(_redis_connect(), from_session, task_id)
 
-    cli = OrchConfig().notify_cli_path
+    cli = notify_cli()
     result = subprocess.run(
         [
             cli,
