@@ -58,13 +58,12 @@ To update an existing local deployment:
 git pull --ff-only
 python -m pip install -e .
 orch --version
-orch doctor --explain-scope
-orch disable
 orch enable
+orch doctor --explain-scope
 curl -s http://127.0.0.1:5002/health
 ```
 
-Run the editable install command again when dependency metadata changes. The entry-point wrappers themselves stay stable; `--version` reports the live checkout version and catches stale non-editable installs during verification.
+Run the editable install command again when dependency metadata changes. The entry-point wrappers themselves stay stable; `--version` reports the live checkout version and catches stale non-editable installs during verification. `orch enable` reconciles managed background processes after the pull and restarts `orch-watch` when its recorded checkout identity is older than the current code.
 
 The bundled compose file sets `NEO4J_AUTH=none`. Neo4j and Redis bind to loopback and run **without auth** — the orchestrator does not support internal-service credentials (the network is the trust boundary; run these on a trusted host/LAN):
 
