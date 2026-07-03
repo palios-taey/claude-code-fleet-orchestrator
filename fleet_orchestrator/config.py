@@ -166,6 +166,9 @@ OPTIONAL_ENV = (
      "the released CLI name on PATH; override for a vendored/renamed install"),
     ("ORCH_NOTIFY_LIB_ROOT", "None (use importable fleet-notify)",
      "required only if fleet-notify is not already importable on sys.path; ensure_notify_importable raises loud if missing then"),
+    ("ORCH_HUMAN_REVIEW_ALERT_TARGET", "unset (no out-of-band delivery-failure alert)",
+     "optional session target for human-review dashboard delivery-failure alerts; unset keeps the gate fail-closed "
+     "with API/UI recovery instructions and does not notify a baked fleet identity"),
     ("ORCH_REF_ALLOWED_ROOT", "unset (explicit ref roots absent)",
      "explicit plan/source ref roots; refs can also use roots auto-derived from ORCH_SESSION_ROOTS"),
     ("ORCH_DASHBOARD_URL", "http://127.0.0.1:5002",
@@ -284,6 +287,7 @@ class OrchConfig:
     redis_sentinel_master: str = field(default_factory=lambda: _optional_env("ORCH_REDIS_SENTINEL_MASTER", "orch-master") or "orch-master")
     notify_lib_root: Optional[str] = field(default_factory=lambda: _optional_env("ORCH_NOTIFY_LIB_ROOT"))
     notify_cli_path: str = field(default_factory=notify_cli)
+    human_review_alert_target: str = field(default_factory=lambda: _optional_env("ORCH_HUMAN_REVIEW_ALERT_TARGET", "") or "")
     product_owner_map: Dict[str, str] = field(default_factory=_parse_product_owner_map)
     session_ids: list[str] = field(default_factory=_parse_session_ids)
     badge_fallback_supervisor: str = field(default_factory=lambda: _optional_env("ORCH_BADGE_FALLBACK_SUPERVISOR", "") or "")
