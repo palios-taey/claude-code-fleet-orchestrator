@@ -5,8 +5,8 @@ The stop engine can only reason about tracker state. If a worker records an
 interrupted/error outcome but no supervisor terminalizes the task, the old task
 can sit pending/in_progress forever and poison next-ready/stop decisions. The
 watch reaper must terminalize those proven non-success outcomes, and it must
-auto-close only PR follow-up/audit tasks whose referenced PR is merged with
-required gates verified.
+auto-close only tasks with an explicit PR linkage whose PR is merged with
+required gates verified. PR references in task prose are context, not evidence.
 """
 from __future__ import annotations
 
@@ -72,9 +72,10 @@ DONE_TASK = f"{PROJECT}::done"
 MISMATCH = f"{PROJECT}::mismatch"
 AWAIT_TASK = f"{PROJECT}::await-parked"
 FRESH_RETRY = f"{PROJECT}::fresh-retry"
-PR_AUDIT = f"{PROJECT}::r5-audit-green"
+PR_LINKED = f"{PROJECT}::explicit-pr-green"
 PR_RED = f"{PROJECT}::r5-audit-red"
-PR_PLAIN = f"{PROJECT}::plain-pr-mention"
+PR_PROSE_AUDIT = f"{PROJECT}::r5-audit-prose-only"
+PR_CONTEXT = f"{PROJECT}::bugfix-context-merged-pr"
 FAILURES: list[str] = []
 
 
@@ -158,6 +159,20 @@ def _current_task_id(worker: str) -> str:
     return str(json.loads(raw).get("task_id") or "")
 
 
+def _link_produced_pr(task_id: str, repo: str, number: int) -> None:
+    with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+        session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            SET t.produced_pr_repo = $repo,
+                t.produced_pr_number = $number
+            """,
+            task_id=task_id,
+            repo=repo,
+            number=number,
+        )
+
+
 def _write_fake_gh(directory: Path) -> None:
     gh = directory / "gh"
     gh.write_text(
@@ -220,9 +235,12 @@ def _setup() -> None:
     create_task(phase_id=PHASE, task_id=MISMATCH, description="mismatched terminal outcome is not proof", owner=MISMATCH_WORKER, priority=10, wake_owner_if_ready=False, config=CFG)
     create_task(phase_id=PHASE, task_id=AWAIT_TASK, description="AWAIT parked task must not be reaped", owner=AWAIT_WORKER, priority=10, wake_owner_if_ready=False, config=CFG)
     create_task(phase_id=PHASE, task_id=FRESH_RETRY, description="fresh active retry must not be reaped by stale outcome", owner=FRESH_WORKER, priority=10, wake_owner_if_ready=False, config=CFG)
-    create_task(phase_id=PHASE, task_id=PR_AUDIT, description="R5 audit for PR #17", owner=SUP, priority=10, wake_owner_if_ready=False, config=CFG)
-    create_task(phase_id=PHASE, task_id=PR_RED, description="Gatekeeper review for PR #18", owner=SUP, priority=10, wake_owner_if_ready=False, config=CFG)
-    create_task(phase_id=PHASE, task_id=PR_PLAIN, description="Implementation notes mention PR #17 in prose only", owner=SUP, priority=10, wake_owner_if_ready=False, config=CFG)
+    create_task(phase_id=PHASE, task_id=PR_LINKED, description="R5 audit for explicitly linked produced PR", owner=SUP, priority=10, wake_owner_if_ready=False, config=CFG)
+    create_task(phase_id=PHASE, task_id=PR_RED, description="Gatekeeper review for explicitly linked produced PR", owner=SUP, priority=10, wake_owner_if_ready=False, config=CFG)
+    create_task(phase_id=PHASE, task_id=PR_PROSE_AUDIT, description="R5 audit for PR #17", owner=SUP, priority=10, wake_owner_if_ready=False, config=CFG)
+    create_task(phase_id=PHASE, task_id=PR_CONTEXT, description="BUG-FIX: PR #17 introduced this source bug; r5-gate after the fix lands", owner=SUP, priority=10, wake_owner_if_ready=False, config=CFG)
+    _link_produced_pr(PR_LINKED, REPO, 17)
+    _link_produced_pr(PR_RED, REPO, 18)
     update_task_status(ERROR_TASK, "in_progress", owner=ERROR_WORKER, config=CFG)
     update_task_status(AWAIT_TASK, "in_progress", owner=AWAIT_WORKER, blocked_on="AWAIT:external-signal:acceptance", config=CFG)
     update_task_status(FRESH_RETRY, "in_progress", owner=FRESH_WORKER, config=CFG)
@@ -278,9 +296,10 @@ def main() -> int:
         mismatch = get_task(MISMATCH, config=CFG)
         await_task = get_task(AWAIT_TASK, config=CFG)
         fresh_retry = get_task(FRESH_RETRY, config=CFG)
-        pr_audit = get_task(PR_AUDIT, config=CFG)
+        pr_linked = get_task(PR_LINKED, config=CFG)
         pr_red = get_task(PR_RED, config=CFG)
-        pr_plain = get_task(PR_PLAIN, config=CFG)
+        pr_prose_audit = get_task(PR_PROSE_AUDIT, config=CFG)
+        pr_context = get_task(PR_CONTEXT, config=CFG)
 
         _check("watch reconciliation emitted wakes for changed tasks", wake_count == 3 and len(sent) == 3, sent)
         _check("pending interrupted zombie terminalized", interrupted.get("status") == "interrupted", interrupted)
@@ -292,14 +311,15 @@ def main() -> int:
         _check("fresh in-progress retry is not terminalized by stale outcome", fresh_retry.get("status") == "in_progress", fresh_retry)
         _check("fresh retry current_task remains bound", _current_task_id(FRESH_WORKER) == FRESH_RETRY, _current_task_id(FRESH_WORKER))
         _check(
-            "merged PR audit auto-closes only with verified gates",
-            pr_audit.get("status") == "completed"
-            and pr_audit.get("completion_evidence_verified") is True
-            and pr_audit.get("completion_evidence", {}).get("commit_sha") == GREEN_SHA,
-            pr_audit,
+            "explicit PR-linked task auto-closes only with verified gates",
+            pr_linked.get("status") == "completed"
+            and pr_linked.get("completion_evidence_verified") is True
+            and pr_linked.get("completion_evidence", {}).get("commit_sha") == GREEN_SHA,
+            pr_linked,
         )
         _check("merged PR with red gate stays open", pr_red.get("status") == "pending", pr_red)
-        _check("plain PR mention stays open", pr_plain.get("status") == "pending", pr_plain)
+        _check("R5 audit prose-only PR mention stays open", pr_prose_audit.get("status") == "pending", pr_prose_audit)
+        _check("bug-fix source PR mention plus r5-gate stays open", pr_context.get("status") == "pending", pr_context)
     finally:
         for key, value in previous_env.items():
             if value is None:
@@ -312,7 +332,7 @@ def main() -> int:
     if FAILURES:
         print(f"\nFAIL -- {len(FAILURES)}: {FAILURES}")
         return 1
-    print("\nPASS -- stale task reconciliation terminalizes dead outcomes and verified merged PR audit tasks.")
+    print("\nPASS -- stale task reconciliation terminalizes dead outcomes and requires explicit PR links.")
     return 0
 
 
