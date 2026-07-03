@@ -45,6 +45,23 @@ def decode_current_task(raw: Any) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
+def current_task_matches(
+    session_id: str,
+    task_id: str,
+    *,
+    redis_client: Any = None,
+) -> bool:
+    if not session_id or not task_id:
+        return False
+    try:
+        r = redis_client or redis_connect()
+        current = decode_current_task(r.get(state_key(session_id, "current_task")))
+    except RedisError as exc:
+        LOG.warning("current_task match check failed worker=%s task=%s: %s", session_id, task_id, exc)
+        return False
+    return bool(current and str(current.get("task_id") or "") == str(task_id))
+
+
 def clear_matching_current_task(
     worker: str,
     task_id: str,

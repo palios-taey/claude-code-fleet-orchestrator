@@ -14,10 +14,10 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 248.
-- Teaches: 115.
+- Enumerated surfaces: 253.
+- Teaches: 121.
 - Needs-fix baseline debt: 48.
-- Exempt reviewed rows: 85.
+- Exempt reviewed rows: 84.
 
 <!-- ai-native-surfaces:start -->
 | File | Function | Kind | Ordinal | Line Hint | Fingerprint | Classification | Teaching Evidence | Rationale | Review |
@@ -267,11 +267,12 @@ Summary:
 | fleet_orchestrator/tasks_api.py | ui_resolve_human_review_hold_endpoint | http_exception_detail | 3 | 1006 | 72eaaa17e546f0de | teaches | taey-task | Missing/changed hold error names the task inspect CLI and UI resolution path. | task-e01ac5b9 |
 | fleet_orchestrator/tasks_api.py | ui_resolve_human_review_hold_endpoint | json_response_error | 1 | 1022 | 662ae1525f71f87f | teaches | POST /api/ui/human-review-holds/{}/resolve | ValueError wrapper returns the exact hold-resolution endpoint as next_step. | task-e01ac5b9 |
 | fleet_orchestrator/tasks_api.py | ui_resolve_human_review_hold_endpoint | json_response_error | 2 | 1028 | a40ba0877882c1b9 | exempt |  | Raw persistence/notify/internal failure is logged and returned as a 500 operator concern, not a client-correctable AI workflow surface. | task-e01ac5b9 |
-| fleet_orchestrator/tasks_api.py | update | json_response_error | 1 | 667 | f64c93f2129a0ecd | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
-| fleet_orchestrator/tasks_api.py | update | json_response_error | 2 | 676 | a7e4e83c6bf59785 | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 1 | 775 | f64c93f2129a0ecd | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 2 | 784 | a7e4e83c6bf59785 | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | update | json_response_error | 3 | 815 | 19b4febc70e7140a | teaches | PATCH /api/task/{} | Static teaching assertion passes. | task-b50d9355-pr257 |
 | fleet_orchestrator/tasks_api.py | update | json_response_error | 4 | 828 | 863252f36b86e208 | teaches | taey-task | Static teaching assertion passes. | task-b50d9355-pr257 |
-| fleet_orchestrator/tasks_api.py | update | json_response_error | 5 | 869 | d6c61be575531467 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
-| fleet_orchestrator/tasks_api.py | update | json_response_error | 6 | 921 | 90ccf2be5ade8d12 | teaches | next_step | Static teaching assertion passes. | task-b50d9355-pr257 |
-| fleet_orchestrator/tasks_api.py | update | json_response_error | 7 | 938 | ace60ea8e3e7a0f5 | exempt |  | Raw subprocess/persistence/unhandled server failure is an operator/logging concern, not a client-correctable AI workflow surface. | anbr-fix-exempt:internal-transport-or-500 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 5 | 871 | ffecd11cb9aa2feb | teaches | next_step | Peer execution binding rejection returns a structured next_step explaining the required current_task binding or explicit dispatch. | task-6fc330b4 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 6 | 881 | d6c61be575531467 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 7 | 947 | 90ccf2be5ade8d12 | teaches | next_step | Static teaching assertion passes. | task-b50d9355-pr257 |
+| fleet_orchestrator/tasks_api.py | update | json_response_error | 8 | 964 | ace60ea8e3e7a0f5 | exempt |  | Raw subprocess/persistence/unhandled server failure is an operator/logging concern, not a client-correctable AI workflow surface. | anbr-fix-exempt:internal-transport-or-500 |
 <!-- ai-native-surfaces:end -->

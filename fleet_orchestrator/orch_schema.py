@@ -3972,7 +3972,10 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
         result = session.run(f"""
             MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status = 'pending'
-              AND coalesce(t.owner, '') = $sess
+              AND (
+                  coalesce(t.owner, '') = $sess
+                  OR coalesce(t.dispatched_to, '') = $sess
+              )
               AND NOT (
                   coalesce(t.task_type, '') = $human_review_task_type
                   AND EXISTS {{
@@ -3992,6 +3995,7 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
               AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
             RETURN t.id AS task_id, t.description AS description,
                    t.priority AS priority, t.owner AS owner,
+                   t.dispatched_to AS dispatched_to,
                    t.blocked_on AS blocked_on,
                    t.refs AS task_refs,
                    t.source_path AS task_source_path,
