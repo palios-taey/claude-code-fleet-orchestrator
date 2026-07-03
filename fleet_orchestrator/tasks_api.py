@@ -856,7 +856,19 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             owner = task_before.get("owner", "")
         blocked_on = data["blocked_on"] if "blocked_on" in data else None
         completion_evidence = _terminal_evidence_from_request(data)
-        from fleet_orchestrator.completion_guard import peer_self_completion_rejection
+        from fleet_orchestrator.completion_guard import (
+            peer_execution_binding_rejection,
+            peer_self_completion_rejection,
+        )
+
+        binding_rejection = peer_execution_binding_rejection(
+            task_id,
+            task_before,
+            sender,
+            status,
+        )
+        if binding_rejection:
+            return JSONResponse(status_code=409, content=binding_rejection)
 
         rejection = peer_self_completion_rejection(
             task_id,
@@ -867,6 +879,20 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         )
         if rejection:
             return JSONResponse(status_code=409, content=rejection)
+
+        prebound_current_task = False
+        if sender and owner == sender and status == "in_progress":
+            binding_supervisor = _resolve_supervisor_session(sender, config=cfg)
+            bind_current_task(
+                worker=sender,
+                task_id=task_id,
+                description=task_before.get("description", ""),
+                supervisor=binding_supervisor,
+                set_parent=True,
+                guard_existing=True,
+                dispatcher=sender,
+            )
+            prebound_current_task = True
 
         update_task_status(
             task_id,
@@ -880,7 +906,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         )
 
         if sender and owner == sender:
-            if status == "in_progress":
+            if status == "in_progress" and not prebound_current_task:
                 binding_supervisor = _resolve_supervisor_session(sender, config=cfg)
                 bind_current_task(
                     worker=sender,
@@ -1484,7 +1510,7 @@ def session_current(session_id: str) -> Dict[str, Any]:
 
 @app.get("/api/sessions/{session_id}/next-ready")
 def session_next_ready(session_id: str) -> Dict[str, Any]:
-    """Top pending task owned-by this session only — under single-supervisor scope there is no claim-from-unowned-pool path."""
+    """Top pending task owned by or explicitly dispatched to this session; no unowned-pool claims."""
     cfg = _cfg()
     result = get_session_next_ready(session_id, config=cfg)
     if not result:

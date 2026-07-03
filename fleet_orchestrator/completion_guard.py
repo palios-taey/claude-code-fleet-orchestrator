@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from .config import OrchConfig, get_neo4j_driver
+from .current_task_binding import current_task_matches
 
 
 _AUTONOMOUS_PEER_SUFFIXES = ("-codex", "-gemini", "-grok", "-claude")
@@ -28,6 +29,70 @@ def _task_project_supervisor(task_id: str, config: OrchConfig) -> Optional[str]:
             task_id=task_id,
         ).single()
     return str(record["supervisor"]) if record and record["supervisor"] else None
+
+
+def peer_execution_binding_rejection(task_id: str,
+                                     task_before: dict[str, Any],
+                                     sender: str,
+                                     status: str) -> Optional[dict[str, Any]]:
+    """Reject supervised peer execution writes that are not backed by current_task."""
+    peer = str(sender or "").strip()
+    if not peer:
+        return None
+    supervisor = _autonomous_peer_supervisor(peer)
+    if not supervisor:
+        return None
+
+    normalized_status = str(status or "").strip().lower()
+    if normalized_status not in {"in_progress", "completed", "failed", "interrupted"}:
+        return None
+
+    owner = str(task_before.get("owner") or "").strip()
+    dispatched_to = str(task_before.get("dispatched_to") or "").strip()
+    bound_to_task = current_task_matches(peer, task_id)
+
+    if normalized_status == "in_progress":
+        if owner == peer:
+            return None
+        if dispatched_to == peer and bound_to_task:
+            return None
+        return {
+            "ok": False,
+            "error": (
+                "unbound peer execution rejected: a peer may start only a task it owns "
+                "or a task explicitly dispatched to it with a live current_task binding"
+            ),
+            "task_id": task_id,
+            "status": task_before.get("status"),
+            "owner": owner,
+            "dispatched_to": dispatched_to,
+            "sender": peer,
+            "next_step": (
+                f"Use `taey-task dispatch {task_id} {peer}` from the supervisor, "
+                f"or inspect `taey-task status {task_id}` before retrying."
+            ),
+        }
+
+    if not bound_to_task:
+        return {
+            "ok": False,
+            "error": (
+                "unbound peer outcome rejected: the sender does not hold the task's "
+                "current_task binding"
+            ),
+            "task_id": task_id,
+            "status": task_before.get("status"),
+            "owner": owner,
+            "dispatched_to": dispatched_to,
+            "sender": peer,
+            "next_step": (
+                f"If this is dispatched peer work, call "
+                f"`record_outcome('{peer}', '<done|error|interrupted>', '<summary>')`; "
+                "otherwise the supervisor must close the task after audit."
+            ),
+        }
+
+    return None
 
 
 def peer_self_completion_rejection(task_id: str,
