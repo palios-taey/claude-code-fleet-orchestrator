@@ -12,46 +12,15 @@ from typing import Dict, Optional
 import redis
 import redis.asyncio as aioredis
 
+from fleet_orchestrator.dotenv_loader import load_dotenv_candidates
+
 
 class OrchConfigError(ValueError):
     """Raised when required orchestrator configuration is missing or invalid."""
 
 
-_DOTENV_SUPPRESS_VALUES = {"empty"}
-
-
 def _load_dotenv_candidates() -> None:
-    candidates = []
-    explicit = os.environ.get("ORCH_DOTENV")
-    if explicit and explicit.strip().lower() in _DOTENV_SUPPRESS_VALUES:
-        return
-    if explicit:
-        candidates.append(Path(explicit))
-    candidates.append(Path.cwd() / ".env")
-    candidates.append(Path(__file__).resolve().parent.parent / ".env")
-
-    for env_path in candidates:
-        if not env_path.is_file():
-            continue
-        with env_path.open(encoding="utf-8") as handle:
-            for raw_line in handle:
-                line = raw_line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.replace("export ", "").strip()
-                value = value.strip()
-                # Standard dotenv semantics: strip one matching pair of
-                # surrounding quotes. Operators quote values to keep the
-                # same .env shell-sourceable (unquoted JSON braces would
-                # brace-expand under `set -a; . .env`); without stripping,
-                # the quotes reach consumers and silently break JSON values
-                # (live finding 2026-06-11: ORCH_SESSION_ROOTS unparseable
-                # -> every wake packet empty despite correct selection code).
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-                    value = value[1:-1]
-                os.environ.setdefault(key, value)
-        break
+    load_dotenv_candidates()
 
 
 _load_dotenv_candidates()
