@@ -14,9 +14,9 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 247.
-- Teaches: 110.
-- Needs-fix baseline debt: 52.
+- Enumerated surfaces: 248.
+- Teaches: 115.
+- Needs-fix baseline debt: 48.
 - Exempt reviewed rows: 85.
 
 <!-- ai-native-surfaces:start -->
@@ -51,13 +51,14 @@ Summary:
 | fleet_orchestrator/cli_taey_task.py | cmd_remove_dependency | cli_failure_message | 1 | 229 | 0f1cd4262a1ee9a8 | exempt |  | Thin CLI wrapper relays the API error body from remove_task_dependency; the endpoint rows carry the actionable next-step text. | task-ea95c040:thin-cli-wrapper |
 | fleet_orchestrator/cli_taey_task.py | cmd_status | cli_failure_message | 1 | 106 | 15ac09e58ff7b290 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_task.py | cmd_unbind | cli_failure_message | 1 | 240 | 0f1cd4262a1ee9a8 | exempt |  | Thin CLI wrapper relays the API error body from clear_current_task; the endpoint rows carry the actionable next-step text. | task-98b37864:thin-cli-wrapper |
-| fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 1 | 191 | 899355c6a0e4a5d7 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
-| fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 2 | 194 | 968a4d6cd4a87440 | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
+| fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 1 | 252 | 3a415c6578f48e5c | teaches | taey-task | Terminal status rejection names all valid evidence channels and gives an exact shell-safe observation retry command. | task-adf26f8f |
+| fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 2 | 257 | 2d55ddfdbb0ea45c | teaches | taey-task | Non-terminal evidence rejection gives an exact terminal retry command using --evidence-observation. | task-adf26f8f |
 | fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 3 | 208 | 85e489b78cdf383d | teaches | taey-task | Static teaching assertion passes. | task-b50d9355-pr257 |
 | fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 4 | 215 | 5c6e5cefeb8383d2 | teaches | taey-task | Static teaching assertion passes. | task-b50d9355-pr257 |
 | fleet_orchestrator/cli_taey_task.py | cmd_update | cli_failure_message | 5 | 247 | 6542c2eda870d601 | teaches | taey-task | Static teaching assertion passes. | task-b50d9355-pr257 |
-| fleet_orchestrator/cli_taey_task.py | parse_evidence_arg | cli_failure_message | 1 | 62 | 25c98ca4c6f95876 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
-| fleet_orchestrator/cli_taey_task.py | parse_evidence_arg | cli_failure_message | 2 | 65 | 7c6e8e65b8cc161c | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
+| fleet_orchestrator/cli_taey_task.py | parse_evidence_arg | cli_failure_message | 1 | 76 | 7a7009958d88c7c2 | teaches | taey-task | JSON parse failures include line, column, char position, and exact shell-safe evidence retry commands. | task-adf26f8f |
+| fleet_orchestrator/cli_taey_task.py | parse_evidence_arg | cli_failure_message | 2 | 83 | c10f674ee6daf227 | teaches | taey-task | Non-object JSON evidence failures point to exact shell-safe file and observation retry commands. | task-adf26f8f |
+| fleet_orchestrator/cli_taey_task.py | parse_evidence_file_arg | cli_failure_message | 1 | 96 | f85324be5e9f9d38 | teaches | taey-task | Evidence-file read failures name the failing path and give the plain observation retry command. | task-adf26f8f |
 | fleet_orchestrator/context_assembler.py | _render_operating_section | wake_operating_line | 1 | 906 | 29e15a489d9eef00 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/context_assembler.py | _render_operating_section | wake_operating_line | 2 | 907 | e6aec2ad24a197eb | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/context_assembler.py | _render_operating_section | wake_operating_line | 3 | 908 | 69572e26ef65f036 | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
