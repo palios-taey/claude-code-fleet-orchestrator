@@ -108,7 +108,7 @@ _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "interrupted"})
 HUMAN_REVIEW_TASK_TYPE = "human-review"
 HUMAN_REVIEW_QUESTION_TYPE = "human_review_gate"
 COMPLETED_EVIDENCE_NEXT_STEP = (
-    'Completed writes require shape-valid evidence and record completion_evidence_verification. commit_sha evidence must include repo. VERIFIED means GitHub confirms the commit exists in a repo present in ORCH_COMPLETION_ALLOWED_REPOS and satisfies that repo verification profile: gated repos require independent gate contexts for the exact commit_sha from trusted GitHub actors/apps, while gateless repos require the commit to be reachable from the repo default branch. UNVERIFIED means a shape-valid self-report only. '
+    'Completed writes require shape-valid evidence and record completion_evidence_verification. commit_sha evidence must include repo. VERIFIED means GitHub confirms the commit exists in a repo present in ORCH_COMPLETION_ALLOWED_REPOS and satisfies that repo verification profile: gated repos require configured independent gate contexts for the exact commit_sha from trusted GitHub actors/apps, while gateless repos require the commit to be reachable from the repo default branch. UNVERIFIED means a shape-valid self-report only. '
     'For non-production research/prototype tasks, a distinct supervisor can verify with evidence.supervisor_verification={"mode":"research","verifier":"<supervisor-session>","observation":"<what was checked>"}; verifier must differ from the task producer and commit_sha evidence still uses the GitHub gate path. '
     'Use `taey-task update <task-id> completed --evidence '
     '\'{"commit_sha":"<sha>","repo":"OWNER/REPO","production_observation":"<what you verified>"}\'` '
