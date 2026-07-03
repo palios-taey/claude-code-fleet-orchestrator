@@ -807,11 +807,75 @@ def _proc_identity(pid: int) -> Optional[Dict[str, Any]]:
     return {"pid": pid, "cmdline": cmdline, "cwd": cwd, "starttime": str(starttime)}
 
 
-def write_pid_record(pid_path: Path, pid: int) -> None:
+def _git_head() -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    head = result.stdout.strip()
+    return head or None
+
+
+def _digest_files(paths: Iterable[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        if not path.exists():
+            continue
+        rel = path.relative_to(REPO_ROOT)
+        digest.update(str(rel).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _orch_watch_source_identity() -> Dict[str, Any]:
+    watched_files = [
+        REPO_ROOT / "scripts" / "orch-watch",
+        REPO_ROOT / "fleet_orchestrator" / "cli_orch_watch.py",
+        REPO_ROOT / "fleet_orchestrator" / "script_entrypoints.py",
+        REPO_ROOT / "fleet_orchestrator" / "config.py",
+        REPO_ROOT / "fleet_orchestrator" / "dispatch.py",
+        REPO_ROOT / "fleet_orchestrator" / "plan_readiness.py",
+        REPO_ROOT / "fleet_orchestrator" / "worker_liveness.py",
+        REPO_ROOT / "fleet_orchestrator" / "task_reconciliation.py",
+        REPO_ROOT / "fleet_orchestrator" / "handoff_validation.py",
+        REPO_ROOT / "fleet_orchestrator" / "notify_state.py",
+        REPO_ROOT / "fleet_orchestrator" / "out_of_band.py",
+        REPO_ROOT / "fleet_orchestrator" / "inflight.py",
+        REPO_ROOT / "fleet_orchestrator" / "orch_schema.py",
+    ]
+    identity: Dict[str, Any] = {
+        "repo_root": str(REPO_ROOT),
+        "watch_digest": _digest_files(watched_files),
+    }
+    head = _git_head()
+    if head:
+        identity["git_head"] = head
+    return identity
+
+
+def _source_identity_label(identity: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(identity, dict):
+        return "missing"
+    head = str(identity.get("git_head") or "no-git")
+    digest = str(identity.get("watch_digest") or "?")
+    return f"head={head[:12]} digest={digest[:12]}"
+
+
+def write_pid_record(pid_path: Path, pid: int, *, source_identity: Optional[Dict[str, Any]] = None) -> None:
     ensure_runtime_dirs()
     identity = _proc_identity(pid)
     if identity is None:
         raise RuntimeError(f"unable to capture process identity for pid {pid}")
+    if source_identity is not None:
+        identity["source_identity"] = source_identity
     atomic_write_json(pid_path, identity)
 
 
@@ -845,6 +909,37 @@ def _identity_matches(expected: Dict[str, Any], actual: Optional[Dict[str, Any]]
     if suffix is not None and not any(str(item).endswith(suffix) for item in actual.get("cmdline", [])):
         return False
     return True
+
+
+def _orch_watch_pid_status(record: Optional[Dict[str, Any]],
+                           source_identity: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not isinstance(record, dict):
+        return {"current": False, "managed": False, "detail": "orch-watch not running under managed pidfile"}
+    try:
+        pid = int(record.get("pid", 0))
+    except (TypeError, ValueError):
+        return {"current": False, "managed": False, "detail": "orch-watch pidfile has invalid pid"}
+    if not _identity_matches(record, _proc_identity(pid), suffix="scripts/orch-watch"):
+        return {"current": False, "managed": False, "detail": "orch-watch pidfile does not match a live managed process"}
+    expected_source = source_identity or _orch_watch_source_identity()
+    recorded_source = record.get("source_identity")
+    if recorded_source != expected_source:
+        return {
+            "current": False,
+            "managed": True,
+            "pid": pid,
+            "detail": (
+                f"orch-watch stale source pid={pid} "
+                f"recorded={_source_identity_label(recorded_source)} "
+                f"current={_source_identity_label(expected_source)}"
+            ),
+        }
+    return {
+        "current": True,
+        "managed": True,
+        "pid": pid,
+        "detail": f"pid={pid} managed source={_source_identity_label(expected_source)}",
+    }
 
 
 def stop_pidfile(pid_path: Path, *, suffix: Optional[str] = None) -> bool:
@@ -1034,10 +1129,14 @@ def enable_services() -> List[str]:
         messages.append(f"api: started pid={pid} on {host}:{port} ({reach})")
         messages.append(f"api: chat box {'ENABLED' if chat_on else 'off (ORCH_CHAT_ENABLED=0)'}")
 
-    watch_record = read_pid_record(WATCH_PID_PATH)
-    if isinstance(watch_record, dict) and _identity_matches(watch_record, _proc_identity(int(watch_record["pid"])), suffix="scripts/orch-watch"):
+    watch_source = _orch_watch_source_identity()
+    watch_status = _orch_watch_pid_status(read_pid_record(WATCH_PID_PATH), watch_source)
+    if watch_status["current"]:
         messages.append("watch: already managed")
     else:
+        if watch_status.get("managed"):
+            stop_pidfile(WATCH_PID_PATH, suffix="scripts/orch-watch")
+            messages.append(f"watch: restarting stale managed process ({watch_status['detail']})")
         pid = _spawn_background(
             [
                 python_exec,
@@ -1052,7 +1151,7 @@ def enable_services() -> List[str]:
             WATCH_LOG_PATH,
             env=env,
         )
-        write_pid_record(WATCH_PID_PATH, pid)
+        write_pid_record(WATCH_PID_PATH, pid, source_identity=watch_source)
         messages.append(f"watch: started pid={pid}")
     return messages
 
@@ -1315,10 +1414,10 @@ def _doctor_notify_daemon() -> CheckResult:
 
 
 def _doctor_orch_watch() -> CheckResult:
-    record = read_pid_record(WATCH_PID_PATH)
-    if isinstance(record, dict) and _identity_matches(record, _proc_identity(int(record["pid"])), suffix="scripts/orch-watch"):
-        return CheckResult("orch-watch", True, f"pid={record['pid']} managed")
-    return CheckResult("orch-watch", False, "orch-watch not running under managed pidfile", "run `orch enable`")
+    status = _orch_watch_pid_status(read_pid_record(WATCH_PID_PATH))
+    if status["current"]:
+        return CheckResult("orch-watch", True, status["detail"])
+    return CheckResult("orch-watch", False, status["detail"], "run `orch enable`")
 
 
 def run_doctor() -> List[CheckResult]:
