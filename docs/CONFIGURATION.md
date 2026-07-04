@@ -41,7 +41,8 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ORCH_API_BASE` / `ORCH_DASHBOARD_URL` | `http://127.0.0.1:5002` | Base URL the CLIs call. |
 | `ORCH_COMPLETION_GITHUB_REPO` / `GITHUB_REPOSITORY` | inferred from `gh api repos/:owner/:repo` | Runtime GitHub repo fallback for explicit GitHub helper calls. It is not used to fill missing `completion_evidence.repo` for commit evidence, and stale-task PR reconciliation does not infer a repo from task prose; commit evidence without `repo` is rejected. |
 | `ORCH_COMPLETION_ALLOWED_REPOS` | unset | Comma-separated GitHub repo verification profiles for completed-task verification. Entries are `OWNER/REPO` or `OWNER/REPO:gated` for the default required-check profile, and `OWNER/REPO:gateless` for repos that lack PR/check machinery and verify by commit reachability from the default branch. When unset or empty, startup logs a warning and all commit-based completions stay `UNVERIFIED` until configured. A caller-supplied repo outside this list is `UNVERIFIED`, even if the commit and statuses exist. |
-| `ORCH_COMPLETION_REQUIRED_CHECKS` / `ORCH_PRE_MERGE_REQUIRED_CHECKS` | `r5-audit-gate,ship-gate-acceptance` | Comma-separated GitHub check/status contexts required before a completed task's commit evidence can be marked `VERIFIED`. |
+| `ORCH_COMPLETION_REQUIRED_CHECKS` / `ORCH_PRE_MERGE_REQUIRED_CHECKS` | `r5-audit-gate,ship-gate-acceptance` | Comma-separated GitHub check/status contexts required before a completed task's commit evidence can be marked `VERIFIED` for gated repos without a repo-specific override. |
+| `ORCH_COMPLETION_REPO_CHECKS` | unset | Semicolon-separated per-repo required-check overrides for gated completion evidence. Each entry is `OWNER/REPO=check-a,check-b`; for example `palios-taey/taeys-hands=r5-audit-gate,consultation-v2-integrity`. Repos not listed here use `ORCH_COMPLETION_REQUIRED_CHECKS`. |
 | `ORCH_COMPLETION_TRUSTED_CHECK_RUN_APPS` | `github-actions` | Comma-separated GitHub check-run app slugs trusted for required check-run contexts. Matching name + success is insufficient if the app is not trusted. |
 | `ORCH_COMPLETION_TRUSTED_STATUS_CREATORS` | `github-actions[bot]` | Comma-separated GitHub commit-status creator logins trusted for required status contexts. Matching context + success is insufficient if the creator is not trusted. |
 | `ORCH_NEO4J_URI` / `ORCH_NEO4J_DB` | (required) | Neo4j connection. **No auth** — the orchestrator connects with no credentials and does not support internal-service auth (run Neo4j with `NEO4J_AUTH=none`). Internal-service credentials are intentionally unsupported: the network is the boundary, and a credential dimension in the driver config caused a recurring outage. |
@@ -87,7 +88,8 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 force a pass), `ORCH_PRE_MERGE_REQUIRED_CHECKS` (consumed by the pre-merge gate
 and as the fallback completed-task verification context list),
 `ORCH_COMPLETION_GITHUB_REPO`, `ORCH_COMPLETION_ALLOWED_REPOS`,
-`ORCH_COMPLETION_REQUIRED_CHECKS`, `ORCH_COMPLETION_TRUSTED_CHECK_RUN_APPS`,
+`ORCH_COMPLETION_REQUIRED_CHECKS`, `ORCH_COMPLETION_REPO_CHECKS`,
+`ORCH_COMPLETION_TRUSTED_CHECK_RUN_APPS`,
 `ORCH_COMPLETION_TRUSTED_STATUS_CREATORS`, `ORCH_CAREERS_CANONICAL_STATUS_PATHS`
 (comma-separated relative canonical careers-state paths checked for untracked
 drift by loop-proof completion verification; default `foundations/careers`).

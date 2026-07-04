@@ -34,6 +34,37 @@ def required_github_checks() -> Tuple[str, ...]:
     return checks or DEFAULT_REQUIRED_GITHUB_CHECKS
 
 
+def _parse_repo_required_checks_entry(entry: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
+    text = entry.strip()
+    if not text or "=" not in text:
+        return None
+    repo, raw_checks = text.split("=", 1)
+    repo = repo.strip()
+    if "/" not in repo:
+        return None
+    checks = tuple(dict.fromkeys(part.strip() for part in raw_checks.split(",") if part.strip()))
+    if not checks:
+        return None
+    return repo, checks
+
+
+def completion_repo_required_checks() -> Dict[str, Tuple[str, ...]]:
+    raw = os.environ.get("ORCH_COMPLETION_REPO_CHECKS", "")
+    entries = raw.split(";") if ";" in raw else [raw]
+    required_checks: Dict[str, Tuple[str, ...]] = {}
+    for entry in entries:
+        parsed = _parse_repo_required_checks_entry(entry)
+        if not parsed:
+            continue
+        repo, checks = parsed
+        required_checks[repo.lower()] = checks
+    return required_checks
+
+
+def required_github_checks_for_repo(repo: str) -> Tuple[str, ...]:
+    return completion_repo_required_checks().get(repo.strip().lower(), required_github_checks())
+
+
 def _csv_env_values(name: str, defaults: Iterable[str]) -> Tuple[str, ...]:
     raw = os.environ.get(name, "")
     values = [part.strip() for part in raw.split(",") if part.strip()] if raw else list(defaults)
@@ -513,13 +544,13 @@ def verify_completion_evidence(
         verification = verify_loop_proof_receipt(evidence, producer=producer)
         verification["applies"] = True
         return verification
-    checks = required_github_checks()
     commit_sha = str(evidence.get("commit_sha") or "").strip()
+    repo = repo_from_completion_evidence(evidence)
+    checks = required_github_checks_for_repo(repo) if repo else required_github_checks()
     if not commit_sha:
         supervisor_verification = _verify_supervisor_completion_evidence(evidence, producer=producer)
         if supervisor_verification is not None:
             return supervisor_verification
-        repo = repo_from_completion_evidence(evidence)
         return _unverified(
             "completion evidence has no commit_sha; local/non-repo completion remains a self-report",
             repo=repo,
@@ -527,7 +558,6 @@ def verify_completion_evidence(
             producer=producer,
             applies=False,
         )
-    repo = repo_from_completion_evidence(evidence)
     if not repo:
         return _unverified(
             "completion evidence with commit_sha must include completion_evidence.repo; "
