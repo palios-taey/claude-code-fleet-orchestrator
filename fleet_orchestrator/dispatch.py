@@ -1088,13 +1088,12 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
 
     ``outcome`` MUST be one of ``done``, ``error``, ``interrupted``. Any
     other value raises ``ValueError``. The enum is load-bearing: every
-    terminal outcome records ``last_outcome`` and immediately wakes the
-    binding supervisor. Outcomes that move the OrchTask out of in_progress
-    also clear the matching current_task binding so later dispatches do not
-    treat a pending task as a live worker slot.
+    terminal outcome records ``last_outcome``, clears the matching
+    current_task binding, and immediately wakes the binding supervisor.
 
     Semantics:
-    - ``done`` — task completed successfully. Supervisor can move on.
+    - ``done`` — task completed successfully. Supervisor can move on, and
+      current_task clears.
     - ``error`` — task hit an unrecoverable error. The task returns to
       pending, last_outcome preserves the failure, and current_task clears.
     - ``interrupted`` — Ctrl-C, timeout, or external cancel. The task returns
@@ -1145,11 +1144,12 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
                     continue
     if stored:
         try:
-            if current_task_id and outcome != "done":
-                _revert_outcome_claim(worker, current_task_id)
-                from .worker_liveness import clear_worker_task_liveness
+            if current_task_id:
+                if outcome != "done":
+                    _revert_outcome_claim(worker, current_task_id)
+                    from .worker_liveness import clear_worker_task_liveness
 
-                clear_worker_task_liveness(current_task_id)
+                    clear_worker_task_liveness(current_task_id)
                 from .current_task_binding import clear_matching_current_task
 
                 clear_matching_current_task(
