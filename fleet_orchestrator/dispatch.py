@@ -861,11 +861,19 @@ def _write_completion_receipt(r: Any, worker: str, current_task_id: str, payload
     details = str(payload.get("details") or "").strip()
     if details:
         receipt["details"] = details[:500]
-    r.set(
-        _state_key(worker, "last_completion_receipt"),
-        json.dumps(receipt, sort_keys=True),
-        ex=_COMPLETION_RECEIPT_TTL_SECS,
-    )
+    try:
+        r.set(
+            _state_key(worker, "last_completion_receipt"),
+            json.dumps(receipt, sort_keys=True),
+            ex=_COMPLETION_RECEIPT_TTL_SECS,
+        )
+    except Exception:
+        logger.warning(
+            "completion receipt write failed worker=%s task=%s",
+            worker,
+            current_task_id,
+            exc_info=True,
+        )
 
 
 def _notify_supervisor_response_ready(worker: str,

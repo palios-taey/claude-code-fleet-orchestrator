@@ -131,6 +131,21 @@ def _response_ready_call(call_args: list[str], outcome: str, task_id: str) -> bo
     )
 
 
+class _ReceiptWriteFailingRedis:
+    def __init__(self, inner):
+        self.inner = inner
+        self.receipt_set_attempts = 0
+
+    def set(self, key, *args, **kwargs):
+        if str(key).endswith(":last_completion_receipt"):
+            self.receipt_set_attempts += 1
+            raise RuntimeError("simulated receipt write failure")
+        return self.inner.set(key, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
 def main() -> int:
     init_schema(config=CFG)
     _cleanup()
@@ -207,6 +222,55 @@ def main() -> int:
                 _check(f"{outcome}: record_outcome clears current_task", not current_after, current_after)
                 _check(f"{outcome}: no completion receipt", not completion_receipt, completion_receipt)
             _redis_connect().delete(_state_key(PEER, "last_completion_receipt"))
+
+        task_id = f"{PFX}::done-receipt-set-fails"
+        create_task(
+            phase_id=PHASE,
+            task_id=task_id,
+            description="done receipt write failure",
+            owner=OWNER,
+            wake_owner_if_ready=False,
+            config=CFG,
+        )
+        bind_current_task(
+            PEER,
+            task_id,
+            "done receipt write failure",
+            supervisor=SUP,
+            set_parent=False,
+        )
+        notify_calls: list[list[str]] = []
+        failing_redis = _ReceiptWriteFailingRedis(_redis_connect())
+
+        def fake_run(args, **_kwargs):
+            notify_calls.append(list(args))
+            return ok
+
+        raised = None
+        with mock.patch.object(dispatch_module, "_redis_connect", return_value=failing_redis), \
+             mock.patch.object(dispatch_module.subprocess, "run", side_effect=fake_run):
+            try:
+                record_outcome(PEER, "done", "receipt write failure verdict")
+            except Exception as exc:  # pragma: no cover - asserted below in script output
+                raised = exc
+
+        last_outcome_raw = _redis_connect().get(_state_key(PEER, "last_outcome"))
+        last_outcome = json.loads(last_outcome_raw) if last_outcome_raw else {}
+        after = _task_row(task_id)
+        current_after = _redis_connect().get(_state_key(PEER, "current_task"))
+        completion_receipt_raw = _redis_connect().get(_state_key(PEER, "last_completion_receipt"))
+        _check("done receipt failure: receipt write attempted", failing_redis.receipt_set_attempts == 1, failing_redis.receipt_set_attempts)
+        _check("done receipt failure: record_outcome does not raise", raised is None, repr(raised))
+        _check("done receipt failure: last_outcome stored", last_outcome.get("outcome") == "done", last_outcome)
+        _check("done receipt failure: last_outcome carries task id", last_outcome.get("task_id") == task_id, last_outcome)
+        _check(
+            "done receipt failure: record_outcome sends supervisor response_ready immediately",
+            any(_response_ready_call(call, "done", task_id) for call in notify_calls),
+            notify_calls,
+        )
+        _check("done receipt failure: record_outcome does not self-complete task", after.get("status") == "in_progress", after)
+        _check("done receipt failure: record_outcome clears current_task", not current_after, current_after)
+        _check("done receipt failure: no partial completion receipt", not completion_receipt_raw, completion_receipt_raw)
     finally:
         _cleanup()
 
