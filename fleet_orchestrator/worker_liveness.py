@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, get_neo4j_driver
 from .current_task_binding import clear_matching_current_task
-from .inflight import active_inflight_signal, task_actively_in_flight
+from .inflight import InFlightProbeError, active_inflight_signal, task_actively_in_flight
 from .notify_state import key as _notify_key
 from .notify_state import redis_connect as _notify_redis_connect
 from .notify_state import state_key as _notify_state_key
@@ -216,15 +216,19 @@ def _live_outward_action_guarded(task: Dict[str, Any], worker: str, task_id: str
         return False
     if _task_effect_class(task, current) not in OUTWARD_EFFECT_CLASSES:
         return False
-    return active_inflight_signal(
-        task_id,
-        workers=[worker],
-        oob_workers=_task_out_of_band_workers(task),
-        now=now,
-        config=config,
-        heartbeat_ttl_secs=ttl_secs,
-        heartbeat_mode="current_task",
-    ) is not None
+    try:
+        return active_inflight_signal(
+            task_id,
+            workers=[worker],
+            oob_workers=_task_out_of_band_workers(task),
+            now=now,
+            config=config,
+            heartbeat_ttl_secs=ttl_secs,
+            heartbeat_mode="current_task",
+            raise_on_probe_error=True,
+        ) is not None
+    except InFlightProbeError:
+        return True
 
 
 def _escalate_task(task: Dict[str, Any], now: float,

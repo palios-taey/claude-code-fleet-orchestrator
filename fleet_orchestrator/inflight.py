@@ -21,6 +21,10 @@ class InFlightSignal:
     worker: Optional[str] = None
 
 
+class InFlightProbeError(RuntimeError):
+    pass
+
+
 def _json_dict(raw: Any) -> Optional[dict[str, Any]]:
     if not raw:
         return None
@@ -90,6 +94,7 @@ def active_inflight_signal(
     config: Optional[OrchConfig] = None,
     heartbeat_ttl_secs: Optional[int] = None,
     heartbeat_mode: str = "peer",
+    raise_on_probe_error: bool = False,
 ) -> Optional[InFlightSignal]:
     if not task_id:
         return None
@@ -112,7 +117,9 @@ def active_inflight_signal(
     for worker in worker_list:
         try:
             current_task_id = _current_task_id(r, worker)
-        except Exception:
+        except Exception as exc:
+            if raise_on_probe_error:
+                raise InFlightProbeError(f"current_task probe failed for {worker}") from exc
             current_task_id = None
         if heartbeat_mode == "current_task":
             if current_task_id != task_id:
@@ -125,18 +132,24 @@ def active_inflight_signal(
         try:
             if _terminal_outcome_for_task(r, worker, task_id, details_required=details_required):
                 continue
-        except Exception:
+        except Exception as exc:
+            if raise_on_probe_error:
+                raise InFlightProbeError(f"terminal outcome probe failed for {worker}") from exc
             pass
         try:
             raw_tool_activity = r.get(state_key(worker, "last_tool_activity"))
-        except Exception:
+        except Exception as exc:
+            if raise_on_probe_error:
+                raise InFlightProbeError(f"tool heartbeat probe failed for {worker}") from exc
             continue
         if _fresh_timestamp(raw_tool_activity, current_time, ttl):
             return InFlightSignal(source="tool_heartbeat", worker=worker)
         try:
             if _tool_running_signal_fresh(r, worker, current_time, ttl):
                 return InFlightSignal(source="tool_running", worker=worker)
-        except Exception:
+        except Exception as exc:
+            if raise_on_probe_error:
+                raise InFlightProbeError(f"tool-running probe failed for {worker}") from exc
             continue
     return None
 
