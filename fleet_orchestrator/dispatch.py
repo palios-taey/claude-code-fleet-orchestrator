@@ -821,6 +821,7 @@ def dispatch(
 
 
 _VALID_OUTCOMES = ("done", "error", "interrupted")
+_COMPLETION_RECEIPT_TTL_SECS = 1800
 
 
 def _current_task_id(raw: Optional[str]) -> Optional[str]:
@@ -848,6 +849,31 @@ def _outcome_payload(outcome: str, details: Optional[str], current_task: Optiona
     if detail_text:
         payload["details"] = detail_text[:500]
     return payload
+
+
+def _write_completion_receipt(r: Any, worker: str, current_task_id: str, payload: dict[str, Any]) -> None:
+    receipt = {
+        "outcome": "done",
+        "task_id": current_task_id,
+        "worker": worker,
+        "ts": time.time(),
+    }
+    details = str(payload.get("details") or "").strip()
+    if details:
+        receipt["details"] = details[:500]
+    try:
+        r.set(
+            _state_key(worker, "last_completion_receipt"),
+            json.dumps(receipt, sort_keys=True),
+            ex=_COMPLETION_RECEIPT_TTL_SECS,
+        )
+    except Exception:
+        logger.warning(
+            "completion receipt write failed worker=%s task=%s",
+            worker,
+            current_task_id,
+            exc_info=True,
+        )
 
 
 def _notify_supervisor_response_ready(worker: str,
@@ -1088,13 +1114,14 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
 
     ``outcome`` MUST be one of ``done``, ``error``, ``interrupted``. Any
     other value raises ``ValueError``. The enum is load-bearing: every
-    terminal outcome records ``last_outcome`` and immediately wakes the
-    binding supervisor. Outcomes that move the OrchTask out of in_progress
-    also clear the matching current_task binding so later dispatches do not
-    treat a pending task as a live worker slot.
+    terminal outcome records ``last_outcome``, clears the matching
+    current_task binding, and immediately wakes the binding supervisor.
+    A successful ``done`` cleanup also writes ``last_completion_receipt`` so
+    schedulers can prove a session boundary before clearing context.
 
     Semantics:
-    - ``done`` — task completed successfully. Supervisor can move on.
+    - ``done`` — task completed successfully. Supervisor can move on, and
+      current_task clears.
     - ``error`` — task hit an unrecoverable error. The task returns to
       pending, last_outcome preserves the failure, and current_task clears.
     - ``interrupted`` — Ctrl-C, timeout, or external cancel. The task returns
@@ -1145,19 +1172,22 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
                     continue
     if stored:
         try:
-            if current_task_id and outcome != "done":
-                _revert_outcome_claim(worker, current_task_id)
-                from .worker_liveness import clear_worker_task_liveness
+            if current_task_id:
+                if outcome != "done":
+                    _revert_outcome_claim(worker, current_task_id)
+                    from .worker_liveness import clear_worker_task_liveness
 
-                clear_worker_task_liveness(current_task_id)
+                    clear_worker_task_liveness(current_task_id)
                 from .current_task_binding import clear_matching_current_task
 
-                clear_matching_current_task(
+                cleared_current_task = clear_matching_current_task(
                     worker,
                     current_task_id,
                     redis_client=r,
                     reason=f"record_outcome:{outcome}",
                 )
+                if outcome == "done" and cleared_current_task:
+                    _write_completion_receipt(r, worker, current_task_id, payload)
         finally:
             _notify_supervisor_response_ready(worker, current_task, payload)
 
