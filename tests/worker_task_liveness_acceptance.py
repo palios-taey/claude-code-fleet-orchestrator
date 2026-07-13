@@ -70,6 +70,7 @@ STALL = f"{PROJECT}::stall"
 AWAIT = f"{PROJECT}::await"
 FREE_TEXT_WAIT = f"{PROJECT}::free-text-wait"
 HUMAN_REVIEW = f"{PROJECT}::human-review"
+OUTWARD = f"{PROJECT}::outward"
 QUESTION = f"{PFX}-question"
 REVIEWER = f"{PFX}-reviewer"
 GUARD_PROJECT = f"{GUARD_PFX}-project"
@@ -120,7 +121,7 @@ def _setup() -> None:
     init_schema(config=CFG)
     create_project(project_id=PROJECT, name=PROJECT, supervisor=SUP, priority=1, config=CFG)
     create_phase(project_id=PROJECT, phase_id=PHASE, name="phase", config=CFG)
-    for task_id in (FIRST, SECOND, STALL, AWAIT, FREE_TEXT_WAIT):
+    for task_id in (FIRST, SECOND, STALL, AWAIT, FREE_TEXT_WAIT, OUTWARD):
         create_task(
             phase_id=PHASE,
             task_id=task_id,
@@ -196,6 +197,30 @@ def _fresh_tool_heartbeat() -> None:
     _redis().set(_state_key(WORKER, "last_tool_activity"), str(time.time()))
 
 
+def _stale_running_tool() -> None:
+    old = str(time.time() - 30)
+    _redis().set(_state_key(WORKER, "tool_running"), "1")
+    _redis().set(_state_key(WORKER, "tool_running_at"), old)
+    _redis().set(_state_key(WORKER, "last_activity"), old)
+    _redis().set(_state_key(WORKER, "last_tool_activity"), old)
+
+
+def _fresh_running_tool_with_stale_last_tool_activity() -> None:
+    now = str(time.time())
+    _redis().set(_state_key(WORKER, "tool_running"), "1")
+    _redis().set(_state_key(WORKER, "tool_running_at"), now)
+    _redis().set(_state_key(WORKER, "last_activity"), now)
+    _redis().set(_state_key(WORKER, "last_tool_activity"), str(time.time() - 30))
+
+
+def _mark_outward(task_id: str) -> None:
+    with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+        session.run(
+            "MATCH (t:OrchTask {id: $task_id}) SET t.effect_class = 'outward_irreversible'",
+            task_id=task_id,
+        )
+
+
 def main() -> int:
     _cleanup()
     try:
@@ -238,10 +263,12 @@ def main() -> int:
 
         _dispatch(STALL)
         time.sleep(1.2)
+        _stale_running_tool()
         sent.clear()
         count = _run_liveness_once(sent)
         stalled = get_task(STALL, config=CFG)
         _check("worker stall TTL requeues current task", stalled.get("status") == "pending" and stalled.get("needs_attention") is True, stalled)
+        _check("stale tool_running_at does not preserve current_task", _current_task_id() == "", _current_task_id())
         _check("worker stall TTL emits supervisor wake", count == 1 and sent and sent[0][0] == SUP and STALL in sent[0][1], sent)
 
         _dispatch(AWAIT)
@@ -298,6 +325,19 @@ def main() -> int:
             "human-review gate past TTL is not escalated",
             count == 0 and human_review_task.get("status") == "in_progress",
             {"count": count, "task": human_review_task, "sent": sent},
+        )
+
+        _dispatch(OUTWARD, force=True)
+        _mark_outward(OUTWARD)
+        time.sleep(1.2)
+        _fresh_running_tool_with_stale_last_tool_activity()
+        sent.clear()
+        count = _run_liveness_once(sent)
+        outward_task = get_task(OUTWARD, config=CFG)
+        _check(
+            "fresh tool_running_at protects outward action despite stale last_tool_activity",
+            count == 0 and outward_task.get("status") == "in_progress" and _current_task_id() == OUTWARD,
+            {"count": count, "task": outward_task, "current_task": _current_task_id(), "sent": sent},
         )
     finally:
         _cleanup()

@@ -12,6 +12,7 @@ from .out_of_band import out_of_band_task_active
 
 
 PEER_HEARTBEAT_STALE_SEC = 300
+_TRUTHY_VALUES = {"1", "true", "yes", "on", "running"}
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,39 @@ def _current_task_id(r: Any, worker: str) -> Optional[str]:
         return None
     task_id = current.get("task_id")
     return str(task_id) if task_id else None
+
+
+def _truthy(raw: Any) -> bool:
+    if raw is None:
+        return False
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    return str(raw).strip().lower() in _TRUTHY_VALUES
+
+
+def _float_or_none(raw: Any) -> Optional[float]:
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fresh_timestamp(raw: Any, current_time: float, ttl: int) -> bool:
+    stamp = _float_or_none(raw)
+    return stamp is not None and 0 <= current_time - stamp < ttl
+
+
+def _tool_running_signal_fresh(r: Any, worker: str, current_time: float, ttl: int) -> bool:
+    if not _truthy(r.get(state_key(worker, "tool_running"))):
+        return False
+    return (
+        _fresh_timestamp(r.get(state_key(worker, "tool_running_at")), current_time, ttl)
+        or _fresh_timestamp(r.get(state_key(worker, "last_activity")), current_time, ttl)
+    )
 
 
 def _terminal_outcome_for_task(r: Any, worker: str, task_id: str, *, details_required: bool) -> bool:
@@ -94,15 +128,15 @@ def active_inflight_signal(
         except Exception:
             pass
         try:
-            raw = r.get(state_key(worker, "last_tool_activity"))
+            raw_tool_activity = r.get(state_key(worker, "last_tool_activity"))
         except Exception:
             continue
-        if raw is None:
-            continue
+        if _fresh_timestamp(raw_tool_activity, current_time, ttl):
+            return InFlightSignal(source="tool_heartbeat", worker=worker)
         try:
-            if current_time - float(raw) < ttl:
-                return InFlightSignal(source="tool_heartbeat", worker=worker)
-        except (TypeError, ValueError):
+            if _tool_running_signal_fresh(r, worker, current_time, ttl):
+                return InFlightSignal(source="tool_running", worker=worker)
+        except Exception:
             continue
     return None
 
