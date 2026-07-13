@@ -7,6 +7,7 @@ supervisor could stay asleep until a later Stop-hook or liveness path happened.
 This test proves record_outcome itself is sufficient:
   - bind_current_task registers worker-liveness at bind time;
   - done/error/interrupted each emit response_ready to the binding supervisor;
+  - done clears current_task and writes a completion receipt;
   - error/interrupted revert the OrchTask claim to pending and clear current_task.
 
 Env: ORCH_NEO4J_URI, ORCH_NEO4J_DB, ORCH_REDIS_HOST/PORT,
@@ -79,7 +80,7 @@ def _driver():
 
 def _cleanup() -> None:
     redis_client = _redis_connect()
-    for suffix in ("current_task", "last_outcome", "parent", "idle", "last_tool_activity"):
+    for suffix in ("current_task", "last_outcome", "last_completion_receipt", "parent", "idle", "last_tool_activity"):
         redis_client.delete(_state_key(PEER, suffix))
     prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
     for pattern in (
@@ -188,13 +189,24 @@ def main() -> int:
             )
             after = _task_row(task_id)
             current_after = _redis_connect().get(_state_key(PEER, "current_task"))
+            completion_receipt_raw = _redis_connect().get(_state_key(PEER, "last_completion_receipt"))
+            completion_receipt = json.loads(completion_receipt_raw) if completion_receipt_raw else {}
             if outcome == "done":
                 _check("done: record_outcome does not self-complete task", after.get("status") == "in_progress", after)
-                _check("done: current_task remains for Stop hook cleanup", bool(current_after), current_after)
+                _check("done: record_outcome clears current_task", not current_after, current_after)
+                _check(
+                    "done: completion receipt records task",
+                    completion_receipt.get("outcome") == "done"
+                    and completion_receipt.get("task_id") == task_id
+                    and completion_receipt.get("worker") == PEER,
+                    completion_receipt,
+                )
             else:
                 _check(f"{outcome}: record_outcome reverts claim to pending", after.get("status") == "pending", after)
                 _check(f"{outcome}: record_outcome clears dispatched_to", after.get("dispatched_to") is None, after)
                 _check(f"{outcome}: record_outcome clears current_task", not current_after, current_after)
+                _check(f"{outcome}: no completion receipt", not completion_receipt, completion_receipt)
+            _redis_connect().delete(_state_key(PEER, "last_completion_receipt"))
     finally:
         _cleanup()
 

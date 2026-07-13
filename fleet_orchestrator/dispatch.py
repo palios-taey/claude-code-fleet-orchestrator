@@ -821,6 +821,7 @@ def dispatch(
 
 
 _VALID_OUTCOMES = ("done", "error", "interrupted")
+_COMPLETION_RECEIPT_TTL_SECS = 1800
 
 
 def _current_task_id(raw: Optional[str]) -> Optional[str]:
@@ -848,6 +849,23 @@ def _outcome_payload(outcome: str, details: Optional[str], current_task: Optiona
     if detail_text:
         payload["details"] = detail_text[:500]
     return payload
+
+
+def _write_completion_receipt(r: Any, worker: str, current_task_id: str, payload: dict[str, Any]) -> None:
+    receipt = {
+        "outcome": "done",
+        "task_id": current_task_id,
+        "worker": worker,
+        "ts": time.time(),
+    }
+    details = str(payload.get("details") or "").strip()
+    if details:
+        receipt["details"] = details[:500]
+    r.set(
+        _state_key(worker, "last_completion_receipt"),
+        json.dumps(receipt, sort_keys=True),
+        ex=_COMPLETION_RECEIPT_TTL_SECS,
+    )
 
 
 def _notify_supervisor_response_ready(worker: str,
@@ -1090,6 +1108,8 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
     other value raises ``ValueError``. The enum is load-bearing: every
     terminal outcome records ``last_outcome``, clears the matching
     current_task binding, and immediately wakes the binding supervisor.
+    A successful ``done`` cleanup also writes ``last_completion_receipt`` so
+    schedulers can prove a session boundary before clearing context.
 
     Semantics:
     - ``done`` — task completed successfully. Supervisor can move on, and
@@ -1152,12 +1172,14 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
                     clear_worker_task_liveness(current_task_id)
                 from .current_task_binding import clear_matching_current_task
 
-                clear_matching_current_task(
+                cleared_current_task = clear_matching_current_task(
                     worker,
                     current_task_id,
                     redis_client=r,
                     reason=f"record_outcome:{outcome}",
                 )
+                if outcome == "done" and cleared_current_task:
+                    _write_completion_receipt(r, worker, current_task_id, payload)
         finally:
             _notify_supervisor_response_ready(worker, current_task, payload)
 
