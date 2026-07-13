@@ -857,6 +857,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         blocked_on = data["blocked_on"] if "blocked_on" in data else None
         completion_evidence = _terminal_evidence_from_request(data)
         from fleet_orchestrator.completion_guard import (
+            completion_producer_for_status_update,
             peer_execution_binding_rejection,
             peer_self_completion_rejection,
         )
@@ -894,6 +895,15 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             )
             prebound_current_task = True
 
+        completed_by = completion_producer_for_status_update(
+            task_id,
+            task_before,
+            sender,
+            status,
+            owner=owner,
+            completion_evidence=completion_evidence,
+            config=cfg,
+        )
         update_task_status(
             task_id,
             status,
@@ -901,7 +911,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             result=result,
             blocked_on=blocked_on,
             completion_evidence=completion_evidence,
-            completed_by=sender or owner or "",
+            completed_by=completed_by,
             config=cfg,
         )
 

@@ -8,6 +8,8 @@ import sys
 import uuid
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 if "ORCH_DOTENV" not in os.environ:
@@ -35,6 +37,7 @@ from fleet_orchestrator.orch_schema import (  # noqa: E402
     init_schema,
     update_task_status,
 )
+from fleet_orchestrator.tasks_api import app  # noqa: E402
 from fleet_orchestrator.test_isolation import assert_acceptance_redis_isolated  # noqa: E402
 
 
@@ -139,6 +142,7 @@ def _assert_not_ready(project_id: str, downstream: str) -> None:
 
 def main() -> int:
     init_schema(config=CFG)
+    client = TestClient(app)
     previous_allowlist = os.environ.get("ORCH_COMPLETION_ALLOWED_REPOS")
     os.environ["ORCH_COMPLETION_ALLOWED_REPOS"] = ""
     _cleanup()
@@ -166,6 +170,61 @@ def main() -> int:
             json.dumps(verification, sort_keys=True),
         )
         _assert_ready(research_project, research_downstream)
+
+        api_project, _, api_dep, api_downstream = _seed_dependency_pair("api-supervisor")
+        response = client.patch(
+            f"/api/task/{api_dep}",
+            json={
+                "status": "completed",
+                "from": SUPERVISOR,
+                "evidence": _supervisor_evidence(mode="prototype"),
+            },
+        )
+        api_payload = get_task(api_dep, CFG) or {}
+        api_verification = api_payload.get("completion_evidence_verification") or {}
+        _check("supervisor API close with supervisor_verification is accepted", response.status_code == 200, response.text)
+        _check(
+            "supervisor API close attributes producer to peer owner",
+            api_payload.get("status") == "completed"
+            and api_payload.get("completed_by") == WORKER
+            and api_payload.get("completion_evidence_verification_status") == VERIFIED
+            and api_payload.get("completion_evidence_verified") is True
+            and api_payload.get("completion_evidence_verification_applies") is True
+            and api_verification.get("source") == "supervisor-verification"
+            and api_verification.get("producer") == WORKER
+            and api_verification.get("verifier") == SUPERVISOR,
+            json.dumps(api_verification, sort_keys=True),
+        )
+        _assert_ready(api_project, api_downstream)
+
+        api_production_project, _, api_production_dep, api_production_downstream = _seed_dependency_pair("api-production")
+        api_production_response = client.patch(
+            f"/api/task/{api_production_dep}",
+            json={
+                "status": "completed",
+                "from": SUPERVISOR,
+                "evidence": {
+                    "commit_sha": UNVERIFIED_SHA,
+                    "repo": REPO,
+                    "production_observation": "commit evidence must keep closer attribution through API",
+                    **_supervisor_evidence(mode="prototype"),
+                },
+            },
+        )
+        api_production_payload = get_task(api_production_dep, CFG) or {}
+        api_production_verification = api_production_payload.get("completion_evidence_verification") or {}
+        _check("supervisor API close with commit evidence is accepted", api_production_response.status_code == 200, api_production_response.text)
+        _check(
+            "supervisor API commit evidence keeps closer attribution",
+            api_production_payload.get("completed_by") == SUPERVISOR
+            and api_production_payload.get("completion_evidence_verification_status") == UNVERIFIED
+            and api_production_payload.get("completion_evidence_verified") is False
+            and api_production_payload.get("completion_evidence_verification_applies") is True
+            and api_production_verification.get("source") == "github-required-checks"
+            and api_production_verification.get("producer") == SUPERVISOR,
+            json.dumps(api_production_verification, sort_keys=True),
+        )
+        _assert_not_ready(api_production_project, api_production_downstream)
 
         production_project, _, production_dep, production_downstream = _seed_dependency_pair("production")
         update_task_status(
