@@ -131,3 +131,30 @@ def peer_self_completion_rejection(task_id: str,
         "supervisor": project_supervisor,
         "next_step": f"record_outcome('{peer}', 'done', '<short outcome summary>')",
     }
+
+
+def completion_producer_for_status_update(task_id: str,
+                                          task_before: dict[str, Any],
+                                          sender: str,
+                                          status: str,
+                                          *,
+                                          owner: str,
+                                          completion_evidence: Optional[dict[str, Any]],
+                                          config: OrchConfig) -> str:
+    """Return the producer identity passed into completion evidence verification."""
+    actor = str(sender or "").strip()
+    owner_value = str(owner or task_before.get("owner") or "").strip()
+    default = actor or owner_value
+    if str(status or "").strip().lower() != "completed":
+        return default
+    if not actor or not owner_value or actor == owner_value:
+        return default
+    if not isinstance(completion_evidence, dict) or "supervisor_verification" not in completion_evidence:
+        return default
+    if completion_evidence.get("commit_sha") or completion_evidence.get("loop_proof"):
+        return default
+
+    project_supervisor = _task_project_supervisor(task_id, config)
+    if project_supervisor == actor:
+        return owner_value
+    return default
