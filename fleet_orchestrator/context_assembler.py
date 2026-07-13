@@ -28,6 +28,7 @@ from fleet_orchestrator.orch_schema import (
     get_task_project,
 )
 from fleet_orchestrator.paths import repo_root
+from fleet_orchestrator.kb_context import select_kb_context
 from fleet_orchestrator.memory_tier import get_memory
 from fleet_orchestrator.rules_tier import RULES_ROOT, get_rules
 
@@ -130,6 +131,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
     rules_meta = rules_selection["meta"]
     identity = _select_identity(raw_session, session_key, cli)
     supervisor_affordance = _supervisor_access_affordance(raw_session, roots, registered_sessions)
+    kb_context = select_kb_context(session_key, work, refs)
 
     context = {
         "overall_refs": refs["overall"],
@@ -144,6 +146,8 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
         "rules_meta": rules_meta,
         "budget_used": 0,
     }
+    if kb_context:
+        context["kb_context"] = kb_context
     context["snapshot"] = _build_snapshot(
         session_key,
         cli,
@@ -153,6 +157,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
         selected_memory,
         rules,
         identity,
+        kb_context,
         repo_head=repo_head,
     )
     context["budget_used"] = _estimate_tokens(json.dumps(context, sort_keys=True))
@@ -281,6 +286,7 @@ def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
                         "owner": task.get("owner"),
                         "dispatched_to": task.get("dispatched_to"),
                         "task_type": task.get("task_type"),
+                        "capability_tags": task.get("capability_tags") or [],
                         "blocked_on": task.get("blocked_on"),
                         "phase_id": phase_item.get("phase", {}).get("id"),
                         "phase_name": phase_item.get("phase", {}).get("name"),
@@ -335,6 +341,7 @@ def _current_work_row(current_work: Dict[str, Any], session: str) -> Dict[str, A
         "owner": row.get("owner") or session,
         "dispatched_to": row.get("dispatched_to"),
         "task_type": row.get("task_type"),
+        "capability_tags": row.get("capability_tags") or [],
         "blocked_on": row.get("blocked_on"),
         "phase_id": row.get("phase_id"),
         "phase_name": row.get("phase_name"),
@@ -881,6 +888,7 @@ def _companion_identity_paths(root: Path) -> List[Path]:
 def _build_snapshot(session: str, cli: str, task_id: Optional[str], work: Dict[str, Any],
                     summary: Optional[Dict[str, Any]], memory: List[Dict[str, Any]],
                     rules: List[Dict[str, Any]], identity: Optional[Dict[str, Any]] = None,
+                    kb_context: Optional[List[Dict[str, Any]]] = None,
                     repo_head: Optional[str] = None) -> Dict[str, Any]:
     resolved_task = task_id or work.get("task_id") or work.get("top_task_id")
     identity = identity or {}
@@ -900,6 +908,7 @@ def _build_snapshot(session: str, cli: str, task_id: Optional[str], work: Dict[s
             "owner": work.get("owner"),
             "dispatched_to": work.get("dispatched_to"),
             "task_type": work.get("task_type"),
+            "capability_tags": work.get("capability_tags") or [],
             "blocked_on": work.get("blocked_on"),
             "step_governance": work.get("step_governance") or {},
         },
@@ -939,6 +948,15 @@ def _build_snapshot(session: str, cli: str, task_id: Optional[str], work: Dict[s
                 "size": item.get("size", 0),
             }
             for item in identity.get("files") or []
+        ],
+        "kb_context": [
+            {
+                "stable_key": item.get("stable_key", ""),
+                "revision_no": item.get("revision_no"),
+                "content_sha256": item.get("content_sha256", ""),
+                "deduped": bool(item.get("deduped")),
+            }
+            for item in (kb_context or [])
         ],
         "ledger": _ledger_tail(),
         "assembler_version": head,
@@ -1029,6 +1047,10 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
         lines.append("")
     if not context.get("memory"):
         lines.append("- none selected")
+    kb_context = context.get("kb_context") or []
+    if kb_context:
+        lines.extend(["", "## Knowledge Base"])
+        lines.extend(_render_kb_context(kb_context, nonce))
     lines.extend(["", "## Rules"])
     rules = context.get("rules") or []
     for idx, rule in enumerate(rules, start=1):
@@ -1304,6 +1326,35 @@ def _render_refs(tier: str, refs: List[Dict[str, Any]], max_refs: int, nonce: st
     return lines
 
 
+def _render_kb_context(items: List[Dict[str, Any]], nonce: str) -> List[str]:
+    lines: List[str] = []
+    for idx, item in enumerate(items, start=1):
+        stable_key = str(item.get("stable_key") or f"item-{idx}")
+        node_lines = [
+            f"stable_key: {stable_key}",
+            f"revision_no: {item.get('revision_no', '')}",
+            f"content_sha256: {item.get('content_sha256', '')}",
+            f"title: {item.get('title', '')}",
+            f"entity_type: {item.get('entity_type', '')}",
+            f"layer: {item.get('layer', '')}",
+            f"active_status: {item.get('active_status', '')}",
+            f"truth_register: {item.get('truth_register', '')}",
+        ]
+        if item.get("summary"):
+            node_lines.extend(["summary:", str(item.get("summary") or "").strip()])
+        if item.get("deduped"):
+            node_lines.extend([
+                "deduped: true",
+                "deduped_reason: content already present in selected refs by content_sha256",
+            ])
+        else:
+            node_lines.extend(["deduped: false", "content:", str(item.get("content") or "").strip()])
+        lines.append(f"### KB item {idx}")
+        lines.extend(_render_untrusted(nonce, f"kb:{stable_key}", "\n".join(node_lines)))
+        lines.append("")
+    return lines
+
+
 def _trim_packet(packet: Dict[str, Any], cli: str, budget_bytes: int, max_refs_per_tier: int) -> Dict[str, Any]:
     trimmed = json.loads(json.dumps(packet))
     context = trimmed.setdefault("context", {})
@@ -1314,6 +1365,8 @@ def _trim_packet(packet: Dict[str, Any], cli: str, budget_bytes: int, max_refs_p
         memory = context.get("memory") or []
         if not memory:
             break
+        # KB context is intentionally not trim-able: selector-matched policy and
+        # process rulings are required context, like refs/rules/identity.
         memory.pop()
         context["memory"] = memory
     return trimmed

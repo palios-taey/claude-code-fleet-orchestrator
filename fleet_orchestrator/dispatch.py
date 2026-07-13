@@ -69,6 +69,7 @@ from .context_assembler import (
     size_report as wake_size_report,
     task_ref_receipt,
 )
+from .kb_context import KnowledgeBaseContextError
 from .notify_state import redis_connect as _notify_redis_connect
 from .notify_state import state_key as _notify_state_key
 from .decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
@@ -617,6 +618,8 @@ def _select_dispatch_context(worker: str, task_id: str, description: str,
                              supervisor: Optional[str], cli: str) -> tuple[dict[str, Any], str]:
     try:
         return select_wake_context(worker, task_id=task_id, cli=cli), ""
+    except KnowledgeBaseContextError:
+        raise
     except Exception as exc:
         warning = (
             "full task-scoped context selection unavailable; dispatch built the "
