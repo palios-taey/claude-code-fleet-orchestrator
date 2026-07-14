@@ -80,6 +80,7 @@ from .orch_schema import completed_task_satisfies_dependents_cypher
 from .rules_tier import get_rules
 from .worker_liveness import register_worker_task_liveness
 from .current_task_binding import (
+    clear_matching_current_task,
     clear_session_current_task,
     decode_current_task,
     is_live_binding_status,
@@ -298,7 +299,7 @@ def _orch_task_exists(task_id: str) -> bool:
     return record is not None
 
 
-def _claim_ready_orch_task(task_id: str, worker: str) -> None:
+def _claim_ready_orch_task(task_id: str, worker: str, *, force: bool = False) -> None:
     if not _orch_task_exists(task_id):
         return
 
@@ -313,6 +314,7 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
             WHERE (
                   prior_status = 'pending'
                   OR (prior_status = 'completed' AND coalesce(t.recurring, false) = true)
+                  OR ($force = true AND prior_status = 'in_progress')
               )
               AND {_DEPENDENCIES_READY_CYPHER}
             SET t.status = 'in_progress',
@@ -333,6 +335,7 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
             task_id=task_id,
             worker=worker,
             owner=owner,
+            force=bool(force),
         ).single()
 
         if record is not None:
@@ -355,6 +358,60 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
         f"ORCH_TASK_NOT_READY task={task_id} status={detail['status']} "
         f"incomplete_deps={detail['incomplete_deps']}"
     )
+
+
+def _current_task_binding_candidates(task_id: str) -> set[str]:
+    if not _orch_task_exists(task_id):
+        return set()
+    cfg = OrchConfig()
+    with get_neo4j_session(cfg) as session:
+        record = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            RETURN coalesce(t.status, 'pending') AS status,
+                   t.owner AS owner,
+                   t.dispatched_to AS dispatched_to,
+                   t.worker_liveness_worker AS worker_liveness_worker
+            """,
+            task_id=task_id,
+        ).single()
+    if not record:
+        return set()
+    values = record.data()
+    if str(values.get("status") or "").strip().lower() != "in_progress":
+        return set()
+    return {
+        str(candidate).strip()
+        for candidate in (
+            values.get("owner"),
+            values.get("dispatched_to"),
+            values.get("worker_liveness_worker"),
+        )
+        if str(candidate or "").strip()
+    }
+
+
+def _clear_replaced_force_bindings(task_id: str, previous_workers: set[str], worker: str) -> None:
+    stale_workers = sorted(previous_workers - {worker})
+    if not stale_workers:
+        return
+    try:
+        r = _redis_connect()
+    except Exception as exc:
+        logger.warning(
+            "force dispatch reclaim could not connect to Redis for stale binding clear task=%s workers=%s: %r",
+            task_id,
+            stale_workers,
+            exc,
+        )
+        return
+    for stale_worker in stale_workers:
+        clear_matching_current_task(
+            stale_worker,
+            task_id,
+            redis_client=r,
+            reason=f"dispatch-force-reclaim:{worker}",
+        )
 
 
 def _binding_is_ours(raw: Optional[str], task_id: str, binding_nonce: Optional[float]) -> bool:
@@ -726,7 +783,8 @@ def dispatch(
 
     from_session = supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")
 
-    _claim_ready_orch_task(task_id=task_id, worker=worker)
+    previous_force_bindings = _current_task_binding_candidates(task_id) if force else set()
+    _claim_ready_orch_task(task_id=task_id, worker=worker, force=force)
     try:
         binding_nonce = bind_current_task(
             worker=worker,
@@ -795,6 +853,7 @@ def dispatch(
         # means the wake was not delivered (V3): reverting is correct.
         _rollback_claim(worker, task_id, binding_nonce)
         raise RuntimeError(result.stderr.strip() or f"{cli} failed")
+    _clear_replaced_force_bindings(task_id, previous_force_bindings, worker)
     maybe_emit_decision_receipt(
         "wake",
         {
