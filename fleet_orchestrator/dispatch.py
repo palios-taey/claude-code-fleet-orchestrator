@@ -865,8 +865,16 @@ def _write_completion_receipt(r: Any, worker: str, current_task_id: str, payload
     if details:
         receipt["details"] = details[:500]
     try:
+        key = _state_key(worker, "last_completion_receipt")
+        existing = _decode_current_task(r.get(key))
+        if (
+            existing
+            and str(existing.get("outcome") or "").strip().lower() == "done"
+            and str(existing.get("task_id") or "").strip() == current_task_id
+        ):
+            return
         r.set(
-            _state_key(worker, "last_completion_receipt"),
+            key,
             json.dumps(receipt, sort_keys=True),
             ex=_COMPLETION_RECEIPT_TTL_SECS,
         )
@@ -877,6 +885,15 @@ def _write_completion_receipt(r: Any, worker: str, current_task_id: str, payload
             current_task_id,
             exc_info=True,
         )
+
+
+def write_completion_receipt(worker: str, task_id: str, details: Optional[str] = None) -> None:
+    clean_worker = str(worker or "").strip()
+    clean_task_id = str(task_id or "").strip()
+    if not clean_worker or not clean_task_id:
+        return
+    payload = _outcome_payload("done", details, {"task_id": clean_task_id})
+    _write_completion_receipt(_redis_connect(), clean_worker, clean_task_id, payload)
 
 
 def _notify_supervisor_response_ready(worker: str,

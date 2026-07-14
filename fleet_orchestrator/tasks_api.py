@@ -75,6 +75,7 @@ from fleet_orchestrator.dispatch import (
     dispatch as dispatch_task,
     record_outcome,
     request_changes,
+    write_completion_receipt,
 )
 from fleet_orchestrator.orch_schema import (
     CompletionEvidenceError,
@@ -926,7 +927,9 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
                     set_parent=True,
                 )
             elif status == "completed":
-                record_outcome(sender, "done", _outcome_details(result, completion_evidence))
+                outcome_details = _outcome_details(result, completion_evidence)
+                write_completion_receipt(sender, task_id, outcome_details)
+                record_outcome(sender, "done", outcome_details)
             elif status == "failed":
                 record_outcome(sender, "error", _outcome_details(result, completion_evidence))
             elif status == "interrupted":
