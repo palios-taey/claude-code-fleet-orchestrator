@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import OrchConfig, get_neo4j_driver
 from .current_task_binding import clear_matching_current_task
-from .inflight import active_inflight_signal, task_actively_in_flight
+from .inflight import InFlightProbeError, active_inflight_signal, task_actively_in_flight
 from .notify_state import key as _notify_key
 from .notify_state import redis_connect as _notify_redis_connect
 from .notify_state import state_key as _notify_state_key
@@ -16,6 +16,7 @@ from .notify_state import state_key as _notify_state_key
 
 DEFAULT_WORKER_TASK_LIVENESS_TTL_SECS = 300
 LOG = logging.getLogger(__name__)
+OUTWARD_EFFECT_CLASSES = frozenset({"outward_irreversible", "outward_action"})
 
 
 def worker_task_liveness_enabled() -> bool:
@@ -132,16 +133,13 @@ def _json_dict(raw: Any) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
-def _current_task_id(r, worker: str) -> Optional[str]:
-    current = _json_dict(r.get(_state_key(worker, "current_task")))
-    if not current:
-        return None
-    task_id = current.get("task_id")
-    return str(task_id) if task_id else None
+def _current_task_payload(r, worker: str) -> Optional[Dict[str, Any]]:
+    return _json_dict(r.get(_state_key(worker, "current_task")))
 
 
 def _last_outcome_terminal_for_current_task(r, worker: str, task_id: str) -> bool:
-    if _current_task_id(r, worker) != task_id:
+    current = _current_task_payload(r, worker)
+    if not current or str(current.get("task_id") or "") != task_id:
         return False
     outcome = _json_dict(r.get(_state_key(worker, "last_outcome"))) or {}
     return str(outcome.get("outcome") or "").strip().lower() in {"done", "error", "interrupted"}
@@ -198,6 +196,41 @@ def _task_out_of_band_workers(task: Dict[str, Any]) -> List[str]:
     ]
 
 
+def _task_effect_class(task: Dict[str, Any], current: Optional[Dict[str, Any]]) -> str:
+    for value in (
+        task.get("effect_class"),
+        (current or {}).get("effect_class"),
+        (current or {}).get("action_effect_class"),
+    ):
+        effect_class = str(value or "").strip().lower()
+        if effect_class:
+            return effect_class
+    return ""
+
+
+def _live_outward_action_guarded(task: Dict[str, Any], worker: str, task_id: str, now: float,
+                                 ttl_secs: int, *, config: Optional[OrchConfig] = None) -> bool:
+    r = _redis_connect()
+    current = _current_task_payload(r, worker)
+    if not current or str(current.get("task_id") or "") != task_id:
+        return False
+    if _task_effect_class(task, current) not in OUTWARD_EFFECT_CLASSES:
+        return False
+    try:
+        return active_inflight_signal(
+            task_id,
+            workers=[worker],
+            oob_workers=_task_out_of_band_workers(task),
+            now=now,
+            config=config,
+            heartbeat_ttl_secs=ttl_secs,
+            heartbeat_mode="current_task",
+            raise_on_probe_error=True,
+        ) is not None
+    except InFlightProbeError:
+        return True
+
+
 def _escalate_task(task: Dict[str, Any], now: float,
                    *, config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
     task_id = str(task.get("task_id") or "")
@@ -205,6 +238,9 @@ def _escalate_task(task: Dict[str, Any], now: float,
     if not task_id or not worker:
         return None
     cfg = config or OrchConfig()
+    ttl_secs = max(1, int(task.get("ttl_secs") or worker_task_liveness_ttl_secs()))
+    if _live_outward_action_guarded(task, worker, task_id, now, ttl_secs, config=cfg):
+        return None
     if task_actively_in_flight(
         task_id,
         workers=_task_out_of_band_workers(task),
@@ -280,6 +316,7 @@ def _registered_in_progress_tasks(
                    t.owner AS owner,
                    t.blocked_on AS blocked_on,
                    t.task_type AS task_type,
+                   t.effect_class AS effect_class,
                    t.dispatched_to AS dispatched_to,
                    t.worker_liveness_worker AS worker,
                    t.worker_liveness_supervisor AS supervisor,
@@ -330,7 +367,7 @@ def escalate_stale_worker_tasks(now: Optional[float] = None,
             heartbeat_ttl_secs=ttl_secs,
             heartbeat_mode="current_task",
         )
-        if signal and signal.source == "tool_heartbeat":
+        if signal and signal.source in {"tool_heartbeat", "tool_running"}:
             _mark_liveness_heartbeat(task_id, worker, current_time, ttl_secs, config=cfg)
             continue
         if signal:

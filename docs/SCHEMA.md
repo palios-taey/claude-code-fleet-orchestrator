@@ -89,5 +89,7 @@ For one-shot tasks dispatched to workers via `fleet_orchestrator/dispatch.py:dis
 | `taey:<worker>:last_outcome` | JSON `{outcome, details}` | Optionally set by worker via `record_outcome()` before stopping. |
 | `taey:<worker>:parent` | string | Optional explicit supervisor override (else suffix-strip). |
 | `taey:<worker>:idle` | "1" | Set by Stop hook, cleared by UserPromptSubmit hook. |
+| `taey:<worker>:last_activity` / `taey:<worker>:last_tool_activity` | unix timestamp string | Stamped by fleet-notify lifecycle hooks. Worker liveness treats `last_tool_activity` as task work only when the worker's `current_task` matches the task under inspection. |
+| `taey:<worker>:tool_running` / `taey:<worker>:tool_running_at` | "1" / unix timestamp string | Set by fleet-notify PreToolUse and cleared by PostToolUse. Orchestrator liveness consumes this only as an age-bounded matching-current-task signal; a stale `tool_running` key alone does not preserve or clear work. |
 
 These keys coexist with the live Neo4j task tracker. When a dispatched task already exists as an OrchTask, `dispatch()` claims it in Neo4j and also sets `current_task` in fleet-notify Redis. If the Redis bind is refused because another dispatcher already owns a live worker slot, the new claim is rolled back to `pending` and the existing binding is preserved. If the existing binding resolves to a non-live graph task, the stale binding is cleared and the new dispatch proceeds. Fleet-notify Redis remains the direct source of truth for stop-hook / idle-state coordination.
