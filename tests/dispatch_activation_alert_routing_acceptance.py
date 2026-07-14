@@ -21,10 +21,14 @@ FAILURES: list[str] = []
 class FakeRedis:
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
+        self.expiry: dict[str, int] = {}
 
     def set(self, key: str, value: object, ex: int | None = None) -> bool:
-        del ex
         self.store[key] = value
+        if ex is None:
+            self.expiry.pop(key, None)
+        else:
+            self.expiry[key] = ex
         return True
 
     def lpush(self, key: str, value: object) -> int:
@@ -41,6 +45,7 @@ class FakeRedis:
     def delete(self, *keys: str) -> int:
         deleted = 0
         for key in keys:
+            self.expiry.pop(key, None)
             if key in self.store:
                 del self.store[key]
                 deleted += 1
@@ -358,6 +363,25 @@ def _run_placeholder_composer_no_alert() -> list[tuple[str, str]]:
     })
 
 
+def _run_wedged_composer_candidate_ttl_floor() -> int | None:
+    r = FakeRedis()
+    worker = "conductor-codex"
+    with mock.patch.dict(
+        watch.os.environ,
+        {"ORCH_WEDGED_COMPOSER_STABILITY_WINDOW_SEC": "5"},
+    ):
+        matched = watch._composer_candidate_matches(
+            r,
+            worker,
+            "stable-fingerprint",
+            current_time=1000.0,
+            ttl_sec=2,
+        )
+    if matched:
+        return None
+    return r.expiry.get(watch._wedged_composer_candidate_key(worker))
+
+
 def main() -> int:
     sent = _run_activation_alert()
     _check(
@@ -434,6 +458,12 @@ def main() -> int:
         "ignored composer placeholder does not alert",
         placeholder_sent == [],
         placeholder_sent,
+    )
+    candidate_ttl = _run_wedged_composer_candidate_ttl_floor()
+    _check(
+        "wedged composer candidate ttl keeps stability floor",
+        candidate_ttl == watch.DEFAULT_WEDGED_COMPOSER_STABILITY_WINDOW_SEC,
+        candidate_ttl,
     )
     if FAILURES:
         print("\nFAIL -- " + "; ".join(FAILURES))
