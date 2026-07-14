@@ -137,6 +137,7 @@ DEFAULT_NOTIFY_DAEMON_HEARTBEAT_MAX_AGE_SEC = 15
 DEFAULT_NOTIFY_DAEMON_ALERT_DEDUP_TTL_SEC = 300
 DEFAULT_STUCK_INBOX_MAX_AGE_SEC = 600
 DEFAULT_COMPOSER_OCCUPANCY_MAX_AGE_SEC = 300
+DEFAULT_WEDGED_COMPOSER_REARM_SEC = 1800
 DEFAULT_NOTIFY_ROUTER_SERVICE = "conductor-notify-router"
 DEFAULT_NOTIFY_DAEMON_ALERT_TARGET = "conductor"
 USAGE_LIMIT_IDLE_MARKERS = (
@@ -889,10 +890,15 @@ def _failed_activation_handoffs(r, *, prefix: str) -> list[dict[str, object]]:
     return records
 
 
-def _wedged_composer_dedup_key(record: dict[str, object]) -> str:
-    target = str(record.get("target_session_id") or "unknown")
-    msg_id = str(record.get("msg_id") or record.get("dispatcher_task_id") or "unknown")
-    return orch_key("wedged-composer-liveness", target, msg_id)
+def _wedged_composer_transition_key(target: str) -> str:
+    return orch_key("wedged-composer-liveness", target or "unknown")
+
+
+def _clear_wedged_composer_transition(r, target: str) -> None:
+    try:
+        r.delete(_wedged_composer_transition_key(target))
+    except Exception as exc:
+        log.warning("wedged composer transition clear failed for %s: %s", target, exc)
 
 
 def _supervisor_for_failed_activation(r, target: str, record: dict[str, object]) -> Optional[str]:
@@ -910,7 +916,9 @@ def _process_wedged_composer_liveness(
     dedup_ttl_sec: int,
     *,
     max_age_sec: Optional[int] = None,
+    rearm_sec: Optional[int] = None,
 ) -> int:
+    del dedup_ttl_sec
     prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
     current_time = _redis_now(r)
     freshness = max(1, int(
@@ -918,6 +926,12 @@ def _process_wedged_composer_liveness(
         if max_age_sec is not None
         else _int_env("ORCH_COMPOSER_OCCUPANCY_MAX_AGE_SEC",
                       DEFAULT_COMPOSER_OCCUPANCY_MAX_AGE_SEC)
+    ))
+    rearm = max(1, int(
+        rearm_sec
+        if rearm_sec is not None
+        else _int_env("ORCH_WEDGED_COMPOSER_REARM_SEC",
+                      DEFAULT_WEDGED_COMPOSER_REARM_SEC)
     ))
     sent = 0
     for record in _failed_activation_handoffs(r, prefix=prefix):
@@ -931,9 +945,10 @@ def _process_wedged_composer_liveness(
             max_age_sec=freshness,
         )
         if not occupancy:
+            _clear_wedged_composer_transition(r, target)
             continue
-        dedup_key = _wedged_composer_dedup_key(record)
-        if r.exists(dedup_key):
+        transition_key = _wedged_composer_transition_key(target)
+        if r.exists(transition_key):
             continue
         supervisor = _supervisor_for_failed_activation(r, target, record)
         if not supervisor:
@@ -957,7 +972,15 @@ def _process_wedged_composer_liveness(
             priority="high",
             msg_id=f"orch-watch-wedged-composer-{target}-{msg_id}-{int(current_time)}",
         ):
-            r.set(dedup_key, "1", ex=dedup_ttl_sec)
+            payload = {
+                "target_session_id": target,
+                "dispatcher_task_id": task_id,
+                "msg_id": msg_id,
+                "activation_failed_at": record.get("activation_failed_at"),
+                "occupancy_observed_at": occupancy.get("observed_at"),
+                "alerted_at": current_time,
+            }
+            r.set(transition_key, json.dumps(payload, separators=(",", ":")), ex=rearm)
             sent += 1
             log.info("Sent WEDGED_COMPOSER wake: supervisor=%s worker=%s task=%s",
                      supervisor, target, task_id)
