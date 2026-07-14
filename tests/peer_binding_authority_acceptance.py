@@ -72,6 +72,7 @@ PARENT_RECUR = f"{PROJECT}::parent-recurring"
 EXPLICIT = f"{PROJECT}::explicit-peer"
 CLAIM_RECUR = f"{PROJECT}::claim-recurring"
 SELF_OWNED = f"{PROJECT}::self-owned"
+SUP_OWNED = f"{PROJECT}::supervisor-owned"
 FAILURES: list[str] = []
 
 
@@ -86,7 +87,7 @@ def _driver():
 
 
 def _cleanup() -> None:
-    R.delete(*[_state_key(peer, suffix) for peer in (PEER, PEER2, SELF_PEER) for suffix in ("current_task", "last_outcome", "parent")])
+    R.delete(*[_state_key(peer, suffix) for peer in (SUP, PEER, PEER2, SELF_PEER) for suffix in ("current_task", "last_outcome", "parent")])
     with _driver().session(database=CFG.neo4j_db) as session:
         session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=PFX)
 
@@ -119,7 +120,7 @@ def _setup() -> None:
     init_schema(config=CFG)
     create_project(project_id=PROJECT, name=PROJECT, supervisor=SUP, priority=1, config=CFG)
     create_phase(project_id=PROJECT, phase_id=PHASE, name="phase", config=CFG)
-    for task_id in (PARENT_RECUR, EXPLICIT, CLAIM_RECUR):
+    for task_id in (PARENT_RECUR, EXPLICIT, CLAIM_RECUR, SUP_OWNED):
         create_task(
             phase_id=PHASE,
             task_id=task_id,
@@ -186,9 +187,13 @@ def main() -> int:
         _check("unbound peer completion is rejected", code == 409 and body.get("ok") is False, body)
         _check("rejected completion leaves parent task pending", get_task(PARENT_RECUR, CFG).get("status") == "pending", get_task(PARENT_RECUR, CFG))
 
+        code, body = _patch(client, SUP_OWNED, {"status": "in_progress", "from": SUP, "blocked_on": "AWAIT:external-signal:acceptance"})
+        _check("supervisor in_progress update is allowed", code == 200 and body.get("ok") is True, body)
+        _check("supervisor in_progress update does not bind current_task", _current_task_id(SUP) == "", _current_task_id(SUP))
+
         code, body = _patch(client, SELF_OWNED, {"status": "in_progress", "from": SELF_PEER})
         _check("self-owned peer in_progress is allowed", code == 200 and body.get("ok") is True, body)
-        _check("self-owned peer start writes current_task first", _current_task_id(SELF_PEER) == SELF_OWNED, _current_task_id(SELF_PEER))
+        _check("self-owned peer in_progress binds its own current_task", _current_task_id(SELF_PEER) == SELF_OWNED, _current_task_id(SELF_PEER))
 
         _set_dispatched(EXPLICIT, PEER)
         ready = get_session_next_ready(PEER, project_id=PROJECT, config=CFG)

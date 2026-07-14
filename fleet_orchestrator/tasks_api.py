@@ -858,6 +858,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         blocked_on = data["blocked_on"] if "blocked_on" in data else None
         completion_evidence = _terminal_evidence_from_request(data)
         from fleet_orchestrator.completion_guard import (
+            _autonomous_peer_supervisor,
             completion_producer_for_status_update,
             peer_execution_binding_rejection,
             peer_self_completion_rejection,
@@ -882,8 +883,12 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         if rejection:
             return JSONResponse(status_code=409, content=rejection)
 
-        prebound_current_task = False
-        if sender and owner == sender and status == "in_progress":
+        if (
+            sender
+            and owner == sender
+            and str(status or "").strip().lower() == "in_progress"
+            and _autonomous_peer_supervisor(sender)
+        ):
             binding_supervisor = _resolve_supervisor_session(sender, config=cfg)
             bind_current_task(
                 worker=sender,
@@ -894,7 +899,6 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
                 guard_existing=True,
                 dispatcher=sender,
             )
-            prebound_current_task = True
 
         completed_by = completion_producer_for_status_update(
             task_id,
@@ -917,16 +921,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         )
 
         if sender and owner == sender:
-            if status == "in_progress" and not prebound_current_task:
-                binding_supervisor = _resolve_supervisor_session(sender, config=cfg)
-                bind_current_task(
-                    worker=sender,
-                    task_id=task_id,
-                    description=task_before.get("description", ""),
-                    supervisor=binding_supervisor,
-                    set_parent=True,
-                )
-            elif status == "completed":
+            if status == "completed":
                 outcome_details = _outcome_details(result, completion_evidence)
                 write_completion_receipt(sender, task_id, outcome_details)
                 record_outcome(sender, "done", outcome_details)
