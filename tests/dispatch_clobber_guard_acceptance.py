@@ -62,12 +62,37 @@ def main() -> int:
             row = session.run("MATCH (t:OrchTask {id:$id}) RETURN t.status AS status", id=tid).single()
         return str(row["status"]) if row else None
 
+    def task_record(tid: str) -> dict:
+        with driver.session(database=cfg.neo4j_db) as session:
+            row = session.run(
+                """
+                MATCH (t:OrchTask {id:$id})
+                RETURN t.status AS status, t.owner AS owner, t.dispatched_to AS dispatched_to
+                """,
+                id=tid,
+            ).single()
+        return row.data() if row else {}
+
     def direct_task_status_change(tid: str, status: str) -> None:
         with driver.session(database=cfg.neo4j_db) as session:
             session.run(
                 "MATCH (t:OrchTask {id:$id}) SET t.status = $status REMOVE t.dispatched_to",
                 id=tid,
                 status=status,
+            ).consume()
+
+    def phantom_in_progress(tid: str, owner: str) -> None:
+        with driver.session(database=cfg.neo4j_db) as session:
+            session.run(
+                """
+                MATCH (t:OrchTask {id:$id})
+                SET t.status = 'in_progress',
+                    t.owner = $owner,
+                    t.blocked_on = 'stop_when_all_ready_tasks_dispatched'
+                REMOVE t.dispatched_to
+                """,
+                id=tid,
+                owner=owner,
             ).consume()
 
     def current_task() -> dict:
@@ -77,8 +102,9 @@ def main() -> int:
     def cleanup() -> None:
         with driver.session(database=cfg.neo4j_db) as session:
             session.run("MATCH (n) WHERE n.id STARTS WITH $p DETACH DELETE n", p=PFX)
-        for suffix in ("current_task", "last_outcome", "parent"):
-            redis_client.delete(D._state_key(WORKER, suffix))
+        for session_id in (WORKER, SUP_A, SUP_B):
+            for suffix in ("current_task", "last_outcome", "parent"):
+                redis_client.delete(D._state_key(session_id, suffix))
 
     cleanup()
     old_notify_cli = os.environ.get("ORCH_NOTIFY_CLI")
@@ -90,7 +116,7 @@ def main() -> int:
         try:
             create_project(project_id=PFX, name="dispatch clobber guard", supervisor=SUP_A, config=cfg)
             create_phase(project_id=PFX, phase_id=task_id("phase"), name="phase", config=cfg)
-            for name in ("first", "same-second", "stale-next", "second", "forced", "terminal-next"):
+            for name in ("first", "same-second", "stale-next", "second", "forced", "terminal-next", "force-recover"):
                 create_task(
                     phase_id=task_id("phase"),
                     task_id=task_id(name),
@@ -169,6 +195,29 @@ def main() -> int:
             _check("terminal next task is in_progress", task_status(task_id("terminal-next")) == "in_progress", task_status(task_id("terminal-next")))
             _check("terminal previous task stays completed", task_status(task_id("forced")) == "completed", task_status(task_id("forced")))
             _check("terminal next dispatch notifies worker", len(notify_log.read_text(encoding="utf-8").splitlines()) == 4, notify_log.read_text(encoding="utf-8"))
+
+            phantom_in_progress(task_id("force-recover"), SUP_A)
+            redis_client.set(
+                D._state_key(SUP_A, "current_task"),
+                json.dumps({"task_id": task_id("force-recover"), "description": "force-recover", "supervisor": SUP_A, "started_at": 321.0}),
+            )
+
+            not_ready = None
+            try:
+                D.dispatch(WORKER, task_id("force-recover"), "force-recover", supervisor=SUP_B)
+            except D.OrchTaskNotReady as exc:
+                not_ready = str(exc)
+            _check("plain dispatch refuses in_progress phantom", bool(not_ready and "status=in_progress" in not_ready), not_ready)
+            _check("plain phantom refusal does not notify worker", len(notify_log.read_text(encoding="utf-8").splitlines()) == 4, notify_log.read_text(encoding="utf-8"))
+
+            D.dispatch(WORKER, task_id("force-recover"), "force-recover", supervisor=SUP_B, force=True)
+            recovered = current_task()
+            recovered_record = task_record(task_id("force-recover"))
+            _check("force dispatch recovers in_progress phantom", recovered.get("task_id") == task_id("force-recover"), recovered)
+            _check("force recovery binds target worker", recovered_record.get("dispatched_to") == WORKER, recovered_record)
+            _check("force recovery leaves task in_progress", recovered_record.get("status") == "in_progress", recovered_record)
+            _check("force recovery clears stale caller current_task", redis_client.get(D._state_key(SUP_A, "current_task")) is None)
+            _check("force recovery notifies worker", len(notify_log.read_text(encoding="utf-8").splitlines()) == 5, notify_log.read_text(encoding="utf-8"))
         finally:
             if old_notify_cli is None:
                 os.environ.pop("ORCH_NOTIFY_CLI", None)
