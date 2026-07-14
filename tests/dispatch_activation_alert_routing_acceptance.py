@@ -2,6 +2,7 @@
 """Acceptance: dispatch activation/stuck alerts do not route to a host identity."""
 from __future__ import annotations
 
+from fnmatch import fnmatch
 import json
 import sys
 from pathlib import Path
@@ -26,11 +27,22 @@ class FakeRedis:
         self.store[key] = value
         return True
 
+    def lpush(self, key: str, value: object) -> int:
+        self.store.setdefault(key, [])
+        self.store[key].insert(0, value)
+        return len(self.store[key])
+
     def get(self, key: str) -> object:
         return self.store.get(key)
 
     def exists(self, key: str) -> int:
         return 1 if key in self.store else 0
+
+    def scan_iter(self, match: str | None = None, count: int | None = None):
+        del count
+        for key in list(self.store):
+            if match is None or fnmatch(key, match):
+                yield key
 
     def time(self) -> tuple[int, int]:
         return (1000, 0)
@@ -83,6 +95,58 @@ def _run_activation_alert() -> list[tuple[str, str]]:
     return sent
 
 
+def _run_wedged_composer_alert(composer_payload: dict[str, object]) -> list[tuple[str, str]]:
+    r = FakeRedis()
+    worker = "conductor-codex"
+    task_id = "dispatch-activation-alert-task"
+    msg_id = "activation-failed-msg"
+    r.set(watch.notify_key("mira:inbox", prefix=watch.NOTIFY_KEY_PREFIX), "stale dead-letter")
+    r.set(watch.state_key(worker, "parent"), "mira")
+    r.set(
+        watch.state_key(worker, "current_task"),
+        json.dumps({
+            "task_id": task_id,
+            "description": "worker should have activated",
+            "supervisor": "mira",
+            "dispatcher": "mira",
+            "started_at": 900,
+        }),
+    )
+    r.set(watch.state_key(worker, "composer_occupancy"), json.dumps(composer_payload))
+    r.set(
+        f"{watch.NOTIFY_KEY_PREFIX}:handoff:mira:{msg_id}",
+        json.dumps({
+            "kind": "explicit_handoff",
+            "dispatcher_session_id": "mira",
+            "target_session_id": worker,
+            "dispatcher_task_id": task_id,
+            "msg_id": msg_id,
+            "activation_state": "failed",
+            "activation_failed_at": 990,
+        }),
+    )
+    sent: list[tuple[str, str]] = []
+
+    def fake_send(_r, target: str, body: str, **_kwargs) -> bool:
+        sent.append((target, body))
+        return True
+
+    with mock.patch.object(watch, "_local_hostname", return_value="mira"), \
+            mock.patch.object(watch, "_local_tmux_sessions", return_value={"conductor"}), \
+            mock.patch.object(watch, "_send_wake", side_effect=fake_send):
+        watch._process_wedged_composer_liveness(
+            r,
+            dedup_ttl_sec=60,
+            max_age_sec=120,
+        )
+        watch._process_wedged_composer_liveness(
+            r,
+            dedup_ttl_sec=60,
+            max_age_sec=120,
+        )
+    return sent
+
+
 def main() -> int:
     sent = _run_activation_alert()
     _check(
@@ -94,6 +158,42 @@ def main() -> int:
         "phantom host identity is not used as alert target",
         all(target != "mira" for target, _body in sent),
         sent,
+    )
+    composer_sent = _run_wedged_composer_alert({
+        "occupied": True,
+        "observed_at": 999,
+        "machine": "notify-host",
+        "excerpt": "Click Post on LinkedIn",
+    })
+    _check(
+        "wedged composer activation failure reaches owning supervisor",
+        len(composer_sent) == 1 and composer_sent[0][0] == "conductor",
+        composer_sent,
+    )
+    _check(
+        "wedged composer alert names failed activation and non-empty composer",
+        bool(composer_sent)
+        and "[WEDGED_COMPOSER]" in composer_sent[0][1]
+        and "dispatch_activation_failed" in composer_sent[0][1]
+        and "composer is still non-empty" in composer_sent[0][1],
+        composer_sent,
+    )
+    _check(
+        "wedged composer alert omits raw composer text",
+        bool(composer_sent)
+        and "composer_excerpt" not in composer_sent[0][1]
+        and "Click Post on LinkedIn" not in composer_sent[0][1],
+        composer_sent,
+    )
+    composer_empty_sent = _run_wedged_composer_alert({
+        "occupied": False,
+        "observed_at": 999,
+        "machine": "notify-host",
+    })
+    _check(
+        "activation failure without occupied composer does not alert",
+        composer_empty_sent == [],
+        composer_empty_sent,
     )
     if FAILURES:
         print("\nFAIL -- " + "; ".join(FAILURES))
