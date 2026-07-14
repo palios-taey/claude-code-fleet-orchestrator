@@ -81,6 +81,7 @@ skipped (preserves backward compat with Phase B v0.2.0).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -98,7 +99,8 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from fleet_orchestrator.config import OrchConfig
-from fleet_orchestrator.handoff_validation import process_expired_handoffs
+from fleet_orchestrator.evidence_contract import TERMINAL_STATUSES
+from fleet_orchestrator.handoff_validation import handoff_index_key, process_expired_handoffs
 from fleet_orchestrator.notify_state import (
     key as notify_key,
     key_prefix as notify_key_prefix,
@@ -140,6 +142,16 @@ DEFAULT_COMPOSER_OCCUPANCY_MAX_AGE_SEC = 300
 DEFAULT_WEDGED_COMPOSER_REARM_SEC = 1800
 DEFAULT_NOTIFY_ROUTER_SERVICE = "conductor-notify-router"
 DEFAULT_NOTIFY_DAEMON_ALERT_TARGET = "conductor"
+WEDGED_COMPOSER_TERMINAL_TASK_STATUSES = TERMINAL_STATUSES | frozenset({
+    "cancelled",
+    "done",
+    "killed",
+    "superseded",
+})
+COMPOSER_IGNORED_PROMPT_PREFIXES = (
+    "use /skills to list available skills",
+    "how is claude doing this session?",
+)
 USAGE_LIMIT_IDLE_MARKERS = (
     "you've hit your session limit",
     "you have hit your session limit",
@@ -875,6 +887,62 @@ def _fresh_composer_occupancy(
     return payload
 
 
+def _composer_prompt_text(payload: dict[str, object]) -> str:
+    for key in ("composer_text", "text", "content", "excerpt"):
+        text = " ".join(str(payload.get(key) or "").split())
+        if text:
+            return text
+    return ""
+
+
+def _composer_occupancy_fingerprint(payload: dict[str, object]) -> Optional[str]:
+    prompt_text = _composer_prompt_text(payload)
+    lowered = prompt_text.lower()
+    if any(lowered.startswith(prefix) for prefix in COMPOSER_IGNORED_PROMPT_PREFIXES):
+        return None
+    for key in (
+        "content_fingerprint",
+        "fingerprint",
+        "content_hash",
+        "text_hash",
+        "excerpt_hash",
+    ):
+        fingerprint = str(payload.get(key) or "").strip()
+        if fingerprint:
+            return fingerprint
+    if not prompt_text:
+        return None
+    return hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+
+
+def _failed_activation_record_task_is_terminal(record: dict[str, object]) -> bool:
+    task_id = str(record.get("dispatcher_task_id") or "").strip()
+    if not task_id:
+        return False
+    try:
+        task = _load_task_state(task_id)
+    except Exception as exc:
+        log.warning("wedged composer task lookup failed for %s: %s", task_id, exc)
+        return False
+    if not isinstance(task, dict):
+        return False
+    return str(task.get("status") or "").strip().lower() in WEDGED_COMPOSER_TERMINAL_TASK_STATUSES
+
+
+def _delete_failed_activation_handoff_record(r, record: dict[str, object], *, prefix: str) -> None:
+    key = str(record.get("_key") or "").strip()
+    dispatcher = str(record.get("dispatcher_session_id") or "").strip()
+    msg_id = str(record.get("msg_id") or "").strip()
+    try:
+        if key:
+            r.delete(key)
+        if dispatcher and msg_id:
+            r.srem(handoff_index_key(prefix, dispatcher), msg_id, key)
+    except Exception as exc:
+        log.warning("failed activation handoff cleanup failed for task=%s msg=%s: %s",
+                    record.get("dispatcher_task_id"), msg_id, exc)
+
+
 def _failed_activation_handoffs(r, *, prefix: str) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for key in r.scan_iter(match=f"{prefix}:handoff:*", count=1000):
@@ -886,6 +954,9 @@ def _failed_activation_handoffs(r, *, prefix: str) -> list[dict[str, object]]:
         if not record.get("activation_failed_at"):
             continue
         record["_key"] = str(key)
+        if _failed_activation_record_task_is_terminal(record):
+            _delete_failed_activation_handoff_record(r, record, prefix=prefix)
+            continue
         records.append(record)
     return records
 
@@ -894,11 +965,31 @@ def _wedged_composer_transition_key(target: str) -> str:
     return orch_key("wedged-composer-liveness", target or "unknown")
 
 
-def _clear_wedged_composer_transition(r, target: str) -> None:
+def _wedged_composer_candidate_key(target: str) -> str:
+    return orch_key("wedged-composer-candidate", target or "unknown")
+
+
+def _composer_candidate_matches(r, target: str, fingerprint: str, *, current_time: float,
+                                ttl_sec: int) -> bool:
+    key = _wedged_composer_candidate_key(target)
+    existing = _decode_queued_message(r.get(key))
+    matched = str(existing.get("fingerprint") or "") == fingerprint
+    payload = {
+        "fingerprint": fingerprint,
+        "observed_at": current_time,
+    }
     try:
-        r.delete(_wedged_composer_transition_key(target))
+        r.set(key, json.dumps(payload, separators=(",", ":")), ex=ttl_sec)
+    except TypeError:
+        r.set(key, json.dumps(payload, separators=(",", ":")))
+    return matched
+
+
+def _clear_wedged_composer_candidate(r, target: str) -> None:
+    try:
+        r.delete(_wedged_composer_candidate_key(target))
     except Exception as exc:
-        log.warning("wedged composer transition clear failed for %s: %s", target, exc)
+        log.debug("wedged composer candidate clear failed for %s: %s", target, exc)
 
 
 def _supervisor_for_failed_activation(r, target: str, record: dict[str, object]) -> Optional[str]:
@@ -934,10 +1025,12 @@ def _process_wedged_composer_liveness(
                       DEFAULT_WEDGED_COMPOSER_REARM_SEC)
     ))
     sent = 0
+    seen_targets: set[str] = set()
     for record in _failed_activation_handoffs(r, prefix=prefix):
         target = str(record.get("target_session_id") or "").strip()
-        if not target:
+        if not target or target in seen_targets:
             continue
+        seen_targets.add(target)
         occupancy = _fresh_composer_occupancy(
             r,
             target,
@@ -945,10 +1038,18 @@ def _process_wedged_composer_liveness(
             max_age_sec=freshness,
         )
         if not occupancy:
-            _clear_wedged_composer_transition(r, target)
+            _clear_wedged_composer_candidate(r, target)
+            continue
+        fingerprint = _composer_occupancy_fingerprint(occupancy)
+        if not fingerprint:
+            _clear_wedged_composer_candidate(r, target)
             continue
         transition_key = _wedged_composer_transition_key(target)
         if r.exists(transition_key):
+            continue
+        if not _composer_candidate_matches(r, target, fingerprint,
+                                           current_time=current_time,
+                                           ttl_sec=freshness):
             continue
         supervisor = _supervisor_for_failed_activation(r, target, record)
         if not supervisor:
