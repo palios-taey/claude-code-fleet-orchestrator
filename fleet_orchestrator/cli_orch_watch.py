@@ -136,6 +136,7 @@ DEFAULT_NOTIFY_DAEMON_WATCH_INTERVAL_SEC = 30
 DEFAULT_NOTIFY_DAEMON_HEARTBEAT_MAX_AGE_SEC = 15
 DEFAULT_NOTIFY_DAEMON_ALERT_DEDUP_TTL_SEC = 300
 DEFAULT_STUCK_INBOX_MAX_AGE_SEC = 600
+DEFAULT_COMPOSER_OCCUPANCY_MAX_AGE_SEC = 300
 DEFAULT_NOTIFY_ROUTER_SERVICE = "conductor-notify-router"
 DEFAULT_NOTIFY_DAEMON_ALERT_TARGET = "conductor"
 USAGE_LIMIT_IDLE_MARKERS = (
@@ -842,6 +843,125 @@ def _process_handoff_timeouts(r) -> None:
             )
         except Exception as exc:
             log.error("handoff timeout processing failed for %s: %s", dispatcher, exc)
+
+
+def _float_or_none(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fresh_composer_occupancy(
+    r,
+    node_id: str,
+    *,
+    now: float,
+    max_age_sec: int,
+) -> Optional[dict[str, object]]:
+    payload = _decode_queued_message(r.get(state_key(node_id, "composer_occupancy")))
+    if payload.get("occupied") is not True:
+        return None
+    observed_at = _float_or_none(payload.get("observed_at"))
+    if observed_at is None:
+        return None
+    age_sec = max(0.0, now - observed_at)
+    if age_sec > max_age_sec:
+        return None
+    payload["age_sec"] = age_sec
+    return payload
+
+
+def _failed_activation_handoffs(r, *, prefix: str) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for key in r.scan_iter(match=f"{prefix}:handoff:*", count=1000):
+        record = _decode_queued_message(r.get(key))
+        if record.get("kind") != "explicit_handoff":
+            continue
+        if str(record.get("activation_state") or "") != "failed":
+            continue
+        if not record.get("activation_failed_at"):
+            continue
+        record["_key"] = str(key)
+        records.append(record)
+    return records
+
+
+def _wedged_composer_dedup_key(record: dict[str, object]) -> str:
+    target = str(record.get("target_session_id") or "unknown")
+    msg_id = str(record.get("msg_id") or record.get("dispatcher_task_id") or "unknown")
+    return orch_key("wedged-composer-liveness", target, msg_id)
+
+
+def _supervisor_for_failed_activation(r, target: str, record: dict[str, object]) -> Optional[str]:
+    current = get_current_task(r, target)
+    task = dict(current) if isinstance(current, dict) else {}
+    dispatcher = str(record.get("dispatcher_session_id") or "").strip()
+    if dispatcher:
+        task.setdefault("dispatcher", dispatcher)
+        task.setdefault("supervisor", dispatcher)
+    return resolve_supervisor(r, target, task)
+
+
+def _process_wedged_composer_liveness(
+    r,
+    dedup_ttl_sec: int,
+    *,
+    max_age_sec: Optional[int] = None,
+) -> int:
+    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+    current_time = _redis_now(r)
+    freshness = max(1, int(
+        max_age_sec
+        if max_age_sec is not None
+        else _int_env("ORCH_COMPOSER_OCCUPANCY_MAX_AGE_SEC",
+                      DEFAULT_COMPOSER_OCCUPANCY_MAX_AGE_SEC)
+    ))
+    sent = 0
+    for record in _failed_activation_handoffs(r, prefix=prefix):
+        target = str(record.get("target_session_id") or "").strip()
+        if not target:
+            continue
+        occupancy = _fresh_composer_occupancy(
+            r,
+            target,
+            now=current_time,
+            max_age_sec=freshness,
+        )
+        if not occupancy:
+            continue
+        dedup_key = _wedged_composer_dedup_key(record)
+        if r.exists(dedup_key):
+            continue
+        supervisor = _supervisor_for_failed_activation(r, target, record)
+        if not supervisor:
+            log.warning("wedged composer liveness could not resolve supervisor for %s", target)
+            continue
+        task_id = str(record.get("dispatcher_task_id") or "?")
+        msg_id = str(record.get("msg_id") or "?")
+        age = int(float(occupancy.get("age_sec") or 0))
+        machine = str(occupancy.get("machine") or "unknown")
+        body = (
+            f"[WEDGED_COMPOSER] {target} has dispatch_activation_failed for task={task_id} "
+            f"while its composer is still non-empty (observed {age}s ago on {machine}). "
+            "Treat this peer as WEDGED, not idle; inspect the tmux pane before redispatching "
+            "or clearing any possible outward action."
+        )
+        body += f" handoff_msg_id={msg_id}."
+        if _send_wake(
+            r,
+            supervisor,
+            body,
+            priority="high",
+            msg_id=f"orch-watch-wedged-composer-{target}-{msg_id}-{int(current_time)}",
+        ):
+            r.set(dedup_key, "1", ex=dedup_ttl_sec)
+            sent += 1
+            log.info("Sent WEDGED_COMPOSER wake: supervisor=%s worker=%s task=%s",
+                     supervisor, target, task_id)
+    return sent
 
 
 def _stop_gate_dedup(r, node_id: str, current_task_id: str, decision_key: str,
@@ -1603,6 +1723,8 @@ def main():
             max(1.0, args.notify_daemon_watch_interval_sec / 4),
         )
     last_notify_daemon_watch = 0.0
+    last_wedged_composer_liveness = 0.0
+    wedged_composer_liveness_interval = min(60.0, max(1.0, poll_timeout))
 
     while True:
         try:
@@ -1615,6 +1737,13 @@ def main():
             continue
 
         now = time.time()
+        if now - last_wedged_composer_liveness >= wedged_composer_liveness_interval:
+            last_wedged_composer_liveness = now
+            try:
+                _process_wedged_composer_liveness(r, args.dedup_ttl_sec)
+            except Exception as exc:
+                log.error("wedged composer liveness check failed: %s", exc)
+
         if (args.notify_daemon_watchdog
                 and now - last_notify_daemon_watch >= args.notify_daemon_watch_interval_sec):
             last_notify_daemon_watch = now
@@ -1638,6 +1767,7 @@ def main():
             sweep_count = 0
             try:
                 _process_handoff_timeouts(r)
+                _process_wedged_composer_liveness(r, args.dedup_ttl_sec)
                 _process_task_reconciliations(r, args.dedup_ttl_sec)
                 _process_worker_liveness_expirations(r, args.dedup_ttl_sec)
                 _process_idle_owner_graph_work(r, args.dedup_ttl_sec)
@@ -1656,6 +1786,7 @@ def main():
         if not message or message.get("type") not in ("pmessage", "message"):
             try:
                 _process_handoff_timeouts(r)
+                _process_wedged_composer_liveness(r, args.dedup_ttl_sec)
                 _process_task_reconciliations(r, args.dedup_ttl_sec)
                 _process_worker_liveness_expirations(r, args.dedup_ttl_sec)
                 _process_idle_owner_graph_work(r, args.dedup_ttl_sec)
