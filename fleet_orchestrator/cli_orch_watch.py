@@ -139,6 +139,7 @@ DEFAULT_NOTIFY_DAEMON_HEARTBEAT_MAX_AGE_SEC = 15
 DEFAULT_NOTIFY_DAEMON_ALERT_DEDUP_TTL_SEC = 300
 DEFAULT_STUCK_INBOX_MAX_AGE_SEC = 600
 DEFAULT_COMPOSER_OCCUPANCY_MAX_AGE_SEC = 300
+DEFAULT_WEDGED_COMPOSER_STABILITY_WINDOW_SEC = 120
 DEFAULT_WEDGED_COMPOSER_REARM_SEC = 1800
 DEFAULT_NOTIFY_ROUTER_SERVICE = "conductor-notify-router"
 DEFAULT_NOTIFY_DAEMON_ALERT_TARGET = "conductor"
@@ -969,6 +970,18 @@ def _wedged_composer_candidate_key(target: str) -> str:
     return orch_key("wedged-composer-candidate", target or "unknown")
 
 
+def _wedged_composer_candidate_ttl_sec(freshness_sec: int) -> int:
+    stability_window = _int_env(
+        "ORCH_WEDGED_COMPOSER_STABILITY_WINDOW_SEC",
+        DEFAULT_WEDGED_COMPOSER_STABILITY_WINDOW_SEC,
+    )
+    stability_window = max(
+        DEFAULT_WEDGED_COMPOSER_STABILITY_WINDOW_SEC,
+        int(stability_window),
+    )
+    return max(1, int(freshness_sec), stability_window)
+
+
 def _composer_candidate_matches(r, target: str, fingerprint: str, *, current_time: float,
                                 ttl_sec: int) -> bool:
     key = _wedged_composer_candidate_key(target)
@@ -978,8 +991,9 @@ def _composer_candidate_matches(r, target: str, fingerprint: str, *, current_tim
         "fingerprint": fingerprint,
         "observed_at": current_time,
     }
+    candidate_ttl_sec = _wedged_composer_candidate_ttl_sec(ttl_sec)
     try:
-        r.set(key, json.dumps(payload, separators=(",", ":")), ex=ttl_sec)
+        r.set(key, json.dumps(payload, separators=(",", ":")), ex=candidate_ttl_sec)
     except TypeError:
         r.set(key, json.dumps(payload, separators=(",", ":")))
     return matched
