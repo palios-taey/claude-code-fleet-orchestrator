@@ -38,6 +38,14 @@ class FakeRedis:
     def exists(self, key: str) -> int:
         return 1 if key in self.store else 0
 
+    def delete(self, *keys: str) -> int:
+        deleted = 0
+        for key in keys:
+            if key in self.store:
+                del self.store[key]
+                deleted += 1
+        return deleted
+
     def scan_iter(self, match: str | None = None, count: int | None = None):
         del count
         for key in list(self.store):
@@ -113,6 +121,57 @@ def _run_wedged_composer_alert(composer_payload: dict[str, object]) -> list[tupl
         }),
     )
     r.set(watch.state_key(worker, "composer_occupancy"), json.dumps(composer_payload))
+    for record_msg_id in (msg_id, f"{msg_id}-second"):
+        r.set(
+            f"{watch.NOTIFY_KEY_PREFIX}:handoff:mira:{record_msg_id}",
+            json.dumps({
+                "kind": "explicit_handoff",
+                "dispatcher_session_id": "mira",
+                "target_session_id": worker,
+                "dispatcher_task_id": task_id,
+                "msg_id": record_msg_id,
+                "activation_state": "failed",
+                "activation_failed_at": 990,
+            }),
+        )
+    sent: list[tuple[str, str]] = []
+
+    def fake_send(_r, target: str, body: str, **_kwargs) -> bool:
+        sent.append((target, body))
+        return True
+
+    with mock.patch.object(watch, "_local_hostname", return_value="mira"), \
+            mock.patch.object(watch, "_local_tmux_sessions", return_value={"conductor"}), \
+            mock.patch.object(watch, "_send_wake", side_effect=fake_send):
+        watch._process_wedged_composer_liveness(
+            r,
+            dedup_ttl_sec=60,
+            max_age_sec=120,
+        )
+        watch._process_wedged_composer_liveness(
+            r,
+            dedup_ttl_sec=60,
+            max_age_sec=120,
+        )
+    return sent
+
+
+def _run_wedged_composer_resolution_recurrence() -> list[tuple[str, str]]:
+    r = FakeRedis()
+    worker = "conductor-codex"
+    task_id = "dispatch-activation-alert-task"
+    msg_id = "activation-failed-msg"
+    r.set(watch.state_key(worker, "parent"), "mira")
+    r.set(
+        watch.state_key(worker, "current_task"),
+        json.dumps({
+            "task_id": task_id,
+            "description": "worker should have activated",
+            "supervisor": "mira",
+            "dispatcher": "mira",
+            "started_at": 900,
+        }),
+    )
     r.set(
         f"{watch.NOTIFY_KEY_PREFIX}:handoff:mira:{msg_id}",
         json.dumps({
@@ -134,11 +193,31 @@ def _run_wedged_composer_alert(composer_payload: dict[str, object]) -> list[tupl
     with mock.patch.object(watch, "_local_hostname", return_value="mira"), \
             mock.patch.object(watch, "_local_tmux_sessions", return_value={"conductor"}), \
             mock.patch.object(watch, "_send_wake", side_effect=fake_send):
+        r.set(watch.state_key(worker, "composer_occupancy"), json.dumps({
+            "occupied": True,
+            "observed_at": 999,
+            "machine": "notify-host",
+        }))
         watch._process_wedged_composer_liveness(
             r,
             dedup_ttl_sec=60,
             max_age_sec=120,
         )
+        r.set(watch.state_key(worker, "composer_occupancy"), json.dumps({
+            "occupied": False,
+            "observed_at": 1000,
+            "machine": "notify-host",
+        }))
+        watch._process_wedged_composer_liveness(
+            r,
+            dedup_ttl_sec=60,
+            max_age_sec=120,
+        )
+        r.set(watch.state_key(worker, "composer_occupancy"), json.dumps({
+            "occupied": True,
+            "observed_at": 1000,
+            "machine": "notify-host",
+        }))
         watch._process_wedged_composer_liveness(
             r,
             dedup_ttl_sec=60,
@@ -166,7 +245,7 @@ def main() -> int:
         "excerpt": "Click Post on LinkedIn",
     })
     _check(
-        "wedged composer activation failure reaches owning supervisor",
+        "wedged composer persistent failed handoffs alert once per active transition",
         len(composer_sent) == 1 and composer_sent[0][0] == "conductor",
         composer_sent,
     )
@@ -194,6 +273,12 @@ def main() -> int:
         "activation failure without occupied composer does not alert",
         composer_empty_sent == [],
         composer_empty_sent,
+    )
+    composer_recurrence_sent = _run_wedged_composer_resolution_recurrence()
+    _check(
+        "wedged composer resolution plus recurrence alerts again",
+        len(composer_recurrence_sent) == 2,
+        composer_recurrence_sent,
     )
     if FAILURES:
         print("\nFAIL -- " + "; ".join(FAILURES))

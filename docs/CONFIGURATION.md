@@ -118,6 +118,7 @@ drift by loop-proof completion verification; default `foundations/careers`).
 | `ORCH_NOTIFY_DAEMON_HEARTBEAT_MAX_AGE_SEC` | `15` | Maximum accepted age for `taey:_notify_daemon:heartbeat` before `orch-watch` treats the notify daemon as wedged. |
 | `ORCH_NOTIFY_DAEMON_STUCK_INBOX_MAX_AGE_SEC` | `600` | Maximum accepted age for a queued `${NOTIFY_KEY_PREFIX}:*:inbox` message before `orch-watch` raises the stuck-delivery SLO alert. |
 | `ORCH_COMPOSER_OCCUPANCY_MAX_AGE_SEC` | `300` | Maximum accepted age, in seconds, for a worker's `${NOTIFY_KEY_PREFIX}:<session>:composer_occupancy` stamp before `orch-watch` ignores it for wedged-composer activation-failure alerts. |
+| `ORCH_WEDGED_COMPOSER_REARM_SEC` | `1800` | Minimum re-arm window, in seconds, before `orch-watch` can re-alert on the same wedged-composer activation-failure transition after the composer clears and wedges again. |
 | `ORCH_NOTIFY_ROUTER_SERVICE` | `conductor-notify-router` | `systemctl --user is-active` service name checked by the notify-daemon watchdog. |
 | `ORCH_NOTIFY_DAEMON_ALERT_TARGET` | `conductor` | tmux session that receives direct out-of-band service and heartbeat liveness watchdog alerts. |
 
