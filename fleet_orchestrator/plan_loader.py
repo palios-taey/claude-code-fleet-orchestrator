@@ -315,6 +315,38 @@ def _release_ingest_holds(task_ids: Set[str], cfg: OrchConfig) -> None:
         """, task_ids=sorted(task_ids))
 
 
+def _user_stop_condition_labels(user_stop_conditions: List[Any]) -> List[str]:
+    labels: List[str] = []
+    for item in user_stop_conditions or []:
+        if isinstance(item, dict):
+            value = item.get("label")
+        else:
+            value = item
+        label = str(value or "").strip()
+        if label:
+            labels.append(label)
+    return list(dict.fromkeys(labels))
+
+
+def _clear_plan_stop_condition_blocked_on_leaks(task_ids: Set[str],
+                                                user_stop_conditions: List[Any],
+                                                cfg: OrchConfig) -> int:
+    labels = _user_stop_condition_labels(user_stop_conditions)
+    if not task_ids or not labels:
+        return 0
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        record = session.run("""
+            MATCH (t:OrchTask)
+            WHERE t.id IN $task_ids
+              AND t.blocked_on IN $blocked_on_values
+            SET t.blocked_on = NULL,
+                t.updated_at = datetime()
+            RETURN count(t) AS cleared_count
+        """, task_ids=sorted(task_ids), blocked_on_values=labels).single()
+    return int(record["cleared_count"] if record else 0)
+
+
 def _reconcile_task_dependencies(task_id: str, depends_on_ids: List[str],
                                  source_path: str = "",
                                  config: Optional[OrchConfig] = None) -> Dict[str, Any]:
@@ -808,6 +840,11 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
             )
 
     _release_ingest_holds(held_task_ids, cfg)
+    _clear_plan_stop_condition_blocked_on_leaks(
+        parsed_task_ids,
+        project.get("user_stop_conditions", []),
+        cfg,
+    )
 
     stale_tasks = sorted(task_id for task_id in existing_tasks if task_id not in parsed_task_ids)
 
