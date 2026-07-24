@@ -1217,10 +1217,12 @@ def _handle_user_stop_gate(r, node_id: str, task: dict) -> bool:
         next_task_id = next_ready.get("task_id", "?")
         if not _stop_gate_dedup(r, node_id, task_id, f"continue:{next_task_id}"):
             return True
+        next_desc = (next_ready.get("description") or "")[:120]
         body = (
             f"[AUTO_CONTINUE] You stopped while task={task_id} remains in_progress with no matching "
-            f"user stop condition. The next ready task for you is: {next_task_id} — "
-            f"{(next_ready.get('description') or '')[:120]}. Continue execution instead of stopping."
+            f"user stop condition. Continue execution instead of stopping. Next ready task: {next_task_id} — "
+            f"{next_desc}. Inspect it with `taey-task status {next_task_id}` or resume routing with "
+            "`taey-plan current`."
         )
         if _send_wake(
             r,
