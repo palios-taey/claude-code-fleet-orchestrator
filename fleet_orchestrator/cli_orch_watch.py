@@ -337,19 +337,6 @@ def _task_project_context(task_id: str) -> Optional[Dict[str, object]]:
     return get_task_project(task_id, config=OrchConfig())
 
 
-def _set_task_blocked_on(task_id: str, owner: str, reason: str) -> None:
-    from fleet_orchestrator.config import OrchConfig
-    from fleet_orchestrator.orch_schema import update_task_status
-
-    update_task_status(
-        task_id,
-        "in_progress",
-        owner=owner,
-        blocked_on=reason,
-        config=OrchConfig(),
-    )
-
-
 def _send_wake(r, target: str, body: str, priority: str, msg_id: str) -> bool:
     del r, msg_id
     cli = OrchConfig().notify_cli_path
@@ -1218,11 +1205,11 @@ def _handle_user_stop_gate(r, node_id: str, task: dict) -> bool:
     matched_condition, next_ready = _evaluate_user_stop_conditions(
         r, node_id, task_state, project_context
     )
-    owner = task_state.get("owner") or node_id
 
     if matched_condition:
-        _set_task_blocked_on(task_id, owner=owner, reason=matched_condition)
-        log.info("Suppressed stop-gate wake: session=%s task=%s blocked_on=%s",
+        # User stop conditions are project state. task.blocked_on is reserved for resolvable
+        # task ids or structured AWAIT markers; storing the condition label there deadlocks.
+        log.info("Suppressed stop-gate wake: session=%s task=%s user_stop_condition=%s",
                  node_id, task_id, matched_condition)
         return True
 
