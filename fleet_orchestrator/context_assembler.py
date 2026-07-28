@@ -41,6 +41,9 @@ MEMORY_BASE = Path.home() / ".claude" / "projects"
 RULES_STORE_ABSENT_LINE = "- no rules store configured - add rules/global.md or set ORCH_RULES_ROOT; see rules/README.md"
 UNTRUSTED_NONCE_FIELD = "untrusted_data_nonce"
 DEFAULT_COMPANION_SESSIONS = ("taey", "companion")
+# Seats whose mandate is ENABLING Taey to run a process, not implementing code. Opt-in per seat
+# via ORCH_ENABLEMENT_SESSIONS; empty default so no seat changes role without being named.
+DEFAULT_ENABLEMENT_SESSIONS = ()
 UNAVAILABLE_CONTEXT_MARKER = "UNAVAILABLE (context selection error)"
 MISSING_SESSION_ROOT_MARKER = "UNAVAILABLE (missing ORCH_SESSION_ROOTS)"
 UNTRUSTED_DATA_PREAMBLE = (
@@ -61,6 +64,34 @@ ENGINEERING_IDENTITY_CORE = "\n".join([
     "- A failing verification stops the handoff until the root cause is understood.",
     "- Report branch, commit, touched files, verification commands, and residual risk.",
 ])
+ENABLEMENT_IDENTITY_CORE = "\n".join([
+    "role: enablement operator",
+    "- TAEY EXECUTES THE WORK. You enable. You do not perform the process yourself, and you do not",
+    "  build automation that removes Taey from the loop. Taking the action yourself and automating",
+    "  the action away are THE SAME FAILURE.",
+    "- THE LOOP, one action at a time, every platform: read the live screen (tree_view --display :N)",
+    "  -> TAEY JUDGES EXACTLY ONE ACTION -> shape-validate its JSON -> execute Taey's VERBATIM JSON",
+    "  via act.py -> verify the screen against Taey's own `expect` -> write the ledger row. Then the",
+    "  next single action. act.py is a governed interface, not automation.",
+    "- WHEN AN ACTION FAILS: FULL STOP. Do not retry, do not work around it, do not do the step",
+    "  yourself. Triage into exactly ONE lever, then TAEY RETRIES:",
+    "    (1) fix on our end (infra/code/data) -> Taey then succeeds unchanged -> author a",
+    "        spec_knowledge_v1 row so Taey becomes the regression detector for that subsystem;",
+    "    (2) fix the instruction/system prompt -> Taey retries -> still train it, so the prompt line",
+    "        can later be evicted;",
+    "    (3) train it -> genuine capability gap -> author the behavioral pair, right-way-only.",
+    "  An unfixable gap is FILED, never trained around: training over missing capability manufactures",
+    "  confident failure.",
+    "- YOUR OUTPUT IS MEASURED IN: production actions Taey executed, walks completed end to end,",
+    "  training rows generated and registered, and real outcomes shipped. NOT in commits, branches,",
+    "  or touched files. A session with many diffs and no completed walk has produced nothing.",
+    "- WORK THE PLAN. Start from `taey-plan current` / `next`, not from the notification stream. A",
+    "  defect notification is an interruption to queue, never a substitute for the walk.",
+    "- Treat claims as observed, inferred, or unknown; cite files, commands, commits, or live output.",
+    "  Verify before asserting, including about your own past actions.",
+])
+
+
 COMPANION_IDENTITY_MISSING = "\n".join([
     "role: companion",
     "- Full companion identity was requested, but no operator identity file is configured.",
@@ -777,6 +808,8 @@ def _select_identity(raw_session: str, session: str, cli: str) -> Dict[str, Any]
     role = _identity_role(raw_session, session, cli)
     if role == "companion":
         return _companion_identity()
+    if role == "enablement":
+        return _enablement_identity()
     return _engineering_identity()
 
 
@@ -786,7 +819,17 @@ def _identity_role(raw_session: str, session: str, cli: str) -> str:
     companions = _companion_sessions()
     if session in companions or (raw_session or "").strip() in companions:
         return "companion"
+    enablers = _enablement_sessions()
+    if session in enablers or (raw_session or "").strip() in enablers:
+        return "enablement"
     return "engineering"
+
+
+def _enablement_sessions() -> set[str]:
+    raw = os.environ.get("ORCH_ENABLEMENT_SESSIONS", "").strip()
+    if not raw:
+        return set(DEFAULT_ENABLEMENT_SESSIONS)
+    return {item.strip() for item in raw.split(",") if item.strip()}
 
 
 def _companion_sessions() -> set[str]:
@@ -794,6 +837,20 @@ def _companion_sessions() -> set[str]:
     if not raw:
         return set(DEFAULT_COMPANION_SESSIONS)
     return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _enablement_identity() -> Dict[str, Any]:
+    return {
+        "role": "enablement",
+        "mode": "lean_role_core",
+        "source": "built_in",
+        "content": ENABLEMENT_IDENTITY_CORE,
+        "path": "",
+        "sha256": _sha256_text(ENABLEMENT_IDENTITY_CORE),
+        "mtime_ns": 0,
+        "size": len(ENABLEMENT_IDENTITY_CORE.encode("utf-8")),
+        "files": [],
+    }
 
 
 def _engineering_identity() -> Dict[str, Any]:
