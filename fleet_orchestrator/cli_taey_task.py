@@ -349,8 +349,9 @@ def main():
 
     p_list = sub.add_parser("list", help="List pending tasks")
 
-    p_status = sub.add_parser("status", help="Check task status")
+    p_status = sub.add_parser("status", aliases=["show"], help="Check task status (alias: show)")
     p_status.add_argument("task_id", help="Task ID")
+    p_status.set_defaults(command="status")
 
     p_dispatch = sub.add_parser("dispatch", help="Claim, bind, and wake a peer task")
     p_dispatch.add_argument("task_id", help="Task ID")
