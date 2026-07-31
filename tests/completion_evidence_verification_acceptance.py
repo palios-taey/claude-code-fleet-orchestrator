@@ -405,22 +405,96 @@ def main() -> int:
             f"{repo_only_response.status_code} {repo_only_response.text}",
         )
 
-        local_task = _seed_task("local")
+        os.environ["ORCH_COMPLETION_GITHUB_REPO"] = ORCH_REPO
+        gated_observation_task = _seed_task("gated-observation-only")
+        gated_observation_response = client.patch(
+            f"/api/task/{gated_observation_task}",
+            json={
+                "status": "completed",
+                "from": "tester-api",
+                "evidence": {"production_observation": "gated observation-only completion probe"},
+            },
+        )
+        gated_observation_payload = client.get(f"/api/tasks/{gated_observation_task}").json()
+        check(
+            "gated repo observation-only completion is rejected",
+            gated_observation_response.status_code == 400
+            and "gated repo" in gated_observation_response.text
+            and "commit_sha" in gated_observation_response.text
+            and gated_observation_payload.get("status") == "pending",
+            f"{gated_observation_response.status_code} {gated_observation_response.text} payload={gated_observation_payload}",
+        )
+
+        gated_runtime_override_task = _seed_task("gated-runtime-override")
+        gated_runtime_override_response = client.patch(
+            f"/api/task/{gated_runtime_override_task}",
+            json={
+                "status": "completed",
+                "from": "tester-api",
+                "evidence": {
+                    "repo": TAEYS_HANDS_REPO,
+                    "production_observation": "gated runtime must not accept explicit gateless override",
+                },
+            },
+        )
+        gated_runtime_override_payload = client.get(f"/api/tasks/{gated_runtime_override_task}").json()
+        check(
+            "gated runtime repo cannot be bypassed by explicit gateless repo",
+            gated_runtime_override_response.status_code == 400
+            and ORCH_REPO in gated_runtime_override_response.text
+            and TAEYS_HANDS_REPO not in gated_runtime_override_response.text
+            and "commit_sha" in gated_runtime_override_response.text
+            and gated_runtime_override_payload.get("status") == "pending",
+            f"{gated_runtime_override_response.status_code} {gated_runtime_override_response.text} "
+            f"payload={gated_runtime_override_payload}",
+        )
+
+        gated_supervisor_task = _seed_task("gated-supervisor-verification")
         _complete(
             client,
-            local_task,
-            {"production_observation": "local-only completion probe"},
+            gated_supervisor_task,
+            {
+                "supervisor_verification": {
+                    "mode": "research",
+                    "verifier": "tester-supervisor",
+                    "observation": "supervisor inspected the no-commit research artifact",
+                },
+                "production_observation": "gated runtime supervisor verification probe",
+            },
         )
-        local_payload = client.get(f"/api/tasks/{local_task}").json()
+        gated_supervisor_payload = client.get(f"/api/tasks/{gated_supervisor_task}").json()
+        gated_supervisor_verification = gated_supervisor_payload.get("completion_evidence_verification", {})
         check(
-            "local completion without commit_sha is UNVERIFIED",
-            local_payload.get("completion_evidence_verification_status") == "UNVERIFIED"
-            and local_payload.get("completion_evidence_verified") is False
-            and local_payload.get("completion_evidence_verification_applies") is False
-            and local_payload.get("completion_evidence_verification", {}).get("applies") is False
-            and "no commit_sha" in local_payload.get("completion_evidence_verification", {}).get("reason", ""),
-            json.dumps(local_payload.get("completion_evidence_verification"), sort_keys=True),
+            "gated runtime repo still accepts valid supervisor verification",
+            gated_supervisor_payload.get("status") == "completed"
+            and gated_supervisor_payload.get("completion_evidence_verification_status") == "VERIFIED"
+            and gated_supervisor_payload.get("completion_evidence_verified") is True
+            and gated_supervisor_payload.get("completion_evidence_verification_applies") is True
+            and gated_supervisor_verification.get("source") == "supervisor-verification"
+            and gated_supervisor_verification.get("verifier") == "tester-supervisor",
+            json.dumps(gated_supervisor_verification, sort_keys=True),
         )
+
+        os.environ["ORCH_COMPLETION_GITHUB_REPO"] = TAEYS_HANDS_REPO
+        gateless_observation_task = _seed_task("gateless-observation-only")
+        _complete(
+            client,
+            gateless_observation_task,
+            {"production_observation": "gateless observation-only completion probe"},
+        )
+        gateless_observation_payload = client.get(f"/api/tasks/{gateless_observation_task}").json()
+        check(
+            "gateless repo observation-only completion remains UNVERIFIED but accepted",
+            gateless_observation_payload.get("status") == "completed"
+            and gateless_observation_payload.get("completion_evidence_verification_status") == "UNVERIFIED"
+            and gateless_observation_payload.get("completion_evidence_verified") is False
+            and gateless_observation_payload.get("completion_evidence_verification_applies") is False
+            and gateless_observation_payload.get("completion_evidence_verification", {}).get("applies") is False
+            and gateless_observation_payload.get("completion_evidence_verification", {}).get("repo") == TAEYS_HANDS_REPO
+            and "no commit_sha" in gateless_observation_payload.get("completion_evidence_verification", {}).get("reason", ""),
+            json.dumps(gateless_observation_payload.get("completion_evidence_verification"), sort_keys=True),
+        )
+        os.environ["ORCH_COMPLETION_GITHUB_REPO"] = ORCH_REPO
 
         missing_repo_task = _seed_task("missing-repo")
         missing_repo_response = client.patch(
