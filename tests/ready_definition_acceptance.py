@@ -52,6 +52,7 @@ CROSS_PROJECT = f"{PREFIX}-cross"
 STOPPED_PROJECT = f"{PREFIX}-stopped"
 DIRECT_TASK = f"{PREFIX}-direct-p80"
 CROSS_TOP_TASK = f"{CROSS_PROJECT}::cross_low"
+STOPPED_READY_TASK = f"{STOPPED_PROJECT}::stopped_ready"
 FAILURES: list[str] = []
 
 
@@ -160,8 +161,11 @@ def _contract_ready_ids() -> list[str]:
         rows = session.run(
             f"""
             MATCH (t:OrchTask {{status: 'pending'}})
+            OPTIONAL MATCH (proj:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t)
+            WITH t, proj
             WHERE t.id STARTS WITH $prefix
               AND {_READY_DEPENDENCIES_SATISFIED_CYPHER}
+              AND (proj IS NULL OR coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress'])
             RETURN t.id AS id
             ORDER BY toInteger(coalesce(t.priority, 999999999)) ASC,
                      t.created_at ASC,
@@ -255,9 +259,19 @@ def main() -> int:
                 "legacy": _legacy_zero(task_id),
             })
 
-        _check("get_ready_tasks matches task-priority broad ready ids", _current_ready_ids() == _contract_ready_ids(), {
-            "current": _current_ready_ids(),
-            "contract": _contract_ready_ids(),
+        current_ready_ids = _current_ready_ids()
+        contract_ready_ids = _contract_ready_ids()
+        _check("get_ready_tasks matches task-priority broad ready ids", current_ready_ids == contract_ready_ids, {
+            "current": current_ready_ids,
+            "contract": contract_ready_ids,
+        })
+        _check("get_ready_tasks excludes stopped-project ready task", STOPPED_READY_TASK not in current_ready_ids, {
+            "current": current_ready_ids,
+            "unexpected": STOPPED_READY_TASK,
+        })
+        _check("get_ready_tasks keeps direct/default ready task", DIRECT_TASK in current_ready_ids, {
+            "current": current_ready_ids,
+            "expected": DIRECT_TASK,
         })
 
         current_next = get_session_next_ready(OWNER, config=CFG)
