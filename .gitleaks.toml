@@ -1,0 +1,20 @@
+# gitleaks config for claude-code-fleet-orchestrator
+
+title = "claude-code-fleet-orchestrator secret scan"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Secret scrubber fixture-adjudicated fake values."
+condition = "AND"
+# 2026-07-31 conductor adjudication: these are deliberately fake fixture
+# literals in tests/public_secret_scrub_acceptance.py, not real secrets.
+paths = [
+  '''^tests/public_secret_scrub_acceptance\.py$''',
+]
+commits = [
+  "3be2bfac20c83226f914852d4cdff2e8e29c7482",
+  "616532185cb1265fedf98b126a8397018646c062",
+  "5ed0a0a74e9ba88fc689bedea1c0f96e7f11f002",
+]
