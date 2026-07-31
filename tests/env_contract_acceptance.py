@@ -1,8 +1,8 @@
 """Ship-gate e2e — generic operator env contract stays minimal and explicit.
 
-Env required to instantiate OrchConfig should be only the core Redis + Neo4j
-connectivity values. Dashboard URL, notify library path, and refs root are
-supported optional modes.
+Env declared required should be only the core Redis + Neo4j connectivity values
+plus delivery-critical local executable paths. Dashboard URL, notify library
+path, and refs root are supported optional modes.
 
 This script sets `ORCH_DOTENV=empty` for its default probes and runs them from
 a cwd containing a poisoned `.env`, so local deployment config cannot make the
@@ -63,6 +63,7 @@ print(json.dumps({
     "optional_names": [item[0] for item in OPTIONAL_ENV],
     "dashboard_url": cfg.dashboard_url,
     "notify_lib_root": cfg.notify_lib_root,
+    "human_review_alert_target": cfg.human_review_alert_target,
 }))
 """
     with _poisoned_cwd() as cwd:
@@ -134,15 +135,23 @@ def main() -> int:
     _check("interior quotes are preserved", quotes["INNER_QUOTE"] == "it's-kept", quotes)
 
     _check(
-        "REQUIRED_ENV is only core Redis + Neo4j connectivity",
-        required == {"ORCH_REDIS_HOST", "ORCH_REDIS_PORT", "ORCH_NEO4J_URI", "ORCH_NEO4J_DB"},
+        "REQUIRED_ENV is only core connectivity plus delivery-critical executable paths",
+        required == {
+            "ORCH_REDIS_HOST",
+            "ORCH_REDIS_PORT",
+            "ORCH_NEO4J_URI",
+            "ORCH_NEO4J_DB",
+            "ORCH_PEER_RESPAWN_SCRIPT",
+        },
         probe["required"],
     )
     _check("ORCH_DASHBOARD_URL is optional", "ORCH_DASHBOARD_URL" in optional and "ORCH_DASHBOARD_URL" not in required, probe)
     _check("ORCH_NOTIFY_LIB_ROOT is optional", "ORCH_NOTIFY_LIB_ROOT" in optional and "ORCH_NOTIFY_LIB_ROOT" not in required, probe)
+    _check("ORCH_HUMAN_REVIEW_ALERT_TARGET is optional", "ORCH_HUMAN_REVIEW_ALERT_TARGET" in optional and "ORCH_HUMAN_REVIEW_ALERT_TARGET" not in required, probe)
     _check("ORCH_REF_ALLOWED_ROOT is optional", "ORCH_REF_ALLOWED_ROOT" in optional and "ORCH_REF_ALLOWED_ROOT" not in required, probe)
     _check("minimal generic config defaults dashboard URL", probe["dashboard_url"] == "http://127.0.0.1:5002", probe)
     _check("minimal generic config leaves notify root unset", probe["notify_lib_root"] is None, probe)
+    _check("minimal generic config leaves human-review alert target unset", probe["human_review_alert_target"] == "", probe)
     _check("minimal generic config suppresses cwd/repo dotenv", "deployment.invalid" not in probe["dashboard_url"], probe)
     notify = _notify_autoresolve_probe()
     _check("notify root auto-resolves sibling checkout", notify["resolved"].endswith("claude-code-fleet-notify"), notify)

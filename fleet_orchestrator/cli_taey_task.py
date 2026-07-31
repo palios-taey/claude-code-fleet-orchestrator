@@ -16,7 +16,10 @@ Usage:
     taey-task unbind <peer>              # Clear a stale peer current_task binding
     taey-task remove-dependency <task-id> <depends-on-task-id>
     taey-task update <task-id> completed --evidence '{"commit_sha":"abc123","repo":"OWNER/REPO","production_observation":"verified live"}'
+    taey-task update <task-id> completed --evidence-file /tmp/evidence.json
+    taey-task update <task-id> completed --evidence-observation "verified live"
     taey-task update <task-id> failed --evidence '{"reason":"blocked by missing dependency"}'
+    taey-task update <task-id> changes_requested --reason "audit rejection reason"
 """
 import argparse
 import json
@@ -31,7 +34,8 @@ from fleet_orchestrator.cli_http import api_json_or_exit
 from fleet_orchestrator.evidence_contract import TERMINAL_STATUSES
 
 DASHBOARD_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002")
-UPDATE_STATUSES = tuple(sorted(TERMINAL_STATUSES | {"in_progress"}))
+CHANGES_REQUESTED_STATUS = "changes_requested"
+UPDATE_STATUSES = tuple(sorted(TERMINAL_STATUSES | {"in_progress", CHANGES_REQUESTED_STATUS}))
 
 
 def detect_from_node():
@@ -57,16 +61,63 @@ def api_call(method, endpoint, data=None):
     return api_json_or_exit(method, DASHBOARD_URL, endpoint, data=data, timeout=10)
 
 
-def parse_evidence_arg(raw):
+EVIDENCE_PARSE_HINT = (
+    "Retry with `taey-task update <task-id> completed --evidence-file <path>` "
+    "for JSON evidence, or `taey-task update <task-id> completed "
+    "--evidence-observation '<plain text>'` for prose production_observation "
+    "evidence with quotes/newlines."
+)
+
+
+def parse_evidence_arg(raw, *, source="--evidence"):
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
-        print(f"ERROR: --evidence must be valid JSON: {exc}", file=sys.stderr)
+        print(
+            f"ERROR: {source} must be valid JSON at line {exc.lineno}, "
+            f"column {exc.colno} (char {exc.pos}): {exc.msg}. {EVIDENCE_PARSE_HINT}",
+            file=sys.stderr,
+        )
         sys.exit(1)
     if not isinstance(value, dict):
-        print("ERROR: --evidence must decode to a JSON object", file=sys.stderr)
+        print(
+            f"ERROR: {source} must decode to a JSON object. {EVIDENCE_PARSE_HINT}",
+            file=sys.stderr,
+        )
         sys.exit(1)
     return value
+
+
+def parse_evidence_file_arg(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return parse_evidence_arg(handle.read(), source=f"--evidence-file {path}")
+    except OSError as exc:
+        print(
+            f"ERROR: could not read --evidence-file {path}: {exc}. "
+            "Inspect the path or retry with `taey-task update <task-id> completed "
+            "--evidence-observation '<plain text>'`.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def evidence_from_update_args(args):
+    if args.evidence is not None:
+        return parse_evidence_arg(args.evidence)
+    if args.evidence_file is not None:
+        return parse_evidence_file_arg(args.evidence_file)
+    if args.evidence_observation is not None:
+        return {"production_observation": args.evidence_observation}
+    return None
+
+
+def has_evidence_input(args):
+    return (
+        args.evidence is not None
+        or args.evidence_file is not None
+        or args.evidence_observation is not None
+    )
 
 
 def cmd_create(args):
@@ -195,11 +246,40 @@ def cmd_dispatch(args):
 def cmd_update(args):
     """Update a task's status via PATCH /api/task/{id}."""
     sender = detect_from_node()
-    if args.status in TERMINAL_STATUSES and args.evidence is None:
-        print(f"ERROR: {args.status} status requires --evidence JSON", file=sys.stderr)
+    changes_requested = args.status == CHANGES_REQUESTED_STATUS
+    evidence_input_provided = has_evidence_input(args)
+    if args.status in TERMINAL_STATUSES and not evidence_input_provided:
+        print(
+            f"ERROR: {args.status} status requires --evidence JSON, "
+            "--evidence-file <path>, or --evidence-observation '<plain text>'. "
+            f"Retry: taey-task update {args.task_id} completed "
+            "--evidence-observation '<what changed>'",
+            file=sys.stderr,
+        )
         sys.exit(1)
-    if args.status not in TERMINAL_STATUSES and args.evidence is not None:
-        print("ERROR: --evidence is only valid with terminal statuses", file=sys.stderr)
+    if args.status not in TERMINAL_STATUSES and evidence_input_provided:
+        print(
+            "ERROR: evidence flags are only valid with terminal statuses. "
+            "Retry without --evidence/--evidence-file/--evidence-observation, "
+            f"or use `taey-task update {args.task_id} completed --evidence-observation '<what changed>'`.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    evidence = evidence_from_update_args(args)
+    if changes_requested and not str(args.reason or "").strip():
+        print(
+            f"ERROR: changes_requested requires --reason '<audit rejection reason>'. "
+            f"Retry: taey-task update {args.task_id} changes_requested --reason '<audit rejection reason>'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if changes_requested and (args.blocked_on is not None or args.clear_blocked_on):
+        print(
+            f"ERROR: --blocked-on is not valid with changes_requested. "
+            f"Retry without --blocked-on: taey-task update {args.task_id} changes_requested "
+            "--reason '<audit rejection reason>'",
+            file=sys.stderr,
+        )
         sys.exit(1)
     data = {
         "status": args.status,
@@ -209,15 +289,28 @@ def cmd_update(args):
         data["blocked_on"] = ""
     elif args.blocked_on is not None:
         data["blocked_on"] = args.blocked_on
-    if args.evidence is not None:
-        data["evidence"] = parse_evidence_arg(args.evidence)
+    if evidence is not None:
+        data["evidence"] = evidence
+    if changes_requested:
+        data["record_outcome"] = CHANGES_REQUESTED_STATUS
+        data["reason"] = args.reason.strip()
+        if args.peer:
+            data["peer"] = args.peer
     result = api_call("PATCH", f"/api/task/{args.task_id}", data)
     if result.get("ok"):
+        if changes_requested:
+            target = result.get("dispatched_to") or (result.get("changes_requested") or {}).get("worker") or "peer"
+            print(f"OK: {args.task_id} → changes_requested; re-dispatched to {target} (by {sender})")
+            return
         blocked_on = result.get("blocked_on")
         suffix = f" blocked_on={blocked_on}" if blocked_on else ""
         print(f"OK: {args.task_id} → {args.status} (by {sender}){suffix}")
     else:
-        print(f"ERROR: {result.get('error', 'unknown')}", file=sys.stderr)
+        print(
+            f"ERROR: {result.get('error', 'unknown')}. "
+            f"Inspect with `taey-task status {args.task_id}` or retry the update command.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -256,8 +349,9 @@ def main():
 
     p_list = sub.add_parser("list", help="List pending tasks")
 
-    p_status = sub.add_parser("status", help="Check task status")
+    p_status = sub.add_parser("status", aliases=["show"], help="Check task status (alias: show)")
     p_status.add_argument("task_id", help="Task ID")
+    p_status.set_defaults(command="status")
 
     p_dispatch = sub.add_parser("dispatch", help="Claim, bind, and wake a peer task")
     p_dispatch.add_argument("task_id", help="Task ID")
@@ -280,8 +374,15 @@ def main():
     p_update.add_argument("--blocked-on", help="Mark the in-progress task as waiting on an external signal")
     p_update.add_argument("--clear-blocked-on", action="store_true",
                           help="Clear the task's blocked_on marker")
-    p_update.add_argument("--evidence",
-                          help="JSON object with completion evidence, e.g. '{\"commit_sha\":\"abc123\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"verified live\"}'")
+    evidence_group = p_update.add_mutually_exclusive_group()
+    evidence_group.add_argument("--evidence",
+                                help="JSON object with completion evidence, e.g. '{\"commit_sha\":\"abc123\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"verified live\"}'")
+    evidence_group.add_argument("--evidence-file",
+                                help="Path to a JSON object with completion evidence; avoids shell quoting for prose evidence")
+    evidence_group.add_argument("--evidence-observation",
+                                help="Plain production_observation text; wrapped as {'production_observation': value}")
+    p_update.add_argument("--reason", help="Audit rejection reason; required with changes_requested")
+    p_update.add_argument("--peer", help="Explicit peer to re-dispatch when the task no longer records one")
 
     args = parser.parse_args()
     if args.command == "create":

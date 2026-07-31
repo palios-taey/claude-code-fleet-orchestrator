@@ -16,6 +16,7 @@ import sys
 import time
 import uuid
 import importlib
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -70,6 +71,9 @@ STALL = f"{PROJECT}::stall"
 AWAIT = f"{PROJECT}::await"
 FREE_TEXT_WAIT = f"{PROJECT}::free-text-wait"
 HUMAN_REVIEW = f"{PROJECT}::human-review"
+OUTWARD = f"{PROJECT}::outward"
+OUTWARD_PROBE_ERROR = f"{PROJECT}::outward-probe-error"
+NON_OUTWARD_PROBE_ERROR = f"{PROJECT}::non-outward-probe-error"
 QUESTION = f"{PFX}-question"
 REVIEWER = f"{PFX}-reviewer"
 GUARD_PROJECT = f"{GUARD_PFX}-project"
@@ -120,7 +124,16 @@ def _setup() -> None:
     init_schema(config=CFG)
     create_project(project_id=PROJECT, name=PROJECT, supervisor=SUP, priority=1, config=CFG)
     create_phase(project_id=PROJECT, phase_id=PHASE, name="phase", config=CFG)
-    for task_id in (FIRST, SECOND, STALL, AWAIT, FREE_TEXT_WAIT):
+    for task_id in (
+        FIRST,
+        SECOND,
+        STALL,
+        AWAIT,
+        FREE_TEXT_WAIT,
+        OUTWARD,
+        OUTWARD_PROBE_ERROR,
+        NON_OUTWARD_PROBE_ERROR,
+    ):
         create_task(
             phase_id=PHASE,
             task_id=task_id,
@@ -176,14 +189,35 @@ def _current_task_id() -> str:
     return str(json.loads(raw).get("task_id") or "")
 
 
-def _run_liveness_once(sent: list[tuple[str, str]]) -> int:
+class _ProbeFailRedis:
+    def __init__(self, real_redis):
+        self._real_redis = real_redis
+
+    def get(self, key):
+        if str(key).endswith(":last_tool_activity"):
+            raise RuntimeError("synthetic liveness probe read failure")
+        return self._real_redis.get(key)
+
+
+def _run_liveness_once(sent: list[tuple[str, str]], *, fail_signal_probe: bool = False) -> int:
     watch = _load_orch_watch()
 
     def fake_send(_r, target, body, **_kwargs):
         sent.append((target, body))
         return True
 
-    with mock.patch.object(watch, "_send_wake", side_effect=fake_send):
+    with ExitStack() as stack:
+        stack.enter_context(mock.patch.object(watch, "_send_wake", side_effect=fake_send))
+        if fail_signal_probe:
+            from fleet_orchestrator import inflight as inflight_module
+
+            stack.enter_context(
+                mock.patch.object(
+                    inflight_module,
+                    "notify_redis_connect",
+                    return_value=_ProbeFailRedis(_redis()),
+                )
+            )
         return watch._process_worker_liveness_expirations(
             _redis(),
             dedup_ttl_sec=1,
@@ -194,6 +228,30 @@ def _run_liveness_once(sent: list[tuple[str, str]]) -> int:
 
 def _fresh_tool_heartbeat() -> None:
     _redis().set(_state_key(WORKER, "last_tool_activity"), str(time.time()))
+
+
+def _stale_running_tool() -> None:
+    old = str(time.time() - 30)
+    _redis().set(_state_key(WORKER, "tool_running"), "1")
+    _redis().set(_state_key(WORKER, "tool_running_at"), old)
+    _redis().set(_state_key(WORKER, "last_activity"), old)
+    _redis().set(_state_key(WORKER, "last_tool_activity"), old)
+
+
+def _fresh_running_tool_with_stale_last_tool_activity() -> None:
+    now = str(time.time())
+    _redis().set(_state_key(WORKER, "tool_running"), "1")
+    _redis().set(_state_key(WORKER, "tool_running_at"), now)
+    _redis().set(_state_key(WORKER, "last_activity"), now)
+    _redis().set(_state_key(WORKER, "last_tool_activity"), str(time.time() - 30))
+
+
+def _mark_outward(task_id: str) -> None:
+    with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+        session.run(
+            "MATCH (t:OrchTask {id: $task_id}) SET t.effect_class = 'outward_irreversible'",
+            task_id=task_id,
+        )
 
 
 def main() -> int:
@@ -238,10 +296,12 @@ def main() -> int:
 
         _dispatch(STALL)
         time.sleep(1.2)
+        _stale_running_tool()
         sent.clear()
         count = _run_liveness_once(sent)
         stalled = get_task(STALL, config=CFG)
         _check("worker stall TTL requeues current task", stalled.get("status") == "pending" and stalled.get("needs_attention") is True, stalled)
+        _check("stale tool_running_at does not preserve current_task", _current_task_id() == "", _current_task_id())
         _check("worker stall TTL emits supervisor wake", count == 1 and sent and sent[0][0] == SUP and STALL in sent[0][1], sent)
 
         _dispatch(AWAIT)
@@ -298,6 +358,59 @@ def main() -> int:
             "human-review gate past TTL is not escalated",
             count == 0 and human_review_task.get("status") == "in_progress",
             {"count": count, "task": human_review_task, "sent": sent},
+        )
+
+        _dispatch(OUTWARD, force=True)
+        _mark_outward(OUTWARD)
+        time.sleep(1.2)
+        _fresh_running_tool_with_stale_last_tool_activity()
+        sent.clear()
+        count = _run_liveness_once(sent)
+        outward_task = get_task(OUTWARD, config=CFG)
+        _check(
+            "fresh tool_running_at protects outward action despite stale last_tool_activity",
+            count == 0 and outward_task.get("status") == "in_progress" and _current_task_id() == OUTWARD,
+            {"count": count, "task": outward_task, "current_task": _current_task_id(), "sent": sent},
+        )
+        update_task_status(
+            OUTWARD,
+            "completed",
+            completion_evidence={"production_observation": "outward liveness protected by fresh tool_running_at"},
+            config=CFG,
+        )
+
+        _dispatch(OUTWARD_PROBE_ERROR, force=True)
+        _mark_outward(OUTWARD_PROBE_ERROR)
+        time.sleep(1.2)
+        sent.clear()
+        count = _run_liveness_once(sent, fail_signal_probe=True)
+        outward_probe_task = get_task(OUTWARD_PROBE_ERROR, config=CFG)
+        _check(
+            "outward action with raising signal probe stays guarded",
+            count == 0
+            and outward_probe_task.get("status") == "in_progress"
+            and _current_task_id() == OUTWARD_PROBE_ERROR,
+            {"count": count, "task": outward_probe_task, "current_task": _current_task_id(), "sent": sent},
+        )
+        update_task_status(
+            OUTWARD_PROBE_ERROR,
+            "completed",
+            completion_evidence={"production_observation": "outward probe error guarded current_task"},
+            config=CFG,
+        )
+
+        _dispatch(NON_OUTWARD_PROBE_ERROR, force=True)
+        time.sleep(1.2)
+        sent.clear()
+        count = _run_liveness_once(sent, fail_signal_probe=True)
+        non_outward_probe_task = get_task(NON_OUTWARD_PROBE_ERROR, config=CFG)
+        _check(
+            "non-outward task with raising signal probe still expires",
+            count == 1
+            and non_outward_probe_task.get("status") == "pending"
+            and non_outward_probe_task.get("needs_attention") is True
+            and _current_task_id() == "",
+            {"count": count, "task": non_outward_probe_task, "current_task": _current_task_id(), "sent": sent},
         )
     finally:
         _cleanup()

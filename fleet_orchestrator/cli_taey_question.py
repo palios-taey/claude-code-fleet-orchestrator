@@ -101,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--from", dest="sender", default="")
     gate.add_argument("--priority", type=int, default=50)
     gate.add_argument("--refs", help="JSON array of ref objects to attach to the gate")
-    gate.add_argument("--no-notify", action="store_true", help="Do not send taey-notify to the reviewer")
+    gate.add_argument("--no-notify", action="store_true", help="Compatibility no-op; gates surface in dashboard chat")
     gate.set_defaults(func=cmd_create_gate)
 
     answer = sub.add_parser("answer", help="Record a proposed answer; dashboard UI completion closes human-review gates")

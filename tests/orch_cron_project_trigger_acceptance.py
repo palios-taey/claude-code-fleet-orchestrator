@@ -8,6 +8,7 @@ import re
 import sys
 import tempfile
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -129,6 +130,19 @@ def _ok_run(args: list[str], **_kwargs: object) -> SimpleNamespace:
     return SimpleNamespace(returncode=0, stdout="", stderr="")
 
 
+@contextmanager
+def _healthy_worker_dispatch_fixture():
+    with mock.patch(
+        "fleet_orchestrator.cli_orch_watch._local_tmux_sessions",
+        return_value={WORKER},
+    ), mock.patch.object(
+        dispatch_module,
+        "hook_installation_status",
+        return_value=SimpleNamespace(ok=True, detail="hooked"),
+    ), mock.patch.object(dispatch_module.subprocess, "run", side_effect=_ok_run):
+        yield
+
+
 def main() -> int:
     _cleanup()
     tmp = Path(tempfile.mkdtemp(prefix="orch-cron-project-"))
@@ -185,8 +199,7 @@ def main() -> int:
             cycle_state,
         )
 
-        with mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
-             mock.patch.object(dispatch_module.subprocess, "run", side_effect=_ok_run):
+        with _healthy_worker_dispatch_fixture():
             fires = cron.tick(str(registry), _redis(), now_override=now)
 
         entry = get_task(ENTRY, config=CFG)
@@ -218,8 +231,7 @@ def main() -> int:
         trigger["id"] = "project-cycle-next"
         trigger["mode"] = "advance"
         _write_registry(registry, trigger)
-        with mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
-             mock.patch.object(dispatch_module.subprocess, "run", side_effect=_ok_run):
+        with _healthy_worker_dispatch_fixture():
             next_fires = cron.tick(str(registry), _redis(), now_override=now)
 
         entry = get_task(ENTRY, config=CFG)
@@ -318,8 +330,7 @@ def main() -> int:
             get_task(RESET_ENTRY, config=CFG),
         )
 
-        with mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
-             mock.patch.object(dispatch_module.subprocess, "run", side_effect=_ok_run):
+        with _healthy_worker_dispatch_fixture():
             reset_fires = cron.tick(str(registry), _redis(), now_override=now)
 
         reset_entry = get_task(RESET_ENTRY, config=CFG)
@@ -350,8 +361,7 @@ def main() -> int:
         _complete(RESET_FOLLOW)
         _redis().delete(_state_key(WORKER, "current_task"))
         now_next = now + timedelta(hours=1)
-        with mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
-             mock.patch.object(dispatch_module.subprocess, "run", side_effect=_ok_run):
+        with _healthy_worker_dispatch_fixture():
             reset_next_fires = cron.tick(str(registry), _redis(), now_override=now_next)
 
         reset_entry = get_task(RESET_ENTRY, config=CFG)

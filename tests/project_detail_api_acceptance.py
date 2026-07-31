@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fleet_orchestrator.config import OrchConfig  # noqa: E402
-from fleet_orchestrator.orch_schema import create_phase, create_project, create_task, get_neo4j_driver, init_schema  # noqa: E402
+from fleet_orchestrator.orch_schema import create_phase, create_project, create_task, get_neo4j_driver, get_task, init_schema  # noqa: E402
 from fleet_orchestrator.tasks_api import app  # noqa: E402
 
 CFG = OrchConfig()
@@ -37,9 +37,12 @@ def main() -> int:
             task_id=f"{PFX}::task",
             description="detail task",
             owner=f"{PFX}-worker",
+            delivery_gate=True,
             wake_owner_if_ready=False,
             config=CFG,
         )
+        with driver.session(database=CFG.neo4j_db) as session:
+            session.run("MATCH (t:OrchTask {id: $task_id}) SET t.recurring = true", task_id=f"{PFX}::task")
 
         response = TestClient(app).get(f"/api/projects/{PFX}")
         body = response.json()
@@ -50,6 +53,18 @@ def main() -> int:
         _check("nested project id remains populated", (body.get("project") or {}).get("id") == PFX, body)
         _check("nested project name remains populated", (body.get("project") or {}).get("name") == "Project Detail API", body)
         _check("phases/tasks still returned", body.get("phases") and body["phases"][0].get("tasks"), body)
+        detail_task = body["phases"][0]["tasks"][0] if body.get("phases") and body["phases"][0].get("tasks") else {}
+        task_api = get_task(f"{PFX}::task", config=CFG) or {}
+        _check(
+            "detail task recurring matches task API",
+            detail_task.get("recurring") is True and detail_task.get("recurring") == task_api.get("recurring"),
+            {"detail": detail_task, "task_api": task_api},
+        )
+        _check(
+            "detail task delivery_gate matches task API",
+            detail_task.get("delivery_gate") is True and detail_task.get("delivery_gate") == task_api.get("delivery_gate"),
+            {"detail": detail_task, "task_api": task_api},
+        )
     finally:
         with driver.session(database=CFG.neo4j_db) as session:
             session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=PFX)

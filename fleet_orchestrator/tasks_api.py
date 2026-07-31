@@ -66,6 +66,7 @@ from fleet_orchestrator.loop_engine import (
 from fleet_orchestrator.shippability import evaluate_shippability
 from fleet_orchestrator.dispatch import (
     BugLockActive,
+    ChangesRequestedError,
     HooksNotInstalled,
     OrchTaskNotReady,
     WorkerBusy,
@@ -73,6 +74,8 @@ from fleet_orchestrator.dispatch import (
     clear_current_task,
     dispatch as dispatch_task,
     record_outcome,
+    request_changes,
+    write_completion_receipt,
 )
 from fleet_orchestrator.orch_schema import (
     CompletionEvidenceError,
@@ -787,19 +790,88 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
                     "next_step": _task_update_body_next_step(task_id),
                 },
             )
-        status = data.get("status", "pending")
+        status = data.get("record_outcome") or data.get("status", "pending")
         sender = data.get("from", "")
         result = data.get("result", "")
 
         cfg = _cfg()
         task_id = resolve_task_id(task_id, config=cfg)  # bare id -> canonical namespaced node
         task_before = _load_task(task_id, cfg)
+        if status == "changes_requested":
+            reason = (
+                data.get("reason")
+                or data.get("details")
+                or data.get("result")
+                or ""
+            )
+            try:
+                rework = request_changes(
+                    task_id,
+                    requested_by=sender,
+                    reason=reason,
+                    worker=data.get("peer") or data.get("worker") or data.get("dispatched_to"),
+                    priority=str(data.get("priority") or "high"),
+                )
+            except ChangesRequestedError as exc:
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "ok": False,
+                        "error": str(exc),
+                        "next_step": (
+                            f"Retry with PATCH /api/task/{task_id} body "
+                            "{\"record_outcome\":\"changes_requested\",\"from\":\"<validator>\","
+                            "\"reason\":\"<audit rejection reason>\",\"peer\":\"<same-peer-if-not-inferred>\"}."
+                        ),
+                    },
+                )
+            except (BugLockActive, HooksNotInstalled, OrchTaskNotReady, WorkerBusy, RuntimeError) as exc:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "ok": False,
+                        "error": f"changes_requested redispatch failed: {exc}",
+                        "next_step": (
+                            f"Inspect `taey-task status {task_id}`; the task is left pending/re-dispatchable "
+                            "if the wake could not be delivered."
+                        ),
+                    },
+                )
+            task_after = load_task_record(task_id, config=cfg) or {}
+            return {
+                "ok": True,
+                "task_id": task_id,
+                "status": task_after.get("status", rework.get("status", "in_progress")),
+                "owner": task_after.get("owner"),
+                "dispatched_to": task_after.get("dispatched_to") or rework.get("dispatched_to"),
+                "blocked_on": task_after.get("blocked_on"),
+                "changes_requested": {
+                    "requested_by": rework.get("requested_by"),
+                    "worker": rework.get("dispatched_to"),
+                    "reason": rework.get("reason"),
+                    "count": rework.get("count"),
+                },
+            }
         owner = data.get("owner")
         if owner is None:
             owner = task_before.get("owner", "")
         blocked_on = data["blocked_on"] if "blocked_on" in data else None
         completion_evidence = _terminal_evidence_from_request(data)
-        from fleet_orchestrator.completion_guard import peer_self_completion_rejection
+        from fleet_orchestrator.completion_guard import (
+            _autonomous_peer_supervisor,
+            completion_producer_for_status_update,
+            peer_execution_binding_rejection,
+            peer_self_completion_rejection,
+        )
+
+        binding_rejection = peer_execution_binding_rejection(
+            task_id,
+            task_before,
+            sender,
+            status,
+        )
+        if binding_rejection:
+            return JSONResponse(status_code=409, content=binding_rejection)
 
         rejection = peer_self_completion_rejection(
             task_id,
@@ -811,6 +883,31 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         if rejection:
             return JSONResponse(status_code=409, content=rejection)
 
+        if (
+            sender
+            and owner == sender
+            and str(status or "").strip().lower() == "in_progress"
+        ):
+            binding_supervisor = _resolve_supervisor_session(sender, config=cfg)
+            bind_current_task(
+                worker=sender,
+                task_id=task_id,
+                description=task_before.get("description", ""),
+                supervisor=binding_supervisor,
+                set_parent=bool(_autonomous_peer_supervisor(sender)),
+                guard_existing=True,
+                dispatcher=sender,
+            )
+
+        completed_by = completion_producer_for_status_update(
+            task_id,
+            task_before,
+            sender,
+            status,
+            owner=owner,
+            completion_evidence=completion_evidence,
+            config=cfg,
+        )
         update_task_status(
             task_id,
             status,
@@ -818,22 +915,15 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             result=result,
             blocked_on=blocked_on,
             completion_evidence=completion_evidence,
-            completed_by=sender or owner or "",
+            completed_by=completed_by,
             config=cfg,
         )
 
         if sender and owner == sender:
-            if status == "in_progress":
-                binding_supervisor = _resolve_supervisor_session(sender, config=cfg)
-                bind_current_task(
-                    worker=sender,
-                    task_id=task_id,
-                    description=task_before.get("description", ""),
-                    supervisor=binding_supervisor,
-                    set_parent=True,
-                )
-            elif status == "completed":
-                record_outcome(sender, "done", _outcome_details(result, completion_evidence))
+            if status == "completed":
+                outcome_details = _outcome_details(result, completion_evidence)
+                write_completion_receipt(sender, task_id, outcome_details)
+                record_outcome(sender, "done", outcome_details)
             elif status == "failed":
                 record_outcome(sender, "error", _outcome_details(result, completion_evidence))
             elif status == "interrupted":
@@ -1427,7 +1517,7 @@ def session_current(session_id: str) -> Dict[str, Any]:
 
 @app.get("/api/sessions/{session_id}/next-ready")
 def session_next_ready(session_id: str) -> Dict[str, Any]:
-    """Top pending task owned-by this session only — under single-supervisor scope there is no claim-from-unowned-pool path."""
+    """Top pending task owned by or explicitly dispatched to this session; no unowned-pool claims."""
     cfg = _cfg()
     result = get_session_next_ready(session_id, config=cfg)
     if not result:

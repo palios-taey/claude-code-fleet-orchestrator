@@ -378,6 +378,47 @@ def main() -> int:
             messages = easy_setup.enable_services()
         _assert("venv-interpreter", any("started pid=1234" in line for line in messages) and any("started pid=5678" in line for line in messages), messages)
 
+        current_source = {"repo_root": str(ROOT), "git_head": "new-head", "watch_digest": "new-digest"}
+        stale_source = {"repo_root": str(ROOT), "git_head": "old-head", "watch_digest": "old-digest"}
+        api_record = {"pid": 1111, "starttime": "1", "cwd": str(ROOT), "cmdline": ["uvicorn"]}
+        watch_record = {
+            "pid": 2222,
+            "starttime": "2",
+            "cwd": str(ROOT),
+            "cmdline": [str(ROOT / "scripts" / "orch-watch")],
+            "source_identity": stale_source,
+        }
+        with mock.patch("fleet_orchestrator.easy_setup.ensure_claude_integration", return_value={"guard": {"changed": False}}), \
+             mock.patch("fleet_orchestrator.easy_setup.managed_python", return_value="/tmp/fake-venv-python"), \
+             mock.patch("fleet_orchestrator.easy_setup._orch_watch_source_identity", return_value=current_source), \
+             mock.patch("fleet_orchestrator.easy_setup.read_pid_record", side_effect=[api_record, watch_record]), \
+             mock.patch("fleet_orchestrator.easy_setup._proc_identity", return_value={"pid": 2222, "starttime": "2", "cwd": str(ROOT), "cmdline": [str(ROOT / "scripts" / "orch-watch")]}), \
+             mock.patch("fleet_orchestrator.easy_setup._identity_matches", return_value=True), \
+             mock.patch("fleet_orchestrator.easy_setup.stop_pidfile", return_value=True) as stop_pidfile, \
+             mock.patch("fleet_orchestrator.easy_setup._spawn_background", return_value=3333) as spawn_background, \
+             mock.patch("fleet_orchestrator.easy_setup.write_pid_record") as write_pid_record:
+            messages = easy_setup.enable_services()
+        _assert(
+            "orch-enable-restarts-stale-watch",
+            any("restarting stale managed process" in line for line in messages)
+            and any("started pid=3333" in line for line in messages)
+            and stop_pidfile.call_count == 1
+            and spawn_background.call_count == 1
+            and write_pid_record.call_args.kwargs.get("source_identity") == current_source,
+            {"messages": messages, "write_call": write_pid_record.call_args},
+        )
+
+        with mock.patch("fleet_orchestrator.easy_setup._orch_watch_source_identity", return_value=current_source), \
+             mock.patch("fleet_orchestrator.easy_setup.read_pid_record", return_value=watch_record), \
+             mock.patch("fleet_orchestrator.easy_setup._proc_identity", return_value={"pid": 2222, "starttime": "2", "cwd": str(ROOT), "cmdline": [str(ROOT / "scripts" / "orch-watch")]}), \
+             mock.patch("fleet_orchestrator.easy_setup._identity_matches", return_value=True):
+            stale_watch = easy_setup._doctor_orch_watch()
+        _assert(
+            "doctor-flags-stale-watch-source",
+            not stale_watch.ok and "stale source" in stale_watch.detail and stale_watch.remediation == "run `orch enable`",
+            stale_watch,
+        )
+
         fake_cfg = mock.Mock(redis_host="10.1.2.3", redis_port=6399, neo4j_uri="bolt://10.9.9.9:7777", neo4j_db="neo4j")
         with mock.patch("fleet_orchestrator.easy_setup._load_config_module") as loader, \
              mock.patch("fleet_orchestrator.easy_setup._redis_ping") as redis_ping, \

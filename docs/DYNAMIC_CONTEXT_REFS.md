@@ -21,7 +21,7 @@ The normal usage pattern is:
 
 This is a clear-then-reinject pattern, not hidden long-context magic. The packet is the current scoped slice.
 
-The dispatch path does not depend on the endpoint. `fleet_orchestrator.dispatch.dispatch()` first verifies that the target CLI's settings contain the managed notify hooks, then assembles the packet directly, embeds the dispatch body in the packet's Human section, and sends the rendered packet through `taey-notify`. A direct `dispatch()` call to a hooked target still receives global, supervisor, and project rules when they apply. If full task-scoped context selection is unavailable for an ad-hoc/no-Neo4j dispatch, dispatch still sends a packet built from dispatch-local state plus available rules and includes a visible warning. If packet rendering or wake delivery fails, dispatch rolls back the claim instead of sending an un-injected prompt.
+The dispatch path does not depend on the endpoint. `fleet_orchestrator.dispatch.dispatch()` first verifies that the target CLI's settings contain the managed notify hooks, then assembles the packet directly, embeds the dispatch body in the packet's Human section, and sends the rendered packet through `taey-notify`. A direct `dispatch()` call to a hooked target still receives global, supervisor, and project rules when they apply. If full task-scoped context selection is unavailable for an ad-hoc/no-Neo4j dispatch, dispatch still sends a packet built from dispatch-local state plus available rules and includes a visible warning. Selector-matched Knowledge Base failures are different: they are required context and fail closed instead of falling back to a minimal packet. If packet rendering or wake delivery fails, dispatch rolls back the claim instead of sending an un-injected prompt.
 
 The hook path uses the same assembler through the endpoint. `SessionStart` and `UserPromptSubmit` emit the packet as additional hook context; `PostToolUse` appends it after drained notifications. Hook delivery is fail-open: if the local API is down or the endpoint is disabled, the hook emits no packet context rather than blocking the operator.
 
@@ -29,7 +29,17 @@ Consumer banner: consumers MUST check body[ok]; HTTP 200 alone does not imply co
 
 ## Budget Behavior
 
-Required operating context, identity, refs, and rules are not partially truncated to satisfy the wake-packet budget. The assembler keeps those sections whole; when budget pressure requires dropping content, it drops whole ranked-memory items instead. A packet should therefore contain the complete selected required section or omit lower-priority memory entries, not emit half a ref, rule, identity block, or operating section.
+Required operating context, identity, refs, selector-matched Knowledge Base nodes, and rules are not partially truncated to satisfy the wake-packet budget. The assembler keeps those sections whole; when budget pressure requires dropping content, it drops whole ranked-memory items instead. A packet should therefore contain the complete selected required section or omit lower-priority memory entries, not emit half a ref, KB node, rule, identity block, or operating section.
+
+## Knowledge Base Push Layer
+
+When `ORCH_KB_NEO4J_URI` and `ORCH_KB_MAP_PATH` are both set, the assembler reads a JSON selector map and injects matching `KnowledgeEntity` current revisions after `## Memory` and before `## Rules`. Both unset disables the feature with no packet change. Setting only one fails loud during packet assembly.
+
+The map has `universal` stable keys plus selector entries keyed by task owner/session prefix and task `capability_tags`. Universal keys are injected first, but only for tasks that match at least one selector. Tasks that match no selector get no Knowledge Base section.
+
+Each selected KB node is rendered inside the same nonce-scoped `<<UNTRUSTED-DATA ...>>` boundary used for refs and memory, with `stable_key`, `revision_no`, and `content_sha256` provenance lines. If the same content hash is already present in a selected ref, the KB item is rendered as `deduped: true` without repeating the content.
+
+Selector-matched missing keys, unreadable maps, and unreachable KB stores are fail-closed. The wake-packet endpoint returns `ok:false`; dispatch raises and rolls back instead of sending a peer a task without its mapped KB rulings.
 
 ## Identity Tier
 

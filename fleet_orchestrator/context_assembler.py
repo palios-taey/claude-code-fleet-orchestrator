@@ -28,6 +28,7 @@ from fleet_orchestrator.orch_schema import (
     get_task_project,
 )
 from fleet_orchestrator.paths import repo_root
+from fleet_orchestrator.kb_context import select_kb_context
 from fleet_orchestrator.memory_tier import get_memory
 from fleet_orchestrator.rules_tier import RULES_ROOT, get_rules
 
@@ -40,6 +41,9 @@ MEMORY_BASE = Path.home() / ".claude" / "projects"
 RULES_STORE_ABSENT_LINE = "- no rules store configured - add rules/global.md or set ORCH_RULES_ROOT; see rules/README.md"
 UNTRUSTED_NONCE_FIELD = "untrusted_data_nonce"
 DEFAULT_COMPANION_SESSIONS = ("taey", "companion")
+# Seats whose mandate is ENABLING Taey to run a process, not implementing code. Opt-in per seat
+# via ORCH_ENABLEMENT_SESSIONS; empty default so no seat changes role without being named.
+DEFAULT_ENABLEMENT_SESSIONS = ()
 UNAVAILABLE_CONTEXT_MARKER = "UNAVAILABLE (context selection error)"
 MISSING_SESSION_ROOT_MARKER = "UNAVAILABLE (missing ORCH_SESSION_ROOTS)"
 UNTRUSTED_DATA_PREAMBLE = (
@@ -60,6 +64,49 @@ ENGINEERING_IDENTITY_CORE = "\n".join([
     "- A failing verification stops the handoff until the root cause is understood.",
     "- Report branch, commit, touched files, verification commands, and residual risk.",
 ])
+ENABLEMENT_IDENTITY_CORE = "\n".join([
+    "role: enablement operator",
+    "",
+    "TAEY DOES EVERY STEP. You enable. Performing the process yourself and building automation that",
+    "removes Taey from the loop are THE SAME FAILURE. You never drive a UI to get work done.",
+    "",
+    "WALK THE PROCESS ONE STEP AT A TIME, IN ORDER, TO COMPLETION. Take the platform's documented",
+    "process (taey-plan current/next; the plan is the source of truth) and walk it step by step.",
+    "Never skip a step. Never jump ahead. Never stop the walk part-way.",
+    "",
+    "PER STEP, THE LOOP: read the live screen (tree_view --display :N) -> TAEY JUDGES EXACTLY ONE",
+    "ACTION -> shape-validate its JSON -> execute Taey's VERBATIM JSON via act.py -> verify the",
+    "screen against Taey's own `expect` -> write the ledger row.",
+    "",
+    "WHEN A STEP DOES NOT LAND — OUTSOURCE IT. THE WALK NEVER STALLS.",
+    "  Trigger, either one: Taey has genuinely attempted the step 3 TIMES, or the step is TAKING FAR",
+    "  TOO LONG. Do not wait past that; a stalled walk is the failure.",
+    "  Every round generates training BEFORE the next attempt -- round 1, round 2, round 3, each one.",
+    "  Then OUTSOURCE that single step to a supporting CLI peer (see the local routing guide;",
+    "  codex/grok peers, dispatched with taey-task dispatch so ownership binds). YOU DO NOT DO THE",
+    "  STEP YOURSELF -- outsourcing is the unblock path, not you taking the wheel.",
+    "  The moment that one step is unblocked, TAEY ATTEMPTS THE NEXT STEP. Outsource one step, never",
+    "  the walk. Same rule for every step, on every platform.",
+    "TRAINING GENERATION AND TRIAGE ARE SKILL-GOVERNED. Follow them, do not improvise:",
+    "  skill `training-defect-triage` -- which of the three levers this failure belongs to:",
+    "    (1) fix on our end (infra/code/data) -> Taey then succeeds unchanged -> spec_knowledge_v1 row",
+    "    (2) fix the instruction/system prompt -> Taey retries -> still train, so the line can be evicted",
+    "    (3) train it -> genuine capability gap -> behavioral pair, right-way-only",
+    "    an unfixable gap is FILED, never trained around",
+    "  skill `taey-training-trigger` -- how to author the rows: right-way-only, residue-gated,",
+    "    written to the governed store and REGISTERED in the manifest. A row that exists only in a",
+    "    conversation is lost.",
+    "",
+    "YOUR OUTPUT IS MEASURED IN: steps Taey executed, walks completed end to end, training rows",
+    "generated and registered, and real outcomes shipped. NOT in commits, branches, or touched files.",
+    "A session with many diffs and no completed walk has produced nothing.",
+    "",
+    "Work the plan, not the notification stream -- a defect notification is an interruption to queue,",
+    "never a substitute for the walk. Treat claims as observed, inferred, or unknown; cite files,",
+    "commands, or live output; verify before asserting, including about your own past actions.",
+])
+
+
 COMPANION_IDENTITY_MISSING = "\n".join([
     "role: companion",
     "- Full companion identity was requested, but no operator identity file is configured.",
@@ -130,6 +177,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
     rules_meta = rules_selection["meta"]
     identity = _select_identity(raw_session, session_key, cli)
     supervisor_affordance = _supervisor_access_affordance(raw_session, roots, registered_sessions)
+    kb_context = select_kb_context(session_key, work, refs)
 
     context = {
         "overall_refs": refs["overall"],
@@ -144,6 +192,8 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
         "rules_meta": rules_meta,
         "budget_used": 0,
     }
+    if kb_context:
+        context["kb_context"] = kb_context
     context["snapshot"] = _build_snapshot(
         session_key,
         cli,
@@ -153,6 +203,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
         selected_memory,
         rules,
         identity,
+        kb_context,
         repo_head=repo_head,
     )
     context["budget_used"] = _estimate_tokens(json.dumps(context, sort_keys=True))
@@ -281,6 +332,7 @@ def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:
                         "owner": task.get("owner"),
                         "dispatched_to": task.get("dispatched_to"),
                         "task_type": task.get("task_type"),
+                        "capability_tags": task.get("capability_tags") or [],
                         "blocked_on": task.get("blocked_on"),
                         "phase_id": phase_item.get("phase", {}).get("id"),
                         "phase_name": phase_item.get("phase", {}).get("name"),
@@ -335,6 +387,7 @@ def _current_work_row(current_work: Dict[str, Any], session: str) -> Dict[str, A
         "owner": row.get("owner") or session,
         "dispatched_to": row.get("dispatched_to"),
         "task_type": row.get("task_type"),
+        "capability_tags": row.get("capability_tags") or [],
         "blocked_on": row.get("blocked_on"),
         "phase_id": row.get("phase_id"),
         "phase_name": row.get("phase_name"),
@@ -770,6 +823,8 @@ def _select_identity(raw_session: str, session: str, cli: str) -> Dict[str, Any]
     role = _identity_role(raw_session, session, cli)
     if role == "companion":
         return _companion_identity()
+    if role == "enablement":
+        return _enablement_identity()
     return _engineering_identity()
 
 
@@ -779,7 +834,17 @@ def _identity_role(raw_session: str, session: str, cli: str) -> str:
     companions = _companion_sessions()
     if session in companions or (raw_session or "").strip() in companions:
         return "companion"
+    enablers = _enablement_sessions()
+    if session in enablers or (raw_session or "").strip() in enablers:
+        return "enablement"
     return "engineering"
+
+
+def _enablement_sessions() -> set[str]:
+    raw = os.environ.get("ORCH_ENABLEMENT_SESSIONS", "").strip()
+    if not raw:
+        return set(DEFAULT_ENABLEMENT_SESSIONS)
+    return {item.strip() for item in raw.split(",") if item.strip()}
 
 
 def _companion_sessions() -> set[str]:
@@ -787,6 +852,20 @@ def _companion_sessions() -> set[str]:
     if not raw:
         return set(DEFAULT_COMPANION_SESSIONS)
     return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _enablement_identity() -> Dict[str, Any]:
+    return {
+        "role": "enablement",
+        "mode": "lean_role_core",
+        "source": "built_in",
+        "content": ENABLEMENT_IDENTITY_CORE,
+        "path": "",
+        "sha256": _sha256_text(ENABLEMENT_IDENTITY_CORE),
+        "mtime_ns": 0,
+        "size": len(ENABLEMENT_IDENTITY_CORE.encode("utf-8")),
+        "files": [],
+    }
 
 
 def _engineering_identity() -> Dict[str, Any]:
@@ -881,6 +960,7 @@ def _companion_identity_paths(root: Path) -> List[Path]:
 def _build_snapshot(session: str, cli: str, task_id: Optional[str], work: Dict[str, Any],
                     summary: Optional[Dict[str, Any]], memory: List[Dict[str, Any]],
                     rules: List[Dict[str, Any]], identity: Optional[Dict[str, Any]] = None,
+                    kb_context: Optional[List[Dict[str, Any]]] = None,
                     repo_head: Optional[str] = None) -> Dict[str, Any]:
     resolved_task = task_id or work.get("task_id") or work.get("top_task_id")
     identity = identity or {}
@@ -900,6 +980,7 @@ def _build_snapshot(session: str, cli: str, task_id: Optional[str], work: Dict[s
             "owner": work.get("owner"),
             "dispatched_to": work.get("dispatched_to"),
             "task_type": work.get("task_type"),
+            "capability_tags": work.get("capability_tags") or [],
             "blocked_on": work.get("blocked_on"),
             "step_governance": work.get("step_governance") or {},
         },
@@ -939,6 +1020,15 @@ def _build_snapshot(session: str, cli: str, task_id: Optional[str], work: Dict[s
                 "size": item.get("size", 0),
             }
             for item in identity.get("files") or []
+        ],
+        "kb_context": [
+            {
+                "stable_key": item.get("stable_key", ""),
+                "revision_no": item.get("revision_no"),
+                "content_sha256": item.get("content_sha256", ""),
+                "deduped": bool(item.get("deduped")),
+            }
+            for item in (kb_context or [])
         ],
         "ledger": _ledger_tail(),
         "assembler_version": head,
@@ -1029,6 +1119,10 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
         lines.append("")
     if not context.get("memory"):
         lines.append("- none selected")
+    kb_context = context.get("kb_context") or []
+    if kb_context:
+        lines.extend(["", "## Knowledge Base"])
+        lines.extend(_render_kb_context(kb_context, nonce))
     lines.extend(["", "## Rules"])
     rules = context.get("rules") or []
     for idx, rule in enumerate(rules, start=1):
@@ -1304,6 +1398,35 @@ def _render_refs(tier: str, refs: List[Dict[str, Any]], max_refs: int, nonce: st
     return lines
 
 
+def _render_kb_context(items: List[Dict[str, Any]], nonce: str) -> List[str]:
+    lines: List[str] = []
+    for idx, item in enumerate(items, start=1):
+        stable_key = str(item.get("stable_key") or f"item-{idx}")
+        node_lines = [
+            f"stable_key: {stable_key}",
+            f"revision_no: {item.get('revision_no', '')}",
+            f"content_sha256: {item.get('content_sha256', '')}",
+            f"title: {item.get('title', '')}",
+            f"entity_type: {item.get('entity_type', '')}",
+            f"layer: {item.get('layer', '')}",
+            f"active_status: {item.get('active_status', '')}",
+            f"truth_register: {item.get('truth_register', '')}",
+        ]
+        if item.get("summary"):
+            node_lines.extend(["summary:", str(item.get("summary") or "").strip()])
+        if item.get("deduped"):
+            node_lines.extend([
+                "deduped: true",
+                "deduped_reason: content already present in selected refs by content_sha256",
+            ])
+        else:
+            node_lines.extend(["deduped: false", "content:", str(item.get("content") or "").strip()])
+        lines.append(f"### KB item {idx}")
+        lines.extend(_render_untrusted(nonce, f"kb:{stable_key}", "\n".join(node_lines)))
+        lines.append("")
+    return lines
+
+
 def _trim_packet(packet: Dict[str, Any], cli: str, budget_bytes: int, max_refs_per_tier: int) -> Dict[str, Any]:
     trimmed = json.loads(json.dumps(packet))
     context = trimmed.setdefault("context", {})
@@ -1314,6 +1437,8 @@ def _trim_packet(packet: Dict[str, Any], cli: str, budget_bytes: int, max_refs_p
         memory = context.get("memory") or []
         if not memory:
             break
+        # KB context is intentionally not trim-able: selector-matched policy and
+        # process rulings are required context, like refs/rules/identity.
         memory.pop()
         context["memory"] = memory
     return trimmed

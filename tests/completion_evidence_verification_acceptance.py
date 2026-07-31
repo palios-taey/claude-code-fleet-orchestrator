@@ -31,6 +31,7 @@ RED_SHA = "2222222222222222222222222222222222222222"
 CONDUCTOR_SHA = "3333333333333333333333333333333333333333"
 TAEYS_HANDS_SHA = "3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a"
 TAEYS_HANDS_BRANCH_SHA = "3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b"
+TAEYS_HANDS_GATED_SHA = "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c"
 ATTACKER_SHA = "4444444444444444444444444444444444444444"
 UNTRUSTED_STATUS_SHA = "5555555555555555555555555555555555555555"
 UNTRUSTED_CHECK_SHA = "6666666666666666666666666666666666666666"
@@ -129,6 +130,7 @@ def _write_fake_gh(directory: Path) -> None:
                 ("{CONDUCTOR_REPO}", "{CONDUCTOR_SHA}"): "green",
                 ("{TAEYS_HANDS_REPO}", "{TAEYS_HANDS_SHA}"): "gateless-main",
                 ("{TAEYS_HANDS_REPO}", "{TAEYS_HANDS_BRANCH_SHA}"): "gateless-branch",
+                ("{TAEYS_HANDS_REPO}", "{TAEYS_HANDS_GATED_SHA}"): "taeys-gated",
                 ("{ATTACKER_REPO}", "{ATTACKER_SHA}"): "green",
                 ("{ORCH_REPO}", "{OPEN_PR_SHA}"): "open-pr",
             }}
@@ -228,6 +230,16 @@ def _write_fake_gh(directory: Path) -> None:
                                 "app": {{"slug": "github-actions"}},
                             }}
                         ]
+                    if mode == "taeys-gated":
+                        runs = [
+                            {{
+                                "name": "consultation-v2-integrity",
+                                "status": "completed",
+                                "conclusion": "success",
+                                "completed_at": "2026-07-03T00:00:01Z",
+                                "app": {{"slug": "github-actions"}},
+                            }}
+                        ]
                     print(json.dumps({{"check_runs": runs}}))
                     sys.exit(0)
                 if path == f"repos/{{repo}}/commits/{{sha}}/statuses?per_page=100":
@@ -310,6 +322,7 @@ def main() -> int:
         "ORCH_COMPLETION_GITHUB_REPO",
         "ORCH_COMPLETION_REQUIRED_CHECKS",
         "ORCH_COMPLETION_ALLOWED_REPOS",
+        "ORCH_COMPLETION_REPO_CHECKS",
         "ORCH_COMPLETION_TRUSTED_CHECK_RUN_APPS",
         "ORCH_COMPLETION_TRUSTED_STATUS_CREATORS",
     )
@@ -325,6 +338,7 @@ def main() -> int:
         os.environ["PATH"] = f"{tmp}{os.pathsep}{os.environ['PATH']}"
         os.environ["ORCH_COMPLETION_GITHUB_REPO"] = CONDUCTOR_REPO
         os.environ["ORCH_COMPLETION_REQUIRED_CHECKS"] = "r5-audit-gate,ship-gate-acceptance"
+        os.environ.pop("ORCH_COMPLETION_REPO_CHECKS", None)
         os.environ.pop("ORCH_COMPLETION_ALLOWED_REPOS", None)
         check(
             "unset completion repo allowlist has no product default",
@@ -391,22 +405,96 @@ def main() -> int:
             f"{repo_only_response.status_code} {repo_only_response.text}",
         )
 
-        local_task = _seed_task("local")
+        os.environ["ORCH_COMPLETION_GITHUB_REPO"] = ORCH_REPO
+        gated_observation_task = _seed_task("gated-observation-only")
+        gated_observation_response = client.patch(
+            f"/api/task/{gated_observation_task}",
+            json={
+                "status": "completed",
+                "from": "tester-api",
+                "evidence": {"production_observation": "gated observation-only completion probe"},
+            },
+        )
+        gated_observation_payload = client.get(f"/api/tasks/{gated_observation_task}").json()
+        check(
+            "gated repo observation-only completion is rejected",
+            gated_observation_response.status_code == 400
+            and "gated repo" in gated_observation_response.text
+            and "commit_sha" in gated_observation_response.text
+            and gated_observation_payload.get("status") == "pending",
+            f"{gated_observation_response.status_code} {gated_observation_response.text} payload={gated_observation_payload}",
+        )
+
+        gated_runtime_override_task = _seed_task("gated-runtime-override")
+        gated_runtime_override_response = client.patch(
+            f"/api/task/{gated_runtime_override_task}",
+            json={
+                "status": "completed",
+                "from": "tester-api",
+                "evidence": {
+                    "repo": TAEYS_HANDS_REPO,
+                    "production_observation": "gated runtime must not accept explicit gateless override",
+                },
+            },
+        )
+        gated_runtime_override_payload = client.get(f"/api/tasks/{gated_runtime_override_task}").json()
+        check(
+            "gated runtime repo cannot be bypassed by explicit gateless repo",
+            gated_runtime_override_response.status_code == 400
+            and ORCH_REPO in gated_runtime_override_response.text
+            and TAEYS_HANDS_REPO not in gated_runtime_override_response.text
+            and "commit_sha" in gated_runtime_override_response.text
+            and gated_runtime_override_payload.get("status") == "pending",
+            f"{gated_runtime_override_response.status_code} {gated_runtime_override_response.text} "
+            f"payload={gated_runtime_override_payload}",
+        )
+
+        gated_supervisor_task = _seed_task("gated-supervisor-verification")
         _complete(
             client,
-            local_task,
-            {"production_observation": "local-only completion probe"},
+            gated_supervisor_task,
+            {
+                "supervisor_verification": {
+                    "mode": "research",
+                    "verifier": "tester-supervisor",
+                    "observation": "supervisor inspected the no-commit research artifact",
+                },
+                "production_observation": "gated runtime supervisor verification probe",
+            },
         )
-        local_payload = client.get(f"/api/tasks/{local_task}").json()
+        gated_supervisor_payload = client.get(f"/api/tasks/{gated_supervisor_task}").json()
+        gated_supervisor_verification = gated_supervisor_payload.get("completion_evidence_verification", {})
         check(
-            "local completion without commit_sha is UNVERIFIED",
-            local_payload.get("completion_evidence_verification_status") == "UNVERIFIED"
-            and local_payload.get("completion_evidence_verified") is False
-            and local_payload.get("completion_evidence_verification_applies") is False
-            and local_payload.get("completion_evidence_verification", {}).get("applies") is False
-            and "no commit_sha" in local_payload.get("completion_evidence_verification", {}).get("reason", ""),
-            json.dumps(local_payload.get("completion_evidence_verification"), sort_keys=True),
+            "gated runtime repo still accepts valid supervisor verification",
+            gated_supervisor_payload.get("status") == "completed"
+            and gated_supervisor_payload.get("completion_evidence_verification_status") == "VERIFIED"
+            and gated_supervisor_payload.get("completion_evidence_verified") is True
+            and gated_supervisor_payload.get("completion_evidence_verification_applies") is True
+            and gated_supervisor_verification.get("source") == "supervisor-verification"
+            and gated_supervisor_verification.get("verifier") == "tester-supervisor",
+            json.dumps(gated_supervisor_verification, sort_keys=True),
         )
+
+        os.environ["ORCH_COMPLETION_GITHUB_REPO"] = TAEYS_HANDS_REPO
+        gateless_observation_task = _seed_task("gateless-observation-only")
+        _complete(
+            client,
+            gateless_observation_task,
+            {"production_observation": "gateless observation-only completion probe"},
+        )
+        gateless_observation_payload = client.get(f"/api/tasks/{gateless_observation_task}").json()
+        check(
+            "gateless repo observation-only completion remains UNVERIFIED but accepted",
+            gateless_observation_payload.get("status") == "completed"
+            and gateless_observation_payload.get("completion_evidence_verification_status") == "UNVERIFIED"
+            and gateless_observation_payload.get("completion_evidence_verified") is False
+            and gateless_observation_payload.get("completion_evidence_verification_applies") is False
+            and gateless_observation_payload.get("completion_evidence_verification", {}).get("applies") is False
+            and gateless_observation_payload.get("completion_evidence_verification", {}).get("repo") == TAEYS_HANDS_REPO
+            and "no commit_sha" in gateless_observation_payload.get("completion_evidence_verification", {}).get("reason", ""),
+            json.dumps(gateless_observation_payload.get("completion_evidence_verification"), sort_keys=True),
+        )
+        os.environ["ORCH_COMPLETION_GITHUB_REPO"] = ORCH_REPO
 
         missing_repo_task = _seed_task("missing-repo")
         missing_repo_response = client.patch(
@@ -470,6 +558,44 @@ def main() -> int:
             and taeys_branch_payload.get("completion_evidence_verified") is False
             and "not on default branch" in taeys_branch_payload.get("completion_evidence_verification", {}).get("reason", ""),
             json.dumps(taeys_branch_payload.get("completion_evidence_verification"), sort_keys=True),
+        )
+
+        os.environ["ORCH_COMPLETION_ALLOWED_REPOS"] = f"{ORCH_REPO},{CONDUCTOR_REPO},{TAEYS_HANDS_REPO}:gated"
+        os.environ["ORCH_COMPLETION_REPO_CHECKS"] = f"{TAEYS_HANDS_REPO}=r5-audit-gate,consultation-v2-integrity"
+        check(
+            "taeys-hands repo uses repo-specific required checks",
+            evidence_verification.required_github_checks_for_repo(TAEYS_HANDS_REPO)
+            == ("r5-audit-gate", "consultation-v2-integrity"),
+            repr(evidence_verification.required_github_checks_for_repo(TAEYS_HANDS_REPO)),
+        )
+        check(
+            "orchestrator repo still uses global required checks",
+            evidence_verification.required_github_checks_for_repo(ORCH_REPO)
+            == ("r5-audit-gate", "ship-gate-acceptance"),
+            repr(evidence_verification.required_github_checks_for_repo(ORCH_REPO)),
+        )
+        taeys_gated_task = _seed_task("taeys-hands-gated")
+        taeys_gated_update = _complete(
+            client,
+            taeys_gated_task,
+            {
+                "commit_sha": TAEYS_HANDS_GATED_SHA,
+                "repo": TAEYS_HANDS_REPO,
+                "production_observation": "taeys-hands gated completion used repo-specific CI checks",
+            },
+        )
+        taeys_gated_payload = client.get(f"/api/tasks/{taeys_gated_task}").json()
+        taeys_gated_verification = taeys_gated_payload.get("completion_evidence_verification", {})
+        check(
+            "taeys-hands gated repo verifies with r5 plus consultation-v2-integrity and no ship-gate",
+            taeys_gated_update.get("completion_evidence_verification_status") == "VERIFIED"
+            and taeys_gated_payload.get("completion_evidence_verification_status") == "VERIFIED"
+            and taeys_gated_payload.get("completion_evidence_verified") is True
+            and taeys_gated_verification.get("repo") == TAEYS_HANDS_REPO
+            and taeys_gated_verification.get("profile") != "gateless"
+            and taeys_gated_verification.get("required_checks") == ["r5-audit-gate", "consultation-v2-integrity"]
+            and "ship-gate-acceptance" not in json.dumps(taeys_gated_verification, sort_keys=True),
+            json.dumps(taeys_gated_verification, sort_keys=True),
         )
 
         missing_task = _seed_task("missing")

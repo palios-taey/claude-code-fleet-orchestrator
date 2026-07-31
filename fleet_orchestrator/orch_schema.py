@@ -99,6 +99,7 @@ _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
 _COMPLETION_EVIDENCE_CONTEXT_KEYS = ("repo",)
+_COMPLETION_SUPERVISOR_VERIFICATION_KEY = "supervisor_verification"
 _NON_SUCCESS_TERMINAL_EVIDENCE_KEYS = ("reason", "error", "production_observation")
 # Closed set of legal task statuses. Validated BEFORE any completed-specific logic so a
 # non-canonical spelling can never slip past the evidence gate.
@@ -107,7 +108,8 @@ _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "interrupted"})
 HUMAN_REVIEW_TASK_TYPE = "human-review"
 HUMAN_REVIEW_QUESTION_TYPE = "human_review_gate"
 COMPLETED_EVIDENCE_NEXT_STEP = (
-    'Completed writes require shape-valid evidence and record completion_evidence_verification. commit_sha evidence must include repo. VERIFIED means GitHub confirms the commit exists in a repo present in ORCH_COMPLETION_ALLOWED_REPOS and satisfies that repo verification profile: gated repos require independent gate contexts for the exact commit_sha from trusted GitHub actors/apps, while gateless repos require the commit to be reachable from the repo default branch. UNVERIFIED means a shape-valid self-report only. '
+    'Completed writes require shape-valid evidence and record completion_evidence_verification. commit_sha evidence must include repo. VERIFIED means GitHub confirms the commit exists in a repo present in ORCH_COMPLETION_ALLOWED_REPOS and satisfies that repo verification profile: gated repos require configured independent gate contexts for the exact commit_sha from trusted GitHub actors/apps, while gateless repos require the commit to be reachable from the repo default branch. UNVERIFIED means a shape-valid self-report only. '
+    'For non-production research/prototype tasks, a distinct supervisor can verify with evidence.supervisor_verification={"mode":"research","verifier":"<supervisor-session>","observation":"<what was checked>"}; verifier must differ from the task producer and commit_sha evidence still uses the GitHub gate path. '
     'Use `taey-task update <task-id> completed --evidence '
     '\'{"commit_sha":"<sha>","repo":"OWNER/REPO","production_observation":"<what you verified>"}\'` '
     'or PATCH /api/task/<task-id> with body '
@@ -363,6 +365,36 @@ def _normalize_delivery_gate_evidence(evidence: Dict[str, Any]) -> Dict[str, Any
     return {"no_op": no_op}
 
 
+def _json_serializable_completion_object(value: Any, field: str) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        raise CompletionEvidenceError(
+            "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. "
+            f"completion evidence {field!r} must be a JSON object with mode, verifier, and observation. "
+            f"{COMPLETED_EVIDENCE_NEXT_STEP}"
+        )
+    if not value:
+        raise CompletionEvidenceError(
+            "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. "
+            f"completion evidence {field!r} must be a non-empty JSON object with mode, verifier, and observation. "
+            f"{COMPLETED_EVIDENCE_NEXT_STEP}"
+        )
+    try:
+        normalized = json.loads(json.dumps(value, separators=(",", ":"), sort_keys=True))
+    except (TypeError, ValueError) as exc:
+        raise CompletionEvidenceError(
+            "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. "
+            f"completion evidence {field!r} must be JSON-serializable: {exc}. "
+            f"{COMPLETED_EVIDENCE_NEXT_STEP}"
+        ) from exc
+    if not isinstance(normalized, dict) or not normalized:
+        raise CompletionEvidenceError(
+            "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. "
+            f"completion evidence {field!r} must remain a non-empty JSON object after JSON normalization. "
+            f"{COMPLETED_EVIDENCE_NEXT_STEP}"
+        )
+    return normalized
+
+
 def _normalize_completion_evidence(
     evidence: Optional[Dict[str, Any]],
     *,
@@ -405,6 +437,11 @@ def _normalize_completion_evidence(
     outbound_actions = _normalize_outbound_actions(evidence)
     if outbound_actions is not None:
         normalized["outbound_actions"] = outbound_actions
+    if _COMPLETION_SUPERVISOR_VERIFICATION_KEY in evidence:
+        normalized[_COMPLETION_SUPERVISOR_VERIFICATION_KEY] = _json_serializable_completion_object(
+            evidence.get(_COMPLETION_SUPERVISOR_VERIFICATION_KEY),
+            _COMPLETION_SUPERVISOR_VERIFICATION_KEY,
+        )
     try:
         loop_proof = normalize_loop_proof_evidence(evidence.get("loop_proof")) if "loop_proof" in evidence else None
     except ValueError as exc:
@@ -417,11 +454,12 @@ def _normalize_completion_evidence(
         not delivery_gate_evidence
         and not any(key in normalized for key in _COMPLETION_EVIDENCE_KEYS)
         and "outbound_actions" not in normalized
+        and _COMPLETION_SUPERVISOR_VERIFICATION_KEY not in normalized
         and "loop_proof" not in normalized
     ):
         raise CompletionEvidenceError(
             "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. completed status requires evidence with at least one of: "
-            f"commit_sha, gate_run_id, production_observation, loop_proof, or outbound_actions with signoff gate_pass provenance. Optional repo=OWNER/REPO selects the GitHub repository for commit verification. {COMPLETED_EVIDENCE_NEXT_STEP}"
+            f"commit_sha, gate_run_id, production_observation, loop_proof, supervisor_verification, or outbound_actions with signoff gate_pass provenance. Optional repo=OWNER/REPO selects the GitHub repository for commit verification. {COMPLETED_EVIDENCE_NEXT_STEP}"
         )
     return normalized
 
@@ -1094,6 +1132,7 @@ def _completion_evidence_verification_applies_cypher(alias: str) -> str:
         AND (
             {evidence} CONTAINS '"commit_sha"'
             OR {evidence} CONTAINS '"loop_proof"'
+            OR {evidence} CONTAINS '"supervisor_verification"'
         )
     )
 )
@@ -3691,23 +3730,7 @@ def get_project_summary(project_id: str,
                  collect(
                      CASE
                          WHEN t IS NULL THEN NULL
-                         ELSE {
-                             id: t.id,
-                             description: t.description,
-                             status: t.status,
-                             owner: t.owner,
-                             priority: t.priority,
-                             blocked_on: t.blocked_on,
-                             completion_evidence: t.completion_evidence,
-                             completion_evidence_verification: t.completion_evidence_verification,
-                             completion_evidence_verification_status: t.completion_evidence_verification_status,
-                             completion_evidence_verified: t.completion_evidence_verified,
-                             completion_evidence_verification_applies: t.completion_evidence_verification_applies,
-                             completed_by: t.completed_by,
-                             completed_at: t.completed_at,
-                             refs: t.refs,
-                             source_path: t.source_path
-                         }
+                         ELSE properties(t)
                      END
                  ) AS tasks
             ORDER BY ph.order ASC, ph.name ASC
@@ -3837,6 +3860,7 @@ def get_session_current_work(session_id: str,
                    t.dispatched_to AS dispatched_to,
                    t.status AS status,
                    t.task_type AS task_type,
+                   t.capability_tags AS capability_tags,
                    t.blocked_on AS blocked_on,
                    t.source_path AS task_source_path,
                    t.refs AS task_refs
@@ -3933,7 +3957,10 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
         result = session.run(f"""
             MATCH (proj:OrchProject)-[:HAS_PHASE]->(ph:OrchPhase)-[:HAS_TASK]->(t:OrchTask)
             WHERE t.status = 'pending'
-              AND coalesce(t.owner, '') = $sess
+              AND (
+                  coalesce(t.owner, '') = $sess
+                  OR coalesce(t.dispatched_to, '') = $sess
+              )
               AND NOT (
                   coalesce(t.task_type, '') = $human_review_task_type
                   AND EXISTS {{
@@ -3953,6 +3980,9 @@ def get_session_next_ready(session_id: str, exclude_task_id: Optional[str] = Non
               AND coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress']
             RETURN t.id AS task_id, t.description AS description,
                    t.priority AS priority, t.owner AS owner,
+                   t.dispatched_to AS dispatched_to,
+                   t.task_type AS task_type,
+                   t.capability_tags AS capability_tags,
                    t.blocked_on AS blocked_on,
                    t.refs AS task_refs,
                    t.source_path AS task_source_path,
@@ -5638,26 +5668,39 @@ def _resolve_chat_question(question_id: str, *,
     pipe.execute()
 
 
-def _notify_human_review_gate(reviewer: str, prompt: str, *, requested_by: str,
-                              task_id: str, question_id: str,
-                              config: Optional[OrchConfig] = None) -> None:
-    if not reviewer:
-        return
+def _alert_human_review_delivery_failure_to_configured_target(prompt: str, *, requested_by: str,
+                                                              task_id: str, question_id: str,
+                                                              reviewer: str,
+                                                              error: Exception,
+                                                              config: Optional[OrchConfig] = None) -> tuple[bool, str]:
     cfg = config or OrchConfig()
+    target = str(getattr(cfg, "human_review_alert_target", "") or "").strip()
+    if not target:
+        _LOG.error("human-review delivery failure alert skipped: ORCH_HUMAN_REVIEW_ALERT_TARGET is unset")
+        return False, ""
     body = (
-        f"HUMAN REVIEW NEEDED [{task_id}]\n"
+        f"HUMAN REVIEW DELIVERY FAILED [{task_id}]\n"
         f"question_id: {question_id}\n"
+        f"reviewer: {reviewer or 'unknown'}\n"
+        f"requested_by: {requested_by or 'unknown'}\n"
+        f"error: {error}\n\n"
         f"{prompt}"
     )
-    result = subprocess.run(
-        [cfg.notify_cli_path, reviewer, body, "--from", requested_by or "orch-human-review",
-         "--type", "escalation", "--priority", "high"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [cfg.notify_cli_path, target, body, "--from", "orch-human-review",
+             "--type", "escalation", "--priority", "high"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _LOG.error("human-review delivery failure alert subprocess failed: %s", exc)
+        return False, target
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"{cfg.notify_cli_path} failed")
+        _LOG.error("human-review delivery failure alert failed: %s", result.stderr.strip() or result.stdout.strip())
+        return False, target
+    return True, target
 
 
 def create_question(question_id: str, text: str, context: str = "",
@@ -5904,6 +5947,7 @@ def create_human_review_gate(
     notify: bool = True,
     config: Optional[OrchConfig] = None,
 ) -> Dict[str, Any]:
+    cfg = config or OrchConfig()
     task = create_task(
         phase_id=phase_id,
         task_id=task_id,
@@ -5914,7 +5958,7 @@ def create_human_review_gate(
         task_type="human-review",
         refs=refs,
         wake_owner_if_ready=False,
-        config=config,
+        config=cfg,
     )
     question = create_question(
         question_id=question_id,
@@ -5927,12 +5971,42 @@ def create_human_review_gate(
         question_type="human_review_gate",
         gate_task_id=task,
         refs=refs,
-        surface=True,
-        config=config,
+        surface=False,
+        config=cfg,
     )
-    if notify:
-        _notify_human_review_gate(reviewer, prompt, requested_by=requested_by,
-                                  task_id=task, question_id=question, config=config)
+    try:
+        _surface_question_to_chat({
+            "id": question,
+            "text": prompt,
+            "task_id": task,
+            "gate_task_id": task,
+            "asked_by": requested_by,
+            "reviewer": reviewer,
+            "lineage": reviewer,
+        }, config=cfg)
+    except Exception as exc:
+        alert_sent, alert_target = _alert_human_review_delivery_failure_to_configured_target(
+            prompt,
+            requested_by=requested_by,
+            task_id=task,
+            question_id=question,
+            reviewer=reviewer,
+            error=exc,
+            config=cfg,
+        )
+        alert_note = (
+            f"Configured alert target '{alert_target}' was notified."
+            if alert_sent
+            else "No delivery-failure alert target was notified; set ORCH_HUMAN_REVIEW_ALERT_TARGET to enable one."
+        )
+        raise RuntimeError(
+            f"human-review gate '{task}' could not surface in dashboard chat for reviewer '{reviewer}'. "
+            f"{alert_note} Inspect /ui/ or GET /api/chat/{{reviewer}}; "
+            "retry POST /api/human-review-gates after dashboard/Redis delivery is healthy. "
+            f"original error: {exc}"
+        ) from exc
+    # `notify` remains accepted for API/CLI compatibility; dashboard chat is the delivery channel.
+    _ = notify
     return {"task_id": task, "question_id": question, "reviewer": reviewer}
 
 

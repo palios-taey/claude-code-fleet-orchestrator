@@ -17,6 +17,8 @@ GATED_REPO_PROFILE = "gated"
 GATELESS_REPO_PROFILE = "gateless"
 DEFAULT_REPO_PROFILE = GATED_REPO_PROFILE
 SUPPORTED_REPO_PROFILES = frozenset({GATED_REPO_PROFILE, GATELESS_REPO_PROFILE})
+SUPERVISOR_VERIFICATION_SOURCE = "supervisor-verification"
+SUPERVISOR_VERIFICATION_MODES = frozenset({"prototype", "research"})
 VERIFIED = "VERIFIED"
 UNVERIFIED = "UNVERIFIED"
 _GH_TIMEOUT_SEC = 10
@@ -30,6 +32,37 @@ def required_github_checks() -> Tuple[str, ...]:
     values = [part.strip() for part in raw.split(",") if part.strip()] if raw else list(DEFAULT_REQUIRED_GITHUB_CHECKS)
     checks = tuple(dict.fromkeys(values))
     return checks or DEFAULT_REQUIRED_GITHUB_CHECKS
+
+
+def _parse_repo_required_checks_entry(entry: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
+    text = entry.strip()
+    if not text or "=" not in text:
+        return None
+    repo, raw_checks = text.split("=", 1)
+    repo = repo.strip()
+    if "/" not in repo:
+        return None
+    checks = tuple(dict.fromkeys(part.strip() for part in raw_checks.split(",") if part.strip()))
+    if not checks:
+        return None
+    return repo, checks
+
+
+def completion_repo_required_checks() -> Dict[str, Tuple[str, ...]]:
+    raw = os.environ.get("ORCH_COMPLETION_REPO_CHECKS", "")
+    entries = raw.split(";") if ";" in raw else [raw]
+    required_checks: Dict[str, Tuple[str, ...]] = {}
+    for entry in entries:
+        parsed = _parse_repo_required_checks_entry(entry)
+        if not parsed:
+            continue
+        repo, checks = parsed
+        required_checks[repo.lower()] = checks
+    return required_checks
+
+
+def required_github_checks_for_repo(repo: str) -> Tuple[str, ...]:
+    return completion_repo_required_checks().get(repo.strip().lower(), required_github_checks())
 
 
 def _csv_env_values(name: str, defaults: Iterable[str]) -> Tuple[str, ...]:
@@ -142,7 +175,12 @@ def completion_evidence_verification_applies(evidence: Optional[Dict[str, Any]])
         return False
     if str(evidence.get("commit_sha") or "").strip():
         return True
-    return "loop_proof" in evidence
+    if "loop_proof" in evidence or "supervisor_verification" in evidence:
+        return True
+    gated, _repo = _no_commit_evidence_targets_gated_repo(evidence)
+    if gated:
+        return True
+    return False
 
 
 def _repo_allowed_for_completion_evidence(repo: str) -> bool:
@@ -151,6 +189,28 @@ def _repo_allowed_for_completion_evidence(repo: str) -> bool:
 
 def _repo_profile_for_completion_evidence(repo: str) -> str:
     return completion_repo_profiles().get(repo.strip().lower(), "")
+
+
+def _configured_runtime_completion_repo() -> str:
+    return (
+        os.environ.get("ORCH_COMPLETION_GITHUB_REPO", "").strip()
+        or os.environ.get("GITHUB_REPOSITORY", "").strip()
+    )
+
+
+def _no_commit_completion_repo(evidence: Dict[str, Any]) -> str:
+    return _configured_runtime_completion_repo() or repo_from_completion_evidence(evidence)
+
+
+def _no_commit_evidence_targets_gated_repo(evidence: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
+    if not isinstance(evidence, dict) or not evidence:
+        return False, ""
+    if str(evidence.get("commit_sha") or "").strip():
+        return False, ""
+    repo = _no_commit_completion_repo(evidence)
+    if not repo:
+        return False, ""
+    return _repo_profile_for_completion_evidence(repo) == GATED_REPO_PROFILE, repo
 
 
 def _repo_not_allowed_reason(repo: str, *, inferred: bool = False) -> str:
@@ -413,6 +473,93 @@ def _unverified(
     return payload
 
 
+def _supervisor_verification_unverified(
+    reason: str,
+    *,
+    producer: str = "",
+    verifier: str = "",
+    reject_completion: bool = True,
+) -> Dict[str, Any]:
+    payload = {
+        "status": UNVERIFIED,
+        "verified": False,
+        "applies": True,
+        "source": SUPERVISOR_VERIFICATION_SOURCE,
+        "repo": "",
+        "commit_sha": "",
+        "required_checks": [],
+        "producer": producer,
+        "verifier": verifier or "none",
+        "reason": reason,
+        "checks": [],
+    }
+    if reject_completion:
+        payload["reject_completion"] = True
+    return payload
+
+
+def _verify_supervisor_completion_evidence(evidence: Dict[str, Any], *, producer: str = "") -> Optional[Dict[str, Any]]:
+    if "supervisor_verification" not in evidence:
+        return None
+    raw = evidence.get("supervisor_verification")
+    if not isinstance(raw, dict):
+        return _supervisor_verification_unverified(
+            "supervisor_verification evidence must be a JSON object with mode, verifier, and observation",
+            producer=producer,
+        )
+    mode = str(raw.get("mode") or "").strip().lower()
+    verifier = str(raw.get("verifier") or "").strip()
+    observation = str(raw.get("observation") or "").strip()
+    producer_value = str(producer or "").strip()
+    if mode not in SUPERVISOR_VERIFICATION_MODES:
+        return _supervisor_verification_unverified(
+            "supervisor_verification.mode must be one of: prototype, research",
+            producer=producer_value,
+            verifier=verifier,
+        )
+    if not verifier:
+        return _supervisor_verification_unverified(
+            "supervisor_verification.verifier must name the distinct supervisor session that verified the work",
+            producer=producer_value,
+        )
+    if not producer_value:
+        return _supervisor_verification_unverified(
+            "supervisor_verification requires a non-empty completion producer so verifier!=producer can be enforced",
+            verifier=verifier,
+        )
+    if verifier.lower() == producer_value.lower():
+        return _supervisor_verification_unverified(
+            "supervisor_verification is self-attestation: verifier must differ from producer",
+            producer=producer_value,
+            verifier=verifier,
+        )
+    if len(observation) < 8:
+        return _supervisor_verification_unverified(
+            "supervisor_verification.observation must describe what the supervisor verified in at least 8 characters",
+            producer=producer_value,
+            verifier=verifier,
+        )
+    return {
+        "status": VERIFIED,
+        "verified": True,
+        "applies": True,
+        "source": SUPERVISOR_VERIFICATION_SOURCE,
+        "repo": "",
+        "commit_sha": "",
+        "required_checks": [],
+        "producer": producer_value,
+        "verifier": verifier,
+        "mode": mode,
+        "reason": "distinct supervisor session verified this non-production research/prototype completion",
+        "checks": [{
+            "name": SUPERVISOR_VERIFICATION_SOURCE,
+            "kind": "supervisor-attestation",
+            "ok": True,
+            "detail": f"{verifier} verified {mode} completion by {producer_value}: {observation}",
+        }],
+    }
+
+
 def verify_completion_evidence(
     evidence: Optional[Dict[str, Any]],
     *,
@@ -424,18 +571,34 @@ def verify_completion_evidence(
         verification = verify_loop_proof_receipt(evidence, producer=producer)
         verification["applies"] = True
         return verification
-    checks = required_github_checks()
     commit_sha = str(evidence.get("commit_sha") or "").strip()
+    repo = repo_from_completion_evidence(evidence)
+    checks = required_github_checks_for_repo(repo) if repo else required_github_checks()
     if not commit_sha:
-        repo = repo_from_completion_evidence(evidence)
+        supervisor_verification = _verify_supervisor_completion_evidence(evidence, producer=producer)
+        if supervisor_verification is not None:
+            return supervisor_verification
+        gated, no_commit_repo = _no_commit_evidence_targets_gated_repo(evidence)
+        if gated:
+            return _unverified(
+                f"completion evidence for gated repo {no_commit_repo!r} must include commit_sha and repo; "
+                "observation-only evidence cannot bypass open-PR and required-gate verification. "
+                "Use commit_sha+repo evidence after the PR is merged and required gates pass. "
+                "Observation-only completion remains valid only for gateless/local work with no gated GitHub verifier.",
+                repo=no_commit_repo,
+                required_checks=required_github_checks_for_repo(no_commit_repo),
+                producer=producer,
+                applies=True,
+                reject_completion=True,
+            )
+        repo = _no_commit_completion_repo(evidence)
         return _unverified(
-            "completion evidence has no commit_sha; local/non-repo completion remains a self-report",
+            "completion evidence has no commit_sha; gateless/local/non-repo completion remains a self-report",
             repo=repo,
             required_checks=checks,
             producer=producer,
             applies=False,
         )
-    repo = repo_from_completion_evidence(evidence)
     if not repo:
         return _unverified(
             "completion evidence with commit_sha must include completion_evidence.repo; "

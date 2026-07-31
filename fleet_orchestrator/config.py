@@ -12,46 +12,15 @@ from typing import Dict, Optional
 import redis
 import redis.asyncio as aioredis
 
+from fleet_orchestrator.dotenv_loader import load_dotenv_candidates
+
 
 class OrchConfigError(ValueError):
     """Raised when required orchestrator configuration is missing or invalid."""
 
 
-_DOTENV_SUPPRESS_VALUES = {"empty"}
-
-
 def _load_dotenv_candidates() -> None:
-    candidates = []
-    explicit = os.environ.get("ORCH_DOTENV")
-    if explicit and explicit.strip().lower() in _DOTENV_SUPPRESS_VALUES:
-        return
-    if explicit:
-        candidates.append(Path(explicit))
-    candidates.append(Path.cwd() / ".env")
-    candidates.append(Path(__file__).resolve().parent.parent / ".env")
-
-    for env_path in candidates:
-        if not env_path.is_file():
-            continue
-        with env_path.open(encoding="utf-8") as handle:
-            for raw_line in handle:
-                line = raw_line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.replace("export ", "").strip()
-                value = value.strip()
-                # Standard dotenv semantics: strip one matching pair of
-                # surrounding quotes. Operators quote values to keep the
-                # same .env shell-sourceable (unquoted JSON braces would
-                # brace-expand under `set -a; . .env`); without stripping,
-                # the quotes reach consumers and silently break JSON values
-                # (live finding 2026-06-11: ORCH_SESSION_ROOTS unparseable
-                # -> every wake packet empty despite correct selection code).
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-                    value = value[1:-1]
-                os.environ.setdefault(key, value)
-        break
+    load_dotenv_candidates()
 
 
 _load_dotenv_candidates()
@@ -131,14 +100,16 @@ def _int_env(name: str, default: Optional[int] = None) -> int:
 # every _optional_env call. (ws1-grok-audit Check-3 resolution, 2026-06-11: the
 # distinction was correct in behavior but implicit; this makes it explicit.)
 #
-# REQUIRED — _require_env / _int_env(no default): absence raises OrchConfigError.
-# These are connectivity-critical; a silent default would point the product at
-# the wrong store and corrupt state.
+# REQUIRED — _require_env / _int_env(no default) / explicit fail-loud runtime
+# contract. These are connectivity- or delivery-critical; a silent default
+# would point the product at the wrong store or local operator script and
+# corrupt state/drop work.
 REQUIRED_ENV = (
     "ORCH_REDIS_HOST",      # _require via redis_host
     "ORCH_REDIS_PORT",      # _int_env (no default) via redis_port
     "ORCH_NEO4J_URI",       # _require via neo4j_uri
     "ORCH_NEO4J_DB",        # _require via neo4j_db
+    "ORCH_PEER_RESPAWN_SCRIPT",  # explicit fail-loud contract via orch-cron project trigger delivery
 )
 # OPTIONAL — _optional_env with a documented default. Absent => the named mode,
 # which is a fully supported operating state, NOT a silent fallback for missing
@@ -164,6 +135,9 @@ OPTIONAL_ENV = (
      "the released CLI name on PATH; override for a vendored/renamed install"),
     ("ORCH_NOTIFY_LIB_ROOT", "None (use importable fleet-notify)",
      "required only if fleet-notify is not already importable on sys.path; ensure_notify_importable raises loud if missing then"),
+    ("ORCH_HUMAN_REVIEW_ALERT_TARGET", "unset (no out-of-band delivery-failure alert)",
+     "optional session target for human-review dashboard delivery-failure alerts; unset keeps the gate fail-closed "
+     "with API/UI recovery instructions and does not notify a baked fleet identity"),
     ("ORCH_REF_ALLOWED_ROOT", "unset (explicit ref roots absent)",
      "explicit plan/source ref roots; refs can also use roots auto-derived from ORCH_SESSION_ROOTS"),
     ("ORCH_DASHBOARD_URL", "http://127.0.0.1:5002",
@@ -282,6 +256,7 @@ class OrchConfig:
     redis_sentinel_master: str = field(default_factory=lambda: _optional_env("ORCH_REDIS_SENTINEL_MASTER", "orch-master") or "orch-master")
     notify_lib_root: Optional[str] = field(default_factory=lambda: _optional_env("ORCH_NOTIFY_LIB_ROOT"))
     notify_cli_path: str = field(default_factory=notify_cli)
+    human_review_alert_target: str = field(default_factory=lambda: _optional_env("ORCH_HUMAN_REVIEW_ALERT_TARGET", "") or "")
     product_owner_map: Dict[str, str] = field(default_factory=_parse_product_owner_map)
     session_ids: list[str] = field(default_factory=_parse_session_ids)
     badge_fallback_supervisor: str = field(default_factory=lambda: _optional_env("ORCH_BADGE_FALLBACK_SUPERVISOR", "") or "")

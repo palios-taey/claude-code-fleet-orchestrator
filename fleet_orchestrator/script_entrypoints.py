@@ -20,11 +20,20 @@ def _coerce_exit_code(code: Any) -> Any:
     return code
 
 
+def _bootstrap_cli_environment() -> None:
+    # Keep this dependency-free: scripts/install calls through this wrapper
+    # before package dependencies such as redis are installed.
+    from fleet_orchestrator.dotenv_loader import load_dotenv_candidates
+
+    load_dotenv_candidates()
+
+
 def _run_callable(import_path: str) -> Any:
     if _version_requested():
         print(__version__)
         return 0
 
+    _bootstrap_cli_environment()
     module_name, func_name = import_path.rsplit(":", 1)
     module = __import__(module_name, fromlist=[func_name])
     result = getattr(module, func_name)()

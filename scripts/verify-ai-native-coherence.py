@@ -103,7 +103,6 @@ BASELINE_NEEDS_FIX_KEYS = frozenset({
     "fleet_orchestrator/orch_schema.py::_normalize_non_success_terminal_evidence::orch_raise_error::3::fe6fd38dd1ed3046",
     "fleet_orchestrator/orch_schema.py::_normalize_non_success_terminal_evidence::orch_raise_error::4::c253ff80cec9cf29",
     "fleet_orchestrator/orch_schema.py::_normalize_non_success_terminal_evidence::orch_raise_error::5::0fb7b9c4370be4ef",
-    "fleet_orchestrator/orch_schema.py::_notify_human_review_gate::orch_raise_error::1::00d4b005ba9d04df",
     "fleet_orchestrator/orch_schema.py::_parse_pause_expires_at::orch_raise_error::1::b39343b9e78b052b",
     "fleet_orchestrator/orch_schema.py::_parse_pause_expires_at::orch_raise_error::2::1ea435cccd4861db",
     "fleet_orchestrator/orch_schema.py::_project_record::orch_raise_error::1::ad44addeff81d189",

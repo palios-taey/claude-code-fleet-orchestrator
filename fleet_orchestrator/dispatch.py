@@ -61,7 +61,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .config import OrchConfig, get_neo4j_session, notify_cli
+from .config import OrchConfig, _parse_product_owner_map, get_neo4j_session, notify_cli
 from .context_assembler import (
     assemble as assemble_wake_packet,
     build_packet as build_wake_packet,
@@ -69,6 +69,7 @@ from .context_assembler import (
     size_report as wake_size_report,
     task_ref_receipt,
 )
+from .kb_context import KnowledgeBaseContextError
 from .notify_state import redis_connect as _notify_redis_connect
 from .notify_state import state_key as _notify_state_key
 from .decision_receipt import maybe_emit_receipt as maybe_emit_decision_receipt
@@ -79,6 +80,7 @@ from .orch_schema import completed_task_satisfies_dependents_cypher
 from .rules_tier import get_rules
 from .worker_liveness import register_worker_task_liveness
 from .current_task_binding import (
+    clear_matching_current_task,
     clear_session_current_task,
     decode_current_task,
     is_live_binding_status,
@@ -118,6 +120,10 @@ class HooksNotInstalled(Exception):
     """Dispatch blocked because the target session has no managed notify hooks."""
 
 
+class ChangesRequestedError(Exception):
+    """Changes-requested rework could not be resolved to a concrete peer/task."""
+
+
 def _base_session_name(worker: str) -> str:
     for suffix in ("-codex", "-gemini", "-grok", "-claude"):
         if worker.endswith(suffix):
@@ -138,7 +144,7 @@ def _cli_for_worker(worker: str) -> str:
 
 
 def _resolve_product_id(worker: str) -> Optional[str]:
-    return OrchConfig().product_owner_map.get(_base_session_name(worker))
+    return _parse_product_owner_map().get(_base_session_name(worker))
 
 
 def _redis_connect():
@@ -293,7 +299,7 @@ def _orch_task_exists(task_id: str) -> bool:
     return record is not None
 
 
-def _claim_ready_orch_task(task_id: str, worker: str) -> None:
+def _claim_ready_orch_task(task_id: str, worker: str, *, force: bool = False) -> None:
     if not _orch_task_exists(task_id):
         return
 
@@ -308,6 +314,7 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
             WHERE (
                   prior_status = 'pending'
                   OR (prior_status = 'completed' AND coalesce(t.recurring, false) = true)
+                  OR ($force = true AND prior_status = 'in_progress')
               )
               AND {_DEPENDENCIES_READY_CYPHER}
             SET t.status = 'in_progress',
@@ -328,6 +335,7 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
             task_id=task_id,
             worker=worker,
             owner=owner,
+            force=bool(force),
         ).single()
 
         if record is not None:
@@ -350,6 +358,60 @@ def _claim_ready_orch_task(task_id: str, worker: str) -> None:
         f"ORCH_TASK_NOT_READY task={task_id} status={detail['status']} "
         f"incomplete_deps={detail['incomplete_deps']}"
     )
+
+
+def _current_task_binding_candidates(task_id: str) -> set[str]:
+    if not _orch_task_exists(task_id):
+        return set()
+    cfg = OrchConfig()
+    with get_neo4j_session(cfg) as session:
+        record = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            RETURN coalesce(t.status, 'pending') AS status,
+                   t.owner AS owner,
+                   t.dispatched_to AS dispatched_to,
+                   t.worker_liveness_worker AS worker_liveness_worker
+            """,
+            task_id=task_id,
+        ).single()
+    if not record:
+        return set()
+    values = record.data()
+    if str(values.get("status") or "").strip().lower() != "in_progress":
+        return set()
+    return {
+        str(candidate).strip()
+        for candidate in (
+            values.get("owner"),
+            values.get("dispatched_to"),
+            values.get("worker_liveness_worker"),
+        )
+        if str(candidate or "").strip()
+    }
+
+
+def _clear_replaced_force_bindings(task_id: str, previous_workers: set[str], worker: str) -> None:
+    stale_workers = sorted(previous_workers - {worker})
+    if not stale_workers:
+        return
+    try:
+        r = _redis_connect()
+    except Exception as exc:
+        logger.warning(
+            "force dispatch reclaim could not connect to Redis for stale binding clear task=%s workers=%s: %r",
+            task_id,
+            stale_workers,
+            exc,
+        )
+        return
+    for stale_worker in stale_workers:
+        clear_matching_current_task(
+            stale_worker,
+            task_id,
+            redis_client=r,
+            reason=f"dispatch-force-reclaim:{worker}",
+        )
 
 
 def _binding_is_ours(raw: Optional[str], task_id: str, binding_nonce: Optional[float]) -> bool:
@@ -613,6 +675,8 @@ def _select_dispatch_context(worker: str, task_id: str, description: str,
                              supervisor: Optional[str], cli: str) -> tuple[dict[str, Any], str]:
     try:
         return select_wake_context(worker, task_id=task_id, cli=cli), ""
+    except KnowledgeBaseContextError:
+        raise
     except Exception as exc:
         warning = (
             "full task-scoped context selection unavailable; dispatch built the "
@@ -719,7 +783,8 @@ def dispatch(
 
     from_session = supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")
 
-    _claim_ready_orch_task(task_id=task_id, worker=worker)
+    previous_force_bindings = _current_task_binding_candidates(task_id) if force else set()
+    _claim_ready_orch_task(task_id=task_id, worker=worker, force=force)
     try:
         binding_nonce = bind_current_task(
             worker=worker,
@@ -753,7 +818,7 @@ def dispatch(
 
     mark_superseded_for_task(_redis_connect(), from_session, task_id)
 
-    cli = OrchConfig().notify_cli_path
+    cli = notify_cli()
     result = subprocess.run(
         [
             cli,
@@ -788,6 +853,7 @@ def dispatch(
         # means the wake was not delivered (V3): reverting is correct.
         _rollback_claim(worker, task_id, binding_nonce)
         raise RuntimeError(result.stderr.strip() or f"{cli} failed")
+    _clear_replaced_force_bindings(task_id, previous_force_bindings, worker)
     maybe_emit_decision_receipt(
         "wake",
         {
@@ -817,6 +883,7 @@ def dispatch(
 
 
 _VALID_OUTCOMES = ("done", "error", "interrupted")
+_COMPLETION_RECEIPT_TTL_SECS = 1800
 
 
 def _current_task_id(raw: Optional[str]) -> Optional[str]:
@@ -844,6 +911,48 @@ def _outcome_payload(outcome: str, details: Optional[str], current_task: Optiona
     if detail_text:
         payload["details"] = detail_text[:500]
     return payload
+
+
+def _write_completion_receipt(r: Any, worker: str, current_task_id: str, payload: dict[str, Any]) -> None:
+    receipt = {
+        "outcome": "done",
+        "task_id": current_task_id,
+        "worker": worker,
+        "ts": time.time(),
+    }
+    details = str(payload.get("details") or "").strip()
+    if details:
+        receipt["details"] = details[:500]
+    try:
+        key = _state_key(worker, "last_completion_receipt")
+        existing = _decode_current_task(r.get(key))
+        if (
+            existing
+            and str(existing.get("outcome") or "").strip().lower() == "done"
+            and str(existing.get("task_id") or "").strip() == current_task_id
+        ):
+            return
+        r.set(
+            key,
+            json.dumps(receipt, sort_keys=True),
+            ex=_COMPLETION_RECEIPT_TTL_SECS,
+        )
+    except Exception:
+        logger.warning(
+            "completion receipt write failed worker=%s task=%s",
+            worker,
+            current_task_id,
+            exc_info=True,
+        )
+
+
+def write_completion_receipt(worker: str, task_id: str, details: Optional[str] = None) -> None:
+    clean_worker = str(worker or "").strip()
+    clean_task_id = str(task_id or "").strip()
+    if not clean_worker or not clean_task_id:
+        return
+    payload = _outcome_payload("done", details, {"task_id": clean_task_id})
+    _write_completion_receipt(_redis_connect(), clean_worker, clean_task_id, payload)
 
 
 def _notify_supervisor_response_ready(worker: str,
@@ -925,18 +1034,173 @@ def _revert_outcome_claim(worker: str, task_id: str) -> None:
         )
 
 
+def _clean_str(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _load_rework_task(task_id: str) -> dict[str, Any]:
+    cfg = OrchConfig()
+    with get_neo4j_session(cfg) as session:
+        record = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            RETURN t
+            """,
+            task_id=task_id,
+        ).single()
+    if not record:
+        raise ChangesRequestedError(f"task not found: {task_id}")
+    return dict(record["t"])
+
+
+def _rework_worker_for_task(task: dict[str, Any], worker: Optional[str]) -> str:
+    candidates = (
+        worker,
+        task.get("dispatched_to"),
+        task.get("worker_liveness_worker"),
+    )
+    for candidate in candidates:
+        value = _clean_str(candidate)
+        if value:
+            return value
+    owner = _clean_str(task.get("owner"))
+    if owner.endswith(("-codex", "-gemini", "-grok", "-claude")):
+        return owner
+    task_id = _clean_str(task.get("id")) or "unknown-task"
+    raise ChangesRequestedError(
+        f"cannot infer peer for changes_requested task={task_id}; pass peer explicitly"
+    )
+
+
+def _mark_changes_requested_pending(task_id: str, worker: str, requested_by: str, reason: str) -> dict[str, Any]:
+    entry = json.dumps(
+        {
+            "task_id": task_id,
+            "worker": worker,
+            "requested_by": requested_by,
+            "reason": reason,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        },
+        sort_keys=True,
+    )
+    cfg = OrchConfig()
+    with get_neo4j_session(cfg) as session:
+        record = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            SET t.status = 'pending',
+                t.dispatched_to = NULL,
+                t.blocked_on = NULL,
+                t.last_changes_requested_at = datetime(),
+                t.last_changes_requested_by = $requested_by,
+                t.last_changes_requested_worker = $worker,
+                t.last_changes_requested_reason = $reason,
+                t.changes_requested_count = coalesce(t.changes_requested_count, 0) + 1,
+                t.changes_requested_log = coalesce(t.changes_requested_log, []) + [$entry],
+                t.updated_at = datetime()
+            RETURN t.id AS task_id,
+                   t.description AS description,
+                   t.status AS status,
+                   t.last_changes_requested_reason AS reason,
+                   t.last_changes_requested_worker AS worker,
+                   t.last_changes_requested_by AS requested_by,
+                   t.changes_requested_count AS count
+            """,
+            task_id=task_id,
+            worker=worker,
+            requested_by=requested_by,
+            reason=reason,
+            entry=entry,
+        ).single()
+    if not record:
+        raise ChangesRequestedError(f"task not found: {task_id}")
+    return dict(record)
+
+
+def _changes_requested_prompt(task_id: str, description: str, requested_by: str, reason: str) -> str:
+    return (
+        "CHANGES REQUESTED\n\n"
+        f"Task: {task_id}\n"
+        f"Description: {description}\n"
+        f"Validator: {requested_by}\n\n"
+        "The supervisor production/audit validation rejected the prior result. "
+        "Rework the same task; do not mark it complete until the requested change is addressed.\n\n"
+        f"Reason:\n{reason}\n"
+    )
+
+
+def request_changes(
+    task_id: str,
+    *,
+    requested_by: str,
+    reason: str,
+    worker: Optional[str] = None,
+    priority: str = "high",
+) -> dict[str, Any]:
+    """Supervisor-side primitive for audit-rejected peer work.
+
+    The validator requests changes without self-fixing. The same peer is
+    re-bound through the canonical dispatch path, so the task moves directly
+    from rejected in-flight work to a new in-progress worker wake.
+    """
+    clean_task_id = _clean_str(task_id)
+    clean_requested_by = _clean_str(requested_by)
+    clean_reason = _clean_str(reason)
+    if not clean_task_id:
+        raise ChangesRequestedError("changes_requested requires task_id")
+    if not clean_requested_by:
+        raise ChangesRequestedError("changes_requested requires requested_by/from")
+    if not clean_reason:
+        raise ChangesRequestedError("changes_requested requires a non-empty reason")
+
+    task = _load_rework_task(clean_task_id)
+    rework_worker = _rework_worker_for_task(task, worker)
+    if clean_requested_by == rework_worker:
+        raise ChangesRequestedError(
+            "changes_requested must be requested by the validator/supervisor, not the worker being re-dispatched"
+        )
+
+    description = _clean_str(task.get("description"))
+    marked = _mark_changes_requested_pending(
+        clean_task_id,
+        rework_worker,
+        clean_requested_by,
+        clean_reason,
+    )
+    dispatch(
+        rework_worker,
+        clean_task_id,
+        description,
+        supervisor=clean_requested_by,
+        prompt_body=_changes_requested_prompt(clean_task_id, description, clean_requested_by, clean_reason),
+        priority=priority,
+    )
+    marked.update(
+        {
+            "ok": True,
+            "task_id": clean_task_id,
+            "status": "in_progress",
+            "dispatched_to": rework_worker,
+            "requested_by": clean_requested_by,
+            "reason": clean_reason,
+        }
+    )
+    return marked
+
+
 def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> None:
     """Worker-side helper: record the task outcome before stopping.
 
     ``outcome`` MUST be one of ``done``, ``error``, ``interrupted``. Any
     other value raises ``ValueError``. The enum is load-bearing: every
-    terminal outcome records ``last_outcome`` and immediately wakes the
-    binding supervisor. Outcomes that move the OrchTask out of in_progress
-    also clear the matching current_task binding so later dispatches do not
-    treat a pending task as a live worker slot.
+    terminal outcome records ``last_outcome``, clears the matching
+    current_task binding, and immediately wakes the binding supervisor.
+    A successful ``done`` cleanup also writes ``last_completion_receipt`` so
+    schedulers can prove a session boundary before clearing context.
 
     Semantics:
-    - ``done`` — task completed successfully. Supervisor can move on.
+    - ``done`` — task completed successfully. Supervisor can move on, and
+      current_task clears.
     - ``error`` — task hit an unrecoverable error. The task returns to
       pending, last_outcome preserves the failure, and current_task clears.
     - ``interrupted`` — Ctrl-C, timeout, or external cancel. The task returns
@@ -987,19 +1251,22 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
                     continue
     if stored:
         try:
-            if current_task_id and outcome != "done":
-                _revert_outcome_claim(worker, current_task_id)
-                from .worker_liveness import clear_worker_task_liveness
+            if current_task_id:
+                if outcome != "done":
+                    _revert_outcome_claim(worker, current_task_id)
+                    from .worker_liveness import clear_worker_task_liveness
 
-                clear_worker_task_liveness(current_task_id)
+                    clear_worker_task_liveness(current_task_id)
                 from .current_task_binding import clear_matching_current_task
 
-                clear_matching_current_task(
+                cleared_current_task = clear_matching_current_task(
                     worker,
                     current_task_id,
                     redis_client=r,
                     reason=f"record_outcome:{outcome}",
                 )
+                if outcome == "done" and cleared_current_task:
+                    _write_completion_receipt(r, worker, current_task_id, payload)
         finally:
             _notify_supervisor_response_ready(worker, current_task, payload)
 

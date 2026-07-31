@@ -81,11 +81,13 @@ skipped (preserves backward compat with Phase B v0.2.0).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -97,7 +99,8 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from fleet_orchestrator.config import OrchConfig
-from fleet_orchestrator.handoff_validation import process_expired_handoffs
+from fleet_orchestrator.evidence_contract import TERMINAL_STATUSES
+from fleet_orchestrator.handoff_validation import handoff_index_key, process_expired_handoffs
 from fleet_orchestrator.notify_state import (
     key as notify_key,
     key_prefix as notify_key_prefix,
@@ -135,8 +138,21 @@ DEFAULT_NOTIFY_DAEMON_WATCH_INTERVAL_SEC = 30
 DEFAULT_NOTIFY_DAEMON_HEARTBEAT_MAX_AGE_SEC = 15
 DEFAULT_NOTIFY_DAEMON_ALERT_DEDUP_TTL_SEC = 300
 DEFAULT_STUCK_INBOX_MAX_AGE_SEC = 600
+DEFAULT_COMPOSER_OCCUPANCY_MAX_AGE_SEC = 300
+DEFAULT_WEDGED_COMPOSER_STABILITY_WINDOW_SEC = 120
+DEFAULT_WEDGED_COMPOSER_REARM_SEC = 1800
 DEFAULT_NOTIFY_ROUTER_SERVICE = "conductor-notify-router"
 DEFAULT_NOTIFY_DAEMON_ALERT_TARGET = "conductor"
+WEDGED_COMPOSER_TERMINAL_TASK_STATUSES = TERMINAL_STATUSES | frozenset({
+    "cancelled",
+    "done",
+    "killed",
+    "superseded",
+})
+COMPOSER_IGNORED_PROMPT_PREFIXES = (
+    "use /skills to list available skills",
+    "how is claude doing this session?",
+)
 USAGE_LIMIT_IDLE_MARKERS = (
     "you've hit your session limit",
     "you have hit your session limit",
@@ -155,6 +171,14 @@ USAGE_LIMIT_TRANSIENT_EXCLUSIONS = (
     "not your usage limit",
 )
 USAGE_LIMIT_RESTING_REGION_NONBLANK_LINES = 3
+PANE_RESTING_REGION_NONBLANK_LINES = 8
+PANE_WORKING_INDICATOR_MARKERS = (
+    "esc to interrupt",
+    "escape to interrupt",
+    "ctrl c to interrupt",
+    "ctrl+c to interrupt",
+)
+PANE_RESTING_PROMPT_LINES = {"$", ">", "\u276f", "\u203a"}
 
 
 def state_key(node_id: str, suffix: str) -> str:
@@ -201,18 +225,70 @@ SUBSCRIBE_PATTERNS = (
 _KEY_RE = re.compile(rf"^__keyspace@\d+__:{re.escape(NOTIFY_KEY_PREFIX)}:(.+):([a-z_]+)$")
 
 
-def resolve_supervisor(r, node_id: str) -> Optional[str]:
-    """Mirror fleet-notify's _resolve_supervisor: explicit override wins,
-    else suffix-strip, else None."""
+def _local_hostname() -> str:
+    try:
+        return socket.gethostname().strip()
+    except OSError:
+        return ""
+
+
+def _has_notify_session_state(r, session_id: str) -> bool:
+    try:
+        if r.exists(state_key(session_id, "current_task")):
+            return True
+        if r.exists(state_key(session_id, "idle")):
+            return True
+        if r.exists(state_key(session_id, "last_activity")):
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _supervisor_candidate(r, value: object) -> Optional[str]:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return None
+    host = _local_hostname()
+    if not host or candidate != host:
+        return candidate
+    try:
+        if candidate in set(OrchConfig().session_ids or []):
+            return candidate
+    except Exception:
+        pass
+    if _has_notify_session_state(r, candidate):
+        return candidate
+    if candidate in _local_tmux_sessions():
+        return candidate
+    log.debug("Ignoring non-session supervisor candidate %s (matches local host name)", candidate)
+    return None
+
+
+def resolve_supervisor(r, node_id: str, task: Optional[dict] = None) -> Optional[str]:
+    """Resolve the deliverable supervisor for a worker alert.
+
+    Current-task payloads are the dispatch contract, so their supervisor or
+    dispatcher wins over legacy parent/suffix fallback. A local hostname fallback
+    is ignored unless it is also configured or visible as a real local session.
+    """
+    candidates: list[object] = []
+    if isinstance(task, dict):
+        candidates.extend([task.get("supervisor"), task.get("dispatcher")])
     try:
         explicit = r.get(state_key(node_id, "parent"))
         if explicit:
-            return explicit
+            candidates.append(explicit)
     except Exception:
         pass
     for suffix in SUFFIX_SUPERVISOR_RULES:
         if node_id.endswith(suffix):
-            return node_id[: -len(suffix)]
+            candidates.append(node_id[: -len(suffix)])
+            break
+    for candidate in candidates:
+        resolved = _supervisor_candidate(r, candidate)
+        if resolved:
+            return resolved
     return None
 
 
@@ -259,19 +335,6 @@ def _task_project_context(task_id: str) -> Optional[Dict[str, object]]:
     from fleet_orchestrator.orch_schema import get_task_project
 
     return get_task_project(task_id, config=OrchConfig())
-
-
-def _set_task_blocked_on(task_id: str, owner: str, reason: str) -> None:
-    from fleet_orchestrator.config import OrchConfig
-    from fleet_orchestrator.orch_schema import update_task_status
-
-    update_task_status(
-        task_id,
-        "in_progress",
-        owner=owner,
-        blocked_on=reason,
-        config=OrchConfig(),
-    )
 
 
 def _send_wake(r, target: str, body: str, priority: str, msg_id: str) -> bool:
@@ -435,18 +498,50 @@ def _tmux_pane_tail(session_name: str, *, lines: int = 80) -> str:
     return result.stdout or ""
 
 
-def _usage_limit_resting_region(pane_text: str) -> str:
+def _recent_nonblank_pane_lines(pane_text: str, *, limit: int) -> list[str]:
     nonblank_lines = [line.strip() for line in (pane_text or "").splitlines() if line.strip()]
-    return "\n".join(nonblank_lines[-USAGE_LIMIT_RESTING_REGION_NONBLANK_LINES:])
+    return nonblank_lines[-limit:]
+
+
+def _normalize_pane_region(pane_text: str) -> str:
+    lowered = (pane_text or "").lower().replace("-", " ")
+    return " ".join(lowered.split())
+
+
+def _usage_limit_resting_region(pane_text: str) -> str:
+    return "\n".join(_recent_nonblank_pane_lines(
+        pane_text,
+        limit=USAGE_LIMIT_RESTING_REGION_NONBLANK_LINES,
+    ))
 
 
 def _pane_shows_usage_limit_resting_state(pane_text: str) -> bool:
-    normalized = " ".join(_usage_limit_resting_region(pane_text).lower().split())
+    normalized = _normalize_pane_region(_usage_limit_resting_region(pane_text))
     if not normalized:
         return False
     if any(marker in normalized for marker in USAGE_LIMIT_TRANSIENT_EXCLUSIONS):
         return False
     return any(marker in normalized for marker in USAGE_LIMIT_IDLE_MARKERS)
+
+
+def _pane_shows_working_indicator(pane_text: str) -> bool:
+    normalized = _normalize_pane_region(pane_text)
+    return any(marker in normalized for marker in PANE_WORKING_INDICATOR_MARKERS)
+
+
+def _pane_shows_resting_input_prompt(pane_text: str) -> bool:
+    recent_lines = _recent_nonblank_pane_lines(
+        pane_text,
+        limit=PANE_RESTING_REGION_NONBLANK_LINES,
+    )
+    if not recent_lines:
+        return False
+    recent_region = "\n".join(recent_lines)
+    if _pane_shows_working_indicator(recent_region):
+        return False
+    if _pane_shows_usage_limit_resting_state(recent_region):
+        return True
+    return any(line.strip() in PANE_RESTING_PROMPT_LINES for line in recent_lines)
 
 
 def _reconcile_stranded_idle_for_stuck_inbox(r, node_id: str) -> bool:
@@ -456,7 +551,7 @@ def _reconcile_stranded_idle_for_stuck_inbox(r, node_id: str) -> bool:
         return False
     if node_id not in _local_tmux_sessions():
         return False
-    if not _pane_shows_usage_limit_resting_state(_tmux_pane_tail(node_id)):
+    if not _pane_shows_resting_input_prompt(_tmux_pane_tail(node_id)):
         return False
     r.set(state_key(node_id, "idle"), "1")
     log.warning("Reconciled idle=1 for %s before stuck-inbox alert", node_id)
@@ -751,6 +846,249 @@ def _process_handoff_timeouts(r) -> None:
             log.error("handoff timeout processing failed for %s: %s", dispatcher, exc)
 
 
+def _float_or_none(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fresh_composer_occupancy(
+    r,
+    node_id: str,
+    *,
+    now: float,
+    max_age_sec: int,
+) -> Optional[dict[str, object]]:
+    payload = _decode_queued_message(r.get(state_key(node_id, "composer_occupancy")))
+    if payload.get("occupied") is not True:
+        return None
+    observed_at = _float_or_none(payload.get("observed_at"))
+    if observed_at is None:
+        return None
+    age_sec = max(0.0, now - observed_at)
+    if age_sec > max_age_sec:
+        return None
+    payload["age_sec"] = age_sec
+    return payload
+
+
+def _composer_prompt_text(payload: dict[str, object]) -> str:
+    for key in ("composer_text", "text", "content", "excerpt"):
+        text = " ".join(str(payload.get(key) or "").split())
+        if text:
+            return text
+    return ""
+
+
+def _composer_occupancy_fingerprint(payload: dict[str, object]) -> Optional[str]:
+    prompt_text = _composer_prompt_text(payload)
+    lowered = prompt_text.lower()
+    if any(lowered.startswith(prefix) for prefix in COMPOSER_IGNORED_PROMPT_PREFIXES):
+        return None
+    for key in (
+        "content_fingerprint",
+        "fingerprint",
+        "content_hash",
+        "text_hash",
+        "excerpt_hash",
+    ):
+        fingerprint = str(payload.get(key) or "").strip()
+        if fingerprint:
+            return fingerprint
+    if not prompt_text:
+        return None
+    return hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+
+
+def _failed_activation_record_task_is_terminal(record: dict[str, object]) -> bool:
+    task_id = str(record.get("dispatcher_task_id") or "").strip()
+    if not task_id:
+        return False
+    try:
+        task = _load_task_state(task_id)
+    except Exception as exc:
+        log.warning("wedged composer task lookup failed for %s: %s", task_id, exc)
+        return False
+    if not isinstance(task, dict):
+        return False
+    return str(task.get("status") or "").strip().lower() in WEDGED_COMPOSER_TERMINAL_TASK_STATUSES
+
+
+def _delete_failed_activation_handoff_record(r, record: dict[str, object], *, prefix: str) -> None:
+    key = str(record.get("_key") or "").strip()
+    dispatcher = str(record.get("dispatcher_session_id") or "").strip()
+    msg_id = str(record.get("msg_id") or "").strip()
+    try:
+        if key:
+            r.delete(key)
+        if dispatcher and msg_id:
+            r.srem(handoff_index_key(prefix, dispatcher), msg_id, key)
+    except Exception as exc:
+        log.warning("failed activation handoff cleanup failed for task=%s msg=%s: %s",
+                    record.get("dispatcher_task_id"), msg_id, exc)
+
+
+def _failed_activation_handoffs(r, *, prefix: str) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for key in r.scan_iter(match=f"{prefix}:handoff:*", count=1000):
+        record = _decode_queued_message(r.get(key))
+        if record.get("kind") != "explicit_handoff":
+            continue
+        if str(record.get("activation_state") or "") != "failed":
+            continue
+        if not record.get("activation_failed_at"):
+            continue
+        record["_key"] = str(key)
+        if _failed_activation_record_task_is_terminal(record):
+            _delete_failed_activation_handoff_record(r, record, prefix=prefix)
+            continue
+        records.append(record)
+    return records
+
+
+def _wedged_composer_transition_key(target: str) -> str:
+    return orch_key("wedged-composer-liveness", target or "unknown")
+
+
+def _wedged_composer_candidate_key(target: str) -> str:
+    return orch_key("wedged-composer-candidate", target or "unknown")
+
+
+def _wedged_composer_candidate_ttl_sec(freshness_sec: int) -> int:
+    stability_window = _int_env(
+        "ORCH_WEDGED_COMPOSER_STABILITY_WINDOW_SEC",
+        DEFAULT_WEDGED_COMPOSER_STABILITY_WINDOW_SEC,
+    )
+    stability_window = max(
+        DEFAULT_WEDGED_COMPOSER_STABILITY_WINDOW_SEC,
+        int(stability_window),
+    )
+    return max(1, int(freshness_sec), stability_window)
+
+
+def _composer_candidate_matches(r, target: str, fingerprint: str, *, current_time: float,
+                                ttl_sec: int) -> bool:
+    key = _wedged_composer_candidate_key(target)
+    existing = _decode_queued_message(r.get(key))
+    matched = str(existing.get("fingerprint") or "") == fingerprint
+    payload = {
+        "fingerprint": fingerprint,
+        "observed_at": current_time,
+    }
+    candidate_ttl_sec = _wedged_composer_candidate_ttl_sec(ttl_sec)
+    try:
+        r.set(key, json.dumps(payload, separators=(",", ":")), ex=candidate_ttl_sec)
+    except TypeError:
+        r.set(key, json.dumps(payload, separators=(",", ":")))
+    return matched
+
+
+def _clear_wedged_composer_candidate(r, target: str) -> None:
+    try:
+        r.delete(_wedged_composer_candidate_key(target))
+    except Exception as exc:
+        log.debug("wedged composer candidate clear failed for %s: %s", target, exc)
+
+
+def _supervisor_for_failed_activation(r, target: str, record: dict[str, object]) -> Optional[str]:
+    current = get_current_task(r, target)
+    task = dict(current) if isinstance(current, dict) else {}
+    dispatcher = str(record.get("dispatcher_session_id") or "").strip()
+    if dispatcher:
+        task.setdefault("dispatcher", dispatcher)
+        task.setdefault("supervisor", dispatcher)
+    return resolve_supervisor(r, target, task)
+
+
+def _process_wedged_composer_liveness(
+    r,
+    dedup_ttl_sec: int,
+    *,
+    max_age_sec: Optional[int] = None,
+    rearm_sec: Optional[int] = None,
+) -> int:
+    del dedup_ttl_sec
+    prefix = os.environ.get("NOTIFY_KEY_PREFIX", "taey")
+    current_time = _redis_now(r)
+    freshness = max(1, int(
+        max_age_sec
+        if max_age_sec is not None
+        else _int_env("ORCH_COMPOSER_OCCUPANCY_MAX_AGE_SEC",
+                      DEFAULT_COMPOSER_OCCUPANCY_MAX_AGE_SEC)
+    ))
+    rearm = max(1, int(
+        rearm_sec
+        if rearm_sec is not None
+        else _int_env("ORCH_WEDGED_COMPOSER_REARM_SEC",
+                      DEFAULT_WEDGED_COMPOSER_REARM_SEC)
+    ))
+    sent = 0
+    seen_targets: set[str] = set()
+    for record in _failed_activation_handoffs(r, prefix=prefix):
+        target = str(record.get("target_session_id") or "").strip()
+        if not target or target in seen_targets:
+            continue
+        seen_targets.add(target)
+        occupancy = _fresh_composer_occupancy(
+            r,
+            target,
+            now=current_time,
+            max_age_sec=freshness,
+        )
+        if not occupancy:
+            _clear_wedged_composer_candidate(r, target)
+            continue
+        fingerprint = _composer_occupancy_fingerprint(occupancy)
+        if not fingerprint:
+            _clear_wedged_composer_candidate(r, target)
+            continue
+        transition_key = _wedged_composer_transition_key(target)
+        if r.exists(transition_key):
+            continue
+        if not _composer_candidate_matches(r, target, fingerprint,
+                                           current_time=current_time,
+                                           ttl_sec=freshness):
+            continue
+        supervisor = _supervisor_for_failed_activation(r, target, record)
+        if not supervisor:
+            log.warning("wedged composer liveness could not resolve supervisor for %s", target)
+            continue
+        task_id = str(record.get("dispatcher_task_id") or "?")
+        msg_id = str(record.get("msg_id") or "?")
+        age = int(float(occupancy.get("age_sec") or 0))
+        machine = str(occupancy.get("machine") or "unknown")
+        body = (
+            f"[WEDGED_COMPOSER] {target} has dispatch_activation_failed for task={task_id} "
+            f"while its composer is still non-empty (observed {age}s ago on {machine}). "
+            "Treat this peer as WEDGED, not idle; inspect the tmux pane before redispatching "
+            "or clearing any possible outward action."
+        )
+        body += f" handoff_msg_id={msg_id}."
+        if _send_wake(
+            r,
+            supervisor,
+            body,
+            priority="high",
+            msg_id=f"orch-watch-wedged-composer-{target}-{msg_id}-{int(current_time)}",
+        ):
+            payload = {
+                "target_session_id": target,
+                "dispatcher_task_id": task_id,
+                "msg_id": msg_id,
+                "activation_failed_at": record.get("activation_failed_at"),
+                "occupancy_observed_at": occupancy.get("observed_at"),
+                "alerted_at": current_time,
+            }
+            r.set(transition_key, json.dumps(payload, separators=(",", ":")), ex=rearm)
+            sent += 1
+            log.info("Sent WEDGED_COMPOSER wake: supervisor=%s worker=%s task=%s",
+                     supervisor, target, task_id)
+    return sent
+
+
 def _stop_gate_dedup(r, node_id: str, current_task_id: str, decision_key: str,
                      ttl_sec: int = 600) -> bool:
     try:
@@ -867,11 +1205,11 @@ def _handle_user_stop_gate(r, node_id: str, task: dict) -> bool:
     matched_condition, next_ready = _evaluate_user_stop_conditions(
         r, node_id, task_state, project_context
     )
-    owner = task_state.get("owner") or node_id
 
     if matched_condition:
-        _set_task_blocked_on(task_id, owner=owner, reason=matched_condition)
-        log.info("Suppressed stop-gate wake: session=%s task=%s blocked_on=%s",
+        # User stop conditions are project state. task.blocked_on is reserved for resolvable
+        # task ids or structured AWAIT markers; storing the condition label there deadlocks.
+        log.info("Suppressed stop-gate wake: session=%s task=%s user_stop_condition=%s",
                  node_id, task_id, matched_condition)
         return True
 
@@ -879,10 +1217,12 @@ def _handle_user_stop_gate(r, node_id: str, task: dict) -> bool:
         next_task_id = next_ready.get("task_id", "?")
         if not _stop_gate_dedup(r, node_id, task_id, f"continue:{next_task_id}"):
             return True
+        next_desc = (next_ready.get("description") or "")[:120]
         body = (
             f"[AUTO_CONTINUE] You stopped while task={task_id} remains in_progress with no matching "
-            f"user stop condition. The next ready task for you is: {next_task_id} — "
-            f"{(next_ready.get('description') or '')[:120]}. Continue execution instead of stopping."
+            f"user stop condition. Continue execution instead of stopping. Next ready task: {next_task_id} — "
+            f"{next_desc}. Inspect it with `taey-task status {next_task_id}` or resume routing with "
+            "`taey-plan current`."
         )
         if _send_wake(
             r,
@@ -1294,7 +1634,7 @@ def investigate(r, node_id: str, event_type: str,
         if task:
             _TASK_SNAPSHOTS[node_id] = {
                 "task": task,
-                "supervisor": task.get("supervisor") or resolve_supervisor(r, node_id),
+                "supervisor": resolve_supervisor(r, node_id, task),
             }
     else:
         task = None  # The key is gone; DEL handler uses the snapshot.
@@ -1377,7 +1717,7 @@ def investigate(r, node_id: str, event_type: str,
     if stuck_for < stuck_threshold_sec:
         return
 
-    supervisor = resolve_supervisor(r, node_id)
+    supervisor = resolve_supervisor(r, node_id, task)
     if not supervisor:
         log.debug("No supervisor for %s; skip stuck alert.", node_id)
         return
@@ -1482,7 +1822,7 @@ def main():
             if task:
                 _TASK_SNAPSHOTS[node] = {
                     "task": task,
-                    "supervisor": task.get("supervisor") or resolve_supervisor(r, node),
+                    "supervisor": resolve_supervisor(r, node, task),
                 }
 
     pubsub = r.pubsub()
@@ -1510,6 +1850,8 @@ def main():
             max(1.0, args.notify_daemon_watch_interval_sec / 4),
         )
     last_notify_daemon_watch = 0.0
+    last_wedged_composer_liveness = 0.0
+    wedged_composer_liveness_interval = min(60.0, max(1.0, poll_timeout))
 
     while True:
         try:
@@ -1522,6 +1864,13 @@ def main():
             continue
 
         now = time.time()
+        if now - last_wedged_composer_liveness >= wedged_composer_liveness_interval:
+            last_wedged_composer_liveness = now
+            try:
+                _process_wedged_composer_liveness(r, args.dedup_ttl_sec)
+            except Exception as exc:
+                log.error("wedged composer liveness check failed: %s", exc)
+
         if (args.notify_daemon_watchdog
                 and now - last_notify_daemon_watch >= args.notify_daemon_watch_interval_sec):
             last_notify_daemon_watch = now
@@ -1545,6 +1894,7 @@ def main():
             sweep_count = 0
             try:
                 _process_handoff_timeouts(r)
+                _process_wedged_composer_liveness(r, args.dedup_ttl_sec)
                 _process_task_reconciliations(r, args.dedup_ttl_sec)
                 _process_worker_liveness_expirations(r, args.dedup_ttl_sec)
                 _process_idle_owner_graph_work(r, args.dedup_ttl_sec)
@@ -1563,6 +1913,7 @@ def main():
         if not message or message.get("type") not in ("pmessage", "message"):
             try:
                 _process_handoff_timeouts(r)
+                _process_wedged_composer_liveness(r, args.dedup_ttl_sec)
                 _process_task_reconciliations(r, args.dedup_ttl_sec)
                 _process_worker_liveness_expirations(r, args.dedup_ttl_sec)
                 _process_idle_owner_graph_work(r, args.dedup_ttl_sec)
