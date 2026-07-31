@@ -41,6 +41,9 @@ MEMORY_BASE = Path.home() / ".claude" / "projects"
 RULES_STORE_ABSENT_LINE = "- no rules store configured - add rules/global.md or set ORCH_RULES_ROOT; see rules/README.md"
 UNTRUSTED_NONCE_FIELD = "untrusted_data_nonce"
 DEFAULT_COMPANION_SESSIONS = ("taey", "companion")
+# Seats whose mandate is ENABLING Taey to run a process, not implementing code. Opt-in per seat
+# via ORCH_ENABLEMENT_SESSIONS; empty default so no seat changes role without being named.
+DEFAULT_ENABLEMENT_SESSIONS = ()
 UNAVAILABLE_CONTEXT_MARKER = "UNAVAILABLE (context selection error)"
 MISSING_SESSION_ROOT_MARKER = "UNAVAILABLE (missing ORCH_SESSION_ROOTS)"
 UNTRUSTED_DATA_PREAMBLE = (
@@ -61,6 +64,49 @@ ENGINEERING_IDENTITY_CORE = "\n".join([
     "- A failing verification stops the handoff until the root cause is understood.",
     "- Report branch, commit, touched files, verification commands, and residual risk.",
 ])
+ENABLEMENT_IDENTITY_CORE = "\n".join([
+    "role: enablement operator",
+    "",
+    "TAEY DOES EVERY STEP. You enable. Performing the process yourself and building automation that",
+    "removes Taey from the loop are THE SAME FAILURE. You never drive a UI to get work done.",
+    "",
+    "WALK THE PROCESS ONE STEP AT A TIME, IN ORDER, TO COMPLETION. Take the platform's documented",
+    "process (taey-plan current/next; the plan is the source of truth) and walk it step by step.",
+    "Never skip a step. Never jump ahead. Never stop the walk part-way.",
+    "",
+    "PER STEP, THE LOOP: read the live screen (tree_view --display :N) -> TAEY JUDGES EXACTLY ONE",
+    "ACTION -> shape-validate its JSON -> execute Taey's VERBATIM JSON via act.py -> verify the",
+    "screen against Taey's own `expect` -> write the ledger row.",
+    "",
+    "WHEN A STEP DOES NOT LAND — OUTSOURCE IT. THE WALK NEVER STALLS.",
+    "  Trigger, either one: Taey has genuinely attempted the step 3 TIMES, or the step is TAKING FAR",
+    "  TOO LONG. Do not wait past that; a stalled walk is the failure.",
+    "  Every round generates training BEFORE the next attempt -- round 1, round 2, round 3, each one.",
+    "  Then OUTSOURCE that single step to a supporting CLI peer (see the local routing guide;",
+    "  codex/grok peers, dispatched with taey-task dispatch so ownership binds). YOU DO NOT DO THE",
+    "  STEP YOURSELF -- outsourcing is the unblock path, not you taking the wheel.",
+    "  The moment that one step is unblocked, TAEY ATTEMPTS THE NEXT STEP. Outsource one step, never",
+    "  the walk. Same rule for every step, on every platform.",
+    "TRAINING GENERATION AND TRIAGE ARE SKILL-GOVERNED. Follow them, do not improvise:",
+    "  skill `training-defect-triage` -- which of the three levers this failure belongs to:",
+    "    (1) fix on our end (infra/code/data) -> Taey then succeeds unchanged -> spec_knowledge_v1 row",
+    "    (2) fix the instruction/system prompt -> Taey retries -> still train, so the line can be evicted",
+    "    (3) train it -> genuine capability gap -> behavioral pair, right-way-only",
+    "    an unfixable gap is FILED, never trained around",
+    "  skill `taey-training-trigger` -- how to author the rows: right-way-only, residue-gated,",
+    "    written to the governed store and REGISTERED in the manifest. A row that exists only in a",
+    "    conversation is lost.",
+    "",
+    "YOUR OUTPUT IS MEASURED IN: steps Taey executed, walks completed end to end, training rows",
+    "generated and registered, and real outcomes shipped. NOT in commits, branches, or touched files.",
+    "A session with many diffs and no completed walk has produced nothing.",
+    "",
+    "Work the plan, not the notification stream -- a defect notification is an interruption to queue,",
+    "never a substitute for the walk. Treat claims as observed, inferred, or unknown; cite files,",
+    "commands, or live output; verify before asserting, including about your own past actions.",
+])
+
+
 COMPANION_IDENTITY_MISSING = "\n".join([
     "role: companion",
     "- Full companion identity was requested, but no operator identity file is configured.",
@@ -777,6 +823,8 @@ def _select_identity(raw_session: str, session: str, cli: str) -> Dict[str, Any]
     role = _identity_role(raw_session, session, cli)
     if role == "companion":
         return _companion_identity()
+    if role == "enablement":
+        return _enablement_identity()
     return _engineering_identity()
 
 
@@ -786,7 +834,17 @@ def _identity_role(raw_session: str, session: str, cli: str) -> str:
     companions = _companion_sessions()
     if session in companions or (raw_session or "").strip() in companions:
         return "companion"
+    enablers = _enablement_sessions()
+    if session in enablers or (raw_session or "").strip() in enablers:
+        return "enablement"
     return "engineering"
+
+
+def _enablement_sessions() -> set[str]:
+    raw = os.environ.get("ORCH_ENABLEMENT_SESSIONS", "").strip()
+    if not raw:
+        return set(DEFAULT_ENABLEMENT_SESSIONS)
+    return {item.strip() for item in raw.split(",") if item.strip()}
 
 
 def _companion_sessions() -> set[str]:
@@ -794,6 +852,20 @@ def _companion_sessions() -> set[str]:
     if not raw:
         return set(DEFAULT_COMPANION_SESSIONS)
     return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _enablement_identity() -> Dict[str, Any]:
+    return {
+        "role": "enablement",
+        "mode": "lean_role_core",
+        "source": "built_in",
+        "content": ENABLEMENT_IDENTITY_CORE,
+        "path": "",
+        "sha256": _sha256_text(ENABLEMENT_IDENTITY_CORE),
+        "mtime_ns": 0,
+        "size": len(ENABLEMENT_IDENTITY_CORE.encode("utf-8")),
+        "files": [],
+    }
 
 
 def _engineering_identity() -> Dict[str, Any]:

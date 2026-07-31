@@ -96,6 +96,7 @@ def _select_keys(mapping: Dict[str, Any], *, session: str, work: Dict[str, Any])
 def _selector_matches(match: Dict[str, Any], *, session: str, work: Dict[str, Any]) -> bool:
     owner_prefix = str(match.get("owner_prefix") or "").strip()
     tags_any = _as_list(match.get("tags_any"))
+    tags_none = _as_list(match.get("tags_none"))
     if owner_prefix:
         candidates = [
             str(work.get("owner") or ""),
@@ -104,9 +105,11 @@ def _selector_matches(match: Dict[str, Any], *, session: str, work: Dict[str, An
         ]
         if not any(candidate.startswith(owner_prefix) for candidate in candidates if candidate):
             return False
-    if tags_any:
+    if tags_any or tags_none:
         tags = set(_as_list(work.get("capability_tags")))
-        if not tags.intersection(tags_any):
+        if tags_any and not tags.intersection(tags_any):
+            return False
+        if tags_none and tags.intersection(tags_none):
             return False
     return bool(owner_prefix or tags_any)
 

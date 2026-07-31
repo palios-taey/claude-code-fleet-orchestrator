@@ -65,8 +65,11 @@ R = notify_redis_connect()
 PROJECT = f"{PFX}-project"
 PHASE = f"{PROJECT}::phase"
 TASK = f"{PROJECT}::peer-task"
+ROOT_TASK = f"{PROJECT}::root-task"
 SUP = f"{PFX}-sup"
 PEER = f"{SUP}-codex"
+ROOT_SESSION = f"{PFX}-taey"
+STALE_WORKER = f"{PFX}-job-seeker"
 FAILURES: list[str] = []
 
 
@@ -92,13 +95,45 @@ def _cleanup() -> None:
         session.run("MATCH (n) WHERE n.id STARTS WITH $prefix DETACH DELETE n", prefix=PFX)
 
 
-def _current_task() -> dict:
-    raw = R.get(state_key(PEER, "current_task"))
+def _current_task(session_id: str = PEER) -> dict:
+    raw = R.get(state_key(session_id, "current_task"))
     return json.loads(raw) if raw else {}
 
 
-def _parent() -> str:
-    return str(R.get(state_key(PEER, "parent")) or "")
+def _parent(session_id: str = PEER) -> str:
+    return str(R.get(state_key(session_id, "parent")) or "")
+
+
+def _task_liveness(task_id: str) -> dict:
+    with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+        row = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            RETURN t.worker_liveness_worker AS worker,
+                   t.worker_liveness_supervisor AS supervisor,
+                   t.worker_liveness_started_at AS started_at,
+                   t.worker_liveness_heartbeat_at AS heartbeat_at,
+                   t.status AS status
+            """,
+            task_id=task_id,
+        ).single()
+    return dict(row) if row else {}
+
+
+def _seed_stale_liveness(task_id: str) -> None:
+    with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+        session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            SET t.worker_liveness_worker = $worker,
+                t.worker_liveness_supervisor = $worker,
+                t.worker_liveness_started_at = 1.0,
+                t.worker_liveness_heartbeat_at = 1.0,
+                t.worker_liveness_ttl_secs = 1
+            """,
+            task_id=task_id,
+            worker=STALE_WORKER,
+        )
 
 
 def _is_response_ready_to_supervisor(args: list[str]) -> bool:
@@ -125,6 +160,15 @@ def main() -> int:
             description="peer self-start must bind parent supervisor",
             owner=PEER,
             priority=5,
+            wake_owner_if_ready=False,
+            config=CFG,
+        )
+        create_task(
+            phase_id=PHASE,
+            task_id=ROOT_TASK,
+            description="root self-start must refresh stale liveness",
+            owner=ROOT_SESSION,
+            priority=6,
             wake_owner_if_ready=False,
             config=CFG,
         )
@@ -167,13 +211,30 @@ def main() -> int:
         _check("supervisor can close self-started peer task", closed.status_code == 200, closed.text)
         completed = get_task(TASK, config=CFG)
         _check("supervisor closure persists completion evidence", bool(completed.get("completion_evidence")), completed)
+
+        _seed_stale_liveness(ROOT_TASK)
+        root_started = client.patch(
+            f"/api/task/{ROOT_TASK}",
+            json={"status": "in_progress", "from": ROOT_SESSION},
+        )
+        _check("root self-start accepted", root_started.status_code == 200, root_started.text)
+        root_task = get_task(ROOT_TASK, config=CFG)
+        root_current = _current_task(ROOT_SESSION)
+        root_liveness = _task_liveness(ROOT_TASK)
+        _check("root self-start marks task in progress", root_task.get("status") == "in_progress", root_task)
+        _check("root self-start binds current task", root_current.get("task_id") == ROOT_TASK, root_current)
+        _check("root self-start records self supervisor", root_current.get("supervisor") == ROOT_SESSION, root_current)
+        _check("root self-start leaves parent key untouched", _parent(ROOT_SESSION) == "", _parent(ROOT_SESSION))
+        _check("root self-start replaces stale liveness worker", root_liveness.get("worker") == ROOT_SESSION, root_liveness)
+        _check("root self-start replaces stale liveness supervisor", root_liveness.get("supervisor") == ROOT_SESSION, root_liveness)
+        _check("root self-start refreshes stale heartbeat", float(root_liveness.get("heartbeat_at") or 0.0) > 1.0, root_liveness)
     finally:
         _cleanup()
 
     if FAILURES:
         print(f"\nFAIL -- {len(FAILURES)}: {FAILURES}")
         return 1
-    print("\nPASS -- self-started peer work binds and wakes the parent supervisor.")
+    print("\nPASS -- self-started work binds current-task state and refreshes liveness.")
     return 0
 
 

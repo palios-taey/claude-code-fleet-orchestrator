@@ -887,7 +887,6 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             sender
             and owner == sender
             and str(status or "").strip().lower() == "in_progress"
-            and _autonomous_peer_supervisor(sender)
         ):
             binding_supervisor = _resolve_supervisor_session(sender, config=cfg)
             bind_current_task(
@@ -895,7 +894,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
                 task_id=task_id,
                 description=task_before.get("description", ""),
                 supervisor=binding_supervisor,
-                set_parent=True,
+                set_parent=bool(_autonomous_peer_supervisor(sender)),
                 guard_existing=True,
                 dispatcher=sender,
             )
