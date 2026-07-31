@@ -1,0 +1,16 @@
+[Unit]
+Description=Fleet Orchestrator API
+Documentation=https://github.com/palios-taey/claude-code-fleet-orchestrator
+After=network.target
+CollectMode=inactive-or-failed
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/claude-code-fleet-orchestrator/orchestrator-systemd.env
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=5s
+ExecStart=/bin/bash -lc 'set -euo pipefail; : "${ORCH_REPO_ROOT:?set ORCH_REPO_ROOT in orchestrator-systemd.env}"; : "${ORCH_DOTENV:?set ORCH_DOTENV in orchestrator-systemd.env}"; : "${ORCH_API_BIN:?set ORCH_API_BIN in orchestrator-systemd.env}"; : "${ORCH_API_LOG:?set ORCH_API_LOG in orchestrator-systemd.env}"; cd "$ORCH_REPO_ROOT"; set -a; . "$ORCH_DOTENV"; set +a; exec "$ORCH_API_BIN" >> "$ORCH_API_LOG" 2>&1'
+
+[Install]
+WantedBy=default.target

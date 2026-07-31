@@ -1,0 +1,15 @@
+[Unit]
+Description=orch-watch wake-on-unblock daemon
+Documentation=https://github.com/palios-taey/claude-code-fleet-orchestrator
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/claude-code-fleet-orchestrator/orchestrator-systemd.env
+WorkingDirectory=%h
+Restart=always
+RestartSec=10
+ExecStart=/bin/bash -lc 'set -euo pipefail; : "${ORCH_REPO_ROOT:?set ORCH_REPO_ROOT in orchestrator-systemd.env}"; : "${ORCH_DOTENV:?set ORCH_DOTENV in orchestrator-systemd.env}"; : "${ORCH_WATCH_PYTHON:?set ORCH_WATCH_PYTHON in orchestrator-systemd.env}"; : "${ORCH_WATCH_LOG:?set ORCH_WATCH_LOG in orchestrator-systemd.env}"; : "${ORCH_WATCH_READINESS_CHECKER:?set ORCH_WATCH_READINESS_CHECKER in orchestrator-systemd.env}"; cd "$ORCH_REPO_ROOT"; set -a; . "$ORCH_DOTENV"; set +a; exec "$ORCH_WATCH_PYTHON" scripts/orch-watch --readiness-checker "$ORCH_WATCH_READINESS_CHECKER" >> "$ORCH_WATCH_LOG" 2>&1'
+
+[Install]
+WantedBy=default.target
