@@ -3253,7 +3253,9 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
     with driver.session(database=cfg.neo4j_db) as session:
         result = session.run(f"""
             MATCH (t:OrchTask {{status: 'pending'}})
+            OPTIONAL MATCH (proj:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t)
             WHERE {_READY_DEPENDENCIES_SATISFIED_CYPHER}
+              AND (proj IS NULL OR coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress'])
             RETURN t.id AS id, t.description AS description,
                    t.priority AS priority, t.owner AS owner,
                    t.capability_tags AS capability_tags,
