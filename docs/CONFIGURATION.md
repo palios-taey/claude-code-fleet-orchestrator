@@ -76,6 +76,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ORCH_MEMORY_ROOT` | `""` | Directory of local memory files surfaced in wake-packet Memory. |
 | `ORCH_IDENTITY_ROOT` | `""` | Optional trusted identity directory for wake packets. Companion sessions load full operator-supplied identity from this root; engineering sessions use the built-in lean role core. Supported layouts: Markdown files under companion or taey subdirectories, root-level companion/taey/IDENTITY/PERSONALITY Markdown files, or the corpus identity plus layer_1 layout. |
 | `ORCH_COMPANION_SESSIONS` | `taey,companion` | Comma-separated session ids that should receive companion identity instead of engineering identity. CLI peer suffixes (`-codex`, `-gemini`, `-grok`) remain engineering. |
+| `ORCH_ENABLEMENT_SESSIONS` | `""` | Comma-separated non-peer session ids that should receive the enablement role core instead of the engineering fallback. Companion identity still wins first, and CLI peer suffixes remain engineering. |
 
 ## 3. Public read-only dashboard (display only — cannot mutate or change enforcement)
 
