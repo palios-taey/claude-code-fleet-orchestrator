@@ -3254,6 +3254,7 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
         result = session.run(f"""
             MATCH (t:OrchTask {{status: 'pending'}})
             OPTIONAL MATCH (proj:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t)
+            WITH t, proj
             WHERE {_READY_DEPENDENCIES_SATISFIED_CYPHER}
               AND (proj IS NULL OR coalesce(toLower(trim(proj.status)), '') IN ['active', 'in_progress'])
             RETURN t.id AS id, t.description AS description,
