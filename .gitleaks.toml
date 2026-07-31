@@ -1,0 +1,23 @@
+# gitleaks config for claude-code-fleet-orchestrator
+#
+# Extends the default ruleset. The allowlist below is intentionally narrow:
+# three historical commits stored fake API-key-shaped literals in the public
+# redaction acceptance test. Current source constructs benign fixture values at
+# runtime instead, so this only suppresses the known historical false positives.
+
+title = "claude-code-fleet-orchestrator secret scan"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Historical fake redaction-test fixtures only."
+condition = "AND"
+paths = [
+  '''^tests/public_secret_scrub_acceptance\.py$''',
+]
+commits = [
+  "3be2bfac20c83226f914852d4cdff2e8e29c7482",
+  "616532185cb1265fedf98b126a8397018646c062",
+  "5ed0a0a74e9ba88fc689bedea1c0f96e7f11f002",
+]

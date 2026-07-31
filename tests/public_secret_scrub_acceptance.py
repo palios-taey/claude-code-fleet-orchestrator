@@ -18,15 +18,17 @@ def _check(label: str, condition: bool, detail: object = "") -> None:
 
 
 def main() -> int:
+    token_value = "ghp_" + "fixture_token"
+    api_key_value = "fixture_api_key"
     sample = (
-        "password: hunter2 token: ghp_1234567890abcdefABCDEF secret: keepme "
-        "api_key=sk-1234567890abcdef"
+        f"password: hunter2 token: {token_value} secret: keepme "
+        f"api_key={api_key_value}"
     )
     scrubbed = _scrub_public_text(sample)
     _check("colon password redacted", "hunter2" not in scrubbed, scrubbed)
-    _check("colon token redacted", "ghp_1234567890abcdefABCDEF" not in scrubbed, scrubbed)
+    _check("colon token redacted", token_value not in scrubbed, scrubbed)
     _check("colon secret redacted", "keepme" not in scrubbed, scrubbed)
-    _check("equals api key still redacted", "sk-1234567890abcdef" not in scrubbed, scrubbed)
+    _check("equals api key still redacted", api_key_value not in scrubbed, scrubbed)
     _check("redaction marker emitted", scrubbed.count("[secret]") >= 4, scrubbed)
 
     benign = _scrub_public_text("status: active owner: conductor")
