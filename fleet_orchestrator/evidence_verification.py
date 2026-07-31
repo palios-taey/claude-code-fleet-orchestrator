@@ -498,6 +498,20 @@ def _supervisor_verification_unverified(
     return payload
 
 
+def _gated_no_commit_completion_unverified(no_commit_repo: str, *, producer: str = "") -> Dict[str, Any]:
+    return _unverified(
+        f"completion evidence for gated repo {no_commit_repo!r} must include commit_sha and repo; "
+        "observation-only and supervisor_verification evidence cannot bypass open-PR and required-gate verification. "
+        "Use commit_sha+repo evidence after the PR is merged and required gates pass. "
+        "Supervisor verification remains valid only for research/prototype work with no gated runtime repo.",
+        repo=no_commit_repo,
+        required_checks=required_github_checks_for_repo(no_commit_repo),
+        producer=producer,
+        applies=True,
+        reject_completion=True,
+    )
+
+
 def _verify_supervisor_completion_evidence(evidence: Dict[str, Any], *, producer: str = "") -> Optional[Dict[str, Any]]:
     if "supervisor_verification" not in evidence:
         return None
@@ -575,22 +589,12 @@ def verify_completion_evidence(
     repo = repo_from_completion_evidence(evidence)
     checks = required_github_checks_for_repo(repo) if repo else required_github_checks()
     if not commit_sha:
+        gated, no_commit_repo = _no_commit_evidence_targets_gated_repo(evidence)
+        if gated:
+            return _gated_no_commit_completion_unverified(no_commit_repo, producer=producer)
         supervisor_verification = _verify_supervisor_completion_evidence(evidence, producer=producer)
         if supervisor_verification is not None:
             return supervisor_verification
-        gated, no_commit_repo = _no_commit_evidence_targets_gated_repo(evidence)
-        if gated:
-            return _unverified(
-                f"completion evidence for gated repo {no_commit_repo!r} must include commit_sha and repo; "
-                "observation-only evidence cannot bypass open-PR and required-gate verification. "
-                "Use commit_sha+repo evidence after the PR is merged and required gates pass. "
-                "Observation-only completion remains valid only for gateless/local work with no gated GitHub verifier.",
-                repo=no_commit_repo,
-                required_checks=required_github_checks_for_repo(no_commit_repo),
-                producer=producer,
-                applies=True,
-                reject_completion=True,
-            )
         repo = _no_commit_completion_repo(evidence)
         return _unverified(
             "completion evidence has no commit_sha; gateless/local/non-repo completion remains a self-report",

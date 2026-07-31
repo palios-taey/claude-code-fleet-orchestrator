@@ -320,6 +320,7 @@ def main() -> int:
     env_keys = (
         "PATH",
         "ORCH_COMPLETION_GITHUB_REPO",
+        "GITHUB_REPOSITORY",
         "ORCH_COMPLETION_REQUIRED_CHECKS",
         "ORCH_COMPLETION_ALLOWED_REPOS",
         "ORCH_COMPLETION_REPO_CHECKS",
@@ -405,6 +406,34 @@ def main() -> int:
             f"{repo_only_response.status_code} {repo_only_response.text}",
         )
 
+        os.environ.pop("ORCH_COMPLETION_GITHUB_REPO", None)
+        os.environ.pop("GITHUB_REPOSITORY", None)
+        no_runtime_supervisor_task = _seed_task("no-runtime-supervisor-verification")
+        _complete(
+            client,
+            no_runtime_supervisor_task,
+            {
+                "supervisor_verification": {
+                    "mode": "research",
+                    "verifier": "tester-supervisor",
+                    "observation": "supervisor inspected the no-runtime research artifact",
+                },
+                "production_observation": "true no-runtime supervisor verification probe",
+            },
+        )
+        no_runtime_supervisor_payload = client.get(f"/api/tasks/{no_runtime_supervisor_task}").json()
+        no_runtime_supervisor_verification = no_runtime_supervisor_payload.get("completion_evidence_verification", {})
+        check(
+            "true no-runtime supervisor verification remains accepted",
+            no_runtime_supervisor_payload.get("status") == "completed"
+            and no_runtime_supervisor_payload.get("completion_evidence_verification_status") == "VERIFIED"
+            and no_runtime_supervisor_payload.get("completion_evidence_verified") is True
+            and no_runtime_supervisor_payload.get("completion_evidence_verification_applies") is True
+            and no_runtime_supervisor_verification.get("source") == "supervisor-verification"
+            and no_runtime_supervisor_verification.get("verifier") == "tester-supervisor",
+            json.dumps(no_runtime_supervisor_verification, sort_keys=True),
+        )
+
         os.environ["ORCH_COMPLETION_GITHUB_REPO"] = ORCH_REPO
         gated_observation_task = _seed_task("gated-observation-only")
         gated_observation_response = client.patch(
@@ -450,29 +479,56 @@ def main() -> int:
         )
 
         gated_supervisor_task = _seed_task("gated-supervisor-verification")
-        _complete(
-            client,
-            gated_supervisor_task,
-            {
-                "supervisor_verification": {
-                    "mode": "research",
-                    "verifier": "tester-supervisor",
-                    "observation": "supervisor inspected the no-commit research artifact",
+        gated_supervisor_response = client.patch(
+            f"/api/task/{gated_supervisor_task}",
+            json={
+                "status": "completed",
+                "from": "tester-api",
+                "evidence": {
+                    "supervisor_verification": {
+                        "mode": "research",
+                        "verifier": "tester-supervisor",
+                        "observation": "supervisor inspected the no-commit research artifact",
+                    },
+                    "production_observation": "gated runtime supervisor verification probe",
                 },
-                "production_observation": "gated runtime supervisor verification probe",
             },
         )
         gated_supervisor_payload = client.get(f"/api/tasks/{gated_supervisor_task}").json()
-        gated_supervisor_verification = gated_supervisor_payload.get("completion_evidence_verification", {})
         check(
-            "gated runtime repo still accepts valid supervisor verification",
-            gated_supervisor_payload.get("status") == "completed"
-            and gated_supervisor_payload.get("completion_evidence_verification_status") == "VERIFIED"
-            and gated_supervisor_payload.get("completion_evidence_verified") is True
-            and gated_supervisor_payload.get("completion_evidence_verification_applies") is True
-            and gated_supervisor_verification.get("source") == "supervisor-verification"
-            and gated_supervisor_verification.get("verifier") == "tester-supervisor",
-            json.dumps(gated_supervisor_verification, sort_keys=True),
+            "gated runtime repo rejects supervisor verification without commit evidence",
+            gated_supervisor_response.status_code == 400
+            and "gated repo" in gated_supervisor_response.text
+            and "commit_sha" in gated_supervisor_response.text
+            and "supervisor_verification" in gated_supervisor_response.text
+            and gated_supervisor_payload.get("status") == "pending",
+            f"{gated_supervisor_response.status_code} {gated_supervisor_response.text} payload={gated_supervisor_payload}",
+        )
+
+        forged_supervisor_task = _seed_task("gated-forged-supervisor-verification")
+        forged_supervisor_response = client.patch(
+            f"/api/task/{forged_supervisor_task}",
+            json={
+                "status": "completed",
+                "from": "tester-api",
+                "evidence": {
+                    "supervisor_verification": {
+                        "mode": "research",
+                        "verifier": "not-actually-a-supervisor",
+                        "observation": "attacker named a different verifier session",
+                    },
+                    "production_observation": "gated runtime forged verifier probe",
+                },
+            },
+        )
+        forged_supervisor_payload = client.get(f"/api/tasks/{forged_supervisor_task}").json()
+        check(
+            "gated runtime repo rejects forged verifier names fail-closed",
+            forged_supervisor_response.status_code == 400
+            and "gated repo" in forged_supervisor_response.text
+            and "supervisor_verification" in forged_supervisor_response.text
+            and forged_supervisor_payload.get("status") == "pending",
+            f"{forged_supervisor_response.status_code} {forged_supervisor_response.text} payload={forged_supervisor_payload}",
         )
 
         os.environ["ORCH_COMPLETION_GITHUB_REPO"] = TAEYS_HANDS_REPO
