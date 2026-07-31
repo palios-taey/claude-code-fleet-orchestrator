@@ -144,7 +144,11 @@ def main() -> int:
     init_schema(config=CFG)
     client = TestClient(app)
     previous_allowlist = os.environ.get("ORCH_COMPLETION_ALLOWED_REPOS")
+    previous_runtime_repo = os.environ.get("ORCH_COMPLETION_GITHUB_REPO")
+    previous_github_repository = os.environ.get("GITHUB_REPOSITORY")
     os.environ["ORCH_COMPLETION_ALLOWED_REPOS"] = ""
+    os.environ.pop("ORCH_COMPLETION_GITHUB_REPO", None)
+    os.environ.pop("GITHUB_REPOSITORY", None)
     _cleanup()
     try:
         research_project, _, research_dep, research_downstream = _seed_dependency_pair("research")
@@ -158,7 +162,7 @@ def main() -> int:
         research_payload = get_task(research_dep, CFG) or {}
         verification = research_payload.get("completion_evidence_verification") or {}
         _check(
-            "research completion stores supervisor verification as VERIFIED evidence",
+            "true no-runtime research completion stores supervisor verification as VERIFIED evidence",
             research_payload.get("status") == "completed"
             and research_payload.get("completion_evidence", {}).get("supervisor_verification", {}).get("verifier") == SUPERVISOR
             and research_payload.get("completion_evidence_verification_status") == VERIFIED
@@ -184,7 +188,7 @@ def main() -> int:
         api_verification = api_payload.get("completion_evidence_verification") or {}
         _check("supervisor API close with supervisor_verification is accepted", response.status_code == 200, response.text)
         _check(
-            "supervisor API close attributes producer to peer owner",
+            "true no-runtime supervisor API close attributes producer to peer owner",
             api_payload.get("status") == "completed"
             and api_payload.get("completed_by") == WORKER
             and api_payload.get("completion_evidence_verification_status") == VERIFIED
@@ -281,6 +285,14 @@ def main() -> int:
             os.environ.pop("ORCH_COMPLETION_ALLOWED_REPOS", None)
         else:
             os.environ["ORCH_COMPLETION_ALLOWED_REPOS"] = previous_allowlist
+        if previous_runtime_repo is None:
+            os.environ.pop("ORCH_COMPLETION_GITHUB_REPO", None)
+        else:
+            os.environ["ORCH_COMPLETION_GITHUB_REPO"] = previous_runtime_repo
+        if previous_github_repository is None:
+            os.environ.pop("GITHUB_REPOSITORY", None)
+        else:
+            os.environ["GITHUB_REPOSITORY"] = previous_github_repository
         _cleanup()
 
 
