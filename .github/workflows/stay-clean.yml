@@ -1,0 +1,108 @@
+name: stay-clean
+
+'on':
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stay-clean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject root doc sprawl and data artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          readonly ONE_MIB=1048576
+          ROOT_MD_ALLOWLIST=$(cat <<'ALLOWLIST'
+          AUDIT.md
+          CHANGELOG.md
+          CLAUDE.md
+          CONTRIBUTING.md
+          INSTALL.md
+          KNOWN_FINDINGS.md
+          OPERATIONAL_DISCIPLINE.md
+          README.md
+          RELEASING.md
+          SECURITY.md
+          SETUP.md
+          SUPPORT.md
+          ALLOWLIST
+          )
+          DATA_OR_LARGE_ALLOWLIST=$(cat <<'ALLOWLIST'
+          ALLOWLIST
+          )
+
+          listed_exact() {
+            local needle="$1" line
+            while IFS= read -r line; do
+              [ -n "$line" ] || continue
+              [ "$needle" = "$line" ] && return 0
+            done <<< "$2"
+            return 1
+          }
+
+          is_data_shaped_path() {
+            local path_lc="${1,,}"
+            case "$path_lc" in
+              *.gz|*.zst|*.xz)
+                path_lc="${path_lc%.*}"
+                ;;
+            esac
+            case "$path_lc" in
+              *.jsonl|*.parquet|*.csv|*.tsv|*.feather|*.arrow|*.npz|*.npy|*.pt|*.pth|*.safetensors|*.db|*.sqlite)
+                return 0
+                ;;
+            esac
+            return 1
+          }
+
+          fails=0
+          tmp_files="$(mktemp)"
+          cleanup() { rm -f "$tmp_files"; }
+          trap cleanup EXIT
+
+          if ! git ls-files -z > "$tmp_files"; then
+            echo "::error::failed to enumerate tracked files with git ls-files"
+            exit 1
+          fi
+
+          while IFS= read -r -d '' path; do
+            [ -n "$path" ] || continue
+            path_lc="${path,,}"
+
+            if [[ "$path" != */* && "$path_lc" == *.md ]] && ! listed_exact "$path" "$ROOT_MD_ALLOWLIST"; then
+              echo "::error file=$path::root-level Markdown is not allowlisted; put working docs under docs/ or the tracker"
+              fails=$((fails + 1))
+            fi
+
+            if is_data_shaped_path "$path" && ! listed_exact "$path" "$DATA_OR_LARGE_ALLOWLIST"; then
+              echo "::error file=$path::data-shaped files must be deliberately allowlisted"
+              fails=$((fails + 1))
+            fi
+
+            if ! size="$(wc -c < "$path")"; then
+              echo "::error file=$path::failed to read tracked file for size check"
+              exit 1
+            fi
+            # The size check is the backstop for data formats we do not know by extension yet.
+            if [ "$size" -gt "$ONE_MIB" ] && ! listed_exact "$path" "$DATA_OR_LARGE_ALLOWLIST"; then
+              echo "::error file=$path::file is ${size} bytes (>1 MiB) and is not allowlisted"
+              fails=$((fails + 1))
+            fi
+          done < "$tmp_files"
+
+          if [ "$fails" -ne 0 ]; then
+            echo "stay-clean failed: $fails violation(s)"
+            exit 1
+          fi
+
+          echo "stay-clean passed"
