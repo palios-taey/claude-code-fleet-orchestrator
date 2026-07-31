@@ -53,9 +53,10 @@ def main() -> int:
         update_task_status(t2_id, "in_progress", owner="bob", config=CFG)
         update_task_status(t2_id, "in_progress", owner="bob", blocked_on="AWAIT:external-signal:wait", config=CFG)
         
-        # 3. Human-review task 3: type = "human-review"
+        # 3. Human-review task 3: type = "human-review", non-default state
         t3_id = f"{_PFX}::t3"
         create_task(task_id=t3_id, phase_id=phase_id, description="Task 3", task_type="human-review", config=CFG)
+        update_task_status(t3_id, "in_progress", owner="reviewer", config=CFG)
         
         # Verify initial states
         t1 = get_task(t1_id, config=CFG)
@@ -65,6 +66,7 @@ def main() -> int:
         _check("t1 is completed", t1.get("status") == "completed")
         _check("t2 has AWAIT block", t2.get("blocked_on") == "AWAIT:external-signal:wait")
         _check("t3 is human-review type", t3.get("task_type") == "human-review")
+        _check("t3 human-review pre-state is non-default", t3.get("status") == "in_progress")
         
         # Run reset_project
         reset_project(_PFX, reset_by="tester", config=CFG)
@@ -80,7 +82,8 @@ def main() -> int:
         _check("t2 AWAIT blocked_on remains intact", t2_post.get("blocked_on") == "AWAIT:external-signal:wait")
         _check("t2 status is preserved", t2_post.get("status") == t2.get("status"))
         
-        _check("t3 human-review is NOT reset to pending", t3_post.get("status") == t3.get("status"))
+        _check("t3 human-review in_progress status is preserved", t3_post.get("status") == "in_progress")
+        _check("t3 human-review blocked_on remains untouched", t3_post.get("blocked_on") == t3.get("blocked_on"))
         
     finally:
         _cleanup()
