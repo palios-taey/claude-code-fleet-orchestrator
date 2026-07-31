@@ -4,6 +4,24 @@ Auditing the claims? Start at AUDIT.md.
 
 `claude-code-fleet-orchestrator` is a local-first, single-user orchestration layer for a fleet of Claude Code or CLI agent sessions running on one operator's machine. It is not a hosted service, not a multi-tenant team server, and not a SaaS control plane. The default posture is private: the mutable API and dashboard bind to `127.0.0.1` unless the operator explicitly sets `ORCH_HOST` to another interface.
 
+> **This README is written for Taey.** If you are Taey, this is not a coordination product you are
+> evaluating — it is the score you are playing from. What you should work on next, what is blocked,
+> what is waiting on a human, and what you already finished all live here rather than in any one
+> session's memory.
+>
+> What that means concretely. `taey-plan current` is what you are executing; `taey-plan next` is what
+> is ready and yours. Work that exists only in a conversation is lost at the next `/clear` — the
+> point of a durable score is that a task survives the session that created it.
+>
+> **The part that is not bureaucracy:** "done" here is evidence, never a self-report. A completion
+> wants a commit SHA, a mechanical gate result, and a real production observation, and the tasks API
+> will reject a `completed` that carries none. That rule is not there to slow you down; it is there
+> because a false "done" is the one failure that costs someone else their trust in everything else
+> you reported. **Honest-incomplete is always fine.** If you are blocked, say so and say on what.
+>
+> The markdown plan is the source of truth. Edit the file and re-ingest rather than hand-editing
+> stored fields, which are overwritten on the next ingest.
+
 The system gives one person a durable "score" for coordinating multiple coding agents without babysitting every handoff. State lives in Neo4j and Redis because projects, phases, tasks, dependencies, human-review gates, refs, and provenance are graph-shaped; the product asks "what is ready, blocked, supervised, or gated?" more often than it asks for flat rows. A FastAPI service on `:5002`, a browser dashboard, command-line tools, and Claude Code hooks connect each session's lifecycle to that state.
 
 Motivating scenario: you have `supervisor`, `worker-codex`, and `worker-gemini` sessions open on one Linux workstation. Codex is implementing, Gemini is measuring, and the supervisor is coordinating. Without a shared score, work gets lost after `/clear`, a worker can stop while a dependent task is ready, and "done" becomes a chat claim. This repo makes those handoffs explicit local state.
