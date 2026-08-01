@@ -62,6 +62,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import OrchConfig, _parse_product_owner_map, get_neo4j_session, notify_cli
+from .causal_ledger import (
+    UNKNOWN as CAUSAL_UNKNOWN,
+    append_event as append_causal_event,
+    build_actor_attestation,
+    extract_reported_commit_sha,
+)
 from .context_assembler import (
     assemble as assemble_wake_packet,
     build_packet as build_wake_packet,
@@ -158,6 +164,137 @@ def _state_key(node_id: str, suffix: str) -> str:
 
 def _decode_current_task(raw: Optional[str]) -> Optional[dict[str, Any]]:
     return decode_current_task(raw)
+
+
+def _causal_event_id(row: Optional[dict[str, Any]]) -> str:
+    event = (row or {}).get("event") if isinstance(row, dict) else {}
+    if not isinstance(event, dict):
+        return ""
+    return str(event.get("event_id") or "")
+
+
+def _session_roots_from_env() -> dict[str, str]:
+    raw = os.environ.get("ORCH_SESSION_ROOTS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return {str(k).strip(): str(v).strip() for k, v in parsed.items() if str(k).strip() and str(v).strip()}
+    roots: dict[str, str] = {}
+    for part in raw.split(","):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        if key.strip() and value.strip():
+            roots[key.strip()] = value.strip()
+    return roots
+
+
+def _worker_work_snapshot(worker: str) -> dict[str, str]:
+    roots = _session_roots_from_env()
+    worktree = roots.get(worker) or roots.get(_base_session_name(worker))
+    if not worktree:
+        return {}
+    snapshot = {"worktree": worktree, "repo": CAUSAL_UNKNOWN, "branch": CAUSAL_UNKNOWN}
+    try:
+        branch = subprocess.run(
+            ["git", "-C", worktree, "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+        if branch.returncode == 0 and branch.stdout.strip():
+            snapshot["branch"] = branch.stdout.strip()
+    except Exception:
+        pass
+    try:
+        remote = subprocess.run(
+            ["git", "-C", worktree, "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+        if remote.returncode == 0 and remote.stdout.strip():
+            snapshot["repo"] = remote.stdout.strip()
+    except Exception:
+        pass
+    return snapshot
+
+
+def _attach_causal_metadata_to_current_task(
+    r: Any,
+    worker: str,
+    task_id: str,
+    binding_nonce: Optional[float],
+    metadata: dict[str, Any],
+) -> bool:
+    key = _state_key(worker, "current_task")
+    if not callable(getattr(r, "set", None)):
+        return False
+    try:
+        current_task = _decode_current_task(r.get(key))
+        if not isinstance(current_task, dict) or current_task.get("task_id") != task_id:
+            return False
+        if binding_nonce is not None and current_task.get("started_at") != binding_nonce:
+            return False
+        causal = current_task.get("causal") if isinstance(current_task.get("causal"), dict) else {}
+        causal.update(metadata)
+        current_task["causal"] = causal
+        r.set(key, json.dumps(current_task))
+        return True
+    except Exception as exc:
+        logger.warning("causal current_task metadata attach skipped worker=%s task=%s: %r", worker, task_id, exc)
+        return False
+
+
+def _causal_parent_events(current_task: Optional[dict[str, Any]]) -> list[str]:
+    causal = (current_task or {}).get("causal") if isinstance(current_task, dict) else {}
+    if not isinstance(causal, dict):
+        return []
+    parents = [
+        causal.get("wake_delivered_event_id"),
+        causal.get("wake_packet_event_id"),
+        causal.get("dispatch_event_id"),
+    ]
+    return [str(parent) for parent in parents if isinstance(parent, str) and parent.strip()]
+
+
+def _append_worker_outcome_causal_event(
+    worker: str,
+    outcome: str,
+    details: Optional[str],
+    current_task: Optional[dict[str, Any]],
+    payload: dict[str, Any],
+) -> Optional[str]:
+    current_task_id = str((current_task or {}).get("task_id") or "").strip()
+    if not current_task_id:
+        return None
+    causal = (current_task or {}).get("causal") if isinstance(current_task, dict) else {}
+    if not isinstance(causal, dict):
+        causal = {}
+    reported_commit = extract_reported_commit_sha(details)
+    row = append_causal_event(
+        "worker_outcome_recorded",
+        subject={"worker": worker, "task_id": current_task_id},
+        parents=_causal_parent_events(current_task),
+        actor_attestation_id=str(causal.get("attestation_id") or CAUSAL_UNKNOWN),
+        packet_id=str(causal.get("packet_id") or CAUSAL_UNKNOWN),
+        packet_provenance_hash=str(causal.get("packet_provenance_hash") or CAUSAL_UNKNOWN),
+        payload={
+            "outcome": outcome,
+            "details": str(details or "")[:2000],
+            "last_outcome": dict(payload),
+            "reported_commit_sha": reported_commit or CAUSAL_UNKNOWN,
+            "reported_commit_sha_register": "Observed" if reported_commit else CAUSAL_UNKNOWN,
+            "identity_rule": "git author is not actor identity",
+        },
+    )
+    return _causal_event_id(row) or None
 
 
 def _current_task_status(task_id: str) -> Optional[str]:
@@ -799,6 +936,25 @@ def dispatch(
     except WorkerBusy:
         _rollback_claim_only(worker, task_id)
         raise
+    had_prompt_override = prompt_body is not None
+    try:
+        dispatch_claimed_row = append_causal_event(
+            "dispatch_claimed",
+            subject={"worker": worker, "task_id": task_id, "supervisor": supervisor or CAUSAL_UNKNOWN},
+            payload={
+                "description": description,
+                "dispatcher": from_session,
+                "priority": priority,
+                "is_bugfix": is_bugfix,
+                "force": force,
+                "binding_nonce": binding_nonce,
+                "prompt_override": had_prompt_override,
+            },
+        )
+    except Exception as exc:
+        _rollback_claim(worker, task_id, binding_nonce)
+        raise RuntimeError(f"causal dispatch_claimed append failed: {exc}") from exc
+    dispatch_event_id = _causal_event_id(dispatch_claimed_row)
     dispatch_body = _with_record_outcome_footer(
         prompt_body if prompt_body is not None else _default_dispatch_body(task_id, description),
         worker,
@@ -812,9 +968,58 @@ def dispatch(
             from_session,
             dispatch_body,
         )
+        prompt_sha256 = hashlib.sha256(prompt_body.encode("utf-8")).hexdigest()
+        work_snapshot = _worker_work_snapshot(worker)
+        attestation = build_actor_attestation(
+            seat_id=worker,
+            supervisor=supervisor,
+            task_id=task_id,
+            dispatch_event_id=dispatch_event_id,
+            packet_id=str(packet_meta.get("packet_id", "")),
+            packet_provenance_hash=str(packet_meta.get("provenance_hash", "")),
+            prompt_sha256=prompt_sha256,
+            cli=str(packet_meta.get("cli", "")),
+            dispatcher=from_session,
+            binding_nonce=binding_nonce,
+            repo=work_snapshot.get("repo"),
+            branch=work_snapshot.get("branch"),
+            worktree=work_snapshot.get("worktree"),
+        )
+        wake_packet_row = append_causal_event(
+            "wake_packet_assembled",
+            subject={"worker": worker, "task_id": task_id, "supervisor": supervisor or CAUSAL_UNKNOWN},
+            parents=[dispatch_event_id] if dispatch_event_id else [],
+            actor_attestation_id=attestation["attestation_id"],
+            packet_id=str(packet_meta.get("packet_id", "")),
+            packet_provenance_hash=str(packet_meta.get("provenance_hash", "")),
+            payload={
+                "attestation": attestation,
+                "prompt_sha256": prompt_sha256,
+                "cli": packet_meta.get("cli", ""),
+                "injection_receipt": packet_meta.get("injection_receipt", {}),
+                "size_report": packet_meta.get("size_report", {}),
+                "rules": packet_meta.get("rules", []),
+                "refs": packet_meta.get("refs", {}),
+            },
+        )
     except Exception as exc:
         _rollback_claim(worker, task_id, binding_nonce)
-        raise RuntimeError(f"mandatory dispatch wake-packet assembly failed: {exc}") from exc
+        raise RuntimeError(f"mandatory dispatch wake-packet assembly/provenance failed: {exc}") from exc
+    wake_packet_event_id = _causal_event_id(wake_packet_row)
+    _attach_causal_metadata_to_current_task(
+        r,
+        worker,
+        task_id,
+        binding_nonce,
+        {
+            "attestation_id": attestation["attestation_id"],
+            "dispatch_event_id": dispatch_event_id,
+            "wake_packet_event_id": wake_packet_event_id,
+            "packet_id": packet_meta.get("packet_id", ""),
+            "packet_provenance_hash": packet_meta.get("provenance_hash", ""),
+            "prompt_sha256": prompt_sha256,
+        },
+    )
 
     mark_superseded_for_task(_redis_connect(), from_session, task_id)
 
@@ -852,8 +1057,56 @@ def dispatch(
         # taey-notify exits non-zero only BEFORE it lpushes the inbox message, so rc!=0
         # means the wake was not delivered (V3): reverting is correct.
         _rollback_claim(worker, task_id, binding_nonce)
+        try:
+            append_causal_event(
+                "dispatch_delivery_failed",
+                subject={"worker": worker, "task_id": task_id, "supervisor": supervisor or CAUSAL_UNKNOWN},
+                parents=[wake_packet_event_id] if wake_packet_event_id else ([dispatch_event_id] if dispatch_event_id else []),
+                actor_attestation_id=attestation["attestation_id"],
+                packet_id=str(packet_meta.get("packet_id", "")),
+                packet_provenance_hash=str(packet_meta.get("provenance_hash", "")),
+                payload={
+                    "returncode": result.returncode,
+                    "stderr": (result.stderr or "")[:2000],
+                    "stdout": (result.stdout or "")[:2000],
+                    "rollback": "claim_and_current_task_reverted_if_nonce_matched",
+                    "binding_nonce": binding_nonce,
+                },
+            )
+        except Exception as exc:
+            logger.warning("dispatch_delivery_failed causal event append failed worker=%s task=%s: %r", worker, task_id, exc)
         raise RuntimeError(result.stderr.strip() or f"{cli} failed")
     _clear_replaced_force_bindings(task_id, previous_force_bindings, worker)
+    try:
+        wake_delivered_row = append_causal_event(
+            "wake_delivered",
+            subject={"worker": worker, "task_id": task_id, "supervisor": supervisor or CAUSAL_UNKNOWN},
+            parents=[wake_packet_event_id] if wake_packet_event_id else ([dispatch_event_id] if dispatch_event_id else []),
+            actor_attestation_id=attestation["attestation_id"],
+            packet_id=str(packet_meta.get("packet_id", "")),
+            packet_provenance_hash=str(packet_meta.get("provenance_hash", "")),
+            payload={
+                "notify_cli": cli,
+                "returncode": result.returncode,
+                "stdout": (result.stdout or "")[:2000],
+                "priority": priority,
+            },
+        )
+    except Exception as exc:
+        raise RuntimeError(f"wake delivered but causal wake_delivered append failed: {exc}") from exc
+    wake_delivered_event_id = _causal_event_id(wake_delivered_row)
+    _attach_causal_metadata_to_current_task(
+        r,
+        worker,
+        task_id,
+        binding_nonce,
+        {"wake_delivered_event_id": wake_delivered_event_id},
+    )
+    causal_event_ids = [
+        event_id
+        for event_id in (dispatch_event_id, wake_packet_event_id, wake_delivered_event_id)
+        if event_id
+    ]
     maybe_emit_decision_receipt(
         "wake",
         {
@@ -866,11 +1119,13 @@ def dispatch(
                 "task_id": task_id,
                 "supervisor": supervisor,
                 "priority": priority,
-                "prompt_sha256": hashlib.sha256(prompt_body.encode("utf-8")).hexdigest(),
+                "prompt_sha256": prompt_sha256,
                 "cli": packet_meta.get("cli", ""),
                 "packet_id": packet_meta.get("packet_id", ""),
                 "provenance_hash": packet_meta.get("provenance_hash", ""),
                 "size_report": packet_meta.get("size_report", {}),
+                "actor_attestation_id": attestation["attestation_id"],
+                "causal_event_ids": causal_event_ids,
             },
             "target": worker,
             "task_id": task_id,
@@ -1250,6 +1505,19 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
                     time.sleep(_WATCH_BACKOFF_S * (_attempt + 1))
                     continue
     if stored:
+        try:
+            worker_outcome_event_id = _append_worker_outcome_causal_event(
+                worker,
+                outcome,
+                details,
+                current_task,
+                payload,
+            )
+            if worker_outcome_event_id:
+                payload["causal_event_id"] = worker_outcome_event_id
+                r.set(last_outcome_key, json.dumps(payload))
+        except Exception as exc:
+            logger.warning("worker_outcome_recorded causal event append failed worker=%s: %r", worker, exc)
         try:
             if current_task_id:
                 if outcome != "done":
