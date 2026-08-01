@@ -488,6 +488,43 @@ def _assembler_contract() -> None:
         and proof_capsule.get("authority_roots"),
         proof_capsule,
     )
+    task_dispatch_claim = next(
+        (
+            claim
+            for claim in proof_capsule.get("claims") or []
+            if claim.get("handle") == "p:task-dispatch"
+        ),
+        {},
+    )
+    _check(
+        "task-bound wake observes task-dispatch claim",
+        task_dispatch_claim.get("register") == "Observed",
+        task_dispatch_claim,
+    )
+    no_task_packet = assembler.build_packet(
+        "conductor-codex",
+        {
+            "snapshot": {
+                "repo_head": "test-no-task",
+                "resolved_work": {},
+            },
+            "rules": [],
+        },
+    )
+    no_task_dispatch_claims = [
+        claim
+        for claim in no_task_packet.get("proof_capsule", {}).get("claims") or []
+        if claim.get("handle") == "p:task-dispatch"
+    ]
+    _check(
+        "no-task wake has no Observed task-dispatch claim",
+        bool(no_task_dispatch_claims)
+        and all(
+            claim.get("register") != "Observed"
+            for claim in no_task_dispatch_claims
+        ),
+        no_task_dispatch_claims,
+    )
     _check(
         "proof capsule renders after Provenance before Operating",
         rendered.find("## Provenance") < rendered.find("## Proof Capsule") < rendered.find("## Operating"),

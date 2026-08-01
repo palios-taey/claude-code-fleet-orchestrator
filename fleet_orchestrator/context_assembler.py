@@ -321,7 +321,20 @@ def _build_proof_capsule(
     causal_event_ids = _proof_string_list(dispatch_state.get("causal_event_ids"))
     attestation_id = _proof_value(dispatch_state.get("attestation_id"))
     world_id = _proof_value(dispatch_state.get("world_id"))
+    task_known = task_id != PROOF_UNKNOWN
     authority_roots = _proof_authority_roots(context, snapshot, resolved, task_id)
+    task_dispatch_claim = {
+        "handle": "p:task-dispatch",
+        "claim": "Task identity, dispatch target, and supervisor came from orchestrator task/dispatch metadata.",
+        "authority_root": "root:task",
+        "proof_event_ids": causal_event_ids,
+    }
+    if task_known:
+        task_dispatch_claim["register"] = "Observed"
+    else:
+        task_dispatch_claim.update(
+            _proof_unknown("no orchestrator task metadata resolved for this wake packet")
+        )
     return {
         "schema_version": PROOF_CAPSULE_SCHEMA_VERSION,
         "world_id": world_id,
@@ -335,13 +348,7 @@ def _build_proof_capsule(
         "causal_event_ids": causal_event_ids,
         "authority_roots": authority_roots,
         "claims": [
-            {
-                "handle": "p:task-dispatch",
-                "claim": "Task identity, dispatch target, and supervisor came from orchestrator task/dispatch metadata.",
-                "register": "Observed",
-                "authority_root": "root:task",
-                "proof_event_ids": causal_event_ids,
-            },
+            task_dispatch_claim,
             {
                 "handle": "p:rendered-authority",
                 "claim": "Selected refs and rules are rendered into this wake packet under the packet nonce boundary.",
@@ -398,7 +405,11 @@ def _proof_authority_roots(
                     "resolved_work": resolved,
                 },
             ),
-            "register": "Observed",
+            **(
+                {"register": "Observed"}
+                if task_id != PROOF_UNKNOWN
+                else _proof_unknown("no orchestrator task metadata resolved for this wake packet")
+            ),
         },
         {
             "handle": "root:packet-context",
