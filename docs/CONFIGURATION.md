@@ -60,6 +60,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ORCH_PEER_RESPAWN_SCRIPT` | required | Absolute peer-respawn executable used by `orch-cron` project-trigger delivery prechecks when a target tmux session is absent. Set this to the operator-owned peer-respawn script path for the local install; this is not an auth boundary. |
 | `ACCOUNTABILITY_LEDGER_PATH` | platform state dir | Location of the hash-chained accountability ledger. The ledger module is explicit that it is **tamper-evident, not tamper-proof**; an ephemeral path silently loses the record — point it at durable, operator-owned storage. |
 | `ACCOUNTABILITY_CI_AUDIT_PATH` | platform state dir | Location of the separate hash-chained CI merge audit ledger (`ci-audit.jsonl`). Use durable, operator-owned storage; this chain records completed CONTROL merges only when real gate results and durations are supplied. |
+| `ORCH_CAUSAL_LEDGER_PATH` | `ORCH_DATA_DIR/provenance/causal-events.jsonl` | Optional override for the append-only causal dispatch/outcome ledger. Use durable, operator-owned storage; a temporary path loses the provenance row-chain across restarts. |
 
 ## 2. Security & access
 
