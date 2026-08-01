@@ -83,6 +83,10 @@ Enable the optional features you intend to use:
   (one path, comma-list, or JSON list), or set `ORCH_SESSION_ROOTS` so each session's
   repo root is auto-derived as an allowed ref root. Refs are *disabled* until one of
   those sources yields an allowed root.
+- **Causal provenance ledger**: dispatch/outcome causal events write to
+  `ORCH_DATA_DIR/provenance/causal-events.jsonl` by default. Set
+  `ORCH_CAUSAL_LEDGER_PATH=/abs/path/to/causal-events.jsonl` when the default data
+  directory is ephemeral or you want a dedicated durable ledger location.
 - **Dashboard network exposure**: default `ORCH_HOST=127.0.0.1` is the security boundary. Any
   non-loopback bind or LAN URL is an explicit, deliberate opt-in only for a trusted single-user
   network. Set `ORCH_AUTH_TOKEN` for non-loopback mutable access, or set

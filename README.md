@@ -165,6 +165,7 @@ Fleet and context:
 - `ORCH_IDENTITY_ROOT`: optional trusted identity directory. Companion sessions load full operator-supplied identity from this root; engineering sessions use the built-in lean role core.
 - `ORCH_COMPANION_SESSIONS`: optional comma-separated companion session ids. Defaults to `taey,companion`.
 - `ORCH_SHIP_GATES`: comma-separated task-id suffixes that must be complete before a project can receive a successful ship verdict.
+- `ORCH_CAUSAL_LEDGER_PATH`: optional path for the causal dispatch/outcome JSONL ledger. Default is under `ORCH_DATA_DIR` at `provenance/causal-events.jsonl`; set a durable operator-owned path if the data directory is ephemeral.
 
 ## What "taey" Means
 
