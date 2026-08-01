@@ -154,6 +154,14 @@ OPTIONAL_ENV = (
      "World Manifest seed root; when absent the repo-local system map is measured, and missing files become Unknown roots"),
     ("ORCH_WORLD_KNOWLEDGE_INDEX_PATH", "sibling/home Taey Presence production index if present",
      "World Manifest Taey Presence seed root; absent uses local operator checkouts, and missing indexes become Unknown roots"),
+    ("ORCH_PROVENANCE_WITNESS_ENABLED", "off",
+     "external witness anchoring is disabled until explicitly enabled after witness-principal selection"),
+    ("ORCH_PROVENANCE_WITNESS_PRINCIPAL", "unset",
+     "witness identity selected by Jesse; anchoring fails loud while unset"),
+    ("ORCH_PROVENANCE_WITNESS_ADAPTER", "jsonl",
+     "local roots-and-counts witness adapter selected only after anchoring is explicitly enabled"),
+    ("ORCH_PROVENANCE_WITNESS_PATH", "unset",
+     "required output path for the jsonl external witness adapter"),
 )
 
 

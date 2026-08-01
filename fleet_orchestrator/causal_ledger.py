@@ -40,6 +40,7 @@ _HEADER = (
     "Rows are hash-chained and fsync'd; do not delete or rewrite lines."
 )
 _GENESIS = "0" * 64
+_GENESIS_LEDGER_ROOT = f"sha256:{_GENESIS}"
 _REPORTED_SHA_MARKER_RE = re.compile(r"(?<![A-Za-z0-9_])sha=([0-9a-fA-F]{40})(?![A-Za-z0-9_])")
 
 
@@ -96,6 +97,55 @@ def _scan_last_hash(f=None, path: Optional[str] = None) -> str:
         row = json.loads(line)
         last = row["row_hash"]
     return last
+
+
+def _read_rows_unverified(path: Optional[str] = None) -> list[dict[str, Any]]:
+    target_path = _ledger_path(path)
+    if not os.path.exists(target_path):
+        return []
+    rows: list[dict[str, Any]] = []
+    with open(target_path, encoding="utf-8") as f:
+        ledger_row_number = 0
+        for line_no, raw in enumerate(f, 1):
+            line = raw.rstrip("\n")
+            if line_no == 1 and line.startswith("#"):
+                continue
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if isinstance(row, dict):
+                ledger_row_number += 1
+                materialized = dict(row)
+                materialized["ledger_row_number"] = ledger_row_number
+                rows.append(materialized)
+    return rows
+
+
+def read_ledger_rows(path: Optional[str] = None) -> list[dict[str, Any]]:
+    chain = verify_chain(path)
+    if not chain.get("ok"):
+        raise ValueError(f"causal ledger chain does not verify: {chain}")
+    return _read_rows_unverified(path)
+
+
+def merkle_root(event_ids: Sequence[str]) -> str:
+    leaves: list[str] = []
+    for event_id in event_ids:
+        value = str(event_id or "").strip()
+        if not value:
+            raise ValueError("event_ids must contain non-empty values")
+        leaves.append(hashlib.sha256(f"leaf:{value}".encode("utf-8")).hexdigest())
+    if not leaves:
+        raise ValueError("cannot build a Merkle root for an empty batch")
+    level = leaves
+    while len(level) > 1:
+        next_level: list[str] = []
+        for index in range(0, len(level), 2):
+            left = level[index]
+            right = level[index + 1] if index + 1 < len(level) else left
+            next_level.append(hashlib.sha256(f"node:{left}:{right}".encode("utf-8")).hexdigest())
+        level = next_level
+    return f"sha256:{level[0]}"
 
 
 def _require_mapping(name: str, value: Any) -> dict[str, Any]:
@@ -217,6 +267,132 @@ def verify_chain(path: Optional[str] = None) -> dict[str, Any]:
             prev = row["row_hash"]
             rows += 1
     return {"ok": True, "rows": rows}
+
+
+def _checkpoint_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    event = row.get("event") if isinstance(row.get("event"), Mapping) else {}
+    payload = event.get("payload") if isinstance(event, Mapping) and isinstance(event.get("payload"), Mapping) else {}
+    return dict(payload)
+
+
+def _ledger_root_payload(prev_ledger_root: str, batch_root: str, n: int) -> dict[str, Any]:
+    return {
+        "prev_ledger_root": prev_ledger_root,
+        "batch_root": batch_root,
+        "n": int(n),
+    }
+
+
+def _ledger_root(prev_ledger_root: str, batch_root: str, n: int) -> str:
+    body = _canonical(_ledger_root_payload(prev_ledger_root, batch_root, n))
+    return f"sha256:{hashlib.sha256(body.encode('utf-8')).hexdigest()}"
+
+
+def checkpoint_ledger(
+    *,
+    path: Optional[str] = None,
+    subject: Optional[Mapping[str, Any]] = None,
+    ts: Optional[float] = None,
+) -> dict[str, Any]:
+    rows = read_ledger_rows(path)
+    if not rows:
+        raise ValueError("cannot checkpoint an empty causal ledger")
+
+    checkpoint_rows = [
+        row for row in rows
+        if isinstance(row.get("event"), Mapping) and row["event"].get("event_type") == "ledger_checkpoint"
+    ]
+    previous_checkpoint = checkpoint_rows[-1] if checkpoint_rows else None
+    previous_payload = _checkpoint_payload(previous_checkpoint) if previous_checkpoint else {}
+    previous_ledger_root = str(previous_payload.get("ledger_root") or _GENESIS_LEDGER_ROOT)
+    previous_checkpoint_row = int(previous_checkpoint.get("ledger_row_number", 0)) if previous_checkpoint else 0
+    batch_rows = [row for row in rows if int(row.get("ledger_row_number", 0)) > previous_checkpoint_row]
+    if not batch_rows:
+        raise ValueError("no new causal events to checkpoint")
+
+    event_ids = [str(row["event"]["event_id"]) for row in batch_rows]
+    from_row = int(batch_rows[0]["ledger_row_number"])
+    to_row = int(batch_rows[-1]["ledger_row_number"])
+    from_event = event_ids[0]
+    to_event = event_ids[-1]
+    batch_root = merkle_root(event_ids)
+    ledger_root = _ledger_root(previous_ledger_root, batch_root, len(event_ids))
+    created_at = _ts_str(ts)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "ledger": "orchestrator-causal",
+        "rows": to_row,
+        "batch_rows": len(event_ids),
+        "from_row": from_row,
+        "to_row": to_row,
+        "from_event": from_event,
+        "to_event": to_event,
+        "batch_root": batch_root,
+        "ledger_root": ledger_root,
+        "prev_ledger_root": previous_ledger_root,
+        "created_at": created_at,
+    }
+    row = append_event(
+        "ledger_checkpoint",
+        subject=dict(subject or {"ledger": "orchestrator-causal", "rows": to_row}),
+        parents=[to_event],
+        authority_roots=[batch_root, ledger_root],
+        payload=payload,
+        ts=ts,
+        path=path,
+    )
+    event = row.get("event") if isinstance(row, Mapping) else {}
+    return {
+        "row": row,
+        "event_id": str(event.get("event_id") or ""),
+        "ledger_root": ledger_root,
+        "batch_root": batch_root,
+        "rows": to_row,
+        "batch_rows": len(event_ids),
+        "payload": payload,
+    }
+
+
+def latest_checkpoint_root(path: Optional[str] = None) -> dict[str, Any]:
+    target_path = _ledger_path(path)
+    if not os.path.exists(target_path):
+        return {
+            "register": UNKNOWN,
+            "kind": "causal_ledger",
+            "reason": "no ledger checkpoint is published yet",
+        }
+    chain = verify_chain(path)
+    if not chain.get("ok"):
+        return {
+            "register": UNKNOWN,
+            "kind": "causal_ledger",
+            "reason": f"causal ledger chain does not verify: {chain}",
+        }
+    checkpoint_rows = [
+        row for row in _read_rows_unverified(path)
+        if isinstance(row.get("event"), Mapping) and row["event"].get("event_type") == "ledger_checkpoint"
+    ]
+    if not checkpoint_rows:
+        return {
+            "register": UNKNOWN,
+            "kind": "causal_ledger",
+            "reason": "no ledger checkpoint is published yet",
+        }
+    checkpoint = checkpoint_rows[-1]
+    event = checkpoint.get("event") if isinstance(checkpoint.get("event"), Mapping) else {}
+    payload = _checkpoint_payload(checkpoint)
+    return {
+        "register": "Observed",
+        "kind": "causal_ledger",
+        "path": target_path,
+        "checkpoint_event_id": str(event.get("event_id") or UNKNOWN),
+        "rows": int(payload.get("rows") or 0),
+        "batch_rows": int(payload.get("batch_rows") or 0),
+        "from_event": str(payload.get("from_event") or UNKNOWN),
+        "to_event": str(payload.get("to_event") or UNKNOWN),
+        "batch_root": str(payload.get("batch_root") or UNKNOWN),
+        "ledger_root": str(payload.get("ledger_root") or UNKNOWN),
+    }
 
 
 def unknown(reason: str) -> dict[str, str]:
