@@ -38,6 +38,7 @@ def main() -> int:
     verify.add_argument("--packet-id", required=True)
     verify.add_argument("--packet-provenance-hash", required=True)
     verify.add_argument("--no-witness-required", action="store_true")
+    verify.add_argument("--witness-waiver-reason", default=None)
 
     reverify = sub.add_parser("reverify-manifest", help="recompute recorded World Manifest roots against the live tree")
     reverify.add_argument("--ledger", dest="ledger_path", default=None)
@@ -64,6 +65,7 @@ def main() -> int:
             packet_provenance_hash=args.packet_provenance_hash,
             ledger_path=args.ledger_path,
             require_witness=not args.no_witness_required,
+            witness_waiver_reason=args.witness_waiver_reason,
         )
         _print(result)
         return 0 if result.get("ok") else 1

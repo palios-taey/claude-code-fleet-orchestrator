@@ -154,6 +154,13 @@ def _require_mapping(name: str, value: Any) -> dict[str, Any]:
     return dict(value)
 
 
+def event_id_for_event(event: Mapping[str, Any]) -> str:
+    event_body = _require_mapping("event", event)
+    material = dict(event_body)
+    material.pop("event_id", None)
+    return f"event:{_typed_hash('causal_event', material)}"
+
+
 def _string_list(name: str, value: Optional[Sequence[Any]]) -> list[str]:
     if value is None:
         return []
@@ -288,6 +295,147 @@ def _ledger_root(prev_ledger_root: str, batch_root: str, n: int) -> str:
     return f"sha256:{hashlib.sha256(body.encode('utf-8')).hexdigest()}"
 
 
+def verify_checkpoint_integrity(path: Optional[str] = None) -> dict[str, Any]:
+    chain = verify_chain(path)
+    if not chain.get("ok"):
+        return {
+            "ok": False,
+            "errors": [f"ledger_chain_invalid:{chain}"],
+            "checkpoints": {},
+            "checkpoint_order": [],
+        }
+    rows = read_ledger_rows(path)
+    errors: list[str] = []
+    checkpoints: dict[str, dict[str, Any]] = {}
+    checkpoint_order: list[str] = []
+    previous_checkpoint_row = 0
+    previous_ledger_root = _GENESIS_LEDGER_ROOT
+
+    for row in rows:
+        event = row.get("event") if isinstance(row.get("event"), Mapping) else {}
+        if not isinstance(event, Mapping) or event.get("event_type") != "ledger_checkpoint":
+            continue
+        row_number = int(row.get("ledger_row_number") or 0)
+        checkpoint_errors: list[str] = []
+        checkpoint_event_id = str(event.get("event_id") or "")
+        try:
+            computed_checkpoint_event_id = event_id_for_event(event)
+        except ValueError:
+            computed_checkpoint_event_id = ""
+            checkpoint_errors.append(f"checkpoint_event_malformed:row:{row_number}")
+        if computed_checkpoint_event_id and checkpoint_event_id != computed_checkpoint_event_id:
+            checkpoint_errors.append(f"checkpoint_event_id_mismatch:row:{row_number}")
+
+        payload = _checkpoint_payload(row)
+        if event.get("payload_oid") != payload_oid(payload):
+            checkpoint_errors.append(f"checkpoint_payload_oid_mismatch:{checkpoint_event_id or row_number}")
+        missing = [
+            key for key in (
+                "rows",
+                "batch_rows",
+                "from_row",
+                "to_row",
+                "from_event",
+                "to_event",
+                "batch_root",
+                "ledger_root",
+                "prev_ledger_root",
+            )
+            if not str(payload.get(key) or "").strip()
+        ]
+        for key in missing:
+            checkpoint_errors.append(f"checkpoint_payload_missing:{checkpoint_event_id or row_number}:{key}")
+
+        try:
+            from_row = int(payload.get("from_row"))
+            to_row = int(payload.get("to_row"))
+            stored_rows = int(payload.get("rows"))
+            stored_batch_rows = int(payload.get("batch_rows"))
+        except (TypeError, ValueError):
+            from_row = previous_checkpoint_row + 1
+            to_row = row_number - 1
+            stored_rows = -1
+            stored_batch_rows = -1
+            checkpoint_errors.append(f"checkpoint_range_malformed:{checkpoint_event_id or row_number}")
+
+        expected_from_row = previous_checkpoint_row + 1
+        expected_to_row = row_number - 1
+        if from_row != expected_from_row:
+            checkpoint_errors.append(f"checkpoint_from_row_mismatch:{checkpoint_event_id or row_number}")
+        if to_row != expected_to_row:
+            checkpoint_errors.append(f"checkpoint_to_row_mismatch:{checkpoint_event_id or row_number}")
+        if stored_rows != to_row:
+            checkpoint_errors.append(f"checkpoint_rows_mismatch:{checkpoint_event_id or row_number}")
+        if stored_batch_rows != max(0, to_row - from_row + 1):
+            checkpoint_errors.append(f"checkpoint_batch_rows_mismatch:{checkpoint_event_id or row_number}")
+
+        range_valid = 1 <= from_row <= to_row < row_number <= len(rows)
+        actual_event_ids: list[str] = []
+        if range_valid:
+            for batch_row in rows[from_row - 1:to_row]:
+                batch_event = batch_row.get("event") if isinstance(batch_row.get("event"), Mapping) else {}
+                batch_row_number = int(batch_row.get("ledger_row_number") or 0)
+                try:
+                    computed_event_id = event_id_for_event(batch_event)
+                except ValueError:
+                    checkpoint_errors.append(f"checkpoint_batch_event_malformed:row:{batch_row_number}")
+                    continue
+                stored_event_id = str(batch_event.get("event_id") or "")
+                if stored_event_id != computed_event_id:
+                    checkpoint_errors.append(f"checkpoint_batch_event_id_mismatch:row:{batch_row_number}")
+                batch_payload = batch_event.get("payload") if isinstance(batch_event.get("payload"), Mapping) else {}
+                if batch_event.get("payload_oid") != payload_oid(batch_payload):
+                    checkpoint_errors.append(f"checkpoint_batch_payload_oid_mismatch:row:{batch_row_number}")
+                actual_event_ids.append(computed_event_id)
+        else:
+            checkpoint_errors.append(f"checkpoint_range_out_of_bounds:{checkpoint_event_id or row_number}")
+
+        recomputed_batch_root = merkle_root(actual_event_ids) if actual_event_ids else UNKNOWN
+        recomputed_ledger_root = (
+            _ledger_root(previous_ledger_root, recomputed_batch_root, len(actual_event_ids))
+            if recomputed_batch_root != UNKNOWN
+            else UNKNOWN
+        )
+        if actual_event_ids and payload.get("from_event") != actual_event_ids[0]:
+            checkpoint_errors.append(f"checkpoint_from_event_mismatch:{checkpoint_event_id or row_number}")
+        if actual_event_ids and payload.get("to_event") != actual_event_ids[-1]:
+            checkpoint_errors.append(f"checkpoint_to_event_mismatch:{checkpoint_event_id or row_number}")
+        if payload.get("prev_ledger_root") != previous_ledger_root:
+            checkpoint_errors.append(f"checkpoint_prev_ledger_root_mismatch:{checkpoint_event_id or row_number}")
+        if payload.get("batch_root") != recomputed_batch_root:
+            checkpoint_errors.append(f"checkpoint_batch_root_mismatch:{checkpoint_event_id or row_number}")
+        if payload.get("ledger_root") != recomputed_ledger_root:
+            checkpoint_errors.append(f"checkpoint_ledger_root_mismatch:{checkpoint_event_id or row_number}")
+
+        report = {
+            "checkpoint_event_id": checkpoint_event_id,
+            "row_number": row_number,
+            "from_row": from_row,
+            "to_row": to_row,
+            "stored_batch_root": str(payload.get("batch_root") or UNKNOWN),
+            "recomputed_batch_root": recomputed_batch_root,
+            "stored_ledger_root": str(payload.get("ledger_root") or UNKNOWN),
+            "recomputed_ledger_root": recomputed_ledger_root,
+            "stored_prev_ledger_root": str(payload.get("prev_ledger_root") or UNKNOWN),
+            "recomputed_prev_ledger_root": previous_ledger_root,
+            "event_ids": actual_event_ids,
+            "errors": checkpoint_errors,
+            "ok": not checkpoint_errors,
+        }
+        if checkpoint_event_id:
+            checkpoints[checkpoint_event_id] = report
+            checkpoint_order.append(checkpoint_event_id)
+        errors.extend(checkpoint_errors)
+        previous_checkpoint_row = row_number
+        previous_ledger_root = recomputed_ledger_root
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "checkpoints": checkpoints,
+        "checkpoint_order": checkpoint_order,
+    }
+
+
 def checkpoint_ledger(
     *,
     path: Optional[str] = None,
@@ -377,6 +525,14 @@ def latest_checkpoint_root(path: Optional[str] = None) -> dict[str, Any]:
             "register": UNKNOWN,
             "kind": "causal_ledger",
             "reason": "no ledger checkpoint is published yet",
+        }
+    integrity = verify_checkpoint_integrity(path)
+    if not integrity.get("ok"):
+        return {
+            "register": UNKNOWN,
+            "kind": "causal_ledger",
+            "reason": "ledger checkpoint integrity does not verify",
+            "errors": list(integrity.get("errors") or []),
         }
     checkpoint = checkpoint_rows[-1]
     event = checkpoint.get("event") if isinstance(checkpoint.get("event"), Mapping) else {}

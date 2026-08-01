@@ -9,7 +9,17 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fleet_orchestrator.causal_ledger import append_event, checkpoint_ledger, latest_checkpoint_root, verify_chain  # noqa: E402
+from fleet_orchestrator.causal_ledger import (  # noqa: E402
+    _GENESIS,
+    _canonical,
+    _row_hash,
+    _typed_hash,
+    append_event,
+    checkpoint_ledger,
+    latest_checkpoint_root,
+    payload_oid,
+    verify_chain,
+)
 from fleet_orchestrator.provenance_verifier import (  # noqa: E402
     reverify_recorded_world_manifests,
     verify_provenance_kernel_closure,
@@ -47,6 +57,56 @@ def _rows(path: Path) -> list[dict]:
             continue
         rows.append(json.loads(raw))
     return rows
+
+
+def _refresh_event_id(event: dict) -> None:
+    material = dict(event)
+    material.pop("event_id", None)
+    event["event_id"] = f"event:{_typed_hash('causal_event', material)}"
+
+
+def _rewrite_chain(path: Path, rows: list[dict]) -> None:
+    prev = _GENESIS
+    for row in rows:
+        row["prev_row_hash"] = prev
+        row["row_hash"] = _row_hash(prev, row["event"], row["ts"])
+        prev = row["row_hash"]
+    path.write_text("\n".join(_canonical(row) for row in rows) + "\n", encoding="utf-8")
+
+
+def _forge_spliced_ledger_with_matching_witness(source: Path, target: Path) -> str:
+    rows = json.loads(json.dumps(_rows(source)))
+    wake_index = next(i for i, row in enumerate(rows) if row["event"]["event_type"] == "wake_packet_assembled")
+    checkpoint_index = next(i for i, row in enumerate(rows) if row["event"]["event_type"] == "ledger_checkpoint")
+    witness_index = next(i for i, row in enumerate(rows) if row["event"]["event_type"] == "external_witness_anchor")
+
+    wake_event = rows[wake_index]["event"]
+    wake_event["payload"] = {**wake_event["payload"], "spliced": "r5-forge"}
+    wake_event["payload_oid"] = payload_oid(wake_event["payload"])
+    _refresh_event_id(wake_event)
+
+    forged_batch_root = "sha256:" + "1" * 64
+    forged_ledger_root = "sha256:" + "2" * 64
+    checkpoint_event = rows[checkpoint_index]["event"]
+    checkpoint_event["payload"]["batch_root"] = forged_batch_root
+    checkpoint_event["payload"]["ledger_root"] = forged_ledger_root
+    checkpoint_event["payload_oid"] = payload_oid(checkpoint_event["payload"])
+    checkpoint_event["authority_roots"] = [forged_batch_root, forged_ledger_root]
+    _refresh_event_id(checkpoint_event)
+
+    witness_event = rows[witness_index]["event"]
+    witness_event["parents"] = [checkpoint_event["event_id"]]
+    witness_event["subject"]["checkpoint_event_id"] = checkpoint_event["event_id"]
+    witness_event["payload"]["checkpoint_event_id"] = checkpoint_event["event_id"]
+    witness_event["payload"]["batch_root"] = forged_batch_root
+    witness_event["payload"]["ledger_root"] = forged_ledger_root
+    witness_event["payload"]["witness_object_id"] = "witness:" + "3" * 64
+    witness_event["payload_oid"] = payload_oid(witness_event["payload"])
+    witness_event["authority_roots"] = [forged_batch_root, forged_ledger_root]
+    _refresh_event_id(witness_event)
+
+    _rewrite_chain(target, rows)
+    return wake_event["event_id"]
 
 
 def _write_index(path: Path) -> None:
@@ -160,6 +220,33 @@ def main() -> int:
                 not no_witness["ok"] and any("missing_witness_roots" in item for item in no_witness["errors"]),
                 no_witness,
             )
+            silent_waiver = verify_provenance_kernel_closure(
+                event_ids=[wake_row["event"]["event_id"]],
+                actor_attestation_id=attestation_id,
+                packet_id=packet_id,
+                packet_provenance_hash=packet_hash,
+                ledger_path=str(ledger_path),
+                require_witness=False,
+            )
+            _check(
+                "no-witness waiver without reason fails closed",
+                not silent_waiver["ok"] and "missing_witness_waiver_reason" in silent_waiver["errors"],
+                silent_waiver,
+            )
+            reasoned_waiver = verify_provenance_kernel_closure(
+                event_ids=[wake_row["event"]["event_id"]],
+                actor_attestation_id=attestation_id,
+                packet_id=packet_id,
+                packet_provenance_hash=packet_hash,
+                ledger_path=str(ledger_path),
+                require_witness=False,
+                witness_waiver_reason="pre-witness diagnostic",
+            )
+            _check(
+                "no-witness waiver reason is visible in verdict",
+                reasoned_waiver["ok"] and reasoned_waiver["witness_waiver_reason"] == "pre-witness diagnostic",
+                reasoned_waiver,
+            )
 
             os.environ[WITNESS_ENABLED_ENV] = "1"
             os.environ[WITNESS_PRINCIPAL_ENV] = "palios-ledger-anchor-v1"
@@ -177,6 +264,26 @@ def main() -> int:
                 ledger_path=str(ledger_path),
             )
             _check("witnessed closure verifies", good["ok"], good)
+
+            forged_path = root / "forged-causal.jsonl"
+            forged_wake_event_id = _forge_spliced_ledger_with_matching_witness(ledger_path, forged_path)
+            _check("forged splice still has valid row chain", verify_chain(str(forged_path))["ok"], verify_chain(str(forged_path)))
+            forged = verify_provenance_kernel_closure(
+                event_ids=[forged_wake_event_id],
+                actor_attestation_id=attestation_id,
+                packet_id=packet_id,
+                packet_provenance_hash=packet_hash,
+                ledger_path=str(forged_path),
+            )
+            _check(
+                "spliced rows plus matching forged witness roots fail closed",
+                not forged["ok"]
+                and any("checkpoint_batch_root_mismatch" in item for item in forged["errors"])
+                and any("witness_recomputed_batch_root_mismatch" in item for item in forged["errors"]),
+                forged,
+            )
+            forged_root = latest_checkpoint_root(str(forged_path))
+            _check("forged checkpoint root is not manifest-observed", forged_root["register"] == "Unknown", forged_root)
 
             missing_event = verify_provenance_kernel_closure(
                 event_ids=["event:not-present"],

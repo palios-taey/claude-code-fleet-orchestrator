@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Optional
 
-from fleet_orchestrator.causal_ledger import UNKNOWN, read_ledger_rows, verify_chain
+from fleet_orchestrator.causal_ledger import UNKNOWN, read_ledger_rows, verify_chain, verify_checkpoint_integrity
 from fleet_orchestrator.world_manifest import reverify_world_manifest, world_manifest_path
 
 
@@ -44,16 +44,18 @@ def _normalize_event_ids(event_ids: Sequence[str]) -> list[str]:
     return normalized
 
 
-def _witnessed_checkpoints(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
-    checkpoints: dict[str, dict[str, Any]] = {}
+def _witnessed_checkpoints(
+    rows: Sequence[Mapping[str, Any]],
+    checkpoint_reports: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    checkpoints: dict[str, dict[str, Any]] = {
+        checkpoint_id: {**dict(report), "anchors": [], "witness_errors": []}
+        for checkpoint_id, report in checkpoint_reports.items()
+    }
     anchors: list[dict[str, Any]] = []
     for row in rows:
         event = _event(row)
-        if event.get("event_type") == "ledger_checkpoint":
-            event_id = str(event.get("event_id") or "")
-            if event_id:
-                checkpoints[event_id] = {"row": row, "event": event, "payload": _payload(event), "anchors": []}
-        elif event.get("event_type") == "external_witness_anchor":
+        if event.get("event_type") == "external_witness_anchor":
             anchors.append(event)
     for anchor in anchors:
         payload = _payload(anchor)
@@ -64,12 +66,19 @@ def _witnessed_checkpoints(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[
         checkpoint = checkpoints.get(checkpoint_event_id)
         if checkpoint is None:
             continue
-        checkpoint_payload = checkpoint["payload"]
-        if (
-            payload.get("ledger_root") == checkpoint_payload.get("ledger_root")
-            and payload.get("batch_root") == checkpoint_payload.get("batch_root")
-            and payload.get("payload_policy") == "roots_and_counts_only"
-        ):
+        witness_errors: list[str] = []
+        if payload.get("payload_policy") != "roots_and_counts_only":
+            witness_errors.append(f"witness_payload_policy_mismatch:{checkpoint_event_id}")
+        if payload.get("batch_root") != checkpoint.get("stored_batch_root"):
+            witness_errors.append(f"witness_stored_batch_root_mismatch:{checkpoint_event_id}")
+        if payload.get("ledger_root") != checkpoint.get("stored_ledger_root"):
+            witness_errors.append(f"witness_stored_ledger_root_mismatch:{checkpoint_event_id}")
+        if payload.get("batch_root") != checkpoint.get("recomputed_batch_root"):
+            witness_errors.append(f"witness_recomputed_batch_root_mismatch:{checkpoint_event_id}")
+        if payload.get("ledger_root") != checkpoint.get("recomputed_ledger_root"):
+            witness_errors.append(f"witness_recomputed_ledger_root_mismatch:{checkpoint_event_id}")
+        checkpoint["witness_errors"].extend(witness_errors)
+        if not witness_errors:
             checkpoint["anchors"].append(anchor)
     return checkpoints
 
@@ -131,11 +140,15 @@ def verify_provenance_kernel_closure(
     packet_provenance_hash: Optional[str],
     ledger_path: Optional[str] = None,
     require_witness: bool = True,
+    witness_waiver_reason: Optional[str] = None,
 ) -> dict[str, Any]:
     errors: list[str] = []
+    waiver_reason = str(witness_waiver_reason or "").strip()
     normalized_event_ids = _normalize_event_ids(event_ids)
     if not normalized_event_ids:
         errors.append("missing_event_ids")
+    if not require_witness and not waiver_reason:
+        errors.append("missing_witness_waiver_reason")
     if _unknown(actor_attestation_id):
         errors.append("missing_actor_attestation")
     if _unknown(packet_id):
@@ -177,34 +190,48 @@ def verify_provenance_kernel_closure(
     if packet_id and packet_provenance_hash and named_rows and matching_packet_events == 0:
         errors.append("packet_binding_not_found")
 
+    checkpoint_integrity = verify_checkpoint_integrity(ledger_path)
+    checkpoint_errors_by_id: dict[str, list[str]] = {
+        checkpoint_id: [str(item) for item in report.get("errors", [])]
+        for checkpoint_id, report in checkpoint_integrity.get("checkpoints", {}).items()
+        if isinstance(report, Mapping)
+    }
     witnessed_checkpoint_ids: set[str] = set()
     if require_witness and named_rows:
-        checkpoints = _witnessed_checkpoints(rows)
+        checkpoints = _witnessed_checkpoints(rows, checkpoint_integrity.get("checkpoints", {}))
         row_numbers = {str(_event(row).get("event_id") or ""): int(row.get("ledger_row_number") or 0) for row in rows}
         covered: set[str] = set()
         for checkpoint_id, checkpoint in checkpoints.items():
-            if not checkpoint["anchors"]:
-                continue
-            payload = checkpoint["payload"]
+            checkpoint_errors = list(checkpoint_errors_by_id.get(checkpoint_id, []))
+            witness_errors = [str(item) for item in checkpoint.get("witness_errors", [])]
             try:
-                from_row = int(payload.get("from_row"))
-                to_row = int(payload.get("to_row"))
+                from_row = int(checkpoint.get("from_row"))
+                to_row = int(checkpoint.get("to_row"))
             except (TypeError, ValueError):
                 continue
             for event_id in normalized_event_ids:
                 row_number = row_numbers.get(event_id, 0)
                 if from_row <= row_number <= to_row:
-                    covered.add(event_id)
-                    witnessed_checkpoint_ids.add(checkpoint_id)
+                    if checkpoint_errors:
+                        errors.extend(checkpoint_errors)
+                    if witness_errors:
+                        errors.extend(witness_errors)
+                    if not checkpoint_errors and not witness_errors and checkpoint.get("anchors"):
+                        covered.add(event_id)
+                        witnessed_checkpoint_ids.add(checkpoint_id)
         missing_witness = [event_id for event_id in normalized_event_ids if event_id not in covered and event_id in by_event_id]
         if missing_witness:
             errors.append("missing_witness_roots:" + ",".join(missing_witness))
 
+    deduped_errors = list(dict.fromkeys(errors))
     return {
-        "ok": not errors,
-        "errors": errors,
+        "ok": not deduped_errors,
+        "errors": deduped_errors,
         "rows": int(chain.get("rows") or 0),
         "event_ids": normalized_event_ids,
+        "witness_required": bool(require_witness),
+        "witness_waiver_reason": waiver_reason or UNKNOWN,
+        "checkpoint_integrity_ok": bool(checkpoint_integrity.get("ok")),
         "witnessed_checkpoints": sorted(witnessed_checkpoint_ids),
     }
 
