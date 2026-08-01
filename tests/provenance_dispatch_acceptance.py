@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fleet_orchestrator.current_task_binding as current_task_binding  # noqa: E402
 import fleet_orchestrator.dispatch as dispatch_module  # noqa: E402
-from fleet_orchestrator.causal_ledger import UNKNOWN, verify_chain  # noqa: E402
+from fleet_orchestrator.causal_ledger import UNKNOWN, append_event, verify_chain  # noqa: E402
 
 
 FAILURES: list[str] = []
@@ -54,6 +54,14 @@ def _rows(path: Path) -> list[dict]:
     return rows
 
 
+def _events_for_task(rows: list[dict], task_id: str) -> list[dict]:
+    return [
+        row["event"]
+        for row in rows
+        if row["event"].get("subject", {}).get("task_id") == task_id
+    ]
+
+
 def _fake_bind(fake: FakeRedis):
     def bind_current_task(*, worker: str, task_id: str, description: str, supervisor: str | None,
                           set_parent: bool, force: bool, guard_existing: bool,
@@ -91,6 +99,8 @@ def main() -> int:
     worker = "provenance-worker-codex"
     supervisor = "provenance-supervisor"
     success_task = "provenance::success"
+    capture_failure_task = "provenance::capture-failure"
+    assemble_failure_task = "provenance::assemble-failure"
     failure_task = "provenance::failure"
     commit_sha = "0123456789abcdef0123456789abcdef01234567"
 
@@ -101,6 +111,14 @@ def main() -> int:
 
     def fake_failure_run(_args: list[str], **_kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(returncode=17, stdout="", stderr="notify failed")
+
+    def fake_assemble_failure(*_args: object, **_kwargs: object) -> tuple[str, dict]:
+        raise RuntimeError("assemble failed")
+
+    def append_with_wake_failure(event_type: str, **kwargs: object) -> dict:
+        if event_type == "wake_delivered":
+            raise RuntimeError("simulated wake_delivered append failure")
+        return append_event(event_type, **kwargs)
 
     def fake_rollback(worker_arg: str, task_id_arg: str, binding_nonce: float | None) -> None:
         captured_rollbacks.append((worker_arg, task_id_arg, binding_nonce))
@@ -159,13 +177,65 @@ def main() -> int:
             with mock.patch.object(dispatch_module, "_redis_connect", return_value=fake), \
                  mock.patch.object(dispatch_module, "_notify_supervisor_response_ready"), \
                  mock.patch.object(current_task_binding, "clear_matching_current_task", side_effect=fake_clear):
-                dispatch_module.record_outcome(worker, "done", f"branch codex/example commit {commit_sha}")
+                dispatch_module.record_outcome(worker, "done", f"RESPONSE_READY branch=codex/example sha={commit_sha} verify=ok")
 
             rows = _rows(ledger_path)
             outcome_event = rows[-1]["event"]
             _check("record_outcome appends child event", outcome_event["event_type"] == "worker_outcome_recorded", outcome_event)
             _check("outcome event binds reported commit", outcome_event["payload"]["reported_commit_sha"] == commit_sha, outcome_event)
             _check("outcome event points at delivered wake", outcome_event["parents"][0] == rows[2]["event"]["event_id"], outcome_event)
+
+            with mock.patch.object(dispatch_module, "_redis_connect", return_value=fake), \
+                 mock.patch.object(dispatch_module, "_resolve_product_id", return_value=None), \
+                 mock.patch.object(dispatch_module, "_claim_ready_orch_task"), \
+                 mock.patch.object(dispatch_module, "bind_current_task", side_effect=_fake_bind(fake)), \
+                 mock.patch.object(dispatch_module, "_assemble_dispatch_prompt", side_effect=_fake_assemble), \
+                 mock.patch.object(dispatch_module, "mark_superseded_for_task"), \
+                 mock.patch.object(dispatch_module, "notify_cli", return_value="notify"), \
+                 mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
+                 mock.patch.object(dispatch_module.subprocess, "run", side_effect=fake_run), \
+                 mock.patch.object(dispatch_module, "_clear_replaced_force_bindings"), \
+                 mock.patch.object(dispatch_module, "append_causal_event", side_effect=append_with_wake_failure), \
+                 mock.patch.object(dispatch_module, "maybe_emit_decision_receipt", side_effect=lambda _kind, body: captured_receipts.append(body)):
+                dispatch_module.dispatch(
+                    worker,
+                    capture_failure_task,
+                    "provenance dispatch with post-delivery capture failure",
+                    supervisor=supervisor,
+                )
+
+            rows = _rows(ledger_path)
+            capture_events = _events_for_task(rows, capture_failure_task)
+            _check("wake-delivered append failure does not raise", [event["event_type"] for event in capture_events] == [
+                "dispatch_claimed",
+                "wake_packet_assembled",
+            ], capture_events)
+            capture_state = captured_receipts[-1]["observable_state"]
+            _check("wake receipt marks capture failure", capture_state["capture_failure"]["marker"] == "capture_failure", capture_state)
+            current_task = json.loads(fake.get(dispatch_module._state_key(worker, "current_task")) or "{}")
+            _check("current_task marks capture failure", current_task["causal"]["capture_failure"]["marker"] == "capture_failure", current_task)
+
+            with mock.patch.object(dispatch_module, "_redis_connect", return_value=fake), \
+                 mock.patch.object(dispatch_module, "_resolve_product_id", return_value=None), \
+                 mock.patch.object(dispatch_module, "_claim_ready_orch_task"), \
+                 mock.patch.object(dispatch_module, "bind_current_task", side_effect=_fake_bind(fake)), \
+                 mock.patch.object(dispatch_module, "_assemble_dispatch_prompt", side_effect=fake_assemble_failure), \
+                 mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
+                 mock.patch.object(dispatch_module, "_rollback_claim", side_effect=fake_rollback):
+                try:
+                    dispatch_module.dispatch(worker, assemble_failure_task, "assembly failure", supervisor=supervisor)
+                    _check("assembly failure raises", False)
+                except RuntimeError:
+                    _check("assembly failure raises", True)
+
+            rows = _rows(ledger_path)
+            assembly_events = _events_for_task(rows, assemble_failure_task)
+            _check("assembly rollback appends terminal child", [event["event_type"] for event in assembly_events] == [
+                "dispatch_claimed",
+                "dispatch_delivery_failed",
+            ], assembly_events)
+            _check("assembly failure child parents claim", assembly_events[-1]["parents"] == [assembly_events[0]["event_id"]], assembly_events)
+            _check("assembly failure terminates delivery", assembly_events[-1]["payload"]["outcome"]["status"] == "delivery_failed", assembly_events[-1])
 
             with mock.patch.object(dispatch_module, "_redis_connect", return_value=fake), \
                  mock.patch.object(dispatch_module, "_resolve_product_id", return_value=None), \
@@ -185,7 +255,14 @@ def main() -> int:
 
             rows = _rows(ledger_path)
             _check("delivery failure rollback called", captured_rollbacks[-1][:2] == (worker, failure_task), captured_rollbacks)
-            _check("delivery failure event appended", rows[-1]["event"]["event_type"] == "dispatch_delivery_failed", rows[-1])
+            delivery_failure_event = _events_for_task(rows, failure_task)[-1]
+            _check("delivery failure event appended", delivery_failure_event["event_type"] == "dispatch_delivery_failed", delivery_failure_event)
+            _check("delivery failure terminates attestation", delivery_failure_event["payload"]["outcome"]["status"] == "delivery_failed", delivery_failure_event)
+            _check(
+                "delivery failure references attestation",
+                delivery_failure_event["payload"]["attestation_id"] == delivery_failure_event["actor_attestation_id"] != UNKNOWN,
+                delivery_failure_event,
+            )
             _check("final ledger verifies", verify_chain(str(ledger_path)) == {"ok": True, "rows": len(rows)}, verify_chain(str(ledger_path)))
         finally:
             if old_ledger is None:

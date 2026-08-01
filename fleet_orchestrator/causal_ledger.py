@@ -40,7 +40,7 @@ _HEADER = (
     "Rows are hash-chained and fsync'd; do not delete or rewrite lines."
 )
 _GENESIS = "0" * 64
-_FULL_SHA_RE = re.compile(r"\b[0-9a-fA-F]{40}\b")
+_REPORTED_SHA_MARKER_RE = re.compile(r"(?<![A-Za-z0-9_])sha=([0-9a-fA-F]{40})(?![A-Za-z0-9_])")
 
 
 def _ledger_path(path: Optional[str] = None) -> str:
@@ -140,6 +140,9 @@ def append_event(
         raise ValueError(f"unknown causal event type: {event_type!r}")
     event_ts = _ts_str(ts)
     event_payload = _require_mapping("payload", payload or {})
+    canonical_payload_oid = payload_oid(event_payload)
+    if payload_hash is not None and str(payload_hash) != canonical_payload_oid:
+        raise ValueError("payload_hash does not match canonical payload_oid")
     event_body: dict[str, Any] = {
         "event_type": event_type,
         "schema_version": SCHEMA_VERSION,
@@ -150,7 +153,7 @@ def append_event(
         "authority_roots": _string_list("authority_roots", authority_roots),
         "packet_id": str(packet_id or UNKNOWN),
         "packet_provenance_hash": str(packet_provenance_hash or UNKNOWN),
-        "payload_oid": str(payload_hash or payload_oid(event_payload)),
+        "payload_oid": canonical_payload_oid,
         "payload": event_payload,
     }
     event_body["event_id"] = f"event:{_typed_hash('causal_event', event_body)}"
@@ -221,8 +224,10 @@ def unknown(reason: str) -> dict[str, str]:
 
 
 def extract_reported_commit_sha(details: Optional[str]) -> Optional[str]:
-    match = _FULL_SHA_RE.search(str(details or ""))
-    return match.group(0).lower() if match else None
+    matches = list(_REPORTED_SHA_MARKER_RE.finditer(str(details or "")))
+    if len(matches) != 1:
+        return None
+    return matches[0].group(1).lower()
 
 
 def build_actor_attestation(

@@ -297,6 +297,64 @@ def _append_worker_outcome_causal_event(
     return _causal_event_id(row) or None
 
 
+def _append_dispatch_delivery_failed_causal_event(
+    *,
+    worker: str,
+    task_id: str,
+    supervisor: Optional[str],
+    dispatch_event_id: str,
+    wake_packet_event_id: str,
+    attestation_id: Optional[str],
+    packet_meta: Optional[dict[str, Any]],
+    failure_stage: str,
+    binding_nonce: Optional[float],
+    rollback: str,
+    returncode: Optional[int] = None,
+    stdout: Optional[str] = None,
+    stderr: Optional[str] = None,
+    error: Optional[BaseException] = None,
+) -> Optional[str]:
+    meta = packet_meta or {}
+    payload: dict[str, Any] = {
+        "attestation_id": str(attestation_id or CAUSAL_UNKNOWN),
+        "outcome": {
+            "status": "delivery_failed",
+            "failure_stage": failure_stage,
+        },
+        "rollback": rollback,
+        "binding_nonce": binding_nonce,
+    }
+    if returncode is not None:
+        payload["returncode"] = returncode
+    if stdout is not None:
+        payload["stdout"] = stdout[:2000]
+    if stderr is not None:
+        payload["stderr"] = stderr[:2000]
+    if error is not None:
+        payload["error"] = f"{error.__class__.__name__}: {error}"[:2000]
+    parents = [wake_packet_event_id] if wake_packet_event_id else ([dispatch_event_id] if dispatch_event_id else [])
+    try:
+        row = append_causal_event(
+            "dispatch_delivery_failed",
+            subject={"worker": worker, "task_id": task_id, "supervisor": supervisor or CAUSAL_UNKNOWN},
+            parents=parents,
+            actor_attestation_id=str(attestation_id or CAUSAL_UNKNOWN),
+            packet_id=str(meta.get("packet_id", "")),
+            packet_provenance_hash=str(meta.get("provenance_hash", "")),
+            payload=payload,
+        )
+    except Exception as exc:
+        logger.warning(
+            "dispatch_delivery_failed causal event append failed worker=%s task=%s stage=%s: %r",
+            worker,
+            task_id,
+            failure_stage,
+            exc,
+        )
+        return None
+    return _causal_event_id(row) or None
+
+
 def _current_task_status(task_id: str) -> Optional[str]:
     return _binding_task_status(task_id)
 
@@ -959,6 +1017,10 @@ def dispatch(
         prompt_body if prompt_body is not None else _default_dispatch_body(task_id, description),
         worker,
     )
+    packet_meta: dict[str, Any] = {}
+    attestation: dict[str, Any] = {}
+    attestation_id = CAUSAL_UNKNOWN
+    wake_packet_event_id = ""
     try:
         prompt_body, packet_meta = _assemble_dispatch_prompt(
             worker,
@@ -985,11 +1047,12 @@ def dispatch(
             branch=work_snapshot.get("branch"),
             worktree=work_snapshot.get("worktree"),
         )
+        attestation_id = str(attestation["attestation_id"])
         wake_packet_row = append_causal_event(
             "wake_packet_assembled",
             subject={"worker": worker, "task_id": task_id, "supervisor": supervisor or CAUSAL_UNKNOWN},
             parents=[dispatch_event_id] if dispatch_event_id else [],
-            actor_attestation_id=attestation["attestation_id"],
+            actor_attestation_id=attestation_id,
             packet_id=str(packet_meta.get("packet_id", "")),
             packet_provenance_hash=str(packet_meta.get("provenance_hash", "")),
             payload={
@@ -1004,6 +1067,19 @@ def dispatch(
         )
     except Exception as exc:
         _rollback_claim(worker, task_id, binding_nonce)
+        _append_dispatch_delivery_failed_causal_event(
+            worker=worker,
+            task_id=task_id,
+            supervisor=supervisor,
+            dispatch_event_id=dispatch_event_id,
+            wake_packet_event_id=wake_packet_event_id,
+            attestation_id=attestation_id,
+            packet_meta=packet_meta,
+            failure_stage="wake_packet_assembly",
+            binding_nonce=binding_nonce,
+            rollback="claim_and_current_task_reverted_if_nonce_matched",
+            error=exc,
+        )
         raise RuntimeError(f"mandatory dispatch wake-packet assembly/provenance failed: {exc}") from exc
     wake_packet_event_id = _causal_event_id(wake_packet_row)
     _attach_causal_metadata_to_current_task(
@@ -1012,7 +1088,7 @@ def dispatch(
         task_id,
         binding_nonce,
         {
-            "attestation_id": attestation["attestation_id"],
+            "attestation_id": attestation_id,
             "dispatch_event_id": dispatch_event_id,
             "wake_packet_event_id": wake_packet_event_id,
             "packet_id": packet_meta.get("packet_id", ""),
@@ -1057,32 +1133,31 @@ def dispatch(
         # taey-notify exits non-zero only BEFORE it lpushes the inbox message, so rc!=0
         # means the wake was not delivered (V3): reverting is correct.
         _rollback_claim(worker, task_id, binding_nonce)
-        try:
-            append_causal_event(
-                "dispatch_delivery_failed",
-                subject={"worker": worker, "task_id": task_id, "supervisor": supervisor or CAUSAL_UNKNOWN},
-                parents=[wake_packet_event_id] if wake_packet_event_id else ([dispatch_event_id] if dispatch_event_id else []),
-                actor_attestation_id=attestation["attestation_id"],
-                packet_id=str(packet_meta.get("packet_id", "")),
-                packet_provenance_hash=str(packet_meta.get("provenance_hash", "")),
-                payload={
-                    "returncode": result.returncode,
-                    "stderr": (result.stderr or "")[:2000],
-                    "stdout": (result.stdout or "")[:2000],
-                    "rollback": "claim_and_current_task_reverted_if_nonce_matched",
-                    "binding_nonce": binding_nonce,
-                },
-            )
-        except Exception as exc:
-            logger.warning("dispatch_delivery_failed causal event append failed worker=%s task=%s: %r", worker, task_id, exc)
+        _append_dispatch_delivery_failed_causal_event(
+            worker=worker,
+            task_id=task_id,
+            supervisor=supervisor,
+            dispatch_event_id=dispatch_event_id,
+            wake_packet_event_id=wake_packet_event_id,
+            attestation_id=attestation_id,
+            packet_meta=packet_meta,
+            failure_stage="taey_notify",
+            binding_nonce=binding_nonce,
+            rollback="claim_and_current_task_reverted_if_nonce_matched",
+            returncode=result.returncode,
+            stdout=result.stdout or "",
+            stderr=result.stderr or "",
+        )
         raise RuntimeError(result.stderr.strip() or f"{cli} failed")
     _clear_replaced_force_bindings(task_id, previous_force_bindings, worker)
+    capture_failure: Optional[dict[str, Any]] = None
+    wake_delivered_event_id = ""
     try:
         wake_delivered_row = append_causal_event(
             "wake_delivered",
             subject={"worker": worker, "task_id": task_id, "supervisor": supervisor or CAUSAL_UNKNOWN},
             parents=[wake_packet_event_id] if wake_packet_event_id else ([dispatch_event_id] if dispatch_event_id else []),
-            actor_attestation_id=attestation["attestation_id"],
+            actor_attestation_id=attestation_id,
             packet_id=str(packet_meta.get("packet_id", "")),
             packet_provenance_hash=str(packet_meta.get("provenance_hash", "")),
             payload={
@@ -1093,40 +1168,67 @@ def dispatch(
             },
         )
     except Exception as exc:
-        raise RuntimeError(f"wake delivered but causal wake_delivered append failed: {exc}") from exc
-    wake_delivered_event_id = _causal_event_id(wake_delivered_row)
-    _attach_causal_metadata_to_current_task(
-        r,
-        worker,
-        task_id,
-        binding_nonce,
-        {"wake_delivered_event_id": wake_delivered_event_id},
-    )
+        capture_failure = {
+            "marker": "capture_failure",
+            "event_type": "wake_delivered",
+            "stage": "wake_delivered",
+            "attestation_id": attestation_id,
+            "reason": f"{exc.__class__.__name__}: {exc}"[:2000],
+            "terminal_child_missing": True,
+        }
+        logger.warning(
+            "wake delivered but causal wake_delivered append failed worker=%s task=%s: %r",
+            worker,
+            task_id,
+            exc,
+        )
+        _attach_causal_metadata_to_current_task(
+            r,
+            worker,
+            task_id,
+            binding_nonce,
+            {
+                "wake_delivered_event_id": CAUSAL_UNKNOWN,
+                "capture_failure": capture_failure,
+            },
+        )
+    else:
+        wake_delivered_event_id = _causal_event_id(wake_delivered_row)
+        _attach_causal_metadata_to_current_task(
+            r,
+            worker,
+            task_id,
+            binding_nonce,
+            {"wake_delivered_event_id": wake_delivered_event_id},
+        )
     causal_event_ids = [
         event_id
         for event_id in (dispatch_event_id, wake_packet_event_id, wake_delivered_event_id)
         if event_id
     ]
+    observable_state = {
+        "source": "dispatch",
+        "worker": worker,
+        "task_id": task_id,
+        "supervisor": supervisor,
+        "priority": priority,
+        "prompt_sha256": prompt_sha256,
+        "cli": packet_meta.get("cli", ""),
+        "packet_id": packet_meta.get("packet_id", ""),
+        "provenance_hash": packet_meta.get("provenance_hash", ""),
+        "size_report": packet_meta.get("size_report", {}),
+        "actor_attestation_id": attestation_id,
+        "causal_event_ids": causal_event_ids,
+    }
+    if capture_failure:
+        observable_state["capture_failure"] = capture_failure
     maybe_emit_decision_receipt(
         "wake",
         {
             "why_this_context": "dispatch assembled the mandatory wake packet and delivered it through taey-notify",
             "refs_used": packet_meta.get("refs", {}),
             "rule_tier_applied": packet_meta.get("rules", []),
-            "observable_state": {
-                "source": "dispatch",
-                "worker": worker,
-                "task_id": task_id,
-                "supervisor": supervisor,
-                "priority": priority,
-                "prompt_sha256": prompt_sha256,
-                "cli": packet_meta.get("cli", ""),
-                "packet_id": packet_meta.get("packet_id", ""),
-                "provenance_hash": packet_meta.get("provenance_hash", ""),
-                "size_report": packet_meta.get("size_report", {}),
-                "actor_attestation_id": attestation["attestation_id"],
-                "causal_event_ids": causal_event_ids,
-            },
+            "observable_state": observable_state,
             "target": worker,
             "task_id": task_id,
             "next_contract": (
