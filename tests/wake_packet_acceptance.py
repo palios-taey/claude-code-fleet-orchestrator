@@ -482,11 +482,22 @@ def _assembler_contract() -> None:
         assembler.DEFAULT_MAX_REFS_PER_TIER,
     )
     _check(
-        "packet carries minimal proof capsule",
+        "packet carries generated proof capsule",
         proof_capsule.get("schema_version") == 0
-        and proof_capsule.get("world_id") == "Unknown"
+        and str(proof_capsule.get("world_id") or "").startswith("world:")
+        and proof_capsule.get("world_id_register", {}).get("register") == "Observed"
         and proof_capsule.get("authority_roots"),
         proof_capsule,
+    )
+    _check(
+        "proof capsule includes world manifest authority root",
+        any(
+            root.get("handle") == "root:world-manifest"
+            and root.get("register") == "Observed"
+            and str(root.get("oid") or "").startswith("world:")
+            for root in proof_capsule.get("authority_roots") or []
+        ),
+        proof_capsule.get("authority_roots"),
     )
     task_dispatch_claim = next(
         (
@@ -531,8 +542,8 @@ def _assembler_contract() -> None:
         rendered,
     )
     _check(
-        "proof capsule render includes compact Unknown world id",
-        '"world_id":"Unknown"' in proof_section,
+        "proof capsule render includes compact world id",
+        '"world_id":"world:' in proof_section,
         proof_section,
     )
     _check(

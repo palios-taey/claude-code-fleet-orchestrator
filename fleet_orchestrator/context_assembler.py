@@ -31,6 +31,7 @@ from fleet_orchestrator.paths import repo_root
 from fleet_orchestrator.kb_context import select_kb_context
 from fleet_orchestrator.memory_tier import get_memory
 from fleet_orchestrator.rules_tier import RULES_ROOT, get_rules
+from fleet_orchestrator.world_manifest import build_world_manifest_v0
 
 
 LOG = logging.getLogger(__name__)
@@ -275,6 +276,7 @@ def build_packet(session: str, context: Dict[str, Any]) -> Dict[str, Any]:
             "next_contract": None,
         },
     }
+    packet["world_manifest"] = build_world_manifest_v0()
     attach_proof_capsule(packet)
     # provenance_hash binds the RENDERED packet, which needs the cli + budget;
     # assemble() computes it at render time. build_packet only constructs the
@@ -320,9 +322,10 @@ def _build_proof_capsule(
     dispatcher = _proof_value(dispatch_state.get("dispatcher"))
     causal_event_ids = _proof_string_list(dispatch_state.get("causal_event_ids"))
     attestation_id = _proof_value(dispatch_state.get("attestation_id"))
-    world_id = _proof_value(dispatch_state.get("world_id"))
+    world_manifest = _proof_world_manifest(packet, dispatch_state)
+    world_id = _proof_value(dispatch_state.get("world_id") or world_manifest.get("world_id"))
     task_known = task_id != PROOF_UNKNOWN
-    authority_roots = _proof_authority_roots(context, snapshot, resolved, task_id)
+    authority_roots = _proof_authority_roots(context, snapshot, resolved, task_id, world_manifest)
     task_dispatch_claim = {
         "handle": "p:task-dispatch",
         "claim": "Task identity, dispatch target, and supervisor came from orchestrator task/dispatch metadata.",
@@ -338,9 +341,16 @@ def _build_proof_capsule(
     return {
         "schema_version": PROOF_CAPSULE_SCHEMA_VERSION,
         "world_id": world_id,
-        "world_id_register": _proof_unknown(
-            "World Manifest v0 lands in palios-provenance-kernel::world-manifest-impl"
-        ) if world_id == PROOF_UNKNOWN else {"register": "Observed"},
+        "world_id_register": (
+            _proof_unknown("World Manifest v0 could not be built")
+            if world_id == PROOF_UNKNOWN
+            else {"register": "Observed"}
+        ),
+        "world_manifest_sha256": _proof_value(
+            dispatch_state.get("world_manifest_sha256")
+            or world_manifest.get("manifest_sha256")
+            or world_manifest.get("sha256")
+        ),
         "attestation_id": attestation_id,
         "attestation_id_register": _proof_unknown(
             "actor attestation is issued after the final rendered packet hash is known"
@@ -364,11 +374,7 @@ def _build_proof_capsule(
             "dispatcher": dispatcher,
         },
         "unknowns": [
-            {
-                "handle": "u:world-manifest-v0",
-                "claim": "World Manifest v0 is not generated in this implementation slice.",
-                "owner": "palios-provenance-kernel::world-manifest-impl",
-            },
+            *_proof_world_unknowns(world_manifest),
             {
                 "handle": "u:attestation-id-prehash",
                 "claim": "The rendered packet cannot carry its post-hash actor attestation ID without creating a hash cycle.",
@@ -393,8 +399,19 @@ def _proof_authority_roots(
     snapshot: Dict[str, Any],
     resolved: Dict[str, Any],
     task_id: str,
+    world_manifest: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     roots: List[Dict[str, Any]] = [
+        {
+            "handle": "root:world-manifest",
+            "kind": "world_manifest_v0",
+            "oid": _proof_value(world_manifest.get("world_id")),
+            **(
+                {"register": "Observed"}
+                if _proof_value(world_manifest.get("world_id")) != PROOF_UNKNOWN
+                else _proof_unknown("World Manifest v0 could not be built")
+            ),
+        },
         {
             "handle": "root:task",
             "kind": "orchestrator_task",
@@ -513,6 +530,51 @@ def _proof_string_list(value: Any) -> List[str]:
     if not isinstance(value, Iterable):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _proof_world_manifest(packet: Dict[str, Any], dispatch_state: Dict[str, Any]) -> Dict[str, Any]:
+    candidate = dispatch_state.get("world_manifest")
+    if isinstance(candidate, dict):
+        return candidate
+    candidate = packet.get("world_manifest")
+    if isinstance(candidate, dict):
+        return candidate
+    return {}
+
+
+def _proof_world_unknowns(world_manifest: Dict[str, Any]) -> List[Dict[str, str]]:
+    roots = world_manifest.get("roots") if isinstance(world_manifest.get("roots"), dict) else {}
+    unknowns: List[Dict[str, str]] = []
+    for key, value in roots.items():
+        if isinstance(value, dict) and value.get("register") == PROOF_UNKNOWN:
+            unknowns.append(
+                {
+                    "handle": f"u:world-root:{key}",
+                    "claim": str(value.get("reason") or f"World Manifest root {key} is Unknown."),
+                    "owner": "world-manifest-v0",
+                }
+            )
+        if isinstance(value, list):
+            for idx, item in enumerate(value, start=1):
+                if isinstance(item, dict) and item.get("register") == PROOF_UNKNOWN:
+                    unknowns.append(
+                        {
+                            "handle": f"u:world-root:{key}:{idx}",
+                            "claim": str(item.get("reason") or f"World Manifest root {key} entry {idx} is Unknown."),
+                            "owner": "world-manifest-v0",
+                        }
+                    )
+    if world_manifest and not unknowns:
+        return []
+    if not world_manifest:
+        return [
+            {
+                "handle": "u:world-manifest-v0",
+                "claim": "World Manifest v0 is unavailable for this packet.",
+                "owner": "world-manifest-v0",
+            }
+        ]
+    return unknowns
 
 
 def _proof_unknown(reason: str) -> Dict[str, str]:

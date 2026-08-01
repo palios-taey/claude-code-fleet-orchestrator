@@ -2,8 +2,11 @@
 """Acceptance: wake packets carry a task-ref injection receipt echo."""
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -99,33 +102,57 @@ def _endpoint_metadata_contract() -> None:
     _check("endpoint decision receipt next_contract names expected echo", "loaded refs: voice_guide,plans/step.md:L7-L9,extra" in str(receipt_ctx.get("next_contract") or ""), receipt_ctx)
     _check(
         "endpoint metadata carries proof capsule",
-        body.get("packet_meta", {}).get("proof_capsule", {}).get("world_id") == "Unknown"
-        and receipt_ctx.get("world_id") == "Unknown",
+        str(body.get("packet_meta", {}).get("proof_capsule", {}).get("world_id") or "").startswith("world:")
+        and str(receipt_ctx.get("world_id") or "").startswith("world:"),
         {"body": body, "receipt": receipt_ctx},
     )
 
 
 def _dispatch_metadata_contract() -> None:
     context = _context()
-    with mock.patch.object(dispatch_module, "_select_dispatch_context", return_value=(context, "")):
-        rendered, meta = dispatch_module._assemble_dispatch_prompt(
-            "worker-codex",
-            "proj::task",
-            "dispatch with task refs",
-            "supervisor",
-            "supervisor",
-            "DISPATCH BODY",
-            causal_event_ids=["event:dispatch-claimed"],
-        )
+    old_manifest = os.environ.get("ORCH_WORLD_MANIFEST_PATH")
+    old_ledger = os.environ.get("ORCH_CAUSAL_LEDGER_PATH")
+    with tempfile.TemporaryDirectory(prefix="injection-world-") as raw:
+        root = Path(raw)
+        os.environ["ORCH_WORLD_MANIFEST_PATH"] = str(root / "world-manifest-v0.json")
+        os.environ["ORCH_CAUSAL_LEDGER_PATH"] = str(root / "causal-events.jsonl")
+        try:
+            with mock.patch.object(dispatch_module, "_select_dispatch_context", return_value=(context, "")):
+                rendered, meta = dispatch_module._assemble_dispatch_prompt(
+                    "worker-codex",
+                    "proj::task",
+                    "dispatch with task refs",
+                    "supervisor",
+                    "supervisor",
+                    "DISPATCH BODY",
+                    causal_event_ids=["event:dispatch-claimed"],
+                )
+            rows = [
+                json.loads(line)
+                for line in (root / "causal-events.jsonl").read_text(encoding="utf-8").splitlines()
+                if line and not line.startswith("#")
+            ]
+        finally:
+            if old_manifest is None:
+                os.environ.pop("ORCH_WORLD_MANIFEST_PATH", None)
+            else:
+                os.environ["ORCH_WORLD_MANIFEST_PATH"] = old_manifest
+            if old_ledger is None:
+                os.environ.pop("ORCH_CAUSAL_LEDGER_PATH", None)
+            else:
+                os.environ["ORCH_CAUSAL_LEDGER_PATH"] = old_ledger
     _check("dispatch packet carries first-action receipt instruction", "reply exactly `loaded refs: voice_guide,plans/step.md:L7-L9,extra`" in rendered, rendered)
     _check("dispatch metadata carries expected injection receipt", meta.get("injection_receipt", {}).get("line") == "loaded refs: voice_guide,plans/step.md:L7-L9,extra", meta)
     _check(
         "dispatch metadata carries pre-assembly proof capsule",
         "## Proof Capsule" in rendered
-        and meta.get("world_id") == "Unknown"
-        and meta.get("proof_capsule", {}).get("causal_event_ids") == ["event:dispatch-claimed"],
+        and str(meta.get("world_id") or "").startswith("world:")
+        and meta.get("proof_capsule", {}).get("causal_event_ids", [None])[0] == "event:dispatch-claimed"
+        and str(meta.get("world_manifest_event_id") or "").startswith("event:")
+        and str(meta.get("world_manifest_sha256") or ""),
         meta,
     )
+    _check("dispatch assembly publishes world manifest event", rows[-1]["event"]["event_type"] == "world_manifest_published", rows)
 
 
 def main() -> int:
