@@ -354,7 +354,8 @@ Extends:
   production receipt/capability seed.
 - `fleet_orchestrator/context_assembler.py:build_packet` lines 244-278 by including
   `world_id` in `proof_capsule`.
-- Future causal ledger `world_manifest_published` event.
+- Causal ledger `world_manifest_published` event emitted when dispatch publishes
+  the manifest.
 
 World Manifest v0 fields:
 

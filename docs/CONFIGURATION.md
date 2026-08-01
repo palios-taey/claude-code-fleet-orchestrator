@@ -61,6 +61,9 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ACCOUNTABILITY_LEDGER_PATH` | platform state dir | Location of the hash-chained accountability ledger. The ledger module is explicit that it is **tamper-evident, not tamper-proof**; an ephemeral path silently loses the record — point it at durable, operator-owned storage. |
 | `ACCOUNTABILITY_CI_AUDIT_PATH` | platform state dir | Location of the separate hash-chained CI merge audit ledger (`ci-audit.jsonl`). Use durable, operator-owned storage; this chain records completed CONTROL merges only when real gate results and durations are supplied. |
 | `ORCH_CAUSAL_LEDGER_PATH` | `ORCH_DATA_DIR/provenance/causal-events.jsonl` | Optional override for the append-only causal dispatch/outcome ledger. Use durable, operator-owned storage; a temporary path loses the provenance row-chain across restarts. |
+| `ORCH_WORLD_MANIFEST_PATH` | ORCH_DATA_DIR provenance data file | Optional output path for the published World Manifest v0 JSON. Dispatch publishes the manifest before rendering the wake-packet proof capsule. |
+| `ORCH_WORLD_SYSTEM_MAP_PATH` | repo-local system connection map | Optional World Manifest seed override for the system connection map. A missing or unreadable file becomes an explicit `Unknown` root. |
+| `ORCH_WORLD_KNOWLEDGE_INDEX_PATH` | sibling/home Taey Presence production index when present | Optional World Manifest seed override for the Taey Presence knowledge index. Only `status=production` capabilities are included; a missing index becomes explicit `Unknown`, not invented data. |
 
 ## 2. Security & access
 

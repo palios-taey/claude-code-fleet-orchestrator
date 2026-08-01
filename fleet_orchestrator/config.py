@@ -148,6 +148,12 @@ OPTIONAL_ENV = (
      "default loopback deployments need no token; when set, mutable HTTP methods require the token"),
     ("ORCH_DATA_DIR", "$XDG_DATA_HOME or ~/.local/share (XDG Base Dir spec)",
      "standard local-tool data location; zero-config by design for a single-user local product"),
+    ("ORCH_WORLD_MANIFEST_PATH", "ORCH_DATA_DIR/provenance/world-manifest-v0.json",
+     "durable World Manifest v0 output path; absent uses the orchestrator data dir"),
+    ("ORCH_WORLD_SYSTEM_MAP_PATH", "repo TAEY_SYSTEM_CONNECTION_MAP.md",
+     "World Manifest seed root; when absent the repo-local system map is measured, and missing files become Unknown roots"),
+    ("ORCH_WORLD_KNOWLEDGE_INDEX_PATH", "sibling/home Taey Presence production index if present",
+     "World Manifest Taey Presence seed root; absent uses local operator checkouts, and missing indexes become Unknown roots"),
 )
 
 

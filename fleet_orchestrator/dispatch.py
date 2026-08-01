@@ -93,6 +93,7 @@ from .current_task_binding import (
     is_live_binding_status,
     task_status as _binding_task_status,
 )
+from .world_manifest import publish_world_manifest_v0
 
 logger = logging.getLogger(__name__)
 
@@ -894,6 +895,19 @@ def _assemble_dispatch_prompt(worker: str, task_id: str, description: str,
     cli = _cli_for_worker(worker)
     context, warning = _select_dispatch_context(worker, task_id, description, supervisor, cli)
     packet = build_wake_packet(worker, context)
+    world_publication = publish_world_manifest_v0(
+        subject={"worker": worker, "task_id": task_id, "supervisor": supervisor or CAUSAL_UNKNOWN},
+        parents=causal_event_ids or [],
+        packet_id=str(packet.get("packet_id") or ""),
+        packet_provenance_hash=CAUSAL_UNKNOWN,
+    )
+    world_manifest_event_id = str(world_publication.get("event_id") or "")
+    packet["world_manifest"] = world_publication.get("manifest") or {}
+    packet_causal_event_ids = [
+        event_id
+        for event_id in [*(causal_event_ids or []), world_manifest_event_id]
+        if event_id
+    ]
     dispatch_record = {
         "from": dispatcher,
         "type": "dispatch",
@@ -912,7 +926,10 @@ def _assemble_dispatch_prompt(worker: str, task_id: str, description: str,
             "task_id": task_id,
             "supervisor": supervisor or "",
             "dispatcher": dispatcher,
-            "causal_event_ids": causal_event_ids or [],
+            "causal_event_ids": packet_causal_event_ids,
+            "world_manifest": world_publication.get("manifest") or {},
+            "world_id": world_publication.get("world_id") or "",
+            "world_manifest_sha256": world_publication.get("manifest_sha256") or "",
         },
     )
     rendered = assemble_wake_packet(packet, cli)
@@ -923,6 +940,10 @@ def _assemble_dispatch_prompt(worker: str, task_id: str, description: str,
         "provenance_hash": packet.get("provenance_hash", ""),
         "proof_capsule": proof_capsule,
         "world_id": proof_capsule.get("world_id", ""),
+        "world_manifest_event_id": world_manifest_event_id,
+        "world_manifest_path": world_publication.get("manifest_path", ""),
+        "world_manifest_sha256": world_publication.get("manifest_sha256", ""),
+        "world_manifest": world_publication.get("manifest") or {},
         "injection_receipt": receipt,
         "size_report": wake_size_report(rendered, packet),
         "rules": [
@@ -1066,7 +1087,11 @@ def dispatch(
         wake_packet_row = append_causal_event(
             "wake_packet_assembled",
             subject={"worker": worker, "task_id": task_id, "supervisor": supervisor or CAUSAL_UNKNOWN},
-            parents=[dispatch_event_id] if dispatch_event_id else [],
+            parents=[
+                event_id
+                for event_id in (dispatch_event_id, packet_meta.get("world_manifest_event_id"))
+                if event_id
+            ],
             actor_attestation_id=attestation_id,
             packet_id=str(packet_meta.get("packet_id", "")),
             packet_provenance_hash=str(packet_meta.get("provenance_hash", "")),
@@ -1078,6 +1103,10 @@ def dispatch(
                 "size_report": packet_meta.get("size_report", {}),
                 "rules": packet_meta.get("rules", []),
                 "refs": packet_meta.get("refs", {}),
+                "world_id": packet_meta.get("world_id", CAUSAL_UNKNOWN),
+                "world_manifest_event_id": packet_meta.get("world_manifest_event_id", CAUSAL_UNKNOWN),
+                "world_manifest_path": packet_meta.get("world_manifest_path", CAUSAL_UNKNOWN),
+                "world_manifest_sha256": packet_meta.get("world_manifest_sha256", CAUSAL_UNKNOWN),
             },
         )
     except Exception as exc:
@@ -1106,6 +1135,8 @@ def dispatch(
             "attestation_id": attestation_id,
             "dispatch_event_id": dispatch_event_id,
             "wake_packet_event_id": wake_packet_event_id,
+            "world_manifest_event_id": packet_meta.get("world_manifest_event_id", ""),
+            "world_id": packet_meta.get("world_id", CAUSAL_UNKNOWN),
             "packet_id": packet_meta.get("packet_id", ""),
             "packet_provenance_hash": packet_meta.get("provenance_hash", ""),
             "prompt_sha256": prompt_sha256,
@@ -1218,7 +1249,12 @@ def dispatch(
         )
     causal_event_ids = [
         event_id
-        for event_id in (dispatch_event_id, wake_packet_event_id, wake_delivered_event_id)
+        for event_id in (
+            dispatch_event_id,
+            packet_meta.get("world_manifest_event_id", ""),
+            wake_packet_event_id,
+            wake_delivered_event_id,
+        )
         if event_id
     ]
     proof_capsule = packet_meta.get("proof_capsule") if isinstance(packet_meta.get("proof_capsule"), dict) else {}
