@@ -157,7 +157,7 @@ OPTIONAL_ENV = (
     ("ORCH_PROVENANCE_WITNESS_ENABLED", "off",
      "external witness anchoring is disabled until explicitly enabled after witness-principal selection"),
     ("ORCH_PROVENANCE_WITNESS_PRINCIPAL", "unset",
-     "witness identity selected by Jesse; anchoring fails loud while unset"),
+     "operator-selected witness identity; anchoring fails loud while unset"),
     ("ORCH_PROVENANCE_WITNESS_ADAPTER", "jsonl",
      "local roots-and-counts witness adapter selected only after anchoring is explicitly enabled"),
     ("ORCH_PROVENANCE_WITNESS_PATH", "unset",

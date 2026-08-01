@@ -123,12 +123,12 @@ def publish_external_witness_anchor(
 ) -> dict[str, Any]:
     if not _enabled(enabled):
         raise WitnessConfigError(
-            f"external witness anchoring is disabled; set {WITNESS_ENABLED_ENV}=1 only after Jesse selects the witness principal"
+            f"external witness anchoring is disabled; set {WITNESS_ENABLED_ENV}=1 only after the witness principal is selected"
         )
     selected_principal = str(principal or _optional_env(WITNESS_PRINCIPAL_ENV) or "").strip()
     if not selected_principal or selected_principal == UNKNOWN:
         raise WitnessConfigError(
-            f"{WITNESS_PRINCIPAL_ENV} is unset; witness principal selection is an InterruptJesse C/I decision"
+            f"{WITNESS_PRINCIPAL_ENV} is unset; witness principal selection is an operator decision"
         )
     adapter = str(_optional_env(WITNESS_ADAPTER_ENV) or "jsonl").strip().lower()
     if adapter != "jsonl":

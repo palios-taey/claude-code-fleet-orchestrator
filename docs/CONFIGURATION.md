@@ -65,7 +65,7 @@ the code, the code wins; verify against the repo, do not trust this table alone.
 | `ORCH_WORLD_SYSTEM_MAP_PATH` | repo-local system connection map | Optional World Manifest seed override for the system connection map. A missing or unreadable file becomes an explicit `Unknown` root. |
 | `ORCH_WORLD_KNOWLEDGE_INDEX_PATH` | sibling/home Taey Presence production index when present | Optional World Manifest seed override for the Taey Presence knowledge index. Only `status=production` capabilities are included; a missing index becomes explicit `Unknown`, not invented data. |
 | `ORCH_PROVENANCE_WITNESS_ENABLED` | `off` | Explicit gate for external checkpoint anchoring. Invoking anchoring while unset/off fails loud. |
-| `ORCH_PROVENANCE_WITNESS_PRINCIPAL` | unset | External witness principal selected by Jesse. The jsonl adapter refuses to anchor without it. |
+| `ORCH_PROVENANCE_WITNESS_PRINCIPAL` | unset | External witness principal selected by the operator. The jsonl adapter refuses to anchor without it. |
 | `ORCH_PROVENANCE_WITNESS_ADAPTER` | `jsonl` | Current external witness adapter name. It writes roots and counts only after the explicit gate is enabled. |
 | `ORCH_PROVENANCE_WITNESS_PATH` | unset | Required path for the jsonl witness object stream. Missing path fails loud when anchoring is invoked. |
 
