@@ -33,7 +33,7 @@ Measured before writing:
 
 Claims-audit constraints:
 - `KERNEL_CLAIMS_AUDIT_2026-08-01.md` confirms that git authorship is not actor
-  provenance; almost all inspected fleet commits use the same Jesse git identity.
+  provenance; almost all inspected fleet commits use the same single operator git identity.
   This design therefore treats git author as byte-history metadata only.
 - The audit confirms current wake packets already carry packet IDs, snapshots,
   source refs, and a provenance hash over the final rendered packet. This design
@@ -252,7 +252,7 @@ Projection rule:
 - All three are rebuildable projections from JSONL plus witness roots, not authorities.
 
 Unknowns for implementation:
-- Which external witness principal Jesse wants is not selected in the measured code.
+- Which external witness principal the operator wants is not selected in the measured code.
 - Ledger rotation and private payload storage layout need a separate implementation spec.
 
 ## Design Element 3: Proof Capsule Extension Of Wake Packets
