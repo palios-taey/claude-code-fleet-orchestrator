@@ -33,6 +33,11 @@ from fastapi.staticfiles import StaticFiles
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fleet_orchestrator.config import OrchConfig, get_redis_sync
+from fleet_orchestrator.causal_ledger import (
+    append_consult_completed_event,
+    event_id_is_well_formed,
+    sha256_oid_is_well_formed,
+)
 from fleet_orchestrator.chat_layer import router as chat_router
 from fleet_orchestrator.context_assembler import (
     CORE_BUDGET_BYTES,
@@ -217,6 +222,31 @@ WAKE_PACKET_CLI_NEXT_STEP = (
     "Use GET /api/sessions/{session_id}/wake-packet?cli=claude or "
     "GET /api/sessions/{session_id}/wake-packet?cli=codex."
 )
+CONSULT_EVENT_REQUIRED_BODY = {
+    "source_family_id": "<family-or-consultation-id>",
+    "request_oid": "sha256:<64 lowercase hex>",
+    "rendered_prompt_oid": "sha256:<64 lowercase hex>",
+    "response_oid": "sha256:<64 lowercase hex>",
+    "platform": "<chat-platform>",
+    "seat_role": "<seat-role>",
+    "requester": "<requesting-session-or-operator>",
+    "session_url": "<source-session-url>",
+    "parents": ["event:<64 lowercase hex>"],
+}
+CONSULT_EVENT_NEXT_STEP = (
+    "POST /api/provenance/consult-event body "
+    + json.dumps(CONSULT_EVENT_REQUIRED_BODY, separators=(",", ":"), sort_keys=True)
+)
+CONSULT_EVENT_STRING_FIELDS = (
+    "source_family_id",
+    "request_oid",
+    "rendered_prompt_oid",
+    "response_oid",
+    "platform",
+    "seat_role",
+    "requester",
+    "session_url",
+)
 
 
 def _terminal_evidence_next_step(task_id: str, status: str) -> str:
@@ -269,6 +299,27 @@ def _task_not_found_detail(task_id: str) -> str:
         f"`taey-task status {task_id}` or `GET /api/tasks/{task_id}`; inspect "
         "project context with `taey-plan show <project-id>`."
     )
+
+
+def _consult_event_validation_errors(data: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    for field in CONSULT_EVENT_STRING_FIELDS:
+        value = data.get(field)
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{field} must be a non-empty string")
+    for field, value in data.items():
+        if field.endswith("_oid") and not sha256_oid_is_well_formed(value):
+            errors.append(f"{field} must be sha256:<64 lowercase hex>")
+    parents = data.get("parents", [])
+    if parents is None:
+        parents = []
+    if not isinstance(parents, list):
+        errors.append("parents must be a list of event:<64 lowercase hex> ids")
+    else:
+        for index, parent in enumerate(parents):
+            if not event_id_is_well_formed(parent):
+                errors.append(f"parents[{index}] must be event:<64 lowercase hex>")
+    return errors
 
 
 def _project_not_found_detail(project_id: str) -> str:
@@ -592,6 +643,59 @@ def list_ranked() -> Dict[str, Any]:
     for t in tasks:
         t["task_id"] = t.get("id", t.get("task_id"))
     return {"tasks": tasks}
+
+
+@app.post("/api/provenance/consult-event")
+async def create_consult_event(req: Request):
+    try:
+        data = await req.json()
+    except Exception as exc:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "error": f"request body must be valid JSON: {exc}",
+                "next_step": CONSULT_EVENT_NEXT_STEP,
+            },
+        )
+    if not isinstance(data, dict):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "ok": False,
+                "error": f"request body must be a JSON object, got {type(data).__name__}",
+                "next_step": CONSULT_EVENT_NEXT_STEP,
+            },
+        )
+    errors = _consult_event_validation_errors(data)
+    if errors:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "errors": errors, "next_step": CONSULT_EVENT_NEXT_STEP},
+        )
+    parents = data.get("parents") or []
+    try:
+        result = append_consult_completed_event(
+            source_family_id=data["source_family_id"].strip(),
+            request_oid=data["request_oid"].strip(),
+            rendered_prompt_oid=data["rendered_prompt_oid"].strip(),
+            response_oid=data["response_oid"].strip(),
+            platform=data["platform"].strip(),
+            seat_role=data["seat_role"].strip(),
+            requester=data["requester"].strip(),
+            session_url=data["session_url"].strip(),
+            parents=parents,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "errors": [str(exc)], "next_step": CONSULT_EVENT_NEXT_STEP},
+        )
+    return {
+        "event_id": result["event_id"],
+        "attestation_id": result["attestation_id"],
+        "row_hash": result["row_hash"],
+    }
 
 
 def _coerce_neo4j_value(v: Any) -> Any:
