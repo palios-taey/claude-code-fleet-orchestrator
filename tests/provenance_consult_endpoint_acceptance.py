@@ -80,10 +80,29 @@ def main() -> int:
             _check("retry returns same row hash", replay_body["row_hash"] == created_body["row_hash"], replay_body)
             _check("retry does not double append", len(read_ledger_rows(str(ledger_path))) == 1, read_ledger_rows(str(ledger_path)))
 
+            auth_body = {**body, "request_oid": _oid("f")}
+            os.environ["ORCH_AUTH_TOKEN"] = "consult-secret"
+            unauthenticated = client.post("/api/provenance/consult-event", json=auth_body)
+            _check("auth token is required when configured", unauthenticated.status_code == 401, unauthenticated.text)
+            bad_auth = client.post(
+                "/api/provenance/consult-event",
+                json=auth_body,
+                headers={"Authorization": "Bearer wrong-secret"},
+            )
+            _check("bad bearer token rejects before append", bad_auth.status_code == 401, bad_auth.text)
+            authorized = client.post(
+                "/api/provenance/consult-event",
+                json=auth_body,
+                headers={"X-API-Key": "consult-secret"},
+            )
+            _check("x-api-key token authorizes consult append", authorized.status_code == 200, authorized.text)
+            _check("auth failures do not append", len(read_ledger_rows(str(ledger_path))) == 2, read_ledger_rows(str(ledger_path)))
+            os.environ.pop("ORCH_AUTH_TOKEN", None)
+
             bad_oid = {**body, "request_oid": "not-a-sha"}
             rejected = client.post("/api/provenance/consult-event", json=bad_oid)
             _check("bad request oid rejects 400", rejected.status_code == 400 and "request_oid" in json.dumps(rejected.json()), rejected.text)
-            _check("bad oid does not append", len(read_ledger_rows(str(ledger_path))) == 1, read_ledger_rows(str(ledger_path)))
+            _check("bad oid does not append", len(read_ledger_rows(str(ledger_path))) == 2, read_ledger_rows(str(ledger_path)))
 
             bad_extra_oid = {**body, "unused_oid": "not-a-sha"}
             rejected_extra = client.post("/api/provenance/consult-event", json=bad_extra_oid)
