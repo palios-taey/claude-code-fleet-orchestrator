@@ -70,6 +70,7 @@ from .causal_ledger import (
 )
 from .context_assembler import (
     assemble as assemble_wake_packet,
+    attach_proof_capsule as attach_wake_proof_capsule,
     build_packet as build_wake_packet,
     select_context as select_wake_context,
     size_report as wake_size_report,
@@ -888,7 +889,8 @@ def _select_dispatch_context(worker: str, task_id: str, description: str,
 
 def _assemble_dispatch_prompt(worker: str, task_id: str, description: str,
                               supervisor: Optional[str], dispatcher: str,
-                              dispatch_body: str) -> tuple[str, dict[str, Any]]:
+                              dispatch_body: str,
+                              causal_event_ids: Optional[list[str]] = None) -> tuple[str, dict[str, Any]]:
     cli = _cli_for_worker(worker)
     context, warning = _select_dispatch_context(worker, task_id, description, supervisor, cli)
     packet = build_wake_packet(worker, context)
@@ -903,12 +905,24 @@ def _assemble_dispatch_prompt(worker: str, task_id: str, description: str,
     if warning:
         dispatch_record["context_warning"] = warning
     packet.setdefault("human", {}).setdefault("replies_since_last", []).append(dispatch_record)
+    proof_capsule = attach_wake_proof_capsule(
+        packet,
+        {
+            "worker": worker,
+            "task_id": task_id,
+            "supervisor": supervisor or "",
+            "dispatcher": dispatcher,
+            "causal_event_ids": causal_event_ids or [],
+        },
+    )
     rendered = assemble_wake_packet(packet, cli)
     receipt = task_ref_receipt(packet)
     return rendered, {
         "cli": cli,
         "packet_id": packet.get("packet_id", ""),
         "provenance_hash": packet.get("provenance_hash", ""),
+        "proof_capsule": proof_capsule,
+        "world_id": proof_capsule.get("world_id", ""),
         "injection_receipt": receipt,
         "size_report": wake_size_report(rendered, packet),
         "rules": [
@@ -1029,6 +1043,7 @@ def dispatch(
             supervisor,
             from_session,
             dispatch_body,
+            causal_event_ids=[dispatch_event_id] if dispatch_event_id else [],
         )
         prompt_sha256 = hashlib.sha256(prompt_body.encode("utf-8")).hexdigest()
         work_snapshot = _worker_work_snapshot(worker)
@@ -1206,6 +1221,8 @@ def dispatch(
         for event_id in (dispatch_event_id, wake_packet_event_id, wake_delivered_event_id)
         if event_id
     ]
+    proof_capsule = packet_meta.get("proof_capsule") if isinstance(packet_meta.get("proof_capsule"), dict) else {}
+    world_id = str(packet_meta.get("world_id") or proof_capsule.get("world_id") or CAUSAL_UNKNOWN)
     observable_state = {
         "source": "dispatch",
         "worker": worker,
@@ -1216,9 +1233,12 @@ def dispatch(
         "cli": packet_meta.get("cli", ""),
         "packet_id": packet_meta.get("packet_id", ""),
         "provenance_hash": packet_meta.get("provenance_hash", ""),
+        "world_id": world_id,
+        "attestation_id": attestation_id,
         "size_report": packet_meta.get("size_report", {}),
         "actor_attestation_id": attestation_id,
         "causal_event_ids": causal_event_ids,
+        "proof_capsule": proof_capsule,
     }
     if capture_failure:
         observable_state["capture_failure"] = capture_failure
@@ -1229,6 +1249,9 @@ def dispatch(
             "refs_used": packet_meta.get("refs", {}),
             "rule_tier_applied": packet_meta.get("rules", []),
             "observable_state": observable_state,
+            "world_id": world_id,
+            "attestation_id": attestation_id,
+            "causal_event_ids": causal_event_ids,
             "target": worker,
             "task_id": task_id,
             "next_contract": (

@@ -100,6 +100,9 @@ def _receipt_core_contract() -> None:
         "refs_used": [{"path": "plan.md", "content": "original"}],
         "rule_tier_applied": [{"scope": "project", "path": "rules/projects/dynctx.md"}],
         "observable_state": {"packet_id": "packet-1", "state": {"a": 1}},
+        "world_id": "world:receipt-test",
+        "attestation_id": "attestation:receipt-test",
+        "causal_event_ids": ["event:one", "event:two"],
         "blocked_on": "blocked-task",
         "next_contract": "continue task",
     }
@@ -111,6 +114,13 @@ def _receipt_core_contract() -> None:
     _check("emit_receipt returns same immutable payload", receipt["observable_state_hash"] == payload["observable_state_hash"], payload)
     _check("receipt payload captures refs before caller mutation", payload["refs_used"][0]["content"] == "original", payload["refs_used"])
     _check("receipt uses requested rule_tier_applied field", isinstance(payload["rule_tier_applied"], str) and "rules/projects/dynctx.md" in payload["rule_tier_applied"], payload)
+    _check(
+        "receipt surfaces proof capsule linkage fields",
+        payload["world_id"] == "world:receipt-test"
+        and payload["attestation_id"] == "attestation:receipt-test"
+        and payload["causal_event_ids"] == ["event:one", "event:two"],
+        payload,
+    )
 
     old_enabled = os.environ.get("ORCH_DECISION_RECEIPTS_ENABLED")
     try:
@@ -218,6 +228,8 @@ def _dispatch_wake_wiring_contract() -> None:
                      "cli": "codex",
                      "packet_id": "packet-dispatch-receipt",
                      "provenance_hash": "abc123",
+                     "proof_capsule": {"world_id": "world:dispatch-receipt"},
+                     "world_id": "world:dispatch-receipt",
                      "size_report": {"under_budget": True},
                      "rules": [{"scope": "global", "path": "rules/global.md"}],
                      "refs": {"overall": [], "supervisor": [], "project": [], "phase": [], "task": []},
@@ -242,6 +254,13 @@ def _dispatch_wake_wiring_contract() -> None:
            "mandatory wake packet" in payload.get("why_this_context", "")
            and "rules/global.md" in payload.get("rule_tier_applied", ""),
            payload)
+    _check(
+        "dispatch wake receipt surfaces proof linkage fields",
+        payload["world_id"] == "world:dispatch-receipt"
+        and payload["attestation_id"].startswith("attestation:")
+        and len(payload["causal_event_ids"]) == 3,
+        payload,
+    )
 
 
 def _receipt_consumer_contract() -> None:
@@ -315,6 +334,8 @@ def _receipt_sink_fail_open_contract() -> None:
                          "cli": "codex",
                          "packet_id": "packet-dispatch-receipt",
                          "provenance_hash": "abc123",
+                         "proof_capsule": {"world_id": "world:dispatch-receipt"},
+                         "world_id": "world:dispatch-receipt",
                          "size_report": {"under_budget": True},
                          "rules": [{"scope": "global", "path": "rules/global.md"}],
                          "refs": {"overall": [], "supervisor": [], "project": [], "phase": [], "task": []},

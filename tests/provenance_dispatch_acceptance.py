@@ -85,6 +85,12 @@ def _fake_assemble(*_args: object, **_kwargs: object) -> tuple[str, dict]:
         "cli": "codex",
         "packet_id": "packet-1",
         "provenance_hash": "provenance-1",
+        "proof_capsule": {
+            "schema_version": 0,
+            "world_id": "world:provenance-test",
+            "causal_event_ids": ["event:dispatch-claimed"],
+        },
+        "world_id": "world:provenance-test",
         "injection_receipt": {"line": "loaded refs: none"},
         "size_report": {"bytes": 18},
         "rules": [{"scope": "global", "path": "rules.md"}],
@@ -173,6 +179,14 @@ def main() -> int:
                 rows[1]["event"]["event_id"],
                 rows[2]["event"]["event_id"],
             ], captured_receipts)
+            _check(
+                "wake receipt carries proof linkage",
+                captured_receipts[0]["world_id"] == "world:provenance-test"
+                and captured_receipts[0]["attestation_id"] == attestation["attestation_id"]
+                and captured_receipts[0]["observable_state"]["attestation_id"] == attestation["attestation_id"]
+                and captured_receipts[0]["observable_state"]["proof_capsule"]["world_id"] == "world:provenance-test",
+                captured_receipts[0],
+            )
 
             with mock.patch.object(dispatch_module, "_redis_connect", return_value=fake), \
                  mock.patch.object(dispatch_module, "_notify_supervisor_response_ready"), \

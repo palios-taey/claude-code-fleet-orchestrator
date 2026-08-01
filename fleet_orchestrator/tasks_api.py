@@ -1948,6 +1948,7 @@ def session_wake_packet(
         rendered = assemble_wake_packet(packet, cli_key, budget_bytes=budget_bytes)
         report = wake_size_report(rendered, packet, budget_bytes=budget_bytes)
         injection_receipt = task_ref_receipt(packet)
+        proof_capsule = packet.get("proof_capsule") if isinstance(packet.get("proof_capsule"), dict) else {}
         maybe_emit_decision_receipt(
             "wake_packet_assembly",
             {
@@ -1963,10 +1964,13 @@ def session_wake_packet(
                     "task_id": task_id,
                     "packet_id": packet.get("packet_id", ""),
                     "provenance_hash": packet.get("provenance_hash", ""),
+                    "world_id": proof_capsule.get("world_id", ""),
                     "size_report": report,
                     "injection_receipt": injection_receipt,
+                    "proof_capsule": proof_capsule,
                     "snapshot": packet.get("snapshot") or {},
                 },
+                "world_id": proof_capsule.get("world_id", ""),
                 "session": session_id,
                 "task_id": task_id,
                 "packet_id": packet.get("packet_id", ""),
@@ -1988,6 +1992,7 @@ def session_wake_packet(
                 "packet_id": packet.get("packet_id", ""),
                 "provenance_hash": packet.get("provenance_hash", ""),
                 "generated_at_commit": packet.get("generated_at_commit", ""),
+                "proof_capsule": proof_capsule,
                 "snapshot": packet.get("snapshot") or {},
                 "injection_receipt": injection_receipt,
                 "size_report": report,
