@@ -196,10 +196,25 @@ def verify_provenance_kernel_closure(
         for checkpoint_id, report in checkpoint_integrity.get("checkpoints", {}).items()
         if isinstance(report, Mapping)
     }
+    checkpoint_reports = checkpoint_integrity.get("checkpoints", {})
+    row_numbers = {str(_event(row).get("event_id") or ""): int(row.get("ledger_row_number") or 0) for row in rows}
+    for checkpoint_id, checkpoint in checkpoint_reports.items():
+        checkpoint_errors = list(checkpoint_errors_by_id.get(checkpoint_id, []))
+        if not checkpoint_errors:
+            continue
+        try:
+            from_row = int(checkpoint.get("from_row"))
+            to_row = int(checkpoint.get("to_row"))
+        except (TypeError, ValueError):
+            continue
+        for event_id in normalized_event_ids:
+            row_number = row_numbers.get(event_id, 0)
+            if from_row <= row_number <= to_row:
+                errors.extend(checkpoint_errors)
+
     witnessed_checkpoint_ids: set[str] = set()
     if require_witness and named_rows:
-        checkpoints = _witnessed_checkpoints(rows, checkpoint_integrity.get("checkpoints", {}))
-        row_numbers = {str(_event(row).get("event_id") or ""): int(row.get("ledger_row_number") or 0) for row in rows}
+        checkpoints = _witnessed_checkpoints(rows, checkpoint_reports)
         covered: set[str] = set()
         for checkpoint_id, checkpoint in checkpoints.items():
             checkpoint_errors = list(checkpoint_errors_by_id.get(checkpoint_id, []))
@@ -212,8 +227,6 @@ def verify_provenance_kernel_closure(
             for event_id in normalized_event_ids:
                 row_number = row_numbers.get(event_id, 0)
                 if from_row <= row_number <= to_row:
-                    if checkpoint_errors:
-                        errors.extend(checkpoint_errors)
                     if witness_errors:
                         errors.extend(witness_errors)
                     if not checkpoint_errors and not witness_errors and checkpoint.get("anchors"):

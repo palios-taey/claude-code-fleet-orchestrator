@@ -282,6 +282,22 @@ def main() -> int:
                 and any("witness_recomputed_batch_root_mismatch" in item for item in forged["errors"]),
                 forged,
             )
+            forged_waiver = verify_provenance_kernel_closure(
+                event_ids=[forged_wake_event_id],
+                actor_attestation_id=attestation_id,
+                packet_id=packet_id,
+                packet_provenance_hash=packet_hash,
+                ledger_path=str(forged_path),
+                require_witness=False,
+                witness_waiver_reason="operator-selected pre-witness mode",
+            )
+            _check(
+                "waived closure over forged checkpoint roots fails closed",
+                not forged_waiver["ok"]
+                and any("checkpoint_batch_root_mismatch" in item for item in forged_waiver["errors"])
+                and forged_waiver["witness_waiver_reason"] == "operator-selected pre-witness mode",
+                forged_waiver,
+            )
             forged_root = latest_checkpoint_root(str(forged_path))
             _check("forged checkpoint root is not manifest-observed", forged_root["register"] == "Unknown", forged_root)
 
