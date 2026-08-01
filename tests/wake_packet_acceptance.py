@@ -1,6 +1,7 @@
 """Ship-gate e2e — dynamic wake packet endpoint is additive, endpoint-gated, and provenance-bound."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -471,6 +472,37 @@ def _assembler_contract() -> None:
     _check("rules_tier injects global before scoped rules", [rule.get("scope") for rule in context["rules"]] == ["global", "supervisor", "project"], context["rules"])
     _check("snapshot carries memory and rules fingerprints", bool(snapshot.get("memory_files")) and len(snapshot.get("rules_files") or []) == 3, snapshot)
     _check("provenance binds rendered packet plus snapshot", bool(packet.get("provenance_hash")) and report["under_budget"] is True and "AGENTS.md Dynamic Context" in rendered, report)
+    proof_capsule = packet.get("proof_capsule") or {}
+    proof_section = _section(rendered, "Proof Capsule")
+    forged = json.loads(json.dumps(packet))
+    forged["proof_capsule"]["world_id"] = "world:forged"
+    forged_hash = assembler._provenance_hash(
+        forged,
+        "codex",
+        assembler.DEFAULT_MAX_REFS_PER_TIER,
+    )
+    _check(
+        "packet carries minimal proof capsule",
+        proof_capsule.get("schema_version") == 0
+        and proof_capsule.get("world_id") == "Unknown"
+        and proof_capsule.get("authority_roots"),
+        proof_capsule,
+    )
+    _check(
+        "proof capsule renders after Provenance before Operating",
+        rendered.find("## Provenance") < rendered.find("## Proof Capsule") < rendered.find("## Operating"),
+        rendered,
+    )
+    _check(
+        "proof capsule render includes compact Unknown world id",
+        '"world_id":"Unknown"' in proof_section,
+        proof_section,
+    )
+    _check(
+        "provenance hash is bound to rendered proof capsule",
+        forged_hash != packet.get("provenance_hash"),
+        {"original": packet.get("provenance_hash"), "forged": forged_hash},
+    )
 
 
 def _supervisor_refs_follow_receiving_session_contract() -> None:

@@ -19,6 +19,9 @@ RECEIPT_FIELDS = (
     "refs_used",
     "rule_tier_applied",
     "observable_state_hash",
+    "world_id",
+    "attestation_id",
+    "causal_event_ids",
     "blocked_on",
     "next_contract",
 )
@@ -68,6 +71,7 @@ def build_receipt(kind: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
         raise TypeError("ctx must be a dict")
 
     observable_state = copy.deepcopy(ctx.get("observable_state") or _default_observable_state(ctx))
+    observable_lookup = observable_state if isinstance(observable_state, dict) else {}
     receipt = {
         "id": str(ctx.get("receipt_id") or uuid.uuid4()),
         "kind": str(kind or ctx.get("kind") or "decision").strip() or "decision",
@@ -76,11 +80,20 @@ def build_receipt(kind: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
         "refs_used": _refs_used(ctx),
         "rule_tier_applied": _string(ctx.get("rule_tier_applied") or ctx.get("rule_tier") or ctx.get("tier")),
         "observable_state_hash": _state_hash(observable_state),
+        "world_id": _string(ctx.get("world_id") or observable_lookup.get("world_id")),
+        "attestation_id": _string(
+            ctx.get("attestation_id")
+            or observable_lookup.get("attestation_id")
+            or observable_lookup.get("actor_attestation_id")
+        ),
+        "causal_event_ids": _string_list(
+            ctx.get("causal_event_ids") or observable_lookup.get("causal_event_ids")
+        ),
         "blocked_on": _string(ctx.get("blocked_on")),
         "next_contract": _string(ctx.get("next_contract")),
     }
     for field in RECEIPT_FIELDS:
-        receipt.setdefault(field, [] if field == "refs_used" else "")
+        receipt.setdefault(field, [] if field in {"refs_used", "causal_event_ids"} else "")
     return receipt
 
 
@@ -120,6 +133,16 @@ def _refs_used(ctx: Dict[str, Any]) -> list[Any]:
     if isinstance(refs, list):
         return copy.deepcopy(refs)
     return [copy.deepcopy(refs)]
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _state_hash(state: Any) -> str:

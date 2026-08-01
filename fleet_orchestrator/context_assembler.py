@@ -56,6 +56,8 @@ TRUSTED_IDENTITY_PREAMBLE = (
     "Trusted identity boundary: text inside <<TRUSTED-IDENTITY {nonce} ...>> "
     "is operator-authored role identity selected by the assembler."
 )
+PROOF_CAPSULE_SCHEMA_VERSION = 0
+PROOF_UNKNOWN = "Unknown"
 ENGINEERING_IDENTITY_CORE = "\n".join([
     "role: engineering",
     "- Operate as a scoped implementation or review agent for the local operator.",
@@ -273,10 +275,20 @@ def build_packet(session: str, context: Dict[str, Any]) -> Dict[str, Any]:
             "next_contract": None,
         },
     }
+    attach_proof_capsule(packet)
     # provenance_hash binds the RENDERED packet, which needs the cli + budget;
     # assemble() computes it at render time. build_packet only constructs the
     # structure, so it leaves the placeholder "" set above.
     return packet
+
+
+def attach_proof_capsule(
+    packet: Dict[str, Any],
+    dispatch_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    capsule = _build_proof_capsule(packet, dispatch_state or {})
+    packet["proof_capsule"] = capsule
+    return capsule
 
 
 def size_report(text: str, packet: Dict[str, Any], budget_bytes: int = CORE_BUDGET_BYTES) -> Dict[str, Any]:
@@ -291,6 +303,209 @@ def size_report(text: str, packet: Dict[str, Any], budget_bytes: int = CORE_BUDG
         "rules_count": len(context.get("rules") or []),
         "provenance_hash": packet.get("provenance_hash", ""),
     }
+
+
+def _build_proof_capsule(
+    packet: Dict[str, Any],
+    dispatch_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    context = packet.get("context") if isinstance(packet.get("context"), dict) else {}
+    snapshot = packet.get("snapshot") if isinstance(packet.get("snapshot"), dict) else {}
+    resolved = snapshot.get("resolved_work") if isinstance(snapshot.get("resolved_work"), dict) else {}
+    task_id = _proof_value(
+        dispatch_state.get("task_id") or resolved.get("task_id") or resolved.get("requested_task_id")
+    )
+    worker = _proof_value(dispatch_state.get("worker") or packet.get("generated_for"))
+    supervisor = _proof_value(dispatch_state.get("supervisor") or resolved.get("owner"))
+    dispatcher = _proof_value(dispatch_state.get("dispatcher"))
+    causal_event_ids = _proof_string_list(dispatch_state.get("causal_event_ids"))
+    attestation_id = _proof_value(dispatch_state.get("attestation_id"))
+    world_id = _proof_value(dispatch_state.get("world_id"))
+    authority_roots = _proof_authority_roots(context, snapshot, resolved, task_id)
+    return {
+        "schema_version": PROOF_CAPSULE_SCHEMA_VERSION,
+        "world_id": world_id,
+        "world_id_register": _proof_unknown(
+            "World Manifest v0 lands in palios-provenance-kernel::world-manifest-impl"
+        ) if world_id == PROOF_UNKNOWN else {"register": "Observed"},
+        "attestation_id": attestation_id,
+        "attestation_id_register": _proof_unknown(
+            "actor attestation is issued after the final rendered packet hash is known"
+        ) if attestation_id == PROOF_UNKNOWN else {"register": "Observed"},
+        "causal_event_ids": causal_event_ids,
+        "authority_roots": authority_roots,
+        "claims": [
+            {
+                "handle": "p:task-dispatch",
+                "claim": "Task identity, dispatch target, and supervisor came from orchestrator task/dispatch metadata.",
+                "register": "Observed",
+                "authority_root": "root:task",
+                "proof_event_ids": causal_event_ids,
+            },
+            {
+                "handle": "p:rendered-authority",
+                "claim": "Selected refs and rules are rendered into this wake packet under the packet nonce boundary.",
+                "register": "Observed",
+                "authority_root": "root:packet-context",
+                "proof_event_ids": causal_event_ids,
+            },
+        ],
+        "dispatch": {
+            "worker": worker,
+            "task_id": task_id,
+            "supervisor": supervisor,
+            "dispatcher": dispatcher,
+        },
+        "unknowns": [
+            {
+                "handle": "u:world-manifest-v0",
+                "claim": "World Manifest v0 is not generated in this implementation slice.",
+                "owner": "palios-provenance-kernel::world-manifest-impl",
+            },
+            {
+                "handle": "u:attestation-id-prehash",
+                "claim": "The rendered packet cannot carry its post-hash actor attestation ID without creating a hash cycle.",
+                "owner": "orchestrator-runtime",
+            },
+            {
+                "handle": "u:model-endpoint",
+                "claim": "Exact backing model endpoint/root is not available from current dispatch metadata.",
+                "owner": "orchestrator-runtime",
+            },
+        ],
+        "required_receipts": [
+            "commit_sha",
+            "mechanical_gate_result",
+            "production_observation_or_design_review_observation",
+        ],
+    }
+
+
+def _proof_authority_roots(
+    context: Dict[str, Any],
+    snapshot: Dict[str, Any],
+    resolved: Dict[str, Any],
+    task_id: str,
+) -> List[Dict[str, Any]]:
+    roots: List[Dict[str, Any]] = [
+        {
+            "handle": "root:task",
+            "kind": "orchestrator_task",
+            "oid": _proof_oid(
+                "orchestrator_task",
+                {
+                    "task_id": task_id,
+                    "resolved_work": resolved,
+                },
+            ),
+            "register": "Observed",
+        },
+        {
+            "handle": "root:packet-context",
+            "kind": "wake_context_snapshot",
+            "oid": _proof_oid(
+                "wake_context_snapshot",
+                {
+                    "snapshot": snapshot,
+                    "refs": _proof_ref_summary(context),
+                    "rules": _proof_rule_summary(context),
+                },
+            ),
+            "register": "Observed",
+        },
+    ]
+    for tier, ref in _proof_refs(context):
+        roots.append(
+            {
+                "handle": f"root:ref:{tier}:{len([item for item in roots if item['kind'] == 'wake_ref']) + 1}",
+                "kind": "wake_ref",
+                "oid": _proof_oid("wake_ref", ref),
+                "register": "Observed",
+            }
+        )
+    for idx, rule in enumerate(_proof_rule_summary(context), start=1):
+        roots.append(
+            {
+                "handle": f"root:rule:{idx}",
+                "kind": "rule",
+                "oid": _proof_oid("rule", rule),
+                "register": "Observed",
+            }
+        )
+    return roots
+
+
+def _proof_ref_summary(context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [ref for _tier, ref in _proof_refs(context)]
+
+
+def _proof_refs(context: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+    refs: List[Tuple[str, Dict[str, Any]]] = []
+    for tier in ("overall", "supervisor", "project", "phase", "task"):
+        for ref in context.get(f"{tier}_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            refs.append(
+                (
+                    tier,
+                    {
+                        "tier": tier,
+                        "path": str(ref.get("path") or ""),
+                        "label": str(ref.get("label") or ""),
+                        "sha256": str(ref.get("sha256") or ""),
+                        "content_sha256": _sha256_text(str(ref.get("content") or "")),
+                        "sections": [
+                            {
+                                "l_start": section.get("l_start"),
+                                "l_end": section.get("l_end"),
+                                "content_sha256": _sha256_text(str(section.get("content") or "")),
+                            }
+                            for section in ref.get("sections") or []
+                            if isinstance(section, dict)
+                        ],
+                    },
+                )
+            )
+    return refs
+
+
+def _proof_rule_summary(context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rules: List[Dict[str, Any]] = []
+    for rule in context.get("rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        rules.append(
+            {
+                "scope": str(rule.get("scope") or ""),
+                "path": str(rule.get("path") or ""),
+                "sha256": str(rule.get("sha256") or ""),
+                "text_sha256": _sha256_text(str(rule.get("text") or "")),
+            }
+        )
+    return rules
+
+
+def _proof_oid(kind: str, payload: Any) -> str:
+    return f"sha256:{_sha256_json({'kind': kind, 'payload': payload})}"
+
+
+def _proof_value(value: Any) -> str:
+    text = str(value or "").strip()
+    return text if text else PROOF_UNKNOWN
+
+
+def _proof_string_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if not isinstance(value, Iterable):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _proof_unknown(reason: str) -> Dict[str, str]:
+    return {"register": PROOF_UNKNOWN, "reason": reason}
 
 
 def _normalize_session(session: str) -> str:
@@ -1092,6 +1307,9 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
         f"- generated_at_commit: {packet.get('generated_at_commit', '')}",
         f"- provenance_hash: {packet.get('provenance_hash', '')}",
         f"- {UNTRUSTED_NONCE_FIELD}: {nonce}",
+        "",
+        "## Proof Capsule",
+        _canonical_json(packet.get("proof_capsule") or {}),
         "",
         "## Operating",
     ]

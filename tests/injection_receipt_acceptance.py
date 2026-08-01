@@ -97,6 +97,12 @@ def _endpoint_metadata_contract() -> None:
     _check("endpoint returns expected injection receipt metadata", meta_receipt.get("line") == "loaded refs: voice_guide,plans/step.md:L7-L9,extra", body)
     _check("endpoint packet carries first-action receipt instruction", "reply exactly `loaded refs: voice_guide,plans/step.md:L7-L9,extra`" in body.get("packet", ""), body)
     _check("endpoint decision receipt next_contract names expected echo", "loaded refs: voice_guide,plans/step.md:L7-L9,extra" in str(receipt_ctx.get("next_contract") or ""), receipt_ctx)
+    _check(
+        "endpoint metadata carries proof capsule",
+        body.get("packet_meta", {}).get("proof_capsule", {}).get("world_id") == "Unknown"
+        and receipt_ctx.get("world_id") == "Unknown",
+        {"body": body, "receipt": receipt_ctx},
+    )
 
 
 def _dispatch_metadata_contract() -> None:
@@ -109,9 +115,17 @@ def _dispatch_metadata_contract() -> None:
             "supervisor",
             "supervisor",
             "DISPATCH BODY",
+            causal_event_ids=["event:dispatch-claimed"],
         )
     _check("dispatch packet carries first-action receipt instruction", "reply exactly `loaded refs: voice_guide,plans/step.md:L7-L9,extra`" in rendered, rendered)
     _check("dispatch metadata carries expected injection receipt", meta.get("injection_receipt", {}).get("line") == "loaded refs: voice_guide,plans/step.md:L7-L9,extra", meta)
+    _check(
+        "dispatch metadata carries pre-assembly proof capsule",
+        "## Proof Capsule" in rendered
+        and meta.get("world_id") == "Unknown"
+        and meta.get("proof_capsule", {}).get("causal_event_ids") == ["event:dispatch-claimed"],
+        meta,
+    )
 
 
 def main() -> int:
