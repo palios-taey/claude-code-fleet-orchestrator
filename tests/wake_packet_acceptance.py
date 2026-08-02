@@ -473,7 +473,6 @@ def _assembler_contract() -> None:
     _check("snapshot carries memory and rules fingerprints", bool(snapshot.get("memory_files")) and len(snapshot.get("rules_files") or []) == 3, snapshot)
     _check("provenance binds rendered packet plus snapshot", bool(packet.get("provenance_hash")) and report["under_budget"] is True and "AGENTS.md Dynamic Context" in rendered, report)
     proof_capsule = packet.get("proof_capsule") or {}
-    proof_section = _section(rendered, "Proof Capsule")
     forged = json.loads(json.dumps(packet))
     forged["proof_capsule"]["world_id"] = "world:forged"
     forged_hash = assembler._provenance_hash(
@@ -537,17 +536,21 @@ def _assembler_contract() -> None:
         no_task_dispatch_claims,
     )
     _check(
-        "proof capsule renders after Provenance before Operating",
-        rendered.find("## Provenance") < rendered.find("## Proof Capsule") < rendered.find("## Operating"),
+        "full proof capsule body is not rendered into the wake packet",
+        "## Proof Capsule" not in rendered
+        and '"unknowns":' not in rendered
+        and "u:attestation-id-prehash" not in rendered,
         rendered,
     )
     _check(
-        "proof capsule render includes compact world id",
-        '"world_id":"world:' in proof_section,
-        proof_section,
+        "provenance renders compact proof receipt",
+        "proof_capsule_sha256:" in rendered
+        and "proof_capsule_world_id: world:" in rendered
+        and rendered.find("## Provenance") < rendered.find("proof_capsule_sha256:") < rendered.find("## Operating"),
+        rendered,
     )
     _check(
-        "provenance hash is bound to rendered proof capsule",
+        "provenance hash is bound to compact proof receipt",
         forged_hash != packet.get("provenance_hash"),
         {"original": packet.get("provenance_hash"), "forged": forged_hash},
     )
@@ -627,8 +630,10 @@ def _supervisor_refs_follow_receiving_session_contract() -> None:
         context["supervisor_refs"],
     )
     _check(
-        "cross-project task does not render task project owner supervisor ref",
-        "SESSION_CORRECT_SUPERVISOR_REF" in rendered
+        "wake packet renders only task ref tier",
+        "### task" in rendered
+        and "### supervisor" not in rendered
+        and "SESSION_CORRECT_SUPERVISOR_REF" not in rendered
         and "WRONG_PROJECT_OWNER_SUPERVISOR_REF" not in rendered,
         rendered,
     )
@@ -767,22 +772,22 @@ def _context_selection_error_contract() -> None:
     packet = assembler.build_packet("conductor-codex", context)
     rendered = assembler.assemble(packet, "codex")
 
-    _check("overall context error renders visible unavailable ref",
-           "### overall\n- ref 1" in rendered and "### overall\n- none" not in rendered,
-           rendered)
-    _check("supervisor context error renders visible unavailable ref",
-           "### supervisor\n- ref 1" in rendered and "### supervisor\n- none" not in rendered,
-           rendered)
-    _check("unavailable marker is rendered in packet",
-           assembler.UNAVAILABLE_CONTEXT_MARKER in rendered,
+    _check("overall context error is retained in selected context",
+           context["overall_refs"] and context["overall_refs"][0].get("path") == assembler.UNAVAILABLE_CONTEXT_MARKER,
+           context)
+    _check("supervisor context error is retained in selected context",
+           context["supervisor_refs"] and context["supervisor_refs"][0].get("path") == assembler.UNAVAILABLE_CONTEXT_MARKER,
+           context)
+    _check("non-task refs are omitted from rendered wake packet",
+           "### overall" not in rendered and "### supervisor" not in rendered and assembler.UNAVAILABLE_CONTEXT_MARKER not in rendered,
            rendered)
 
 
 def _required_context_never_truncated_contract() -> None:
     ref_a = "REF_A_START\n" + ("A" * 9000) + "\nREF_A_END"
     ref_b = "REF_B_START\n" + ("B" * 9000) + "\nREF_B_END"
-    rule = "RULE_START\nKeep all operator rules whole.\nRULE_END"
-    identity = "IDENTITY_START\nKeep all identity text whole.\nIDENTITY_END"
+    rule = "RULE_START\n" + ("R" * 9000) + "\nRULE_END"
+    identity = "IDENTITY_START\n" + ("I" * 9000) + "\nIDENTITY_END"
     packet = {
         "packet_id": "packet-large-ref-no-truncate",
         "generated_for": "conductor-codex",
@@ -819,17 +824,85 @@ def _required_context_never_truncated_contract() -> None:
         "stop": {},
     }
 
-    rendered = assembler.assemble(packet, "codex", budget_bytes=assembler.CORE_BUDGET_BYTES)
-    report = assembler.size_report(rendered, packet)
+    error = ""
+    try:
+        assembler.assemble(packet, "codex", budget_bytes=assembler.CORE_BUDGET_BYTES)
+    except ValueError as exc:
+        error = str(exc)
 
-    _check("oversized required refs may render over budget", report["under_budget"] is False, report)
+    rendered = assembler.assemble(packet, "codex", budget_bytes=100000)
+    report = assembler.size_report(rendered, packet, budget_bytes=100000)
+
+    _check("default packet budget is 8 KiB", assembler.CORE_BUDGET_BYTES == 8 * 1024, assembler.CORE_BUDGET_BYTES)
+    _check(
+        "oversized required refs fail loud under the hard cap",
+        "wake packet exceeds 8192 byte hard cap" in error,
+        error,
+    )
     _check("low-ranked memory was dropped whole", packet["context"].get("memory") == [], packet["context"].get("memory"))
     _check("memory content is absent from rendered packet", "MEMORY_CONTENT_SHOULD_DROP" not in rendered, rendered)
-    _check("required ref A renders whole", ref_a in rendered and "REF_A_END" in rendered, "ref A missing")
-    _check("required ref B renders whole", ref_b in rendered and "REF_B_END" in rendered, "ref B missing")
+    _check("task ref content is visibly budgeted", assembler.REF_TRUNCATED_MARKER in rendered, rendered)
+    _check("later task refs are omitted when ref byte budget is exhausted", assembler.REF_OMITTED_MARKER in rendered, rendered)
     _check("required rules render whole", rule in rendered and "RULE_END" in rendered, "rule missing")
     _check("required identity renders whole", identity in rendered and "IDENTITY_END" in rendered, "identity missing")
-    _check("required context has no truncation marker", "[truncated]" not in rendered, "found truncation marker")
+    _check("required context can still render under explicit larger budget", report["under_budget"] is True, report)
+
+
+def _rules_and_identity_dedupe_contract() -> None:
+    packet = assembler.build_packet(
+        "worker-codex",
+        {
+            "overall_refs": [],
+            "supervisor_refs": [],
+            "project_refs": [],
+            "phase_refs": [],
+            "task_refs": [],
+            "identity": {
+                "role": "engineering",
+                "mode": "lean_role_core",
+                "source": "acceptance",
+                "content": "DEDUP_IDENTITY_TEXT",
+            },
+            "memory": [],
+            "rules": assembler._dedupe_rules(assembler._rank_rules([
+                {"scope": "global", "path": "global.md", "sha256": "a", "text": "DUPLICATE_RULE_TEXT"},
+                {"scope": "supervisor", "path": "supervisor.md", "sha256": "b", "text": "DUPLICATE_RULE_TEXT"},
+                {"scope": "project", "path": "project.md", "sha256": "c", "text": "PROJECT_RULE_TEXT"},
+            ], "project duplicate")),
+            "snapshot": {"repo_head": "dedupe"},
+            "budget_used": 0,
+        },
+    )
+    rendered = assembler.assemble(packet, "codex")
+    _check("exact repeated rules render once", rendered.count("DUPLICATE_RULE_TEXT") == 1, rendered)
+    _check("distinct rules still render", "PROJECT_RULE_TEXT" in rendered, rendered)
+
+    old_root = os.environ.get("ORCH_IDENTITY_ROOT")
+    old_companions = os.environ.get("ORCH_COMPANION_SESSIONS")
+    try:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            companion_dir = root / "companion"
+            companion_dir.mkdir()
+            (companion_dir / "a.md").write_text("DUPLICATE_IDENTITY_BODY\n", encoding="utf-8")
+            (companion_dir / "b.md").write_text("DUPLICATE_IDENTITY_BODY\n", encoding="utf-8")
+            os.environ["ORCH_IDENTITY_ROOT"] = str(root)
+            os.environ.pop("ORCH_COMPANION_SESSIONS", None)
+            context = _select_empty_context("taey", "claude")
+            identity = context.get("identity") or {}
+            rendered = assembler.assemble(assembler.build_packet("taey", context), "claude", budget_bytes=200000)
+    finally:
+        if old_root is None:
+            os.environ.pop("ORCH_IDENTITY_ROOT", None)
+        else:
+            os.environ["ORCH_IDENTITY_ROOT"] = old_root
+        if old_companions is None:
+            os.environ.pop("ORCH_COMPANION_SESSIONS", None)
+        else:
+            os.environ["ORCH_COMPANION_SESSIONS"] = old_companions
+
+    _check("exact repeated identity body renders once", rendered.count("DUPLICATE_IDENTITY_BODY") == 1, rendered)
+    _check("identity provenance keeps both file fingerprints", len(identity.get("files") or []) == 2, identity)
 
 
 def _empty_work_context_contract() -> None:
@@ -923,6 +996,7 @@ def main() -> int:
     _untrusted_envelope_contract()
     _context_selection_error_contract()
     _required_context_never_truncated_contract()
+    _rules_and_identity_dedupe_contract()
     _empty_work_context_contract()
     _memory_traversal_contract()
     if FAILURES:

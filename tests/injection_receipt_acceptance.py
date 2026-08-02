@@ -145,7 +145,8 @@ def _dispatch_metadata_contract() -> None:
     _check("dispatch metadata carries expected injection receipt", meta.get("injection_receipt", {}).get("line") == "loaded refs: voice_guide,plans/step.md:L7-L9,extra", meta)
     _check(
         "dispatch metadata carries pre-assembly proof capsule",
-        "## Proof Capsule" in rendered
+        "## Proof Capsule" not in rendered
+        and "proof_capsule_sha256:" in rendered
         and str(meta.get("world_id") or "").startswith("world:")
         and meta.get("proof_capsule", {}).get("causal_event_ids", [None])[0] == "event:dispatch-claimed"
         and str(meta.get("world_manifest_event_id") or "").startswith("event:")

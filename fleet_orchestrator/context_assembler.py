@@ -35,9 +35,10 @@ from fleet_orchestrator.world_manifest import build_world_manifest_v0
 
 
 LOG = logging.getLogger(__name__)
-CORE_BUDGET_BYTES = 15 * 1024
+CORE_BUDGET_BYTES = 8 * 1024
 DEFAULT_MAX_MEMORY = 4
 DEFAULT_MAX_REFS_PER_TIER = 5
+TASK_REF_CONTENT_BUDGET_BYTES = 2300
 MEMORY_BASE = Path.home() / ".claude" / "projects"
 RULES_STORE_ABSENT_LINE = "- no rules store configured - add rules/global.md or set ORCH_RULES_ROOT; see rules/README.md"
 UNTRUSTED_NONCE_FIELD = "untrusted_data_nonce"
@@ -59,6 +60,12 @@ TRUSTED_IDENTITY_PREAMBLE = (
 )
 PROOF_CAPSULE_SCHEMA_VERSION = 0
 PROOF_UNKNOWN = "Unknown"
+REF_TRUNCATED_MARKER = (
+    "[truncated: ref content exceeded wake packet ref byte budget; open the source path for full text]"
+)
+REF_OMITTED_MARKER = (
+    "[omitted: wake packet ref byte budget exhausted; open the source path for full text]"
+)
 ENGINEERING_IDENTITY_CORE = "\n".join([
     "role: engineering",
     "- Operate as a scoped implementation or review agent for the local operator.",
@@ -236,12 +243,17 @@ def assemble(packet: Dict[str, Any], cli: str, budget_bytes: int = CORE_BUDGET_B
 
     trimmed = _trim_packet(normalized, cli_key, budget_bytes, max_refs_per_tier)
     _packet_with_provenance(trimmed, cli_key, max_refs_per_tier)
-    trimmed["context"]["budget_used"] = _estimate_tokens(
-        _render_packet(trimmed, cli_key, max_refs_per_tier=max_refs_per_tier)
-    )
+    trimmed_rendered = _render_packet(trimmed, cli_key, max_refs_per_tier=max_refs_per_tier)
+    trimmed_size = len(trimmed_rendered.encode("utf-8"))
+    trimmed["context"]["budget_used"] = _estimate_tokens(trimmed_rendered)
     packet.clear()
     packet.update(trimmed)
-    return _render_packet(trimmed, cli_key, max_refs_per_tier=max_refs_per_tier)
+    if trimmed_size > budget_bytes:
+        raise ValueError(
+            f"wake packet exceeds {budget_bytes} byte hard cap after trim-safe sections: "
+            f"{trimmed_size} bytes"
+        )
+    return trimmed_rendered
 
 
 def build_packet(session: str, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -1083,7 +1095,7 @@ def _select_rules(session: str, work: Dict[str, Any], summary: Optional[Dict[str
             effective_root,
         )
     rules = get_rules(session, project=str(project) if project else None, rules_root=rules_root)
-    return {"rules": _rank_rules(rules, task_text), "meta": meta}
+    return {"rules": _dedupe_rules(_rank_rules(rules, task_text)), "meta": meta}
 
 
 def _rules_store_meta(root: Path, configured: bool) -> Dict[str, Any]:
@@ -1188,13 +1200,17 @@ def _companion_identity() -> Dict[str, Any]:
 
     parts: List[str] = []
     files: List[Dict[str, Any]] = []
+    seen_content_hashes: set[str] = set()
     for path in paths:
         text = _read_text(path)
         stat = path.stat()
-        parts.append(f"# Source: {path.name}\n{text.strip()}")
+        content_hash = _sha256_text(text)
+        if content_hash not in seen_content_hashes:
+            seen_content_hashes.add(content_hash)
+            parts.append(f"# Source: {path.name}\n{text.strip()}")
         files.append({
             "path": str(path),
-            "sha256": _sha256_text(text),
+            "sha256": content_hash,
             "mtime_ns": stat.st_mtime_ns,
             "size": stat.st_size,
         })
@@ -1359,6 +1375,25 @@ def _rank_rules(rules: List[Dict[str, Any]], task_text: str) -> List[Dict[str, A
     return [row[3] for row in scored]
 
 
+def _dedupe_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    selected: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for rule in rules:
+        text = str(rule.get("text") or "").strip()
+        sha = str(rule.get("sha256") or "").strip()
+        key = f"text:{_sha256_text(text)}" if text else f"sha:{sha}"
+        if not text and not sha:
+            key = _sha256_json({
+                "scope": rule.get("scope", ""),
+                "path": rule.get("path", ""),
+            })
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(rule)
+    return selected
+
+
 def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> str:
     nonce = _ensure_untrusted_nonce(packet)
     heading = {
@@ -1380,9 +1415,7 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
         f"- generated_at_commit: {packet.get('generated_at_commit', '')}",
         f"- provenance_hash: {packet.get('provenance_hash', '')}",
         f"- {UNTRUSTED_NONCE_FIELD}: {nonce}",
-        "",
-        "## Proof Capsule",
-        _canonical_json(packet.get("proof_capsule") or {}),
+        *_render_proof_capsule_receipt(packet),
         "",
         "## Operating",
     ]
@@ -1396,8 +1429,15 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
         "",
         "## Context Refs",
     ])
-    for tier in ("overall", "supervisor", "project", "phase", "task"):
-        lines.extend(_render_refs(tier, context.get(f"{tier}_refs") or [], max_refs_per_tier, nonce))
+    lines.extend(
+        _render_refs(
+            "task",
+            context.get("task_refs") or [],
+            max_refs_per_tier,
+            nonce,
+            content_budget_bytes=TASK_REF_CONTENT_BUDGET_BYTES,
+        )
+    )
     lines.extend(["", "## Memory"])
     for idx, item in enumerate(context.get("memory") or [], start=1):
         lines.append(f"### Memory item {idx}")
@@ -1440,6 +1480,20 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
         "",
     ])
     return "\n".join(lines)
+
+
+def _render_proof_capsule_receipt(packet: Dict[str, Any]) -> List[str]:
+    capsule = packet.get("proof_capsule")
+    if not isinstance(capsule, dict) or not capsule:
+        return []
+    lines = [f"- proof_capsule_sha256: {_sha256_json(capsule)}"]
+    world_id = _proof_value(capsule.get("world_id"))
+    if world_id != PROOF_UNKNOWN:
+        lines.append(f"- proof_capsule_world_id: {world_id}")
+    causal_event_ids = _proof_string_list(capsule.get("causal_event_ids"))
+    if causal_event_ids:
+        lines.append(f"- proof_capsule_causal_events: {','.join(causal_event_ids[:8])}")
+    return lines
 
 
 def _render_operating_section(
@@ -1668,10 +1722,17 @@ def _rendered_sections(ref: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
-def _render_refs(tier: str, refs: List[Dict[str, Any]], max_refs: int, nonce: str) -> List[str]:
+def _render_refs(
+    tier: str,
+    refs: List[Dict[str, Any]],
+    max_refs: int,
+    nonce: str,
+    content_budget_bytes: Optional[int] = None,
+) -> List[str]:
     lines = [f"### {tier}"]
     if not refs:
         return lines + ["- none"]
+    remaining_content_bytes = content_budget_bytes
     for idx, ref in enumerate(refs[:max_refs], start=1):
         lines.append(f"- ref {idx}")
         lines.extend(_render_untrusted(nonce, f"ref:{tier}:{idx}:path", ref.get("path", "")))
@@ -1682,11 +1743,32 @@ def _render_refs(tier: str, refs: List[Dict[str, Any]], max_refs: int, nonce: st
             lines.extend(_render_untrusted(nonce, f"ref:{tier}:{idx}:warning", warning))
         content = ref.get("content")
         if content:
-            lines.extend(_render_untrusted(nonce, f"ref:{tier}:{idx}:content", content))
+            value, used = _budget_ref_text(content, remaining_content_bytes)
+            lines.extend(_render_untrusted(nonce, f"ref:{tier}:{idx}:content", value))
+            if remaining_content_bytes is not None:
+                remaining_content_bytes = max(0, remaining_content_bytes - used)
         for section in _rendered_sections(ref):
             lines.append(f"  lines {section.get('l_start')}-{section.get('l_end')}:")
-            lines.extend(_render_untrusted(nonce, f"ref:{tier}:{idx}:section", section["content"]))
+            value, used = _budget_ref_text(section["content"], remaining_content_bytes)
+            lines.extend(_render_untrusted(nonce, f"ref:{tier}:{idx}:section", value))
+            if remaining_content_bytes is not None:
+                remaining_content_bytes = max(0, remaining_content_bytes - used)
     return lines
+
+
+def _budget_ref_text(value: Any, remaining_bytes: Optional[int]) -> Tuple[str, int]:
+    text = str(value).strip()
+    raw = text.encode("utf-8")
+    if remaining_bytes is None or len(raw) <= remaining_bytes:
+        return text, len(raw)
+    if remaining_bytes <= 0:
+        return REF_OMITTED_MARKER, 0
+    suffix = "\n\n" + REF_TRUNCATED_MARKER
+    suffix_bytes = suffix.encode("utf-8")
+    if remaining_bytes <= len(suffix_bytes):
+        return REF_OMITTED_MARKER, remaining_bytes
+    prefix = raw[: remaining_bytes - len(suffix_bytes)].decode("utf-8", errors="ignore").rstrip()
+    return f"{prefix}{suffix}", remaining_bytes
 
 
 def _render_kb_context(items: List[Dict[str, Any]], nonce: str) -> List[str]:
