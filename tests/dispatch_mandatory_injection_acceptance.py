@@ -61,11 +61,17 @@ def _dispatch_body(*, worker: str, supervisor: str, prompt_body: str | None,
     task_id = f"{project_id}::{worker}"
     description = f"{worker} direct dispatch"
     captured: list[list[str]] = []
+    captured_bodies: list[str] = []
+    body_file_paths: list[Path] = []
 
     def fake_run(args: list[str], **_kwargs: object) -> SimpleNamespace:
         if args and args[0] == "git":
             return SimpleNamespace(returncode=0, stderr="", stdout="test-head\n")
         captured.append(args)
+        if "--body-file" in args:
+            body_path = Path(args[args.index("--body-file") + 1])
+            body_file_paths.append(body_path)
+            captured_bodies.append(body_path.read_text(encoding="utf-8"))
         return SimpleNamespace(returncode=0, stderr="", stdout="")
 
     with tempfile.TemporaryDirectory(prefix="dispatch-mandatory-injection-") as raw:
@@ -157,7 +163,14 @@ def _dispatch_body(*, worker: str, supervisor: str, prompt_body: str | None,
                 os.environ["ORCH_SESSION_ROOTS"] = old_roots
 
     _check(f"{worker}: notify called once", len(captured) == 1, captured)
-    return captured[0][2] if captured else ""
+    notify_args = captured[0] if captured else []
+    _check(f"{worker}: notify uses body file transport", "--body-file" in notify_args, notify_args)
+    _check(
+        f"{worker}: notify temp body file cleaned",
+        bool(body_file_paths) and not body_file_paths[0].exists(),
+        body_file_paths[0] if body_file_paths else "",
+    )
+    return captured_bodies[0] if captured_bodies else ""
 
 
 def _assert_mandatory_packet(label: str, body: str, expected_dispatch_text: str) -> None:
@@ -204,10 +217,25 @@ def _adhoc_no_neo_contract() -> None:
     _check("ad-hoc no-Neo4j dispatch carries visible context warning", "context_warning" in body and "neo unavailable" in body, body)
 
 
+def _oversized_dispatch_packet_contract() -> None:
+    oversized_body = "OVERSIZED_DISPATCH_BODY:" + ("A" * 140000)
+    body = _dispatch_body(
+        worker="oversized-codex",
+        supervisor="supervisor",
+        prompt_body=oversized_body,
+        endpoint_enabled="0",
+    )
+    _check("oversized dispatch packet: notify body is the rendered packet", body.startswith("# AGENTS.md Dynamic Context"), body[:200])
+    _check("oversized dispatch packet: exceeds single-argv limit", len(body.encode("utf-8")) > 131072, len(body.encode("utf-8")))
+    _check("oversized dispatch packet: dispatch prompt preserved inside packet", oversized_body in body, len(body))
+    _check("oversized dispatch packet: record_outcome footer preserved", "record_outcome" in body, len(body))
+
+
 def main() -> int:
     _direct_dispatch_no_endpoint_contract()
     _hooked_session_contract()
     _adhoc_no_neo_contract()
+    _oversized_dispatch_packet_contract()
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
         return 1
