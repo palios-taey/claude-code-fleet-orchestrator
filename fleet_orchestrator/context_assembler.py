@@ -39,6 +39,7 @@ CORE_BUDGET_BYTES = 8 * 1024
 DEFAULT_MAX_MEMORY = 4
 DEFAULT_MAX_REFS_PER_TIER = 5
 TASK_REF_CONTENT_BUDGET_BYTES = 2300
+RULE_TEXT_BUDGET_BYTES = 2400
 MEMORY_BASE = Path.home() / ".claude" / "projects"
 RULES_STORE_ABSENT_LINE = "- no rules store configured - add rules/global.md or set ORCH_RULES_ROOT; see rules/README.md"
 UNTRUSTED_NONCE_FIELD = "untrusted_data_nonce"
@@ -65,6 +66,12 @@ REF_TRUNCATED_MARKER = (
 )
 REF_OMITTED_MARKER = (
     "[omitted: wake packet ref byte budget exhausted; open the source path for full text]"
+)
+RULE_TRUNCATED_MARKER = (
+    "[truncated: rule content exceeded wake packet rule byte budget; open the rule source path for full text]"
+)
+RULE_OMITTED_MARKER = (
+    "[omitted: wake packet rule byte budget exhausted; open the rule source path for full text]"
 )
 ENGINEERING_IDENTITY_CORE = "\n".join([
     "role: engineering",
@@ -251,7 +258,8 @@ def assemble(packet: Dict[str, Any], cli: str, budget_bytes: int = CORE_BUDGET_B
     if trimmed_size > budget_bytes:
         raise ValueError(
             f"wake packet exceeds {budget_bytes} byte hard cap after trim-safe sections: "
-            f"{trimmed_size} bytes"
+            f"{trimmed_size} bytes. If task description or dispatch body carries payload, "
+            "move-payload-to-file-and-ref, then keep task text to the pointer."
         )
     return trimmed_rendered
 
@@ -1456,10 +1464,16 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
         lines.extend(_render_kb_context(kb_context, nonce))
     lines.extend(["", "## Rules"])
     rules = context.get("rules") or []
+    remaining_rule_bytes: Optional[int] = RULE_TEXT_BUDGET_BYTES
     for idx, rule in enumerate(rules, start=1):
         lines.append(f"### Rule {idx}")
         lines.extend(_render_untrusted(nonce, f"rule:{idx}:scope", rule.get("scope", "project")))
-        lines.extend(_render_untrusted(nonce, f"rule:{idx}:text", rule.get("text", "")))
+        if rule.get("path"):
+            lines.extend(_render_untrusted(nonce, f"rule:{idx}:path", rule.get("path", "")))
+        value, used = _budget_rule_text(rule.get("text", ""), remaining_rule_bytes)
+        lines.extend(_render_untrusted(nonce, f"rule:{idx}:text", value))
+        if remaining_rule_bytes is not None:
+            remaining_rule_bytes = max(0, remaining_rule_bytes - used)
         lines.append("")
     if not rules:
         rules_meta = context.get("rules_meta") or {}
@@ -1757,16 +1771,29 @@ def _render_refs(
 
 
 def _budget_ref_text(value: Any, remaining_bytes: Optional[int]) -> Tuple[str, int]:
+    return _budget_text(value, remaining_bytes, REF_TRUNCATED_MARKER, REF_OMITTED_MARKER)
+
+
+def _budget_rule_text(value: Any, remaining_bytes: Optional[int]) -> Tuple[str, int]:
+    return _budget_text(value, remaining_bytes, RULE_TRUNCATED_MARKER, RULE_OMITTED_MARKER)
+
+
+def _budget_text(
+    value: Any,
+    remaining_bytes: Optional[int],
+    truncated_marker: str,
+    omitted_marker: str,
+) -> Tuple[str, int]:
     text = str(value).strip()
     raw = text.encode("utf-8")
     if remaining_bytes is None or len(raw) <= remaining_bytes:
         return text, len(raw)
     if remaining_bytes <= 0:
-        return REF_OMITTED_MARKER, 0
-    suffix = "\n\n" + REF_TRUNCATED_MARKER
+        return omitted_marker, 0
+    suffix = "\n\n" + truncated_marker
     suffix_bytes = suffix.encode("utf-8")
     if remaining_bytes <= len(suffix_bytes):
-        return REF_OMITTED_MARKER, remaining_bytes
+        return omitted_marker, remaining_bytes
     prefix = raw[: remaining_bytes - len(suffix_bytes)].decode("utf-8", errors="ignore").rstrip()
     return f"{prefix}{suffix}", remaining_bytes
 

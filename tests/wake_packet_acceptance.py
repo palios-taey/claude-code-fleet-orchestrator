@@ -836,16 +836,67 @@ def _required_context_never_truncated_contract() -> None:
     _check("default packet budget is 8 KiB", assembler.CORE_BUDGET_BYTES == 8 * 1024, assembler.CORE_BUDGET_BYTES)
     _check(
         "oversized required refs fail loud under the hard cap",
-        "wake packet exceeds 8192 byte hard cap" in error,
+        "wake packet exceeds 8192 byte hard cap" in error
+        and "move-payload-to-file-and-ref" in error,
         error,
     )
     _check("low-ranked memory was dropped whole", packet["context"].get("memory") == [], packet["context"].get("memory"))
     _check("memory content is absent from rendered packet", "MEMORY_CONTENT_SHOULD_DROP" not in rendered, rendered)
     _check("task ref content is visibly budgeted", assembler.REF_TRUNCATED_MARKER in rendered, rendered)
     _check("later task refs are omitted when ref byte budget is exhausted", assembler.REF_OMITTED_MARKER in rendered, rendered)
-    _check("required rules render whole", rule in rendered and "RULE_END" in rendered, "rule missing")
+    _check("oversized rules are visibly budgeted", assembler.RULE_TRUNCATED_MARKER in rendered and "RULE_END" not in rendered, rendered)
     _check("required identity renders whole", identity in rendered and "IDENTITY_END" in rendered, "identity missing")
     _check("required context can still render under explicit larger budget", report["under_budget"] is True, report)
+
+
+def _rules_tier_budget_contract() -> None:
+    rule = "RULE_START\n" + ("R" * 9000) + "\nRULE_END"
+    packet = {
+        "packet_id": "packet-large-rule-budget",
+        "generated_for": "taeys-hands-codex",
+        "generated_at_commit": "test",
+        "provenance_hash": "",
+        "context": {
+            "overall_refs": [],
+            "supervisor_refs": [],
+            "project_refs": [],
+            "phase_refs": [],
+            "task_refs": [],
+            "identity": {
+                "role": "engineering",
+                "mode": "lean_role_core",
+                "source": "acceptance",
+                "content": "identity",
+            },
+            "memory": [
+                {
+                    "name": "LOW_RANKED_MEMORY",
+                    "type": "reference",
+                    "content": "MEMORY_CONTENT_SHOULD_DROP\n" + ("M" * 5000),
+                }
+            ],
+            "rules": [{"scope": "supervisor", "path": "/rules/supervisor.md", "text": rule}],
+            "budget_used": 0,
+        },
+        "cycle": {},
+        "human": {
+            "replies_since_last": [
+                {
+                    "type": "dispatch",
+                    "body": "small dispatch body",
+                }
+            ]
+        },
+        "stop": {},
+    }
+
+    rendered = assembler.assemble(packet, "codex", budget_bytes=assembler.CORE_BUDGET_BYTES)
+    report = assembler.size_report(rendered, packet)
+
+    _check("rule-heavy packet stays under hard cap after rule budget", report["under_budget"] is True, report)
+    _check("rule source path remains visible when text is truncated", "/rules/supervisor.md" in rendered, rendered)
+    _check("oversized rule text is visibly truncated", assembler.RULE_TRUNCATED_MARKER in rendered and "RULE_END" not in rendered, rendered)
+    _check("memory still yields before required sections", "MEMORY_CONTENT_SHOULD_DROP" not in rendered, rendered)
 
 
 def _rules_and_identity_dedupe_contract() -> None:
@@ -996,6 +1047,7 @@ def main() -> int:
     _untrusted_envelope_contract()
     _context_selection_error_contract()
     _required_context_never_truncated_contract()
+    _rules_tier_budget_contract()
     _rules_and_identity_dedupe_contract()
     _empty_work_context_contract()
     _memory_traversal_contract()
