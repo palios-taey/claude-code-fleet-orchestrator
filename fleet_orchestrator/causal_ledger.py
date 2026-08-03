@@ -32,6 +32,7 @@ CAUSAL_EVENT_TYPES = frozenset(
         "ledger_checkpoint",
         "external_witness_anchor",
         "world_manifest_published",
+        "consult_completed",
     }
 )
 
@@ -42,6 +43,8 @@ _HEADER = (
 _GENESIS = "0" * 64
 _GENESIS_LEDGER_ROOT = f"sha256:{_GENESIS}"
 _REPORTED_SHA_MARKER_RE = re.compile(r"(?<![A-Za-z0-9_])sha=([0-9a-fA-F]{40})(?![A-Za-z0-9_])")
+_EVENT_ID_RE = re.compile(r"\Aevent:[0-9a-f]{64}\Z")
+_SHA256_OID_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 
 
 def _ledger_path(path: Optional[str] = None) -> str:
@@ -75,6 +78,14 @@ def _row_hash(prev_row_hash: str, event: Mapping[str, Any], ts_str: str) -> str:
         }
     )
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def sha256_oid_is_well_formed(value: Any) -> bool:
+    return isinstance(value, str) and bool(_SHA256_OID_RE.fullmatch(value.strip()))
+
+
+def event_id_is_well_formed(value: Any) -> bool:
+    return isinstance(value, str) and bool(_EVENT_ID_RE.fullmatch(value.strip()))
 
 
 def _scan_last_hash(f=None, path: Optional[str] = None) -> str:
@@ -178,6 +189,33 @@ def _ts_str(ts: Optional[float]) -> str:
     return repr(float(ts) if ts is not None else time.time())
 
 
+def _find_existing_event_locked(
+    f,
+    *,
+    event_type: str,
+    idempotency_key: Mapping[str, Any],
+) -> Optional[dict[str, Any]]:
+    f.seek(0)
+    for line_no, raw in enumerate(f, 1):
+        line = raw.rstrip("\n")
+        if line_no == 1 and line.startswith("#"):
+            continue
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if not isinstance(row, Mapping):
+            continue
+        event = row.get("event")
+        if not isinstance(event, Mapping) or event.get("event_type") != event_type:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        if all(payload.get(key) == value for key, value in idempotency_key.items()):
+            return dict(row)
+    return None
+
+
 def append_event(
     event_type: str,
     *,
@@ -191,6 +229,7 @@ def append_event(
     payload_hash: Optional[str] = None,
     ts: Optional[float] = None,
     path: Optional[str] = None,
+    idempotency_key: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Append one validated causal event and return the written JSONL row."""
     if event_type not in CAUSAL_EVENT_TYPES:
@@ -225,6 +264,14 @@ def append_event(
             if os.fstat(f.fileno()).st_size == 0:
                 f.write(_HEADER + "\n")
                 f.flush()
+            if idempotency_key:
+                existing = _find_existing_event_locked(
+                    f,
+                    event_type=event_type,
+                    idempotency_key=_require_mapping("idempotency_key", idempotency_key),
+                )
+                if existing is not None:
+                    return existing
             prev = _scan_last_hash(f)
             row: dict[str, Any] = {
                 "ts": event_ts,
@@ -238,6 +285,108 @@ def append_event(
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     return row
+
+
+def build_consult_actor_attestation(
+    *,
+    source_family_id: str,
+    request_oid: str,
+    rendered_prompt_oid: str,
+    response_oid: str,
+    platform: str,
+    seat_role: str,
+    requester: str,
+    session_url: str,
+    parents: Optional[Sequence[Any]] = None,
+    ts: Optional[float] = None,
+) -> dict[str, Any]:
+    issued_at = _ts_str(ts)
+    body: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "issued_at": issued_at,
+        "issued_by": "orchestrator-runtime",
+        "actor_id": "taeys-hands",
+        "source_seat": "taeys-hands",
+        "source_family_id": source_family_id,
+        "request_oid": request_oid,
+        "rendered_prompt_oid": rendered_prompt_oid,
+        "response_oid": response_oid,
+        "platform": platform,
+        "seat_role": seat_role,
+        "requester": requester,
+        "session_url": session_url,
+        "parents": _string_list("parents", parents),
+        "runtime": {
+            "kind": "orchestrator",
+            "identity_issuer": "orchestrator-runtime",
+            "source_seat": "taeys-hands",
+        },
+        "identity_source": "orchestrator receive-side attests taeys-hands consult completion; caller identity is not reused",
+    }
+    attestation_id = f"attestation:{_typed_hash('actor_attestation', body)}"
+    return {"attestation_id": attestation_id, **body}
+
+
+def append_consult_completed_event(
+    *,
+    source_family_id: str,
+    request_oid: str,
+    rendered_prompt_oid: str,
+    response_oid: str,
+    platform: str,
+    seat_role: str,
+    requester: str,
+    session_url: str,
+    parents: Optional[Sequence[Any]] = None,
+    path: Optional[str] = None,
+    ts: Optional[float] = None,
+) -> dict[str, Any]:
+    attestation = build_consult_actor_attestation(
+        source_family_id=source_family_id,
+        request_oid=request_oid,
+        rendered_prompt_oid=rendered_prompt_oid,
+        response_oid=response_oid,
+        platform=platform,
+        seat_role=seat_role,
+        requester=requester,
+        session_url=session_url,
+        parents=parents,
+        ts=ts,
+    )
+    row = append_event(
+        "consult_completed",
+        subject={
+            "source_seat": "taeys-hands",
+            "source_family_id": source_family_id,
+            "request_oid": request_oid,
+            "platform": platform,
+            "seat_role": seat_role,
+        },
+        parents=parents,
+        actor_attestation_id=str(attestation["attestation_id"]),
+        authority_roots=[request_oid, rendered_prompt_oid, response_oid],
+        payload={
+            "source_seat": "taeys-hands",
+            "source_family_id": source_family_id,
+            "request_oid": request_oid,
+            "rendered_prompt_oid": rendered_prompt_oid,
+            "response_oid": response_oid,
+            "platform": platform,
+            "seat_role": seat_role,
+            "requester": requester,
+            "session_url": session_url,
+            "attestation": attestation,
+        },
+        path=path,
+        ts=ts,
+        idempotency_key={"request_oid": request_oid},
+    )
+    return {
+        "row": row,
+        "event_id": str(row["event"]["event_id"]),
+        "attestation_id": str(row["event"]["actor_attestation_id"]),
+        "row_hash": str(row["row_hash"]),
+    }
 
 
 def verify_chain(path: Optional[str] = None) -> dict[str, Any]:

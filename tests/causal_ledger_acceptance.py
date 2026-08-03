@@ -48,6 +48,7 @@ def main() -> int:
         "ledger_checkpoint",
         "external_witness_anchor",
         "world_manifest_published",
+        "consult_completed",
     ]
     _check("all slice event types are registered", set(event_types) == set(CAUSAL_EVENT_TYPES), CAUSAL_EVENT_TYPES)
     with tempfile.TemporaryDirectory(prefix="causal-ledger-") as raw:
