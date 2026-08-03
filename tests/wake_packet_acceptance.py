@@ -675,7 +675,12 @@ def _identity_section_contract() -> None:
 
             companion_context = _select_empty_context("taey", "claude")
             companion_packet = assembler.build_packet("taey", companion_context)
-            companion_rendered = assembler.assemble(companion_packet, "claude", budget_bytes=200000)
+            companion_rendered = assembler.assemble(companion_packet, "claude")
+
+            companion_identity = companion_context.get("identity") or {}
+            companion_pointer = str((companion_identity.get("files") or [{}])[0].get("path") or "")
+            dereferenced_path = Path(os.path.expandvars(companion_pointer))
+            dereferenced_sha256 = assembler._sha256_text(dereferenced_path.read_text(encoding="utf-8"))
     finally:
         if old_root is None:
             os.environ.pop("ORCH_IDENTITY_ROOT", None)
@@ -687,7 +692,6 @@ def _identity_section_contract() -> None:
             os.environ["ORCH_COMPANION_SESSIONS"] = old_companions
 
     engineering_identity = engineering_context.get("identity") or {}
-    companion_identity = companion_context.get("identity") or {}
     companion_snapshot = companion_packet.get("snapshot") or {}
     companion_files = companion_snapshot.get("identity_files") or []
 
@@ -695,8 +699,37 @@ def _identity_section_contract() -> None:
     _check("engineering packet renders Identity tier", "## Identity" in engineering_rendered and "- role: engineering" in engineering_rendered, engineering_rendered)
     _check("engineering packet does not include full companion body", "FULL_COMPANION_IDENTITY_BODY" not in engineering_rendered, engineering_rendered)
 
-    _check("companion sessions get full identity mode", companion_identity.get("role") == "companion" and companion_identity.get("mode") == "full_identity", companion_identity)
-    _check("companion packet renders full configured identity", "FULL_COMPANION_IDENTITY_BODY" in companion_rendered and "<<TRUSTED-IDENTITY " in companion_rendered, companion_rendered)
+    _check(
+        "companion sessions get bounded runtime identity mode",
+        companion_identity.get("role") == "companion"
+        and companion_identity.get("mode") == "bounded_runtime_core",
+        companion_identity,
+    )
+    _check(
+        "companion packet renders bounded core without full configured body",
+        assembler.COMPANION_IDENTITY_CORE in companion_rendered
+        and "FULL_COMPANION_IDENTITY_BODY" not in companion_rendered
+        and "<<TRUSTED-IDENTITY " in companion_rendered
+        and len(companion_rendered.encode("utf-8")) <= assembler.CORE_BUDGET_BYTES,
+        companion_rendered,
+    )
+    _check(
+        "companion packet renders known-root-relative identity pointer and aggregate hash",
+        "- source_root: ${ORCH_IDENTITY_ROOT}" in companion_rendered
+        and "- full_identity_file: ${ORCH_IDENTITY_ROOT}/companion.md" in companion_rendered
+        and "- full_identity_sha256:" in companion_rendered,
+        companion_rendered,
+    )
+    _check(
+        "known-root-relative identity pointer dereferences with matching hash",
+        dereferenced_path == root / "companion.md"
+        and dereferenced_sha256 == companion_files[0].get("sha256"),
+        {
+            "pointer": companion_pointer,
+            "dereferenced_path": str(dereferenced_path),
+            "sha256": dereferenced_sha256,
+        },
+    )
     _check("snapshot carries identity file fingerprint", bool(companion_files) and companion_files[0].get("sha256") == assembler._sha256_text(companion_text), companion_snapshot)
 
     nonce = companion_packet.get(assembler.UNTRUSTED_NONCE_FIELD, "")
@@ -952,7 +985,14 @@ def _rules_and_identity_dedupe_contract() -> None:
         else:
             os.environ["ORCH_COMPANION_SESSIONS"] = old_companions
 
-    _check("exact repeated identity body renders once", rendered.count("DUPLICATE_IDENTITY_BODY") == 1, rendered)
+    deduped_full_identity = "# Source: a.md\nDUPLICATE_IDENTITY_BODY"
+    _check(
+        "exact repeated full identity body is hash-bound once and not rendered inline",
+        rendered.count("DUPLICATE_IDENTITY_BODY") == 0
+        and identity.get("full_identity_size") == len(deduped_full_identity.encode("utf-8"))
+        and identity.get("full_identity_sha256") == assembler._sha256_text(deduped_full_identity),
+        identity,
+    )
     _check("identity provenance keeps both file fingerprints", len(identity.get("files") or []) == 2, identity)
 
 

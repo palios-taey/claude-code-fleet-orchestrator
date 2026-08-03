@@ -48,7 +48,7 @@ Every wake packet renders `## Identity` after `## Operating` and before `## Cont
 - Engineering sessions receive a built-in lean role core: scoped implementation/review posture, evidence discipline, verification discipline, and reporting requirements.
 - Companion sessions receive a bounded companion runtime core plus hash-bound pointers to the full operator-supplied identity when `ORCH_IDENTITY_ROOT` is configured. The default companion ids are `taey` and `companion`; override with `ORCH_COMPANION_SESSIONS`.
 - CLI peer sessions ending in `-codex`, `-gemini`, or `-grok` always receive engineering identity, even when the normalized session name is listed as a companion.
-- The bounded companion runtime core is rendered in a nonce-scoped `<<TRUSTED-IDENTITY ...>>` block. Full companion identity files remain authoritative operator input; their path, size, mtime, and sha256 are recorded in the packet snapshot and their hash-bound pointers are rendered for task-scoped retrieval.
+- The bounded companion runtime core is rendered in a nonce-scoped `<<TRUSTED-IDENTITY ...>>` block. Full companion identity files remain authoritative operator input; their known-root-relative `${ORCH_IDENTITY_ROOT}/...` path, size, mtime, and sha256 are recorded in the packet snapshot and rendered for task-scoped retrieval. The serving runtime dereferences each pointer against the same configured identity root used to assemble the packet, so packets never expose assembler-host absolute paths.
 
 Supported `ORCH_IDENTITY_ROOT` layouts are:
 
