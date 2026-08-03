@@ -57,6 +57,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -987,7 +988,7 @@ def dispatch(
     5. Assemble a wake packet for ``worker`` and ``task_id``. The original
        dispatch body is embedded in the packet's Human section, so direct
        dispatch still receives rules and context.
-    6. Inject that rendered packet by invoking ``taey-notify <worker> <body>``,
+    6. Inject that rendered packet by invoking ``taey-notify <worker> --body-file <path>``,
        which the released fleet-notify daemon will pick up and deliver
        via tmux as soon as the worker is idle.
 
@@ -1146,27 +1147,45 @@ def dispatch(
     mark_superseded_for_task(_redis_connect(), from_session, task_id)
 
     cli = notify_cli()
-    result = subprocess.run(
-        [
-            cli,
-            worker,
-            prompt_body,
-            "--from",
-            from_session,
-            "--type",
-            "command",
-            "--priority",
-            priority,
-            "--handoff",
-            "--dispatcher-task-id",
-            task_id,
-            "--actionable-inputs",
-            "{}",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    body_file_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            prefix="orch-dispatch-body-",
+            suffix=".txt",
+            delete=False,
+        ) as body_file:
+            body_file.write(prompt_body)
+            body_file_path = body_file.name
+        result = subprocess.run(
+            [
+                cli,
+                worker,
+                "--body-file",
+                body_file_path,
+                "--from",
+                from_session,
+                "--type",
+                "command",
+                "--priority",
+                priority,
+                "--handoff",
+                "--dispatcher-task-id",
+                task_id,
+                "--actionable-inputs",
+                "{}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        if body_file_path:
+            try:
+                os.unlink(body_file_path)
+            except FileNotFoundError:
+                pass
     if result.returncode != 0:
         # Wake delivery failed AFTER the claim+bind. Without this rollback the task
         # lingers as status=in_progress (a "live resolver" per _LIVE_RESOLVER_STATUSES)
