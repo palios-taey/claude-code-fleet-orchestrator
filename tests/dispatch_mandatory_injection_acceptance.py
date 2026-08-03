@@ -56,13 +56,15 @@ def _summary(project_id: str, task_id: str, description: str) -> dict:
 
 
 def _dispatch_body(*, worker: str, supervisor: str, prompt_body: str | None,
-                   endpoint_enabled: str | None, full_context: bool = True) -> str:
+                   endpoint_enabled: str | None, full_context: bool = True,
+                   expect_refusal: bool = False) -> str:
     project_id = "mandatory-injection"
     task_id = f"{project_id}::{worker}"
     description = f"{worker} direct dispatch"
     captured: list[list[str]] = []
     captured_bodies: list[str] = []
     body_file_paths: list[Path] = []
+    dispatch_error: BaseException | None = None
 
     def fake_run(args: list[str], **_kwargs: object) -> SimpleNamespace:
         if args and args[0] == "git":
@@ -137,13 +139,18 @@ def _dispatch_body(*, worker: str, supervisor: str, prompt_body: str | None,
                  mock.patch.object(assembler, "get_project_summary", return_value=_summary(project_id, task_id, description)), \
                  mock.patch.object(assembler, "get_overall_refs", return_value={"ref_context": {"refs": []}}), \
                  mock.patch.object(assembler, "get_supervisor_refs", return_value={"ref_context": {"refs": []}}):
-                dispatch_module.dispatch(
-                    worker=worker,
-                    task_id=task_id,
-                    description=description,
-                    supervisor=supervisor,
-                    prompt_body=prompt_body,
-                )
+                try:
+                    dispatch_module.dispatch(
+                        worker=worker,
+                        task_id=task_id,
+                        description=description,
+                        supervisor=supervisor,
+                        prompt_body=prompt_body,
+                    )
+                except Exception as exc:
+                    dispatch_error = exc
+                    if not expect_refusal:
+                        raise
         finally:
             if old_rules_root is None:
                 os.environ.pop("ORCH_RULES_ROOT", None)
@@ -161,6 +168,35 @@ def _dispatch_body(*, worker: str, supervisor: str, prompt_body: str | None,
                 os.environ.pop("ORCH_SESSION_ROOTS", None)
             else:
                 os.environ["ORCH_SESSION_ROOTS"] = old_roots
+
+    if expect_refusal:
+        error = str(dispatch_error or "")
+        _check(
+            f"{worker}: oversized dispatch refused before notify",
+            isinstance(dispatch_error, RuntimeError),
+            repr(dispatch_error),
+        )
+        _check(
+            f"{worker}: refusal happens at wake-packet assembly",
+            "mandatory dispatch wake-packet assembly/provenance failed" in error,
+            error,
+        )
+        _check(
+            f"{worker}: refusal cites hard cap and file-ref remedy",
+            "wake packet exceeds 8192 byte hard cap" in error
+            and "move-payload-to-file-and-ref" in error,
+            error,
+        )
+        _check(f"{worker}: notify not called after refusal", captured == [], captured)
+        _check(
+            f"{worker}: no notify body temp file created after refusal",
+            body_file_paths == [],
+            body_file_paths,
+        )
+        return error
+
+    if dispatch_error is not None:
+        raise dispatch_error
 
     _check(f"{worker}: notify called once", len(captured) == 1, captured)
     notify_args = captured[0] if captured else []
@@ -219,16 +255,20 @@ def _adhoc_no_neo_contract() -> None:
 
 def _oversized_dispatch_packet_contract() -> None:
     oversized_body = "OVERSIZED_DISPATCH_BODY:" + ("A" * 140000)
-    body = _dispatch_body(
+    # Gate-surface change: post-diet dispatch refuses giant inline payloads before
+    # notify; body-file is the delivery transport, not a wake-packet budget bypass.
+    error = _dispatch_body(
         worker="oversized-codex",
         supervisor="supervisor",
         prompt_body=oversized_body,
         endpoint_enabled="0",
+        expect_refusal=True,
     )
-    _check("oversized dispatch packet: notify body is the rendered packet", body.startswith("# AGENTS.md Dynamic Context"), body[:200])
-    _check("oversized dispatch packet: exceeds single-argv limit", len(body.encode("utf-8")) > 131072, len(body.encode("utf-8")))
-    _check("oversized dispatch packet: dispatch prompt preserved inside packet", oversized_body in body, len(body))
-    _check("oversized dispatch packet: record_outcome footer preserved", "record_outcome" in body, len(body))
+    _check(
+        "oversized dispatch packet: encodes post-diet fail-loud contract",
+        oversized_body not in error,
+        len(error),
+    )
 
 
 def main() -> int:
