@@ -42,6 +42,9 @@ def main() -> None:
             """
 import os
 
+ORCH_CONSTANT_FLAG = "ORCH_CONSTANT_FLAG"
+ORCH_CONSTANT_ALIAS_FLAG = "ORCH_CONSTANT_ALIAS_FLAG"
+
 def probe():
     os.environ.get("ORCH_CODE_FLAG")
     os.getenv("ORCH_GETENV_FLAG")
@@ -49,6 +52,7 @@ def probe():
         pass
     _require_env("ORCH_REQUIRED_FLAG")
     default_on_feature_enabled("ORCH_FEATURE_FLAG", aliases=("ORCH_ALIAS_FLAG",))
+    default_on_feature_enabled(ORCH_CONSTANT_FLAG, aliases=(ORCH_CONSTANT_ALIAS_FLAG,))
     _optional_env("ORCH_OPTIONAL_FLAG")
     _scoped_env_value(None, "ORCH_SCOPED_HELPER_FLAG")
 """,
