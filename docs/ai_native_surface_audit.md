@@ -14,8 +14,8 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 253.
-- Teaches: 121.
+- Enumerated surfaces: 259.
+- Teaches: 127.
 - Needs-fix baseline debt: 48.
 - Exempt reviewed rows: 84.
 
@@ -42,6 +42,8 @@ Summary:
 | fleet_orchestrator/cli_taey_question.py | parse_refs | cli_failure_message | 2 | 38 | 3b7ed5bf6dd6f46c | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_receipts.py | <module> | cli_failure_message | 1 | 73 | 25f0190aef36cb37 | exempt |  | Static extractor treated an exit wrapper or non-error tuple as a user-facing message; the row is not an independent runtime surface. | anbr-fix-exempt:analyzer-artifact |
 | fleet_orchestrator/cli_taey_receipts.py | _cmd_list | cli_failure_message | 1 | 43 | d599b3a9b207c556 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
+| fleet_orchestrator/cli_taey_task.py | _validate_await_marker_or_exit | cli_failure_message | 1 | 132 | 54c438bb09d0042e | teaches | taey-task | Invalid hold markers name the structured AWAIT contract and exact taey-task hold retry command. | task-b099a5fe |
+| fleet_orchestrator/cli_taey_task.py | cmd_hold | cli_failure_message | 1 | 348 | e51a7a3d3e6fbfec | teaches | taey-task | API rejection from hold tells the caller to inspect taey-task status or retry from the bound peer session. | task-b099a5fe |
 | fleet_orchestrator/cli_taey_task.py | cmd_dispatch | cli_failure_message | 1 | 135 | 252f70151008a700 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_task.py | cmd_dispatch | cli_failure_message | 2 | 141 | f1e8f1505630373a | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_task.py | cmd_dispatch | cli_failure_message | 3 | 146 | 6ffaf4faed9b64dc | teaches | taey-task | Static teaching assertion passes. | task-4332d8d5 |
@@ -116,10 +118,10 @@ Summary:
 | fleet_orchestrator/orch_schema.py | _raw_stop_decision | orch_reason_return | 4 | 2306 | d193e5d777fa6916 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/orch_schema.py | _raw_stop_decision | orch_reason_return | 5 | 2326 | d0851ceb845ab672 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/orch_schema.py | _raw_stop_decision | orch_reason_return | 6 | 2366 | 1142af1f7c16e205 | exempt |  | ALLOW_STOP state intentionally means no autonomous work remains; there is no next action for the receiving session. | anbr-fix-exempt:allow-stop-no-autonomous-action |
-| fleet_orchestrator/orch_schema.py | _raw_stop_decision | orch_reason_return | 7 | 2377 | a8b8d612516215ec | teaches | taey-task | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/orch_schema.py | _raw_stop_decision | orch_reason_return | 7 | 2481 | 63fb907f70c96262 | teaches | taey-task | Static teaching assertion passes. | task-b099a5fe |
 | fleet_orchestrator/orch_schema.py | _raw_stop_decision | orch_reason_return | 8 | 2389 | f9937e828712938a | exempt |  | ALLOW_STOP state intentionally means no autonomous work remains; there is no next action for the receiving session. | anbr-fix-exempt:allow-stop-no-autonomous-action |
 | fleet_orchestrator/orch_schema.py | _raw_stop_decision | orch_reason_return | 9 | 2398 | ed4f8b6dbb573032 | exempt |  | ALLOW_STOP state intentionally means no autonomous work remains; there is no next action for the receiving session. | anbr-fix-exempt:allow-stop-no-autonomous-action |
-| fleet_orchestrator/orch_schema.py | _raw_stop_decision | orch_reason_return | 10 | 2407 | f3fc919cae8d2260 | teaches | taey-task | Static teaching assertion passes. | task-cbfe6313 |
+| fleet_orchestrator/orch_schema.py | _raw_stop_decision | orch_reason_return | 10 | 2511 | d0d0a65389b209b8 | teaches | taey-task | Static teaching assertion passes. | task-b099a5fe |
 | fleet_orchestrator/orch_schema.py | _raw_stop_decision | orch_reason_return | 11 | 2426 | 351357a6bbb74caa | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/orch_schema.py | _raw_stop_decision | orch_reason_return | 12 | 2442 | bd3a6f4ac26fdd9b | exempt |  | ALLOW_STOP state intentionally means no autonomous work remains; there is no next action for the receiving session. | anbr-fix-exempt:allow-stop-no-autonomous-action |
 | fleet_orchestrator/orch_schema.py | _raw_stop_decision | orch_reason_return | 13 | 2457 | f9937e828712938a | exempt |  | ALLOW_STOP state intentionally means no autonomous work remains; there is no next action for the receiving session. | anbr-fix-exempt:allow-stop-no-autonomous-action |

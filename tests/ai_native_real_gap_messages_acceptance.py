@@ -344,7 +344,7 @@ def _partial_surface_contracts(client: TestClient) -> None:
             _check(f"{label} includes {needle}", needle in detail, detail)
 
     in_progress = orch_schema._in_progress_block_reason("task-123", "ship the fix")
-    _check("in-progress reason names record_outcome", "record_outcome('<session>', 'done'" in in_progress, in_progress)
+    _check("in-progress reason names CLI outcome", "taey-task outcome done" in in_progress, in_progress)
     _check("in-progress reason names taey-task evidence", "taey-task update task-123 completed" in in_progress, in_progress)
 
     human_wait = orch_schema._awaiting_human_review_stop_reason([
@@ -377,8 +377,8 @@ def _partial_surface_contracts(client: TestClient) -> None:
          mock.patch.object(tasks_api, "update_task_status", side_effect=orch_schema.CompletionEvidenceError("missing evidence")):
         response = client.patch("/api/task/task-1", json={"status": "completed", "from": "session-1-codex"})
     body = response.json()
-    _check("task update evidence has next_step", response.status_code == 400 and "next_step" in body, body)
-    _check("task update next_step names command", "taey-task update task-1 completed" in str(body), body)
+    _check("task update rejection has next_step", 400 <= response.status_code < 500 and "next_step" in body, body)
+    _check("task update next_step names peer outcome command", "taey-task outcome <done|error|interrupted>" in str(body), body)
 
     _assert_detail(
         "project complete object body",

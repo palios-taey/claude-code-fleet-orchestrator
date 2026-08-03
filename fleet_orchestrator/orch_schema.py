@@ -1425,25 +1425,40 @@ def _done_outcome_for_current_task(session_id: str, task_id: str) -> Optional[Di
         r = _fleet_state_redis()
         current_raw = r.get(_state_key(session_id, "current_task"))
         outcome_raw = r.get(_state_key(session_id, "last_outcome"))
+        receipt_raw = r.get(_state_key(session_id, "last_completion_receipt"))
     except RedisError:
         return None
-    if not current_raw or not outcome_raw:
+    if not outcome_raw:
         return None
     try:
-        current = json.loads(current_raw)
         outcome = json.loads(outcome_raw)
+        current = json.loads(current_raw) if current_raw else None
+        receipt = json.loads(receipt_raw) if receipt_raw else None
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
-    if not isinstance(current, dict) or not isinstance(outcome, dict):
+    if not isinstance(outcome, dict):
         return None
-    if str(current.get("task_id") or "").strip() != str(task_id or "").strip():
-        return None
-    dispatcher = str(current.get("dispatcher") or current.get("supervisor") or "").strip()
-    if not dispatcher or dispatcher == str(session_id or "").strip():
-        return None
+    task_value = str(task_id or "").strip()
     if str(outcome.get("outcome") or "").strip().lower() != "done":
         return None
-    if str(outcome.get("task_id") or "").strip() != str(task_id or "").strip():
+    if str(outcome.get("task_id") or "").strip() != task_value:
+        return None
+    if current_raw:
+        if not isinstance(current, dict):
+            return None
+        if str(current.get("task_id") or "").strip() != task_value:
+            return None
+        dispatcher = str(current.get("dispatcher") or current.get("supervisor") or "").strip()
+        if not dispatcher or dispatcher == str(session_id or "").strip():
+            return None
+        return outcome
+    if not isinstance(receipt, dict):
+        return None
+    if str(receipt.get("outcome") or "").strip().lower() != "done":
+        return None
+    if str(receipt.get("task_id") or "").strip() != task_value:
+        return None
+    if str(receipt.get("worker") or "").strip() != str(session_id or "").strip():
         return None
     return outcome
 
@@ -1968,7 +1983,7 @@ def _in_progress_block_reason(task_id: Optional[str], description: Optional[str]
     task_title = (description or "untitled task")[:80]
     return (
         f"Finish in-progress task {task_id_value}: {task_title}. "
-        f"If this is dispatched peer work, call record_outcome('<session>', 'done', '<summary>'); "
+        "If this is dispatched peer work, run `taey-task outcome done --details '<summary>'`; "
         f"if you own the tracker task directly, run `taey-task update {task_id_value} completed "
         "--evidence '{\"commit_sha\":\"<sha>\",\"repo\":\"OWNER/REPO\",\"production_observation\":\"<what you verified>\"}'`."
     )

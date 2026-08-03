@@ -803,17 +803,19 @@ def _default_dispatch_body(task_id: str, description: str) -> str:
 
 
 def _with_record_outcome_footer(body: str, worker: str) -> str:
-    if "record_outcome" in body:
+    if "taey-task outcome" in body:
         return body
     return body.rstrip() + (
-        "\n\n---\nWHEN DONE — call record_outcome so the supervisor knows "
-        "the result (otherwise outcome=unknown + current_task persists as "
-        "'previous dispatch unresolved'). One line via bash tool:\n\n"
-        f"python3 -c \"from fleet_orchestrator import record_outcome; "
-        f"record_outcome('{worker}', 'done', '<short outcome summary>')\"\n\n"
-        "Replace 'done' with 'error' or 'interrupted' if the task did not "
-        "complete cleanly. The '<short outcome summary>' is your one-line "
-        "report — what landed, what's at /tmp/..., what's the verdict."
+        "\n\n---\nWHEN DONE - report the outcome through the installed CLI so "
+        "the supervisor knows the result (otherwise outcome=unknown + current_task "
+        "persists as 'previous dispatch unresolved'). One line via bash tool:\n\n"
+        "taey-task outcome done --details '<short outcome summary>'\n\n"
+        "Replace 'done' with 'error' or 'interrupted' if the task did not complete "
+        "cleanly. If the task is genuinely awaiting a structured external signal, "
+        "keep it in progress with:\n\n"
+        "taey-task hold <task-id> AWAIT:external-signal:<detail>\n\n"
+        "The '<short outcome summary>' is your one-line report - what landed, "
+        "what's at /tmp/..., what's the verdict."
     )
 
 
