@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""CLI for causal-ledger checkpointing and provenance-kernel verification."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from fleet_orchestrator.causal_ledger import checkpoint_ledger  # noqa: E402
+from fleet_orchestrator.provenance_verifier import (  # noqa: E402
+    reverify_recorded_world_manifests,
+    verify_provenance_kernel_closure,
+)
+from fleet_orchestrator.provenance_witness import publish_external_witness_anchor  # noqa: E402
+
+
+def _print(value: object) -> None:
+    print(json.dumps(value, sort_keys=True, indent=2))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Provenance-kernel checkpoint and verification tools")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    checkpoint = sub.add_parser("checkpoint", help="append a causal-ledger checkpoint")
+    checkpoint.add_argument("--ledger", dest="ledger_path", default=None)
+    checkpoint.add_argument("--witness", action="store_true", help="publish an external witness anchor after checkpointing")
+    checkpoint.add_argument("--witness-path", default=None)
+    checkpoint.add_argument("--witness-principal", default=None)
+
+    verify = sub.add_parser("verify", help="verify a provenance-kernel closure claim")
+    verify.add_argument("--ledger", dest="ledger_path", default=None)
+    verify.add_argument("--event-id", action="append", required=True)
+    verify.add_argument("--actor-attestation-id", required=True)
+    verify.add_argument("--packet-id", required=True)
+    verify.add_argument("--packet-provenance-hash", required=True)
+    verify.add_argument("--no-witness-required", action="store_true")
+    verify.add_argument("--witness-waiver-reason", default=None)
+
+    reverify = sub.add_parser("reverify-manifest", help="recompute recorded World Manifest roots against the live tree")
+    reverify.add_argument("--ledger", dest="ledger_path", default=None)
+    reverify.add_argument("--manifest", dest="manifest_path", default=None)
+    reverify.add_argument("--max-age-days", type=float, default=7.0)
+
+    args = parser.parse_args()
+    if args.cmd == "checkpoint":
+        result = checkpoint_ledger(path=args.ledger_path)
+        if args.witness:
+            result["witness"] = publish_external_witness_anchor(
+                result["row"],
+                witness_path=args.witness_path,
+                principal=args.witness_principal,
+                ledger_path=args.ledger_path,
+            )
+        _print(result)
+        return 0
+    if args.cmd == "verify":
+        result = verify_provenance_kernel_closure(
+            event_ids=args.event_id,
+            actor_attestation_id=args.actor_attestation_id,
+            packet_id=args.packet_id,
+            packet_provenance_hash=args.packet_provenance_hash,
+            ledger_path=args.ledger_path,
+            require_witness=not args.no_witness_required,
+            witness_waiver_reason=args.witness_waiver_reason,
+        )
+        _print(result)
+        return 0 if result.get("ok") else 1
+    if args.cmd == "reverify-manifest":
+        result = reverify_recorded_world_manifests(
+            ledger_path=args.ledger_path,
+            manifest_path=args.manifest_path,
+            max_age_days=args.max_age_days,
+        )
+        _print(result)
+        return 0 if result.get("ok") else 1
+    parser.error("unknown command")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -55,6 +55,32 @@ def _string_value(node: ast.AST) -> str | None:
     return None
 
 
+def _module_string_constants(tree: ast.AST) -> dict[str, str]:
+    constants: dict[str, str] = {}
+    for node in getattr(tree, "body", []):
+        if isinstance(node, ast.Assign):
+            value = _string_value(node.value)
+            if value is None:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    constants[target.id] = value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            value = _string_value(node.value) if node.value is not None else None
+            if value is not None:
+                constants[node.target.id] = value
+    return constants
+
+
+def _env_name_value(node: ast.AST, constants: dict[str, str]) -> str | None:
+    value = _string_value(node)
+    if value is not None:
+        return value
+    if isinstance(node, ast.Name):
+        return constants.get(node.id)
+    return None
+
+
 def _literal_text(node: ast.AST) -> str | None:
     if not isinstance(node, ast.Constant):
         return None
@@ -85,19 +111,20 @@ def _is_os_getenv(node: ast.AST) -> bool:
 
 def _env_reads_in_tree(tree: ast.AST) -> set[str]:
     names: set[str] = set()
+    constants = _module_string_constants(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             if _is_os_getenv(node.func):
-                name = _string_value(node.args[0]) if node.args else None
+                name = _env_name_value(node.args[0], constants) if node.args else None
                 if name and _is_env_name(name):
                     names.add(name)
             if isinstance(node.func, ast.Attribute) and node.func.attr in {"get", "pop", "setdefault"} and _is_os_environ(node.func.value):
-                name = _string_value(node.args[0]) if node.args else None
+                name = _env_name_value(node.args[0], constants) if node.args else None
                 if name and _is_env_name(name):
                     names.add(name)
             if isinstance(node.func, ast.Name) and node.func.id in HELPER_ENV_READERS:
                 for item in node.args:
-                    name = _string_value(item)
+                    name = _env_name_value(item, constants)
                     if name and _is_env_name(name):
                         names.add(name)
                 for keyword in node.keywords:
@@ -105,15 +132,15 @@ def _env_reads_in_tree(tree: ast.AST) -> set[str]:
                         continue
                     values = keyword.value.elts if isinstance(keyword.value, (ast.Tuple, ast.List, ast.Set)) else []
                     for item in values:
-                        name = _string_value(item)
+                        name = _env_name_value(item, constants)
                         if name and _is_env_name(name):
                             names.add(name)
         elif isinstance(node, ast.Subscript) and _is_os_environ(node.value) and isinstance(node.ctx, ast.Load):
-            name = _string_value(node.slice)
+            name = _env_name_value(node.slice, constants)
             if name and _is_env_name(name):
                 names.add(name)
         elif isinstance(node, ast.Compare):
-            left = _string_value(node.left)
+            left = _env_name_value(node.left, constants)
             if not left or not _is_env_name(left):
                 continue
             if any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops) and any(_is_os_environ(comp) for comp in node.comparators):
