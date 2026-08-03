@@ -102,7 +102,7 @@ taey-task update <task-id> completed --evidence '{"commit_sha":"abc123","product
 Create and answer a human-review gate:
 
 ```bash
-taey-question create-gate <project-id> <task-id> "Ship this artifact?" --reviewer <session>
+taey-question create-gate <phase-id> <task-id> "Ship this artifact?" --reviewer <session>
 taey-question answer <question-id> "approved"
 ```
 
