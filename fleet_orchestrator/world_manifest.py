@@ -7,10 +7,11 @@ import os
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fleet_orchestrator.causal_ledger import UNKNOWN, append_event
+from fleet_orchestrator.causal_ledger import UNKNOWN, append_event, latest_checkpoint_root
 from fleet_orchestrator.paths import data_dir, repo_root
 
 SCHEMA_VERSION = 0
@@ -363,6 +364,7 @@ def build_world_manifest_v0(
     as_of: Optional[str] = None,
     system_map_path: Optional[str] = None,
     knowledge_index_path: Optional[str] = None,
+    causal_ledger_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """Build a digest-of-roots manifest without writing state."""
     index_root, production_capabilities = _knowledge_index_roots(knowledge_index_path)
@@ -371,10 +373,7 @@ def build_world_manifest_v0(
         "orchestrator_repo": _orchestrator_repo_root(),
         "taey_presence_index": index_root,
         "production_capabilities": production_capabilities,
-        "causal_ledger": _unknown(
-            "no ledger checkpoint is published in World Manifest v0",
-            kind="causal_ledger",
-        ),
+        "causal_ledger": latest_checkpoint_root(causal_ledger_path),
     }
     world_id = f"world:{_sha256_json(_identity_payload(roots))}"
     return {
@@ -414,6 +413,7 @@ def publish_world_manifest_v0(
         as_of=as_of,
         system_map_path=system_map_path,
         knowledge_index_path=knowledge_index_path,
+        causal_ledger_path=ledger_path,
     )
     path = world_manifest_path(manifest_path)
     manifest_sha256 = _write_manifest(path, manifest)
@@ -440,4 +440,96 @@ def publish_world_manifest_v0(
         "manifest_sha256": manifest_sha256,
         "event_id": str(event.get("event_id") or ""),
         "row": row,
+    }
+
+
+def _manifest_root_path(root: Any) -> Optional[str]:
+    if not isinstance(root, Mapping):
+        return None
+    if root.get("register") != "Observed":
+        return None
+    raw_path = str(root.get("path") or "").strip()
+    if not raw_path or raw_path == UNKNOWN:
+        return None
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return str(path)
+    return str((repo_root() / path).resolve(strict=False))
+
+
+def _parse_manifest_time(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def reverify_world_manifest(
+    *,
+    manifest: Optional[Mapping[str, Any]] = None,
+    manifest_path: Optional[str] = None,
+    max_age_days: Optional[float] = 7.0,
+    now: Optional[datetime] = None,
+    causal_ledger_path: Optional[str] = None,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    if manifest is None:
+        path = world_manifest_path(manifest_path)
+        if not path.is_file():
+            return {"ok": False, "errors": [f"manifest_missing:{path}"], "checked_roots": []}
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {
+                "ok": False,
+                "errors": [f"manifest_unreadable:{exc.__class__.__name__}:{exc}"],
+                "checked_roots": [],
+            }
+    if not isinstance(manifest, Mapping):
+        return {"ok": False, "errors": ["manifest_not_object"], "checked_roots": []}
+    roots = manifest.get("roots")
+    if not isinstance(roots, Mapping):
+        return {"ok": False, "errors": ["manifest_roots_missing"], "checked_roots": []}
+
+    expected_world_id = f"world:{_sha256_json(_identity_payload(roots))}"
+    if manifest.get("world_id") != expected_world_id:
+        errors.append("world_id_does_not_match_recorded_roots")
+    if max_age_days is not None:
+        as_of = _parse_manifest_time(manifest.get("as_of"))
+        if as_of is None:
+            errors.append("manifest_as_of_unparseable")
+        else:
+            current = now or datetime.now(timezone.utc)
+            age_days = (current - as_of).total_seconds() / 86400
+            if age_days > float(max_age_days):
+                errors.append(f"manifest_stale:{age_days:.2f}_days")
+
+    live_manifest = build_world_manifest_v0(
+        as_of=str(manifest.get("as_of") or _now()),
+        system_map_path=_manifest_root_path(roots.get("system_connection_map")),
+        knowledge_index_path=_manifest_root_path(roots.get("taey_presence_index")),
+        causal_ledger_path=causal_ledger_path,
+    )
+    live_roots = live_manifest["roots"]
+    checked: list[str] = []
+    for key, recorded_root in roots.items():
+        checked.append(str(key))
+        if canonical_json(live_roots.get(key)) != canonical_json(recorded_root):
+            errors.append(f"root_drift:{key}")
+    if live_manifest["world_id"] != manifest.get("world_id"):
+        errors.append("world_id_drift")
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "checked_roots": checked,
+        "world_id": str(manifest.get("world_id") or ""),
+        "live_world_id": live_manifest["world_id"],
     }
