@@ -206,7 +206,8 @@ exercise the cycle manually; it does not create an autonomous always-running sup
    for that wake.
 4. **Stop-discipline** — a session must not stop while ready work exists. Intentional waits must use
    the structured `blocked_on` form `AWAIT:<kind>:<detail>` with kind `human-review`, `family-consent`,
-   or `external-signal`; free-text `blocked_on` is informational only and worker-liveness may expire it
+   or `external-signal`; peers can set this on their bound task with `taey-task hold <task-id> AWAIT:external-signal:<detail>`.
+   Free-text `blocked_on` is informational only and worker-liveness may expire it
    back to pending. For cross-session cascades, use `AWAIT:external-signal:<id>` and clear it when the
    external executor lands.
 5. **Watcher** — run `orch-watch --redis-host 127.0.0.1 --readiness-checker fleet_orchestrator.plan_readiness:check_readiness`

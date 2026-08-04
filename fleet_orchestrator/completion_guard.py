@@ -8,6 +8,11 @@ from .current_task_binding import current_task_matches
 
 
 _AUTONOMOUS_PEER_SUFFIXES = ("-codex", "-gemini", "-grok", "-claude")
+_PEER_TERMINAL_OUTCOMES = {
+    "completed": "done",
+    "failed": "error",
+    "interrupted": "interrupted",
+}
 
 
 def _autonomous_peer_supervisor(session_id: str) -> Optional[str]:
@@ -87,7 +92,7 @@ def peer_execution_binding_rejection(task_id: str,
             "sender": peer,
             "next_step": (
                 f"If this is dispatched peer work, call "
-                f"`record_outcome('{peer}', '<done|error|interrupted>', '<summary>')`; "
+                "`taey-task outcome <done|error|interrupted> --details '<summary>'`; "
                 "otherwise the supervisor must close the task after audit."
             ),
         }
@@ -102,7 +107,9 @@ def peer_self_completion_rejection(task_id: str,
                                    *,
                                    config: OrchConfig) -> Optional[dict[str, Any]]:
     """Return a 409 payload when a supervised peer tries to close its own task."""
-    if str(status or "").strip().lower() != "completed":
+    normalized_status = str(status or "").strip().lower()
+    outcome_command = _PEER_TERMINAL_OUTCOMES.get(normalized_status)
+    if outcome_command is None:
         return None
     peer = str(sender or "").strip()
     if not peer:
@@ -123,13 +130,13 @@ def peer_self_completion_rejection(task_id: str,
     return {
         "ok": False,
         "error": (
-            "supervised autonomous peers must report completion with record_outcome('done'); "
+            f"supervised autonomous peers must report terminal outcomes with `taey-task outcome {outcome_command}`; "
             "the supervisor closes the task after audit"
         ),
         "task_id": task_id,
         "status": task_before.get("status"),
         "supervisor": project_supervisor,
-        "next_step": f"record_outcome('{peer}', 'done', '<short outcome summary>')",
+        "next_step": f"taey-task outcome {outcome_command} --details '<short outcome summary>'",
     }
 
 

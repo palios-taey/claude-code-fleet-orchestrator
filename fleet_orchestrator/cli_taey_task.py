@@ -20,6 +20,8 @@ Usage:
     taey-task update <task-id> completed --evidence-observation "verified live"
     taey-task update <task-id> failed --evidence '{"reason":"blocked by missing dependency"}'
     taey-task update <task-id> changes_requested --reason "audit rejection reason"
+    taey-task hold <task-id> AWAIT:external-signal:<detail>
+    taey-task outcome done --details "ready for supervisor review"
 """
 import argparse
 import json
@@ -36,6 +38,8 @@ from fleet_orchestrator.evidence_contract import TERMINAL_STATUSES
 DASHBOARD_URL = os.environ.get("ORCH_DASHBOARD_URL", "http://localhost:5002")
 CHANGES_REQUESTED_STATUS = "changes_requested"
 UPDATE_STATUSES = tuple(sorted(TERMINAL_STATUSES | {"in_progress", CHANGES_REQUESTED_STATUS}))
+OUTCOME_STATUSES = ("done", "error", "interrupted")
+AWAIT_MARKER_HINT = "AWAIT:<human-review|family-consent|external-signal>:<detail>"
 
 
 def detect_from_node():
@@ -118,6 +122,20 @@ def has_evidence_input(args):
         or args.evidence_file is not None
         or args.evidence_observation is not None
     )
+
+
+def _validate_await_marker_or_exit(raw: str) -> str:
+    marker = str(raw or "").strip()
+    from fleet_orchestrator.orch_schema import is_declared_await_signal
+
+    if not is_declared_await_signal(marker):
+        print(
+            f"ERROR: hold marker must match {AWAIT_MARKER_HINT}. "
+            "Retry: taey-task hold <task-id> AWAIT:external-signal:<detail>",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return marker
 
 
 def cmd_create(args):
@@ -314,6 +332,36 @@ def cmd_update(args):
         sys.exit(1)
 
 
+def cmd_hold(args):
+    """Set a structured AWAIT marker on the caller's own bound in-progress task."""
+    sender = detect_from_node()
+    marker = _validate_await_marker_or_exit(" ".join(args.blocked_on))
+    data = {
+        "status": "in_progress",
+        "from": sender,
+        "blocked_on": marker,
+    }
+    result = api_call("PATCH", f"/api/task/{args.task_id}", data)
+    if result.get("ok"):
+        print(f"OK: {args.task_id} -> in_progress blocked_on={result.get('blocked_on') or marker} (by {sender})")
+        return
+    print(
+        f"ERROR: {result.get('error', 'unknown')}. "
+        f"Inspect with `taey-task status {args.task_id}` or retry from the bound peer session.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def cmd_outcome(args):
+    """Record the caller's current_task outcome through the installed CLI."""
+    sender = detect_from_node()
+    from fleet_orchestrator.dispatch import record_outcome
+
+    record_outcome(sender, args.outcome, args.details)
+    print(f"OK: outcome recorded for {sender}: {args.outcome}")
+
+
 def cmd_remove_dependency(args):
     """Remove a manual DEPENDS_ON edge through the API."""
     result = api_call("DELETE", f"/api/tasks/{args.task_id}/dependencies/{args.depends_on_id}")
@@ -384,6 +432,24 @@ def main():
     p_update.add_argument("--reason", help="Audit rejection reason; required with changes_requested")
     p_update.add_argument("--peer", help="Explicit peer to re-dispatch when the task no longer records one")
 
+    p_hold = sub.add_parser(
+        "hold",
+        help="Set a structured AWAIT marker on the caller's own bound task",
+    )
+    p_hold.add_argument("task_id", help="Task ID")
+    p_hold.add_argument(
+        "blocked_on",
+        nargs="+",
+        help=f"Structured marker, {AWAIT_MARKER_HINT}",
+    )
+
+    p_outcome = sub.add_parser(
+        "outcome",
+        help="Record the caller's current_task outcome without a Python import snippet",
+    )
+    p_outcome.add_argument("outcome", choices=OUTCOME_STATUSES)
+    p_outcome.add_argument("--details", default="", help="Short outcome summary")
+
     args = parser.parse_args()
     if args.command == "create":
         cmd_create(args)
@@ -399,6 +465,10 @@ def main():
         cmd_unbind(args)
     elif args.command == "update":
         cmd_update(args)
+    elif args.command == "hold":
+        cmd_hold(args)
+    elif args.command == "outcome":
+        cmd_outcome(args)
     else:
         parser.print_help()
 

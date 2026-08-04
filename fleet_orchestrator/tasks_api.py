@@ -963,6 +963,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         completion_evidence = _terminal_evidence_from_request(data)
         from fleet_orchestrator.completion_guard import (
             _autonomous_peer_supervisor,
+            _task_project_supervisor,
             completion_producer_for_status_update,
             peer_execution_binding_rejection,
             peer_self_completion_rejection,
@@ -987,18 +988,23 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         if rejection:
             return JSONResponse(status_code=409, content=rejection)
 
-        if (
-            sender
+        sender_supervisor = _autonomous_peer_supervisor(sender) if sender else None
+        normalized_status = str(status or "").strip().lower()
+        project_supervisor = _task_project_supervisor(task_id, cfg) if sender and owner == sender else None
+        should_bind_self_start = (
+            bool(sender)
             and owner == sender
-            and str(status or "").strip().lower() == "in_progress"
-        ):
-            binding_supervisor = _resolve_supervisor_session(sender, config=cfg)
+            and normalized_status == "in_progress"
+            and (sender_supervisor is not None or project_supervisor != sender)
+        )
+        if should_bind_self_start:
+            binding_supervisor = _resolve_supervisor_session(sender, config=cfg) if sender_supervisor else sender
             bind_current_task(
                 worker=sender,
                 task_id=task_id,
                 description=task_before.get("description", ""),
                 supervisor=binding_supervisor,
-                set_parent=bool(_autonomous_peer_supervisor(sender)),
+                set_parent=sender_supervisor is not None,
                 guard_existing=True,
                 dispatcher=sender,
             )
