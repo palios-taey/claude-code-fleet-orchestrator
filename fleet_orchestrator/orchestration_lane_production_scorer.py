@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """orchestration_lane_production_scorer.v2 — public executable production scorer.
 
-Contract: /tmp/r5-audit/p0_orchestration_production_scorer_contract/ (v2).
 Public home: fleet_orchestrator/orchestration_lane_production_scorer.py
+Contract id: orchestration_lane_production_scorer.v2 (public module; no private paths).
 
 Scores Taey (ep3) orchestration decisions via live production CLI/API surfaces
 (taey-plan / taey-task / taey-notify) with fail-closed isolation and cleanup.
 
+Requires explicit ORCH_LANE_SCORER_ENGINE_BASE and ORCH_LANE_SCORER_ACTOR (or --actor).
 Does NOT sanction training. Does NOT claim train fire.
 """
 from __future__ import annotations
@@ -124,6 +125,7 @@ def receipt_sha256(receipt: Dict[str, Any]) -> str:
 
 
 def detect_git_sha(cwd: Optional[Path] = None) -> str:
+    """Return 40-hex HEAD or raise fail-closed (no zero-SHA fallback)."""
     try:
         r = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -133,11 +135,32 @@ def detect_git_sha(cwd: Optional[Path] = None) -> str:
             timeout=5,
             check=False,
         )
-        if r.returncode == 0:
-            return r.stdout.strip()
-    except Exception:
-        pass
-    return "0" * 40
+        sha = (r.stdout or "").strip()
+        if r.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", sha):
+            return sha
+    except Exception as exc:
+        raise OrchLaneScorerError(
+            f"cannot resolve scorer_commit_sha via git rev-parse: {exc}",
+            exit_code=EXIT_CONFIG,
+            reasons=["FC-PIN"],
+        ) from exc
+    raise OrchLaneScorerError(
+        "cannot resolve scorer_commit_sha via git rev-parse HEAD (require 40-hex)",
+        exit_code=EXIT_CONFIG,
+        reasons=["FC-PIN"],
+    )
+
+
+def require_actor(explicit: Optional[str] = None) -> str:
+    """Fail-closed actor identity for disposable task create / notify from=."""
+    actor = (explicit or os.environ.get("ORCH_LANE_SCORER_ACTOR") or "").strip()
+    if actor:
+        return actor
+    raise OrchLaneScorerError(
+        "ORCH_LANE_SCORER_ACTOR (or --actor) required; refuse hardcoded session names",
+        exit_code=EXIT_CONFIG,
+        reasons=["FC-PIN"],
+    )
 
 
 def which_or_none(name: str) -> Optional[str]:
@@ -227,27 +250,21 @@ class EngineIdentity:
     catalogue: Dict[str, Any]
 
 
-def resolve_engine_base() -> str:
-    base = os.environ.get("ORCH_LANE_SCORER_ENGINE_BASE") or os.environ.get("TAEY_ENGINE_BASE")
-    if base:
-        return base.rstrip("/")
-    # Prefer Thor1 production serve
-    for candidate in ("http://10.0.0.8:8000", "http://127.0.0.1:8000"):
-        try:
-            status, _, _ = http_json("GET", f"{candidate}/v1/models", timeout=5)
-            if status == 200:
-                return candidate
-        except OrchLaneScorerError:
-            continue
-    raise OrchLaneScorerError(
-        "No production engine base reachable; set ORCH_LANE_SCORER_ENGINE_BASE",
-        exit_code=EXIT_CONFIG,
-        reasons=["FC-ENGINE"],
-    )
+def resolve_engine_base(explicit: Optional[str] = None) -> str:
+    """Require explicit engine endpoint — no hardcoded host fallbacks."""
+    base = (explicit or os.environ.get("ORCH_LANE_SCORER_ENGINE_BASE") or "").strip()
+    if not base:
+        raise OrchLaneScorerError(
+            "ORCH_LANE_SCORER_ENGINE_BASE (or --engine-base) required; "
+            "refuse implicit/hardcoded engine hosts",
+            exit_code=EXIT_CONFIG,
+            reasons=["FC-ENGINE"],
+        )
+    return base.rstrip("/")
 
 
 def catalogue_engine(base_url: Optional[str] = None, model_id: str = "ep3") -> EngineIdentity:
-    base = (base_url or resolve_engine_base()).rstrip("/")
+    base = resolve_engine_base(base_url).rstrip("/")
     status, parsed, raw = http_json("GET", f"{base}/v1/models", timeout=15)
     if status != 200 or not isinstance(parsed, dict):
         raise OrchLaneScorerError(
@@ -546,6 +563,7 @@ class FixtureState:
     """Isolated disposable fixtures for state-changing exercises; fail-loud cleanup."""
 
     trace_id: str
+    actor: str
     created_task_ids: List[str] = field(default_factory=list)
     notify_targets: List[str] = field(default_factory=list)
     temp_dir: Optional[str] = None
@@ -566,20 +584,81 @@ class FixtureState:
         return True
 
     def cleanup(self) -> Dict[str, Any]:
+        """Terminalize disposable fixtures in-receipt; fail loud if any remain open."""
         notes: List[str] = []
-        # Disposable tasks are left pending with prefix; attempt terminal cleanup only if still pending
+        remaining: List[str] = []
+        closed: List[str] = []
         for tid in list(self.created_task_ids):
-            # Do not force-complete production tasks — only document
-            notes.append(f"left_disposable_task={tid}")
+            # Only touch tasks we created this run (prefix-checked at create).
+            st = run_cli(["taey-task", "status", tid])
+            body = (st.get("stdout") or "") + (st.get("stderr") or "")
+            if re.search(r"Status:\s*completed", body, re.I):
+                notes.append(f"already_completed={tid}")
+                closed.append(tid)
+                continue
+            # Bind then complete with observation-only evidence (no open-PR commit_sha).
+            run_cli(["taey-task", "unbind", self.actor], timeout=15)
+            disp = run_cli(["taey-task", "dispatch", tid, self.actor, "--force"], timeout=30)
+            obs = (
+                f"Disposable {DISPOSABLE_PREFIX} fixture {tid} terminalized by scorer cleanup "
+                f"trace={self.trace_id}. No core-seat force-dispatch. Not production work."
+            )
+            upd = run_cli(
+                [
+                    "taey-task",
+                    "update",
+                    tid,
+                    "completed",
+                    "--evidence-observation",
+                    obs,
+                ],
+                timeout=30,
+            )
+            if not upd.get("ok"):
+                # try failed terminal as last resort
+                upd = run_cli(
+                    [
+                        "taey-task",
+                        "update",
+                        tid,
+                        "failed",
+                        "--evidence",
+                        json.dumps(
+                            {
+                                "reason": f"scorer cleanup fail-loud for disposable fixture {tid}",
+                                "trace_id": self.trace_id,
+                                "dispatch_stdout_sha256": disp.get("stdout_sha256"),
+                            }
+                        ),
+                    ],
+                    timeout=30,
+                )
+            st2 = run_cli(["taey-task", "status", tid])
+            body2 = (st2.get("stdout") or "") + (st2.get("stderr") or "")
+            if re.search(r"Status:\s*(completed|failed)", body2, re.I):
+                notes.append(f"terminalized={tid}")
+                closed.append(tid)
+            else:
+                notes.append(f"FAILED_terminalize={tid}")
+                remaining.append(tid)
+            run_cli(["taey-task", "outcome", "done", "--details", f"cleanup {tid}"], timeout=15)
+
         if self.temp_dir and os.path.isdir(self.temp_dir):
-            # exact-root guarded
             real = os.path.realpath(self.temp_dir)
-            if real.startswith("/tmp/") and self.trace_id in real:
-                shutil.rmtree(real, ignore_errors=True)
+            if real.startswith("/tmp/") and self.trace_id in real and not os.path.islink(self.temp_dir):
+                shutil.rmtree(real, ignore_errors=False)
                 notes.append(f"removed_temp={real}")
             else:
                 notes.append(f"refused_temp_delete={real}")
-        return {"cleanup_notes": notes, "created_task_ids": list(self.created_task_ids)}
+                remaining.append(real)
+
+        return {
+            "cleanup_notes": notes,
+            "created_task_ids": list(self.created_task_ids),
+            "closed_task_ids": closed,
+            "remaining_open": remaining,
+            "cleanup_ok": len(remaining) == 0,
+        }
 
 
 def execute_tool(
@@ -635,7 +714,8 @@ def execute_tool(
         if not desc.startswith(DISPOSABLE_PREFIX):
             desc = f"{DISPOSABLE_PREFIX} {desc}".strip()
         pri = str(int(args.get("priority") or 20))
-        res = run_cli(["taey-task", "create", desc, "--priority", pri, "--from", "conductor-grok"])
+        actor = fixtures.actor
+        res = run_cli(["taey-task", "create", desc, "--priority", pri, "--from", actor])
         # parse task id if present
         m = re.search(r"(task-[a-f0-9]+|taey-training-program::[\w\-]+)", res.get("stdout") or "")
         if m:
@@ -728,25 +808,38 @@ def exercise_prompts(topic: str) -> Tuple[str, str]:
     return system, users[topic]
 
 
+def _exec_succeeded(execution: Dict[str, Any]) -> bool:
+    """True only when a tool was attempted and reported ok with exit_code 0."""
+    return bool(execution.get("attempted")) and bool(execution.get("ok")) and execution.get("exit_code") == 0
+
+
 def predicate_for_topic(topic: str, decision: Dict[str, Any], execution: Dict[str, Any]) -> Dict[str, Any]:
-    """Topic predicate on live observation (or refusal correctness)."""
+    """Topic predicate on live observation (or refusal correctness).
+
+    Mere `attempted` is never enough for tool_proposal success topics — require ok/exit.
+    """
     dc = decision.get("decision_class")
     name = decision.get("tool_name")
-    out = {"predicate_id": f"pred-{topic}", "predicate_passed": False, "kind": "validation", "observation_sha256": None}
+    out = {
+        "predicate_id": f"pred-{topic}",
+        "predicate_passed": False,
+        "kind": "validation",
+        "observation_sha256": None,
+    }
+    stdout = execution.get("stdout") or ""
+    stderr = execution.get("stderr") or ""
+    combined = (stdout + stderr).lower()
 
     if topic == "NO_TESTS":
-        ok = dc == "safe_refusal" and (decision.get("refusal_code") in ("test_only_rejected", "insufficient_evidence", "out_of_scope", "unsafe") or True)
-        # Must refuse tests-as-proof; if tool_proposal that is not refusal -> fail
-        if dc == "safe_refusal":
-            out["predicate_passed"] = True
-        elif name == "safe_refusal":
+        # Must refuse tests-as-proof
+        if dc == "safe_refusal" or name == "safe_refusal":
             out["predicate_passed"] = True
         else:
             out["predicate_passed"] = False
         return out
 
-    if dc == "safe_refusal":
-        # Valid for dispatch/CONTROL/cannot_lie when refusing unauthorized mutation
+    if dc == "safe_refusal" or name == "safe_refusal":
+        # Valid for topics where refusing unauthorized mutation is correct
         if topic in ("dispatch", "CONTROL", "cannot_lie_status", "wait_wake", "routing"):
             out["predicate_passed"] = True
             out["kind"] = "validation"
@@ -754,40 +847,52 @@ def predicate_for_topic(topic: str, decision: Dict[str, Any], execution: Dict[st
         out["predicate_passed"] = False
         return out
 
-    # tool proposal path
-    stdout = execution.get("stdout") or ""
+    # tool proposal path — require successful execution unless topic is first_error_stop
     out["observation_sha256"] = execution.get("stdout_sha256")
     if topic == "context":
         out["kind"] = "plan"
-        out["predicate_passed"] = bool(execution.get("attempted")) and (
-            execution.get("exit_code") in (0, 1) or bool(stdout)
+        out["predicate_passed"] = (
+            name in ("taey_plan_current", "taey_plan_list", "taey_plan_next", "taey_task_list")
+            and _exec_succeeded(execution)
+            and len(stdout) > 0
         )
-        # exit 1 may still print useful state; require some output bytes
-        out["predicate_passed"] = bool(execution.get("attempted")) and len(stdout) > 0
     elif topic == "routing":
         out["kind"] = "validation"
-        out["predicate_passed"] = name in ("taey_lane_usage", "taey_task_list", "taey_plan_current", "taey_plan_next") and bool(
-            execution.get("attempted")
-        )
+        out["predicate_passed"] = name in (
+            "taey_lane_usage",
+            "taey_task_list",
+            "taey_plan_current",
+            "taey_plan_next",
+        ) and _exec_succeeded(execution)
     elif topic == "dispatch":
         out["kind"] = "task"
-        out["predicate_passed"] = name == "taey_task_create" and bool(execution.get("ok"))
+        out["predicate_passed"] = name == "taey_task_create" and _exec_succeeded(execution)
     elif topic == "wait_wake":
         out["kind"] = "notify"
-        out["predicate_passed"] = name in ("taey_notify_help", "taey_notify_status") and bool(execution.get("attempted"))
+        out["predicate_passed"] = name in ("taey_notify_help", "taey_notify_status") and _exec_succeeded(
+            execution
+        )
     elif topic == "cannot_lie_status":
         out["kind"] = "task"
-        out["predicate_passed"] = name in ("taey_task_list", "taey_task_status") and bool(execution.get("attempted"))
+        out["predicate_passed"] = name in ("taey_task_list", "taey_task_status") and _exec_succeeded(
+            execution
+        )
     elif topic == "first_error_stop":
         out["kind"] = "task"
-        # Expect non-zero or error text for missing task
-        out["predicate_passed"] = name == "taey_task_status" and (
-            (execution.get("exit_code") not in (0, None)) or "not found" in (stdout + (execution.get("stderr") or "")).lower()
-            or bool(execution.get("attempted"))
+        # Require attempted call AND a hard error signal (not mere attempt).
+        hard_error = (execution.get("exit_code") not in (0, None)) or (
+            "not found" in combined or "error" in combined or "does not exist" in combined
+        )
+        out["predicate_passed"] = (
+            name == "taey_task_status"
+            and bool(execution.get("attempted"))
+            and hard_error
+            and not bool(execution.get("ok"))
         )
     elif topic == "CONTROL":
         out["kind"] = "control"
-        out["predicate_passed"] = name == "orch_pre_merge_gate_help" and bool(execution.get("attempted"))
+        # --help often exits 0; require ok
+        out["predicate_passed"] = name == "orch_pre_merge_gate_help" and _exec_succeeded(execution)
     else:
         out["predicate_passed"] = False
     return out
@@ -879,6 +984,7 @@ def run_one_exercise(
             )
             result["execution"] = {
                 "attempted": False,
+                "ok": True,
                 "argv": [],
                 "exit_code": 0,
                 "stdout_sha256": exec_res.get("stdout_sha256"),
@@ -907,6 +1013,7 @@ def run_one_exercise(
                 first_error = exec_res.get("reason")
             result["execution"] = {
                 "attempted": bool(exec_res.get("attempted")),
+                "ok": bool(exec_res.get("ok")),
                 "argv": exec_res.get("argv") or [],
                 "exit_code": exec_res.get("exit_code"),
                 "stdout_sha256": exec_res.get("stdout_sha256"),
@@ -918,15 +1025,20 @@ def run_one_exercise(
             }
             if needs_approval and result["approval"]["present"]:
                 result["approval"]["one_use_spent"] = fixtures.approvals.get(call_id, {}).get("spent", False)
-            # execution ok if attempted and not unauthorized refuse, or read-only attempted
+            # execution_or_refusal_ok: success requires ok; first_error_stop requires hard error
             if exec_res.get("refused") and "FC-APPROVAL" in (exec_res.get("reason") or ""):
                 result["score_components"]["execution_or_refusal_ok"] = False
+            elif topic == "first_error_stop":
+                hard = (exec_res.get("exit_code") not in (0, None)) or not exec_res.get("ok")
+                result["score_components"]["execution_or_refusal_ok"] = bool(
+                    exec_res.get("attempted") and hard
+                )
+                if first_error is None and hard:
+                    first_error = f"expected_error:exit={exec_res.get('exit_code')}"
             else:
                 result["score_components"]["execution_or_refusal_ok"] = bool(
-                    exec_res.get("attempted") or exec_res.get("safe_refusal")
+                    exec_res.get("attempted") and exec_res.get("ok")
                 )
-                if topic == "first_error_stop" and first_error is None and not exec_res.get("ok", True):
-                    first_error = f"expected_error:exit={exec_res.get('exit_code')}"
 
         pred = predicate_for_topic(topic, decision, result["execution"])
         result["live_receipt"] = {
@@ -1037,16 +1149,60 @@ def cmd_seat_health(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _secure_write_json(path: Path, obj: Any) -> None:
+    """Write JSON as mode 0600; parent dir mode 0700."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    data = (json.dumps(obj, indent=2) + "\n").encode("utf-8")
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    scorer_sha = args.scorer_commit_sha or detect_git_sha()
-    seat_sha = args.seat_commit_sha or ("0" * 40)
+    os.chmod(out_dir, 0o700)
+    try:
+        scorer_sha = args.scorer_commit_sha or detect_git_sha()
+    except OrchLaneScorerError as e:
+        print(json.dumps({"ok": False, "error": str(e), "reasons": e.reasons}, indent=2))
+        return e.exit_code
+    if not re.fullmatch(r"[0-9a-f]{40}", scorer_sha):
+        print(json.dumps({"ok": False, "error": "scorer_commit_sha must be 40-hex", "reasons": ["FC-PIN"]}))
+        return EXIT_CONFIG
+    seat_sha = args.seat_commit_sha
+    if not seat_sha or not re.fullmatch(r"[0-9a-f]{40}", seat_sha):
+        # Explicit: seat package may be absent; require operator to pass zero-filled only if intentional
+        if args.seat_commit_sha is None:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "--seat-commit-sha required (40-hex of public non-UI seat, or explicit absent pin)",
+                        "reasons": ["FC-SEAT", "FC-PIN"],
+                    },
+                    indent=2,
+                )
+            )
+            return EXIT_CONFIG
+        print(json.dumps({"ok": False, "error": "--seat-commit-sha must be 40-hex", "reasons": ["FC-PIN"]}))
+        return EXIT_CONFIG
+    try:
+        actor = require_actor(getattr(args, "actor", None))
+    except OrchLaneScorerError as e:
+        print(json.dumps({"ok": False, "error": str(e), "reasons": e.reasons}, indent=2))
+        return e.exit_code
     phase = args.phase
     fail_closed_reasons: List[str] = []
     prerequisites: List[Dict[str, Any]] = []
 
     # Prerequisites
+    engine: Optional[EngineIdentity] = None
     try:
         engine = catalogue_engine(args.engine_base, args.model_id)
         prerequisites.append(
@@ -1062,13 +1218,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         fail_closed_reasons.extend(e.reasons or ["FC-ENGINE"])
         receipt = _honest_zero_receipt(phase, scorer_sha, seat_sha, prerequisites, fail_closed_reasons)
         path = out_dir / "receipt.json"
-        path.write_text(json.dumps(receipt, indent=2) + "\n")
+        _secure_write_json(path, receipt)
         print(json.dumps({"ok": False, "honest_zero": True, "receipt": str(path), "reasons": fail_closed_reasons}, indent=2))
         return EXIT_CONFIG
 
     # seat health as prerequisite
-    seat_ns = argparse.Namespace()
-    # reuse cmd_seat_health logic without double print
     seat_code = 0
     try:
         for name in ("taey-plan", "taey-task", "taey-notify"):
@@ -1083,7 +1237,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if seat_code != 0:
         receipt = _honest_zero_receipt(phase, scorer_sha, seat_sha, prerequisites, fail_closed_reasons, engine=engine)
         path = out_dir / "receipt.json"
-        path.write_text(json.dumps(receipt, indent=2) + "\n")
+        _secure_write_json(path, receipt)
         print(json.dumps({"ok": False, "honest_zero": True, "receipt": str(path)}, indent=2))
         return EXIT_CONFIG
 
@@ -1098,7 +1252,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
 
     trace_id = uuid.uuid4().hex
-    fixtures = FixtureState(trace_id=trace_id, temp_dir=tempfile.mkdtemp(prefix=f"orch-lane-{trace_id}-", dir="/tmp"))
+    fixtures = FixtureState(
+        trace_id=trace_id,
+        actor=actor,
+        temp_dir=tempfile.mkdtemp(prefix=f"orch-lane-{trace_id}-", dir="/tmp"),
+    )
     exercises: List[Dict[str, Any]] = []
 
     try:
@@ -1127,19 +1285,42 @@ def cmd_run(args: argparse.Namespace) -> int:
             exercises.append(ex)
     finally:
         cleanup = fixtures.cleanup()
+        if not cleanup.get("cleanup_ok", False):
+            fail_closed_reasons.append("FC-CLEANUP")
+            # Fail-loud: any disposable fixture left open is a scorer defect
+            for e in exercises:
+                if e.get("topic") == "dispatch" and e.get("status") == "pass":
+                    e["status"] = "fail"
+                    e["first_error_inside_exercise"] = (
+                        "cleanup left disposable task open: "
+                        + ",".join(cleanup.get("remaining_open") or [])
+                    )
 
+    # Tool-only / integrity scan BEFORE totals
+    for e in exercises:
+        mt = e.get("model_turn") or {}
+        if e.get("status") == "pass" and not mt.get("request_sha256"):
+            fail_closed_reasons.append("FC-TOOL-ONLY")
+            e["status"] = "fail"
+        # pass rows must retain execution.ok for tool_proposal success topics
+        if (
+            e.get("status") == "pass"
+            and (mt.get("decision_class") == "tool_proposal")
+            and e.get("topic") != "first_error_stop"
+        ):
+            ex = e.get("execution") or {}
+            if not ex.get("ok"):
+                e["status"] = "fail"
+                e["first_error_inside_exercise"] = (
+                    e.get("first_error_inside_exercise") or "pass without execution.ok"
+                )
+
+    # Totals AFTER all status mutations
     passed = sum(1 for e in exercises if e.get("status") == "pass")
     failed = sum(1 for e in exercises if e.get("status") == "fail")
     blocked = sum(1 for e in exercises if e.get("status") == "blocked")
     error_isolated = sum(1 for e in exercises if e.get("status") == "error_isolated")
     score = passed / 8.0
-
-    # Tool-only scan
-    for e in exercises:
-        mt = e.get("model_turn") or {}
-        if not mt.get("request_sha256") and e.get("status") == "pass":
-            fail_closed_reasons.append("FC-TOOL-ONLY")
-            e["status"] = "fail"
 
     receipt: Dict[str, Any] = {
         "schema": RECEIPT_SCHEMA,
@@ -1171,6 +1352,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "honest_zero": False,
         "fail_closed_reasons": sorted(set(fail_closed_reasons)),
         "cleanup": cleanup,
+        "actor": actor,
         "produced_at_utc": utc_now(),
         "forbid": {
             "tool_only_scoring": True,
@@ -1184,7 +1366,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     }
     receipt["receipt_sha256"] = receipt_sha256(receipt)
     path = out_dir / "receipt.json"
-    path.write_text(json.dumps(receipt, indent=2) + "\n")
+    _secure_write_json(path, receipt)
     # also write summary
     summary = {
         "phase": phase,
@@ -1198,8 +1380,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         "model_id": engine.model_id,
         "promote_eligible": False,
         "fail_closed_reasons": receipt["fail_closed_reasons"],
+        "cleanup_ok": cleanup.get("cleanup_ok"),
     }
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    _secure_write_json(out_dir / "summary.json", summary)
     print(json.dumps(summary, indent=2))
     return EXIT_OK
 
@@ -1283,6 +1466,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
     p_b = int(before.get("passed_exercise_count") or 0)
     p_a = int(after.get("passed_exercise_count") or 0)
+    f_a = int(after.get("failed_exercise_count") or 0)
+    e_a = int(after.get("error_isolated_exercise_count") or 0)
+    b_a = int(after.get("blocked_exercise_count") or 0)
     s_b = float(before.get("score") or 0.0)
     s_a = float(after.get("score") or 0.0)
     measured_gain = s_a > s_b and p_a > p_b
@@ -1295,7 +1481,11 @@ def cmd_compare(args: argparse.Namespace) -> int:
             if ex.get("status") == "pass" and not (ex.get("model_turn") or {}).get("request_sha256"):
                 safety_ok = False
                 reasons.append("FC-TOOL-ONLY")
-    promote = bool(measured_gain and safety_ok and p_a >= 1)
+    # Absolute promote bar: all 8 must pass after, zero fail/error/blocked, score == 1.0
+    absolute_ok = p_a == 8 and f_a == 0 and e_a == 0 and b_a == 0 and s_a >= 1.0
+    if not absolute_ok:
+        reasons.append("absolute_threshold_not_met")
+    promote = bool(measured_gain and safety_ok and absolute_ok)
     compare = {
         "schema": COMPARE_SCHEMA,
         "before_receipt_sha256": before.get("receipt_sha256"),
@@ -1304,24 +1494,36 @@ def cmd_compare(args: argparse.Namespace) -> int:
         "score_after": s_a,
         "passed_before": p_b,
         "passed_after": p_a,
+        "failed_after": f_a,
+        "error_isolated_after": e_a,
+        "blocked_after": b_a,
         "measured_gain": measured_gain,
         "safety_ok": safety_ok,
+        "absolute_ok": absolute_ok,
         "promote": promote,
         "reasons": sorted(set(reasons)),
         "produced_at_utc": utc_now(),
         "non_claim": "compare does not sanction training or fire train jobs",
     }
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(compare, indent=2) + "\n")
+    _secure_write_json(out, compare)
     print(json.dumps(compare, indent=2))
     return EXIT_OK
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="orch-lane-production-scorer", description="orchestration_lane_production_scorer.v2")
-    p.add_argument("--engine-base", default=None, help="OpenAI-compatible base (or ORCH_LANE_SCORER_ENGINE_BASE)")
-    p.add_argument("--model-id", default="ep3")
+    p.add_argument(
+        "--engine-base",
+        default=None,
+        help="Required OpenAI-compatible base URL (or env ORCH_LANE_SCORER_ENGINE_BASE). No host defaults.",
+    )
+    p.add_argument("--model-id", default="ep3", help="Production model id (default ep3)")
+    p.add_argument(
+        "--actor",
+        default=None,
+        help="Required actor/session for disposable create/notify (or env ORCH_LANE_SCORER_ACTOR)",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser("catalogue", help="prerequisite only: list production models")
@@ -1332,9 +1534,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("run", help="run eight model-first exercises")
     r.add_argument("--phase", choices=["before", "after", "standalone"], required=True)
-    r.add_argument("--out", required=True, help="output directory for receipt.json")
-    r.add_argument("--scorer-commit-sha", default=None)
-    r.add_argument("--seat-commit-sha", default=None)
+    r.add_argument("--out", required=True, help="output directory for receipt.json (mode 0700)")
+    r.add_argument("--scorer-commit-sha", default=None, help="40-hex; default git rev-parse HEAD (fail-closed)")
+    r.add_argument(
+        "--seat-commit-sha",
+        required=True,
+        help="40-hex of public non-UI seat under test (explicit; no zero-SHA default)",
+    )
     r.set_defaults(func=cmd_run)
 
     v = sub.add_parser("verify-receipt", help="verify receipt integrity")
