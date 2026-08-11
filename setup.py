@@ -41,6 +41,7 @@ setup(
             "taey-receipts = fleet_orchestrator.script_entrypoints:taey_receipts_main",
             "taey-task = fleet_orchestrator.script_entrypoints:taey_task_main",
             "taey-lane-usage = fleet_orchestrator.script_entrypoints:taey_lane_usage_main",
+            "orch-lane-production-scorer = fleet_orchestrator.script_entrypoints:orch_lane_production_scorer_main",
         ],
     },
     install_requires=load_requirements(),
