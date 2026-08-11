@@ -153,7 +153,24 @@ creating a real expiring pause and no expiry creating an indefinite pause until
 `GROK_HOOKS_PATH`, `TAEYS_HANDS_ROOT`, `TAEY_NODE_ID`,
 `NOTIFY_DAEMON_PIDFILE`, `NOTIFY_KEY_PREFIX`.
 
-## 8. Test-only (never read by the running server)
+## 8. Orchestration-lane production scorer (CLI tool only)
+
+These flags are read by `scripts/orch-lane-production-scorer` /
+`fleet_orchestrator/orchestration_lane_production_scorer.py`. They are **not**
+server/runtime config for the mutable API. The scorer refuses host/actor
+umbilicals: missing values fail closed (no private path, no LAN host default,
+no hardcoded session name).
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `ORCH_LANE_SCORER_ENGINE_BASE` | unset (required unless `--engine-base`) | OpenAI-compatible base URL for the production model engine (for example `http://<host>:8000`). No default host is baked in; the CLI also accepts `--engine-base` as the same required value. |
+| `ORCH_LANE_SCORER_ACTOR` | unset (required unless `--actor`) | Actor/session name used for disposable `taey-plan` / `taey-task` / `taey-notify` fixtures created during a scored run. No default session is baked in; the CLI also accepts `--actor`. |
+
+Related CLI-only pin (not an env flag): `--seat-commit-sha` must be an explicit
+40-hex public seat package commit when seat health is claimed; zero-SHA and
+implicit private refs are refused.
+
+## 9. Test-only (never read by the running server)
 
 `ORCH_AGENT_TEST_INFRA` (`throwaway` for `scripts/orch-acceptance-isolated`,
 `ephemeral-ci` for GitHub Actions service containers), `ORCH_TEST_NAMESPACE`
