@@ -165,6 +165,11 @@ no hardcoded session name).
 |---|---|---|
 | `ORCH_LANE_SCORER_ENGINE_BASE` | unset (required unless `--engine-base`) | OpenAI-compatible base URL for the production model engine (for example `http://<host>:8000`). No default host is baked in; the CLI also accepts `--engine-base` as the same required value. |
 | `ORCH_LANE_SCORER_ACTOR` | unset (required unless `--actor`) | Actor/session name used for disposable `taey-plan` / `taey-task` / `taey-notify` fixtures created during a scored run. No default session is baked in; the CLI also accepts `--actor`. |
+| `ORCH_LANE_SCORER_PROTOCOL_PIN_REPO` | unset (optional; both halves required together) | Optional protocol pin repo `owner/name`. Pair with `ORCH_LANE_SCORER_PROTOCOL_PIN_SHA` (or `--protocol-pin-repo` / `--protocol-pin-sha`). No baked org/repo default. |
+| `ORCH_LANE_SCORER_PROTOCOL_PIN_SHA` | unset (optional; both halves required together) | Optional protocol pin 40-hex commit. Pair with `ORCH_LANE_SCORER_PROTOCOL_PIN_REPO`. Partial pin fails closed (`FC-PIN`). |
+| `ORCH_LANE_SCORER_CAPTURE_DESIGN_PIN_REPO` | unset (optional; all three required together) | Optional capture-design pin repo `owner/name`. Pair with sha + path (or `--capture-design-pin-*`). No baked org/repo default. |
+| `ORCH_LANE_SCORER_CAPTURE_DESIGN_PIN_SHA` | unset (optional; all three required together) | Optional capture-design pin 40-hex commit. |
+| `ORCH_LANE_SCORER_CAPTURE_DESIGN_PIN_PATH` | unset (optional; all three required together) | Optional capture-design pin relative path inside that repo. Partial pin fails closed (`FC-PIN`). |
 
 Related CLI-only pin (not an env flag): `--seat-commit-sha` must be an explicit
 40-hex public seat package commit when seat health is claimed; zero-SHA and

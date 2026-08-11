@@ -8,6 +8,7 @@ Scores Taey (ep3) orchestration decisions via live production CLI/API surfaces
 (taey-plan / taey-task / taey-notify) with fail-closed isolation and cleanup.
 
 Requires explicit ORCH_LANE_SCORER_ENGINE_BASE and ORCH_LANE_SCORER_ACTOR (or --actor).
+Protocol/capture design pins are operator-supplied only (no baked org/repo defaults).
 Does NOT sanction training. Does NOT claim train fire.
 """
 from __future__ import annotations
@@ -40,19 +41,9 @@ MODULE_PATH = "fleet_orchestrator/orchestration_lane_production_scorer.py"
 ENTRYPOINT = "fleet_orchestrator.orchestration_lane_production_scorer:main"
 DISPOSABLE_PREFIX = "[orch-lane-scorer]"
 
-PROTOCOL_PIN = {
-    "repo": "palios-taey/palios-training",
-    "sha": "58b108042e66fa508765a6277c033cc5a8f86abd",
-}
-CAPTURE_DESIGN_PIN = {
-    "repo": "palios-taey/palios-training",
-    "sha": "3759c6a9ad8926db36a6204040a86c85de95b465",
-    "path": "careers-qwen/docs/SFT_SUPERVISED_CAPTURE_DESIGN.md",
-}
-DEPENDENCY_PINS = {
-    "orchestrator": "a027c7f73f5e9309eb3e6664a9e3ea6114b2e31d",
-    "notify": "fdb0d6b34682dc5a94d4f4dee4ee825594bdcd9d",
-}
+# Dependency pins are commit SHAs only (no org/repo strings) so the public tree
+# cannot bake operator org defaults. Repo identity for protocol/capture pins is
+# required from the operator at run time when those pins are recorded.
 
 EXERCISES = (
     "context",
@@ -161,6 +152,77 @@ def require_actor(explicit: Optional[str] = None) -> str:
         exit_code=EXIT_CONFIG,
         reasons=["FC-PIN"],
     )
+
+
+def resolve_protocol_pin(
+    *,
+    repo: Optional[str] = None,
+    sha: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    """Optional operator-supplied protocol pin. Partial input fails closed.
+
+    No baked org/repo defaults — public tree must not embed operator org pins.
+    Env names are read with literal keys so doc-flag coherence can enumerate them.
+    """
+    repo_v = (repo or os.environ.get("ORCH_LANE_SCORER_PROTOCOL_PIN_REPO") or "").strip()
+    sha_v = (sha or os.environ.get("ORCH_LANE_SCORER_PROTOCOL_PIN_SHA") or "").strip()
+    if not repo_v and not sha_v:
+        return None
+    if not repo_v or not sha_v:
+        raise OrchLaneScorerError(
+            "protocol pin requires both repo and sha "
+            "(--protocol-pin-repo/--protocol-pin-sha or "
+            "ORCH_LANE_SCORER_PROTOCOL_PIN_REPO/ORCH_LANE_SCORER_PROTOCOL_PIN_SHA)",
+            exit_code=EXIT_CONFIG,
+            reasons=["FC-PIN"],
+        )
+    if not re.fullmatch(r"[0-9a-f]{40}", sha_v):
+        raise OrchLaneScorerError(
+            "protocol pin sha must be 40-hex",
+            exit_code=EXIT_CONFIG,
+            reasons=["FC-PIN"],
+        )
+    if "/" not in repo_v or repo_v.startswith("/") or " " in repo_v:
+        raise OrchLaneScorerError(
+            "protocol pin repo must look like owner/name",
+            exit_code=EXIT_CONFIG,
+            reasons=["FC-PIN"],
+        )
+    return {"repo": repo_v, "sha": sha_v}
+
+
+def resolve_capture_design_pin(
+    *,
+    repo: Optional[str] = None,
+    sha: Optional[str] = None,
+    path: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    """Optional operator-supplied capture-design pin. Partial input fails closed."""
+    repo_v = (repo or os.environ.get("ORCH_LANE_SCORER_CAPTURE_DESIGN_PIN_REPO") or "").strip()
+    sha_v = (sha or os.environ.get("ORCH_LANE_SCORER_CAPTURE_DESIGN_PIN_SHA") or "").strip()
+    path_v = (path or os.environ.get("ORCH_LANE_SCORER_CAPTURE_DESIGN_PIN_PATH") or "").strip()
+    if not repo_v and not sha_v and not path_v:
+        return None
+    if not repo_v or not sha_v or not path_v:
+        raise OrchLaneScorerError(
+            "capture design pin requires repo, sha, and path "
+            "(--capture-design-pin-* or ORCH_LANE_SCORER_CAPTURE_DESIGN_PIN_*)",
+            exit_code=EXIT_CONFIG,
+            reasons=["FC-PIN"],
+        )
+    if not re.fullmatch(r"[0-9a-f]{40}", sha_v):
+        raise OrchLaneScorerError(
+            "capture design pin sha must be 40-hex",
+            exit_code=EXIT_CONFIG,
+            reasons=["FC-PIN"],
+        )
+    if "/" not in repo_v or repo_v.startswith("/") or " " in repo_v:
+        raise OrchLaneScorerError(
+            "capture design pin repo must look like owner/name",
+            exit_code=EXIT_CONFIG,
+            reasons=["FC-PIN"],
+        )
+    return {"repo": repo_v, "sha": sha_v, "path": path_v}
 
 
 def which_or_none(name: str) -> Optional[str]:
@@ -1194,6 +1256,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         return EXIT_CONFIG
     try:
         actor = require_actor(getattr(args, "actor", None))
+        protocol_pin = resolve_protocol_pin(
+            repo=getattr(args, "protocol_pin_repo", None),
+            sha=getattr(args, "protocol_pin_sha", None),
+        )
+        capture_design_pin = resolve_capture_design_pin(
+            repo=getattr(args, "capture_design_pin_repo", None),
+            sha=getattr(args, "capture_design_pin_sha", None),
+            path=getattr(args, "capture_design_pin_path", None),
+        )
     except OrchLaneScorerError as e:
         print(json.dumps({"ok": False, "error": str(e), "reasons": e.reasons}, indent=2))
         return e.exit_code
@@ -1330,9 +1401,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         "scorer_contract_version": SCORER_CONTRACT_VERSION,
         "scorer_commit_sha": scorer_sha,
         "seat_commit_sha": seat_sha,
-        "protocol_pin": PROTOCOL_PIN,
-        "capture_design_pin": CAPTURE_DESIGN_PIN,
-        "dependency_pins": DEPENDENCY_PINS,
+        # Operator-supplied only; null when omitted (no baked org/repo defaults).
+        "protocol_pin": protocol_pin,
+        "capture_design_pin": capture_design_pin,
         "engine": {
             "model_id": engine.model_id,
             "root": engine.root,
@@ -1540,6 +1611,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--seat-commit-sha",
         required=True,
         help="40-hex of public non-UI seat under test (explicit; no zero-SHA default)",
+    )
+    r.add_argument(
+        "--protocol-pin-repo",
+        default=None,
+        help="Optional protocol pin repo owner/name (or env ORCH_LANE_SCORER_PROTOCOL_PIN_REPO). No default.",
+    )
+    r.add_argument(
+        "--protocol-pin-sha",
+        default=None,
+        help="Optional protocol pin 40-hex (or env ORCH_LANE_SCORER_PROTOCOL_PIN_SHA). No default.",
+    )
+    r.add_argument(
+        "--capture-design-pin-repo",
+        default=None,
+        help="Optional capture-design pin repo (or env ORCH_LANE_SCORER_CAPTURE_DESIGN_PIN_REPO). No default.",
+    )
+    r.add_argument(
+        "--capture-design-pin-sha",
+        default=None,
+        help="Optional capture-design pin 40-hex (or env ORCH_LANE_SCORER_CAPTURE_DESIGN_PIN_SHA). No default.",
+    )
+    r.add_argument(
+        "--capture-design-pin-path",
+        default=None,
+        help="Optional capture-design pin path (or env ORCH_LANE_SCORER_CAPTURE_DESIGN_PIN_PATH). No default.",
     )
     r.set_defaults(func=cmd_run)
 
