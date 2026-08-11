@@ -93,3 +93,9 @@ def taey_task_main() -> Any:
 
 def taey_lane_usage_main() -> Any:
     return _run_callable("fleet_orchestrator.cli_usage:main")
+
+
+def orch_lane_production_scorer_main() -> Any:
+    return _run_callable(
+        "fleet_orchestrator.orchestration_lane_production_scorer:main"
+    )
