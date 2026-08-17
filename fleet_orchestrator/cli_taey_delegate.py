@@ -152,7 +152,37 @@ def collect_artifacts(
     return opened
 
 
-def _assert_artifacts_stable(opened: Sequence[OpenArtifact]) -> None:
+def _verification_step(method: str, artifact_count: int) -> dict[str, Any]:
+    return {"method": method, "artifact_count": artifact_count}
+
+
+def _held_descriptor_verification(opened: Sequence[OpenArtifact]) -> dict[str, Any]:
+    for artifact in opened:
+        if artifact.handle.closed:
+            raise ArtifactCollectionError(f"artifact descriptor is closed: {artifact.path}")
+        os.fstat(artifact.handle.fileno())
+    return _verification_step("held_open_descriptors", len(opened))
+
+
+def _reread_and_rehash(
+    opened: Sequence[OpenArtifact],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    for artifact in opened:
+        record, fingerprint = _artifact_from_open_file(artifact.path, artifact.handle)
+        if record != artifact.record:
+            raise ArtifactCollectionError(
+                f"artifact changed during verification: {artifact.path}"
+            )
+        artifact.record = record
+        artifact.fingerprint = fingerprint
+        artifacts.append(record)
+    return artifacts, _verification_step(
+        "reread_and_rehash_after_collection", len(artifacts)
+    )
+
+
+def _assert_artifacts_stable(opened: Sequence[OpenArtifact]) -> dict[str, Any]:
     for artifact in opened:
         exists = os.path.exists(artifact.path)
         if not exists:
@@ -170,6 +200,51 @@ def _assert_artifacts_stable(opened: Sequence[OpenArtifact]) -> None:
             raise ArtifactCollectionError(
                 f"artifact changed before manifest write: {artifact.path}"
             )
+    return _verification_step("descriptor_and_path_fingerprint_sweep", len(opened))
+
+
+def _same_filesystem_commit_method(temp_path: Path, output: Path) -> str:
+    if temp_path.parent != output.parent:
+        raise ArtifactCollectionError("manifest temp path is not beside output")
+    if os.stat(temp_path).st_dev != os.stat(output.parent).st_dev:
+        raise ArtifactCollectionError("manifest temp path is not on output filesystem")
+    return "same_filesystem_atomic_rename"
+
+
+def _verification_guarantee(
+    opened: Sequence[OpenArtifact],
+    steps: Sequence[dict[str, Any]],
+    commit_method: str,
+) -> dict[str, Any]:
+    expected_methods = (
+        "held_open_descriptors",
+        "reread_and_rehash_after_collection",
+        "descriptor_and_path_fingerprint_sweep",
+    )
+    methods = tuple(step["method"] for step in steps)
+    artifact_count = len(opened)
+    if methods != expected_methods or any(
+        step["artifact_count"] != artifact_count for step in steps
+    ):
+        raise ArtifactCollectionError("manifest verification evidence is incomplete")
+
+    residual_exists = steps[-1]["method"] != commit_method
+    return {
+        "tool_version": __version__,
+        "artifact_count": artifact_count,
+        "methods": list(steps),
+        "certified_state": {
+            "scope": "verified_window",
+            "instantaneous": not residual_exists,
+            "window_ends_after": steps[-1]["method"],
+            "window_ends_before": commit_method,
+        },
+        "residual_window": {
+            "exists": residual_exists,
+            "between": [steps[-1]["method"], commit_method],
+            "irreducible_without_filesystem_snapshot": residual_exists,
+        },
+    }
 
 
 def _write_manifest_transaction(output: Path, opened: Sequence[OpenArtifact]) -> None:
@@ -183,21 +258,21 @@ def _write_manifest_transaction(output: Path, opened: Sequence[OpenArtifact]) ->
     )
     temp_path = Path(handle.name)
     try:
-        artifacts: list[dict[str, Any]] = []
-        for artifact in opened:
-            record, fingerprint = _artifact_from_open_file(artifact.path, artifact.handle)
-            if record != artifact.record:
-                raise ArtifactCollectionError(
-                    f"artifact changed during verification: {artifact.path}"
-                )
-            artifact.record = record
-            artifact.fingerprint = fingerprint
-            artifacts.append(record)
+        held_descriptor_step = _held_descriptor_verification(opened)
+        artifacts, reread_step = _reread_and_rehash(opened)
+        fingerprint_step = _assert_artifacts_stable(opened)
+        commit_method = _same_filesystem_commit_method(temp_path, output)
+        verification = _verification_guarantee(
+            opened,
+            [held_descriptor_step, reread_step, fingerprint_step],
+            commit_method,
+        )
 
         manifest = {
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "tool_version": __version__,
             "artifacts": artifacts,
+            "verification": verification,
         }
         handle.write(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         handle.flush()
@@ -207,7 +282,16 @@ def _write_manifest_transaction(output: Path, opened: Sequence[OpenArtifact]) ->
         # Advisory locks cannot bind writers that ignore flock. A second full read plus
         # this final descriptor/path sweep closes detectable drift; strict simultaneity
         # across arbitrary files requires a filesystem snapshot.
-        _assert_artifacts_stable(opened)
+        final_fingerprint_step = _assert_artifacts_stable(opened)
+        final_verification = _verification_guarantee(
+            opened,
+            [held_descriptor_step, reread_step, final_fingerprint_step],
+            commit_method,
+        )
+        if final_verification != verification:
+            raise ArtifactCollectionError(
+                "manifest verification evidence changed before commit"
+            )
         _assert_output_is_distinct(output, [artifact.path for artifact in opened])
         os.replace(temp_path, output)
     except BaseException:
