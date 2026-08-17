@@ -75,6 +75,10 @@ def taey_dispatch_main() -> Any:
     return _run_callable("fleet_orchestrator.cli_taey_dispatch:main")
 
 
+def taey_delegate_main() -> Any:
+    return _run_callable("fleet_orchestrator.cli_taey_delegate:main")
+
+
 def taey_plan_main() -> Any:
     return _run_callable("fleet_orchestrator.cli_taey_plan:main")
 
