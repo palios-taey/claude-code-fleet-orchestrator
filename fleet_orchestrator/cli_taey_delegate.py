@@ -22,10 +22,48 @@ from fleet_orchestrator.version import __version__
 
 
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+MISSING_NEXT_STEP = (
+    "Create the missing artifact at the reported path or pass the correct artifact path, "
+    "then rerun `taey-delegate collect`."
+)
+READ_NEXT_STEP = (
+    "Grant the current user read access, release any exclusive advisory lock, and rerun "
+    "`taey-delegate collect`."
+)
+EMPTY_NEXT_STEP = (
+    "Write the intended artifact bytes to the reported file, then rerun "
+    "`taey-delegate collect`; zero-byte artifacts are not certifiable."
+)
+REGULAR_FILE_NEXT_STEP = (
+    "Snapshot the source into a non-empty regular file and pass that file to "
+    "`taey-delegate collect`."
+)
+STABLE_FILE_NEXT_STEP = (
+    "Stop the process mutating the artifact or snapshot it to a stable regular file, then "
+    "rerun `taey-delegate collect`."
+)
+OUTPUT_ALIAS_NEXT_STEP = (
+    "Choose an --output path that is not any declared artifact path, then rerun "
+    "`taey-delegate collect`."
+)
+INTERNAL_NEXT_STEP = (
+    "Do not use a manifest from this run; rerun `taey-delegate collect` and report an "
+    "internal collector defect if this error repeats."
+)
+OUTPUT_FILESYSTEM_NEXT_STEP = (
+    "Choose a writable --output directory on one filesystem, then rerun "
+    "`taey-delegate collect`."
+)
+OS_ERROR_NEXT_STEP = (
+    "Repair the reported filesystem path or permissions, ensure the output parent is "
+    "writable, then rerun `taey-delegate collect`."
+)
 
 
 class ArtifactCollectionError(RuntimeError):
-    pass
+    def __init__(self, message: str, next_step: str):
+        super().__init__(message)
+        self.next_step = next_step
 
 
 Fingerprint = tuple[int, int, int, int, int]
@@ -58,22 +96,28 @@ def _artifact_from_open_file(
 ) -> tuple[dict[str, Any], Fingerprint]:
     exists = os.path.exists(path)
     if not exists:
-        raise ArtifactCollectionError(f"artifact does not exist: {path}")
+        raise ArtifactCollectionError(f"artifact does not exist: {path}", MISSING_NEXT_STEP)
 
     try:
         size = os.path.getsize(path)
     except OSError as exc:
-        raise ArtifactCollectionError(f"artifact size read failed for {path}: {exc}") from exc
+        raise ArtifactCollectionError(
+            f"artifact size read failed for {path}: {exc}", READ_NEXT_STEP
+        ) from exc
     if size <= 0:
-        raise ArtifactCollectionError(f"artifact is empty: {path}")
+        raise ArtifactCollectionError(f"artifact is empty: {path}", EMPTY_NEXT_STEP)
 
     descriptor_before = os.fstat(handle.fileno())
     path_before = os.stat(path)
     if not stat.S_ISREG(descriptor_before.st_mode):
-        raise ArtifactCollectionError(f"artifact is not a regular file: {path}")
+        raise ArtifactCollectionError(
+            f"artifact is not a regular file: {path}", REGULAR_FILE_NEXT_STEP
+        )
     fingerprint_before = _fingerprint(descriptor_before)
     if fingerprint_before != _fingerprint(path_before) or descriptor_before.st_size != size:
-        raise ArtifactCollectionError(f"artifact changed before hashing: {path}")
+        raise ArtifactCollectionError(
+            f"artifact changed before hashing: {path}", STABLE_FILE_NEXT_STEP
+        )
 
     digest = hashlib.sha256()
     bytes_read = 0
@@ -83,7 +127,9 @@ def _artifact_from_open_file(
             digest.update(chunk)
             bytes_read += len(chunk)
     except OSError as exc:
-        raise ArtifactCollectionError(f"artifact read failed for {path}: {exc}") from exc
+        raise ArtifactCollectionError(
+            f"artifact read failed for {path}: {exc}", READ_NEXT_STEP
+        ) from exc
 
     descriptor_after = os.fstat(handle.fileno())
     path_after = os.stat(path)
@@ -94,12 +140,15 @@ def _artifact_from_open_file(
         or fingerprint_after != _fingerprint(path_after)
     ):
         raise ArtifactCollectionError(
-            f"artifact changed while hashing {path}: getsize={size} bytes_read={bytes_read}"
+            f"artifact changed while hashing {path}: getsize={size} bytes_read={bytes_read}",
+            STABLE_FILE_NEXT_STEP,
         )
 
     sha256 = digest.hexdigest()
     if not SHA256_PATTERN.fullmatch(sha256):
-        raise ArtifactCollectionError(f"invalid sha256 for {path}: {sha256!r}")
+        raise ArtifactCollectionError(
+            f"invalid sha256 for {path}: {sha256!r}", INTERNAL_NEXT_STEP
+        )
     return {
         "path": path,
         "exists": exists,
@@ -113,29 +162,39 @@ def _assert_output_is_distinct(output: Path, artifact_paths: Sequence[str]) -> N
     output_exists = os.path.exists(output_path)
     for artifact_path in artifact_paths:
         if output_path == artifact_path:
-            raise ArtifactCollectionError(f"manifest output aliases artifact: {artifact_path}")
+            raise ArtifactCollectionError(
+                f"manifest output aliases artifact: {artifact_path}",
+                OUTPUT_ALIAS_NEXT_STEP,
+            )
         if (
             output_exists
             and os.path.exists(artifact_path)
             and os.path.samefile(output_path, artifact_path)
         ):
-            raise ArtifactCollectionError(f"manifest output aliases artifact: {artifact_path}")
+            raise ArtifactCollectionError(
+                f"manifest output aliases artifact: {artifact_path}",
+                OUTPUT_ALIAS_NEXT_STEP,
+            )
 
 
 def _open_artifact(path: str, stack: ExitStack) -> BinaryIO:
     if not os.path.exists(path):
-        raise ArtifactCollectionError(f"artifact does not exist: {path}")
+        raise ArtifactCollectionError(f"artifact does not exist: {path}", MISSING_NEXT_STEP)
     try:
         size = os.path.getsize(path)
     except OSError as exc:
-        raise ArtifactCollectionError(f"artifact size read failed for {path}: {exc}") from exc
+        raise ArtifactCollectionError(
+            f"artifact size read failed for {path}: {exc}", READ_NEXT_STEP
+        ) from exc
     if size <= 0:
-        raise ArtifactCollectionError(f"artifact is empty: {path}")
+        raise ArtifactCollectionError(f"artifact is empty: {path}", EMPTY_NEXT_STEP)
     try:
         handle = stack.enter_context(open(path, "rb"))
         fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
     except OSError as exc:
-        raise ArtifactCollectionError(f"artifact open or lock failed for {path}: {exc}") from exc
+        raise ArtifactCollectionError(
+            f"artifact open or lock failed for {path}: {exc}", READ_NEXT_STEP
+        ) from exc
     return handle
 
 
@@ -159,7 +218,9 @@ def _verification_step(method: str, artifact_count: int) -> dict[str, Any]:
 def _held_descriptor_verification(opened: Sequence[OpenArtifact]) -> dict[str, Any]:
     for artifact in opened:
         if artifact.handle.closed:
-            raise ArtifactCollectionError(f"artifact descriptor is closed: {artifact.path}")
+            raise ArtifactCollectionError(
+                f"artifact descriptor is closed: {artifact.path}", INTERNAL_NEXT_STEP
+            )
         os.fstat(artifact.handle.fileno())
     return _verification_step("held_open_descriptors", len(opened))
 
@@ -172,7 +233,8 @@ def _reread_and_rehash(
         record, fingerprint = _artifact_from_open_file(artifact.path, artifact.handle)
         if record != artifact.record:
             raise ArtifactCollectionError(
-                f"artifact changed during verification: {artifact.path}"
+                f"artifact changed during verification: {artifact.path}",
+                STABLE_FILE_NEXT_STEP,
             )
         artifact.record = record
         artifact.fingerprint = fingerprint
@@ -187,7 +249,8 @@ def _assert_artifacts_stable(opened: Sequence[OpenArtifact]) -> dict[str, Any]:
         exists = os.path.exists(artifact.path)
         if not exists:
             raise ArtifactCollectionError(
-                f"artifact disappeared before manifest write: {artifact.path}"
+                f"artifact disappeared before manifest write: {artifact.path}",
+                STABLE_FILE_NEXT_STEP,
             )
         size = os.path.getsize(artifact.path)
         descriptor_now = os.fstat(artifact.handle.fileno())
@@ -198,16 +261,21 @@ def _assert_artifacts_stable(opened: Sequence[OpenArtifact]) -> dict[str, Any]:
             or _fingerprint(path_now) != artifact.fingerprint
         ):
             raise ArtifactCollectionError(
-                f"artifact changed before manifest write: {artifact.path}"
+                f"artifact changed before manifest write: {artifact.path}",
+                STABLE_FILE_NEXT_STEP,
             )
     return _verification_step("descriptor_and_path_fingerprint_sweep", len(opened))
 
 
 def _same_filesystem_commit_method(temp_path: Path, output: Path) -> str:
     if temp_path.parent != output.parent:
-        raise ArtifactCollectionError("manifest temp path is not beside output")
+        raise ArtifactCollectionError(
+            "manifest temp path is not beside output", OUTPUT_FILESYSTEM_NEXT_STEP
+        )
     if os.stat(temp_path).st_dev != os.stat(output.parent).st_dev:
-        raise ArtifactCollectionError("manifest temp path is not on output filesystem")
+        raise ArtifactCollectionError(
+            "manifest temp path is not on output filesystem", OUTPUT_FILESYSTEM_NEXT_STEP
+        )
     return "same_filesystem_atomic_rename"
 
 
@@ -226,7 +294,9 @@ def _verification_guarantee(
     if methods != expected_methods or any(
         step["artifact_count"] != artifact_count for step in steps
     ):
-        raise ArtifactCollectionError("manifest verification evidence is incomplete")
+        raise ArtifactCollectionError(
+            "manifest verification evidence is incomplete", INTERNAL_NEXT_STEP
+        )
 
     residual_exists = steps[-1]["method"] != commit_method
     return {
@@ -290,7 +360,7 @@ def _write_manifest_transaction(output: Path, opened: Sequence[OpenArtifact]) ->
         )
         if final_verification != verification:
             raise ArtifactCollectionError(
-                "manifest verification evidence changed before commit"
+                "manifest verification evidence changed before commit", INTERNAL_NEXT_STEP
             )
         _assert_output_is_distinct(output, [artifact.path for artifact in opened])
         os.replace(temp_path, output)
@@ -335,7 +405,8 @@ def main() -> int:
     try:
         return args.handler(args)
     except (ArtifactCollectionError, OSError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        next_step = getattr(exc, "next_step", OS_ERROR_NEXT_STEP)
+        print(f"ERROR: {exc}\nnext_step: {next_step}", file=sys.stderr)
         return 1
 
 
