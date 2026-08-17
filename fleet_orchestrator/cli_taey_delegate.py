@@ -276,7 +276,7 @@ def _same_filesystem_commit_method(temp_path: Path, output: Path) -> str:
         raise ArtifactCollectionError(
             "manifest temp path is not on output filesystem", OUTPUT_FILESYSTEM_NEXT_STEP
         )
-    return "same_filesystem_atomic_rename"
+    return "same_filesystem_atomic_rename_with_directory_fsync"
 
 
 def _verification_guarantee(
@@ -327,6 +327,7 @@ def _write_manifest_transaction(output: Path, opened: Sequence[OpenArtifact]) ->
         encoding="utf-8",
     )
     temp_path = Path(handle.name)
+    dir_fd = None
     try:
         held_descriptor_step = _held_descriptor_verification(opened)
         artifacts, reread_step = _reread_and_rehash(opened)
@@ -364,10 +365,15 @@ def _write_manifest_transaction(output: Path, opened: Sequence[OpenArtifact]) ->
             )
         _assert_output_is_distinct(output, [artifact.path for artifact in opened])
         os.replace(temp_path, output)
+        dir_fd = os.open(str(output.parent), os.O_RDONLY)
+        os.fsync(dir_fd)
     except BaseException:
         handle.close()
         temp_path.unlink(missing_ok=True)
         raise
+    finally:
+        if dir_fd is not None:
+            os.close(dir_fd)
 
 
 def cmd_collect(args: argparse.Namespace) -> int:
