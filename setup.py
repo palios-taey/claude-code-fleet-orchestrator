@@ -35,6 +35,7 @@ setup(
             "install = fleet_orchestrator.script_entrypoints:install_main",
             "orch-cron = fleet_orchestrator.script_entrypoints:orch_cron_main",
             "orch-watch = fleet_orchestrator.script_entrypoints:orch_watch_main",
+            "taey-delegate = fleet_orchestrator.script_entrypoints:taey_delegate_main",
             "taey-dispatch = fleet_orchestrator.script_entrypoints:taey_dispatch_main",
             "taey-plan = fleet_orchestrator.script_entrypoints:taey_plan_main",
             "taey-question = fleet_orchestrator.script_entrypoints:taey_question_main",

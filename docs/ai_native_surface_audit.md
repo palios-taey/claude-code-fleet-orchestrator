@@ -14,16 +14,18 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 259.
-- Teaches: 127.
+- Enumerated surfaces: 261.
+- Teaches: 128.
 - Needs-fix baseline debt: 48.
-- Exempt reviewed rows: 84.
+- Exempt reviewed rows: 85.
 
 <!-- ai-native-surfaces:start -->
 | File | Function | Kind | Ordinal | Line Hint | Fingerprint | Classification | Teaching Evidence | Rationale | Review |
 | --- | --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
 | fleet_orchestrator/chat_layer.py | _http_error | http_exception_detail | 1 | 273 | c76409965486615c | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/chat_layer.py | chat_post | http_exception_detail | 1 | 370 | 33c14512ebacfa5e | teaches | GET /api/chat/{} | Gate-bound reply miss returns endpoint + exact reply_to_question_id next-step in-band. | hitl-no-zombie:p2-uichat-gate |
+| fleet_orchestrator/cli_taey_delegate.py | <module> | cli_failure_message | 1 | 414 | ca465dca971e08bc | exempt |  | Static extractor treated an exit wrapper as a user-facing message; `SystemExit(main())` is not an independent runtime surface. | task-1e8615a4:analyzer-artifact |
+| fleet_orchestrator/cli_taey_delegate.py | main | cli_failure_message | 1 | 409 | 3e06017696089658 | teaches | next_step | Every collection refusal emits a failure-specific structured next_step; unexpected filesystem errors emit a repair-and-retry next_step. | task-1e8615a4 |
 | fleet_orchestrator/cli_taey_dispatch.py | <module> | cli_failure_message | 1 | 122 | 415f3a0a1ba97cb6 | exempt |  | Static extractor treated an exit wrapper or non-error tuple as a user-facing message; the row is not an independent runtime surface. | anbr-fix-exempt:analyzer-artifact |
 | fleet_orchestrator/cli_taey_dispatch.py | parse_json_object | cli_failure_message | 1 | 42 | f3a02b3922c82153 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_dispatch.py | parse_json_object | cli_failure_message | 2 | 44 | 881fd581dc03f92f | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
