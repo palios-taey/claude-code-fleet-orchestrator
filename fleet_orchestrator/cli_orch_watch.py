@@ -1237,10 +1237,16 @@ def _handle_user_stop_gate(r, node_id: str, task: dict) -> bool:
 
     if not _stop_gate_dedup(r, node_id, task_id, "clarify"):
         return True
+    task_description = str(
+        task_state.get("description") or task.get("description") or ""
+    ).strip()
     body = (
         f"[CLARIFY_INTENT] You stopped while task={task_id} remains in_progress, no user stop "
-        f"condition matched, and no other ready work exists. Please clarify intent or set blocked_on "
-        f"before stopping again."
+        f"condition matched, and no other ready work exists. Continue the exact current task now; "
+        f"do not replace it with an intent question or unrelated work.\n\n"
+        f"CURRENT TASK\n{task_description}\n\n"
+        f"Inspect the authoritative tracker state with `taey-task status {task_id}` if needed. "
+        f"Set blocked_on only when a real external dependency prevents further execution."
     )
     if _send_wake(
         r,
