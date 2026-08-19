@@ -504,7 +504,12 @@ def _claim_ready_orch_task(task_id: str, worker: str, *,
         return
 
     cfg = OrchConfig()
-    owner = str(supervisor or "").strip() or _base_session_name(worker)
+    supervisor_owner = str(supervisor or "").strip()
+    owner = (
+        supervisor_owner
+        if supervisor_owner and supervisor_owner != worker
+        else _base_session_name(worker)
+    )
     with get_neo4j_session(cfg) as session:
         record = session.run(
             f"""
