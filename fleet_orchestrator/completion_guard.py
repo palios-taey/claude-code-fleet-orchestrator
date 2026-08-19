@@ -55,6 +55,11 @@ def peer_execution_binding_rejection(task_id: str,
     owner = str(task_before.get("owner") or "").strip()
     dispatched_to = str(task_before.get("dispatched_to") or "").strip()
     bound_to_task = current_task_matches(peer, task_id)
+    controls_delegated_execution = (
+        owner == peer
+        and bool(dispatched_to)
+        and dispatched_to != peer
+    )
 
     if normalized_status == "in_progress":
         if owner == peer:
@@ -77,6 +82,9 @@ def peer_execution_binding_rejection(task_id: str,
                 f"or inspect `taey-task status {task_id}` before retrying."
             ),
         }
+
+    if controls_delegated_execution:
+        return None
 
     if not bound_to_task:
         return {
@@ -120,7 +128,8 @@ def peer_self_completion_rejection(task_id: str,
 
     dispatched_to = str(task_before.get("dispatched_to") or "").strip()
     owner = str(task_before.get("owner") or "").strip()
-    if peer not in {dispatched_to, owner}:
+    is_executor = peer == dispatched_to or (not dispatched_to and peer == owner)
+    if not is_executor:
         return None
 
     project_supervisor = _task_project_supervisor(task_id, config)

@@ -73,6 +73,7 @@ EXPLICIT = f"{PROJECT}::explicit-peer"
 CLAIM_RECUR = f"{PROJECT}::claim-recurring"
 SELF_OWNED = f"{PROJECT}::self-owned"
 SUP_OWNED = f"{PROJECT}::supervisor-owned"
+DELEGATED = f"{PROJECT}::delegated-control"
 FAILURES: list[str] = []
 
 
@@ -120,7 +121,7 @@ def _setup() -> None:
     init_schema(config=CFG)
     create_project(project_id=PROJECT, name=PROJECT, supervisor=SUP, priority=1, config=CFG)
     create_phase(project_id=PROJECT, phase_id=PHASE, name="phase", config=CFG)
-    for task_id in (PARENT_RECUR, EXPLICIT, CLAIM_RECUR, SUP_OWNED):
+    for task_id in (PARENT_RECUR, EXPLICIT, CLAIM_RECUR, SUP_OWNED, DELEGATED):
         create_task(
             phase_id=PHASE,
             task_id=task_id,
@@ -208,6 +209,36 @@ def main() -> int:
         _check("explicit dispatch with current_task binding can start", code == 200 and body.get("ok") is True, body)
         explicit = get_task(EXPLICIT, CFG)
         _check("bound explicit task is in_progress", explicit.get("status") == "in_progress", explicit)
+
+        _claim_ready_orch_task(DELEGATED, PEER2, supervisor=SELF_PEER)
+        delegated = get_task(DELEGATED, CFG)
+        _check("distinct dispatch supervisor becomes task owner", delegated.get("owner") == SELF_PEER, delegated)
+        _check("delegated worker remains the executor", delegated.get("dispatched_to") == PEER2, delegated)
+
+        _bind(PEER2, DELEGATED)
+        code, body = _patch(
+            client,
+            DELEGATED,
+            {
+                "status": "completed",
+                "from": PEER2,
+                "evidence": {"production_observation": "delegated worker cannot self-close"},
+            },
+        )
+        _check("delegated worker self-completion is rejected", code == 409 and body.get("ok") is False, body)
+        _check("rejected worker completion leaves delegated task in_progress", get_task(DELEGATED, CFG).get("status") == "in_progress", get_task(DELEGATED, CFG))
+
+        code, body = _patch(
+            client,
+            DELEGATED,
+            {
+                "status": "completed",
+                "from": SELF_PEER,
+                "evidence": {"production_observation": "owning supervisor verified delegated work"},
+            },
+        )
+        _check("owning suffixed supervisor can close delegated work", code == 200 and body.get("ok") is True, body)
+        _check("supervisor close completes delegated task", get_task(DELEGATED, CFG).get("status") == "completed", get_task(DELEGATED, CFG))
 
         update_task_status(
             CLAIM_RECUR,
