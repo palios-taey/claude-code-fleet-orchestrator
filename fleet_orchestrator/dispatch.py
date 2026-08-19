@@ -497,12 +497,14 @@ def _orch_task_exists(task_id: str) -> bool:
     return record is not None
 
 
-def _claim_ready_orch_task(task_id: str, worker: str, *, force: bool = False) -> None:
+def _claim_ready_orch_task(task_id: str, worker: str, *,
+                           supervisor: Optional[str] = None,
+                           force: bool = False) -> None:
     if not _orch_task_exists(task_id):
         return
 
     cfg = OrchConfig()
-    owner = _base_session_name(worker)
+    owner = str(supervisor or "").strip() or _base_session_name(worker)
     with get_neo4j_session(cfg) as session:
         record = session.run(
             f"""
@@ -1017,7 +1019,12 @@ def dispatch(
     from_session = supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")
 
     previous_force_bindings = _current_task_binding_candidates(task_id) if force else set()
-    _claim_ready_orch_task(task_id=task_id, worker=worker, force=force)
+    _claim_ready_orch_task(
+        task_id=task_id,
+        worker=worker,
+        supervisor=supervisor,
+        force=force,
+    )
     try:
         binding_nonce = bind_current_task(
             worker=worker,
