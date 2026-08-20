@@ -106,7 +106,7 @@ def _topology_contract() -> None:
 
     original = os.environ.get("ORCH_SESSION_IDS")
     try:
-        os.environ["ORCH_SESSION_IDS"] = "conductor-codex,weaver-codex"
+        os.environ["ORCH_SESSION_IDS"] = "conductor-codex,weaver-codex,treasurer-codex,job-seeker-codex"
         parentless = SimpleNamespace(get=lambda _key: None)
         stale_parent = SimpleNamespace(get=lambda _key: "conductor")
         _check(
@@ -129,6 +129,15 @@ def _topology_contract() -> None:
                 task={"supervisor": "delegating-control"},
             )
             == "delegating-control",
+        )
+        _check(
+            "orch-watch normalizes stale task authority to the configured control",
+            watch.resolve_supervisor(
+                parentless,
+                "job-seeker-codex",
+                task={"supervisor": "treasurer"},
+            )
+            == "treasurer-codex",
         )
     finally:
         if original is None:

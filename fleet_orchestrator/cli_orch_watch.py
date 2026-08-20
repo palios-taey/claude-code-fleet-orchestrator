@@ -275,9 +275,16 @@ def resolve_supervisor(r, node_id: str, task: Optional[dict] = None) -> Optional
     also configured or visible as a real local session.
     """
     candidates: list[object] = []
+    registered = OrchConfig().session_ids
     if isinstance(task, dict):
-        candidates.extend([task.get("supervisor"), task.get("dispatcher")])
-    configured = configured_supervisor_for_session(node_id, OrchConfig().session_ids)
+        for value in (task.get("supervisor"), task.get("dispatcher")):
+            task_candidate = str(value or "").strip()
+            if task_candidate:
+                candidates.append(
+                    configured_supervisor_for_session(task_candidate, registered)
+                    or task_candidate
+                )
+    configured = configured_supervisor_for_session(node_id, registered)
     if configured:
         candidates.append(configured)
     try:
