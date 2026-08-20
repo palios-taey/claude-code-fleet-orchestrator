@@ -138,7 +138,8 @@ def _endpoint_contract() -> None:
         _check("enabled wake packet returns provenance metadata", bool(body.get("packet_meta", {}).get("provenance_hash")) and body["packet_meta"]["size_report"]["under_budget"] is True, body)
 
         with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["conductor-codex"])), \
-             mock.patch.object(tasks_api, "select_wake_context", side_effect=RuntimeError("assembler boom")):
+             mock.patch.object(tasks_api, "select_wake_context", side_effect=RuntimeError("assembler boom")), \
+             mock.patch.object(tasks_api.LOGGER, "exception") as logged:
             failed = client.get("/api/sessions/conductor-codex/wake-packet?cli=codex")
         failed_body = failed.json()
         _check(
@@ -153,6 +154,11 @@ def _endpoint_contract() -> None:
             failed_body.get("operation") == "wake_packet_assembly"
             and "Wake continues without a packet" in failed_body.get("next_step", ""),
             failed_body,
+        )
+        _check(
+            "assembler failure is logged as wake_packet_assembly",
+            logged.called and "wake_packet_assembly failed" in logged.call_args.args[0],
+            logged.call_args,
         )
     finally:
         if old_endpoint is None:
@@ -930,6 +936,99 @@ def _oversized_kb_content_summary_fallback_contract() -> None:
     _check("packet state records KB body omission", packet["context"]["kb_context"][0].get("content_omitted_for_budget") is True, packet)
 
 
+def _many_item_kb_aggregate_pointer_contract() -> None:
+    items = []
+    summaries = []
+    for idx in range(18):
+        body = f"KB_BODY_{idx}_START\n" + ("K" * 800) + f"\nKB_BODY_{idx}_END"
+        summary = f"SUMMARY_{idx} " + ("S" * 220)
+        summaries.append(summary)
+        items.append({
+            "stable_key": f"policy::aggregate-{idx}",
+            "revision_no": idx + 1,
+            "content_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "title": f"Aggregate policy {idx}",
+            "entity_type": "policy",
+            "layer": "control",
+            "active_status": "active",
+            "truth_register": "Observed",
+            "summary": summary,
+            "content": body,
+            "deduped": False,
+        })
+    packet = {
+        "packet_id": "packet-many-kb-pointer-aggregate",
+        "generated_for": "linkedin-codex",
+        "generated_at_commit": "test",
+        "provenance_hash": "",
+        "context": {
+            "overall_refs": [],
+            "supervisor_refs": [],
+            "project_refs": [],
+            "phase_refs": [],
+            "task_refs": [],
+            "identity": {"role": "engineering", "mode": "lean_role_core", "source": "acceptance"},
+            "memory": [{"name": "drop-me", "type": "reference", "content": "MEMORY_SHOULD_YIELD\n" + ("M" * 400)}],
+            "kb_context": items,
+            "rules": [],
+            "budget_used": 0,
+        },
+        "cycle": {},
+        "human": {},
+        "stop": {},
+    }
+
+    rendered = assembler.assemble(packet, "codex", budget_bytes=assembler.CORE_BUDGET_BYTES)
+    used = len(rendered.encode("utf-8"))
+    compacted = packet["context"]["kb_context"]
+
+    _check("many-item KB aggregate stays under the hard cap", used <= assembler.CORE_BUDGET_BYTES, used)
+    _check("pointer retrieval marker is visible", assembler.KB_POINTERS_OMITTED_MARKER in rendered, rendered)
+    _check("aggregate uses one untrusted KB envelope", rendered.count('source="kb:aggregate"') == 1, rendered)
+    _check(
+        "every selected key and hash survives pointer compaction",
+        all(item["stable_key"] in rendered and item["content_sha256"] in rendered for item in items),
+        rendered,
+    )
+    _check(
+        "revision numbers survive pointer compaction",
+        all(f"revision_no: {item['revision_no']}" in rendered for item in items),
+        rendered,
+    )
+    _check(
+        "KB bodies are absent after pointer compaction",
+        all(f"KB_BODY_{idx}_START" not in rendered for idx in range(18)),
+        rendered,
+    )
+    _check(
+        "summaries are omitted wholly, not truncated",
+        all(summary not in rendered and summary[:40] not in rendered for summary in summaries),
+        rendered,
+    )
+    _check(
+        "packet state records provenance-pointer compaction for every item",
+        all(item.get("payload_omitted_for_budget") is True for item in compacted),
+        compacted,
+    )
+
+    error = ""
+    undersized = json.loads(json.dumps(packet))
+    for item in undersized["context"]["kb_context"]:
+        item["content"] = items[0]["content"]
+        item["summary"] = items[0]["summary"]
+        item.pop("payload_omitted_for_budget", None)
+        item.pop("content_omitted_for_budget", None)
+    try:
+        assembler.assemble(undersized, "codex", budget_bytes=used - 1)
+    except ValueError as exc:
+        error = str(exc)
+    _check(
+        "pointer aggregate fails loud one byte under its rendered size",
+        "wake packet exceeds" in error and str(used - 1) in error,
+        error,
+    )
+
+
 def _rules_tier_budget_contract() -> None:
     rule = "RULE_START\n" + ("R" * 9000) + "\nRULE_END"
     packet = {
@@ -1136,6 +1235,7 @@ def main() -> int:
     _context_selection_error_contract()
     _required_context_never_truncated_contract()
     _oversized_kb_content_summary_fallback_contract()
+    _many_item_kb_aggregate_pointer_contract()
     _rules_tier_budget_contract()
     _rules_and_identity_dedupe_contract()
     _empty_work_context_contract()

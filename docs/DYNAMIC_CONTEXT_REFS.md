@@ -29,7 +29,14 @@ Consumer banner: consumers MUST check body[ok]; HTTP 200 alone does not imply co
 
 ## Budget Behavior
 
-Required operating context, identity, refs, selector-matched Knowledge Base nodes, and rules are not partially truncated to satisfy the wake-packet budget. The assembler keeps those sections whole; when budget pressure requires dropping content, it drops whole ranked-memory items instead. A packet should therefore contain the complete selected required section or omit lower-priority memory entries, not emit half a ref, KB node, rule, identity block, or operating section.
+Required operating context, identity, refs, and rules are not partially truncated to satisfy the wake-packet budget. Ranked memory is dropped as whole items first. Selector-matched Knowledge Base nodes stay selected (every `stable_key` remains); their payload is compacted as a whole aggregate, never half a summary:
+
+1. Full revision bodies when the rendered packet fits the hard cap.
+2. If bodies still overflow after memory is exhausted, omit bodies and keep per-item summaries plus `stable_key` / `revision_no` / `content_sha256`.
+3. If summaries plus per-item envelopes still overflow, render one untrusted aggregate of those provenance pointers and a visible retrieval marker.
+4. If provenance pointers plus the remaining required sections still overflow, assembly fails loud.
+
+The assembler does not silently truncate KB text and does not drop mapped keys to sneak under the cap.
 
 ## Knowledge Base Push Layer
 
@@ -37,7 +44,7 @@ When `ORCH_KB_NEO4J_URI` and `ORCH_KB_MAP_PATH` are both set, the assembler read
 
 The map has `universal` stable keys plus selector entries keyed by task owner/session prefix and task `capability_tags`. Universal keys are injected first, but only for tasks that match at least one selector. Tasks that match no selector get no Knowledge Base section.
 
-Each selected KB node is rendered inside the same nonce-scoped `<<UNTRUSTED-DATA ...>>` boundary used for refs and memory, with `stable_key`, `revision_no`, and `content_sha256` provenance lines. If the same content hash is already present in a selected ref, the KB item is rendered as `deduped: true` without repeating the content.
+Each selected KB node is rendered inside the same nonce-scoped `<<UNTRUSTED-DATA ...>>` boundary used for refs and memory, with `stable_key`, `revision_no`, and `content_sha256` provenance lines. If the same content hash is already present in a selected ref, the KB item is rendered as `deduped: true` without repeating the content. When the selected aggregate cannot keep summaries under the hard cap, those provenance lines are rendered once as a compact untrusted aggregate instead of one envelope per item.
 
 Selector-matched missing keys, unreadable maps, and unreachable KB stores are fail-closed. The wake-packet endpoint returns `ok:false`; dispatch raises and rolls back instead of sending a peer a task without its mapped KB rulings.
 
