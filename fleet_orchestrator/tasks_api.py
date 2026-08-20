@@ -1951,19 +1951,44 @@ def _reconcile_session_unbind_graph(
             )
 
         if _already_reconciled_unbind_state(state):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": (
-                        f"task {task_id} is already pending/unbound for session {session_id}; "
-                        "nothing to repair — refusing success that would only clear Redis sidecars"
-                    ),
-                    "session": session_id,
-                    "task_id": task_id,
-                    "repair": repair,
-                    "task_state": state,
-                },
-            )
+            if repair:
+                # Repair has no Redis bind to prove identity — refuse Redis-sidecar-only success.
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": (
+                            f"task {task_id} is already pending/unbound for session {session_id}; "
+                            "nothing to repair — refusing success that would only clear Redis sidecars"
+                        ),
+                        "session": session_id,
+                        "task_id": task_id,
+                        "repair": True,
+                        "task_state": state,
+                    },
+                )
+            # Normal retry after graph-success/Redis-failure: graph is already pending, but the
+            # exact Redis current_task bind may still be present. Allow idempotent CAS clear only.
+            if started_at is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": (
+                            f"task {task_id} is already pending/unbound and no exact Redis bind "
+                            "identity was provided; refusing Redis-only clear"
+                        ),
+                        "session": session_id,
+                        "task_id": task_id,
+                        "repair": False,
+                        "task_state": state,
+                    },
+                )
+            return {
+                "task_exists": True,
+                "changed": False,
+                "idempotent_redis_clear": True,
+                "prior": state,
+                "after": state,
+            }
         raise HTTPException(
             status_code=409,
             detail={
@@ -2173,8 +2198,14 @@ def session_unbind_current_task(
         config=_cfg(),
         repair=repair,
     )
-    if not graph.get("changed"):
+    allow_idempotent_redis_clear = bool(
+        (not repair)
+        and expected_current is not None
+        and graph.get("idempotent_redis_clear")
+    )
+    if not graph.get("changed") and not allow_idempotent_redis_clear:
         # Soft success without a live graph mutation is fail-open: never clear Redis alone.
+        # Exception: normal-path retry after graph already pending, with exact Redis bind still present.
         raise HTTPException(
             status_code=409,
             detail={

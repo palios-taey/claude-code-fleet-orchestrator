@@ -228,6 +228,74 @@ def main() -> int:
             R.get(state_key(PEER, "last_outcome")) not in (None, b""),
             R.get(state_key(PEER, "last_outcome")),
         )
+
+        # Partial-failure recovery: graph mutated, Redis clear failed, retry with SAME bind.
+        import fleet_orchestrator.tasks_api as tasks_api_mod
+
+        _cleanup()
+        create_project(PROJECT, "unbind binding", supervisor=SUP, priority=10, config=CFG)
+        create_phase(PROJECT, PHASE, "phase", config=CFG)
+        create_task(PHASE, TASK, "bound work", owner=SUP, priority=1, config=CFG)
+        started = _seed_bound()
+        raw_bind = R.get(state_key(PEER, "current_task"))
+        if isinstance(raw_bind, bytes):
+            raw_bind = raw_bind.decode()
+
+        real_clear = tasks_api_mod._clear_exact_session_unbind_redis
+
+        def _boom(session_id, task_id, expected_current):
+            raise tasks_api_mod.RedisError("forced redis clear failure for probe")
+
+        tasks_api_mod._clear_exact_session_unbind_redis = _boom  # type: ignore[assignment]
+        try:
+            failed = CLIENT.delete(f"/api/sessions/{PEER}/current-task")
+        finally:
+            tasks_api_mod._clear_exact_session_unbind_redis = real_clear  # type: ignore[assignment]
+        _check("forced Redis failure returns 503", failed.status_code == 503, failed.json())
+        row_mid = _task_row()
+        _check("graph already pending after Redis failure", row_mid.get("status") == "pending", row_mid)
+        _check(
+            "stale Redis bind still present after Redis failure",
+            R.get(state_key(PEER, "current_task")) not in (None, b""),
+            R.get(state_key(PEER, "current_task")),
+        )
+
+        # Retry with the exact same bind still in Redis — must CAS-clear it.
+        R.set(state_key(PEER, "current_task"), raw_bind)
+        retry = CLIENT.delete(f"/api/sessions/{PEER}/current-task")
+        _check("idempotent normal retry HTTP 200", retry.status_code == 200, retry.json())
+        _check(
+            "idempotent retry cleared exact stale Redis bind",
+            R.get(state_key(PEER, "current_task")) in (None, b""),
+            R.get(state_key(PEER, "current_task")),
+        )
+
+        # Mismatched/new bind must remain untouched on retry after graph already pending.
+        _seed_bound()
+        R.delete(state_key(PEER, "current_task"))
+        # Force graph pending via repair first
+        CLIENT.delete(f"/api/sessions/{PEER}/current-task?task_id={TASK}")
+        new_started = time.time()
+        new_bind = (
+            f'{{"task_id":"{TASK}","description":"new bind","supervisor":"{SUP}",'
+            f'"started_at":{new_started}}}'
+        )
+        R.set(state_key(PEER, "current_task"), new_bind)
+        # Put a fake "old" expected by calling reconcile path with a different bind via API:
+        # API reads whatever is currently in Redis as expected_current. So to prove mismatched
+        # bind safety, call the CAS helper directly with a different expected payload.
+        from fleet_orchestrator.tasks_api import _clear_exact_session_unbind_redis
+
+        stale_expected = (
+            f'{{"task_id":"{TASK}","description":"old bind","supervisor":"{SUP}",'
+            f'"started_at":{started}}}'
+        )
+        mismatched = _clear_exact_session_unbind_redis(PEER, TASK, stale_expected)
+        _check("mismatched bind CAS reports superseded", mismatched.get("superseded") is True, mismatched)
+        live = R.get(state_key(PEER, "current_task"))
+        if isinstance(live, bytes):
+            live = live.decode()
+        _check("mismatched/new bind left untouched", live == new_bind, live)
     finally:
         clear_worker_task_liveness(TASK, config=CFG)
         _cleanup()
