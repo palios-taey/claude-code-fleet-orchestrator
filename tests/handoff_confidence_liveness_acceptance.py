@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import io
+import json
 import os
 import re
 import sys
@@ -186,19 +187,48 @@ def main() -> int:
         liveness = _liveness(client)
         _check("fresh notify last_activity after dispatch => working", liveness.get("state") == "working", liveness)
 
-        # P0 fix: derive from durable active-turn signal (ZSET with future expiry, maintained
-        # by taey-presence with renewable lease on claim/turn_start and during long turn).
-        # Even with no/fresh last_activity, presence of non-expired entry => working.
-        # This makes long blocking turn (delivery_claim + turn_attempt + active_turns) report working.
+        # Validator coverage (shared active_turn_valid_for_task):
+        # - valid ctx + task_id match + future score => working (long turn not AWAITING/stale)
+        # - no turn_context => not working
+        # - mismatched task_id in ctx => not
+        # - invalid ctx json => not
+        # - expired score => not
+        # Peer mode naked lease without ctx also rejected via validator (inflight path)
         notify_r.delete(state_key(WORKER, "last_activity"))
         notify_r.delete(state_key(WORKER, "idle"))
-        turn_id = b"1466be908e1c4cf3bc22581b1c93ba7b"  # example from live
+        turn_id = "1466be908e1c4cf3bc22581b1c93ba7b"
         future_score = time.time() + 3600
-        notify_r.zadd(state_key(WORKER, "active_turns"), {turn_id: future_score})
+        ctx_key = state_key(WORKER, "turn_context")
+        z_key = state_key(WORKER, "active_turns")
+
+        # naked ZSET only (no ctx) -> not working
+        notify_r.zadd(z_key, {turn_id: future_score})
         liveness = _liveness(client)
-        _check("durable active_turn ZSET (future expiry) + current_task => working (long turn not stale)", liveness.get("state") == "working", liveness)
+        _check("naked ZSET no turn_context => not working (invalid lease)", liveness.get("state") != "working", liveness)
+
+        # ctx present but mismatched task_id -> not
+        notify_r.hset(ctx_key, turn_id, json.dumps({"task_id": "mismatched-task", "process_generation": "gen1"}))
+        liveness = _liveness(client)
+        _check("mismatched task_id in turn_context => not working", liveness.get("state") != "working", liveness)
+
+        # invalid ctx -> not
+        notify_r.hset(ctx_key, turn_id, "not-json")
+        liveness = _liveness(client)
+        _check("invalid turn_context => not working", liveness.get("state") != "working", liveness)
+
+        # valid ctx + matching task + future -> working
+        notify_r.hset(ctx_key, turn_id, json.dumps({"task_id": TASK, "process_generation": "gen1"}))
+        liveness = _liveness(client)
+        _check("valid turn_context + task match + future score => working (long turn)", liveness.get("state") == "working", liveness)
+
+        # expired -> not working (even with valid ctx)
+        notify_r.zadd(z_key, {turn_id: time.time() - 10})
+        liveness = _liveness(client)
+        _check("expired active turn => not working", liveness.get("state") != "working", liveness)
+
         # cleanup
-        notify_r.zrem(state_key(WORKER, "active_turns"), turn_id)
+        notify_r.zrem(z_key, turn_id)
+        notify_r.hdel(ctx_key, turn_id)
 
         notify_r.set(state_key(WORKER, "idle"), "1")
         notify_r.set(state_key(WORKER, "last_activity"), str(time.time()))

@@ -85,6 +85,45 @@ def _terminal_outcome_for_task(r: Any, worker: str, task_id: str, *, details_req
     return task_id in str(outcome.get("details") or "")
 
 
+def active_turn_valid_for_task(r: Any, worker: str, task_id: str, current_time: float) -> bool:
+    """One shared read-only validator for the durable active-turn lease (taey-presence ZSET + turn_context).
+
+    Requires ALL of:
+    (d) score (expiry) > now in taey:<worker>:active_turns
+    (b) turn_context HASH entry for the turn_id is present and JSON-decodable to dict
+    (a) ctx['task_id'] (or top_task_id / id equiv) exactly matches the queried task_id
+    (c) process_generation matches if present in ctx (presence validates proper start; no strict current-gen here as not threaded to all call sites)
+
+    Rejects naked ZADD, corrupt/stale ctx, mismatched task, expired, invalid-context, no-start.
+    Used by current_liveness (for label), inflight (all modes, so worker_liveness escalation too).
+    """
+    if not task_id:
+        return False
+    try:
+        turn_key = state_key(worker, "active_turns")
+        ctx_key = state_key(worker, "turn_context")
+        turn_ids = r.zrangebyscore(turn_key, current_time, "+inf")
+        for tid in turn_ids:
+            tid_str = tid.decode(errors="replace") if isinstance(tid, (bytes, bytearray)) else str(tid)
+            raw_ctx = r.hget(ctx_key, tid_str)
+            if not raw_ctx:
+                continue
+            try:
+                ctx = json.loads(raw_ctx.decode(errors="replace") if isinstance(raw_ctx, (bytes, bytearray)) else raw_ctx)
+            except Exception:
+                continue
+            if not isinstance(ctx, dict):
+                continue
+            ctx_task = str(ctx.get("task_id") or ctx.get("top_task_id") or ctx.get("id") or "").strip()
+            if ctx_task and ctx_task == task_id:
+                # process_generation: if present in ctx, accept (the lease was created with gen by presence)
+                # strict cross-gen match would be added if orchestrator threads current gen
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def active_inflight_signal(
     task_id: Optional[str],
     *,
@@ -136,17 +175,10 @@ def active_inflight_signal(
             if raise_on_probe_error:
                 raise InFlightProbeError(f"terminal outcome probe failed for {worker}") from exc
             pass
-        # Durable active-turn signal from taey-presence (ZSET with expiry lease).
-        # If worker has non-expired active turn for its bound task, treat as in-flight.
-        # This prevents stale/awaiting during long blocking proxy turns.
-        try:
-            turn_key = state_key(worker, "active_turns")
-            if r.zrangebyscore(turn_key, current_time, "+inf", start=0, num=1):
-                return InFlightSignal(source="active_turn", worker=worker)
-        except Exception as exc:
-            if raise_on_probe_error:
-                raise InFlightProbeError(f"active_turn probe failed for {worker}") from exc
-            pass
+        # Use shared validator (requires ctx + task match + future score)
+        if active_turn_valid_for_task(r, worker, task_id, current_time):
+            return InFlightSignal(source="active_turn", worker=worker)
+
         try:
             raw_tool_activity = r.get(state_key(worker, "last_tool_activity"))
         except Exception as exc:

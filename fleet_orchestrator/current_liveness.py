@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from redis import RedisError
 
 from .config import OrchConfig
+from .inflight import active_turn_valid_for_task
 from .notify_state import redis_connect, state_key
 from .worker_liveness import worker_task_liveness_ttl_secs
 
@@ -87,21 +88,13 @@ def current_task_liveness(session_id: str,
         ttl = float(worker_task_liveness_ttl_secs())
     ttl = max(1.0, ttl)
 
-    # Derive working from the durable active-turn signal (per-seat ZSET maintained by taey-presence
-    # with expiry scores / renewable lease). Presence of non-expired entry for the worker means
-    # an active long turn (blocking proxy call) is in flight. This is the authoritative signal
-    # that must make tracker report working, even if last_activity is old/stale.
-    has_active_turn = False
-    try:
-        turn_key = state_key(worker, "active_turns")
-        # any member with score (deadline) > now
-        active = redis_client.zrangebyscore(turn_key, checked_at, "+inf", start=0, num=1)
-        has_active_turn = bool(active)
-    except RedisError:
-        pass
-
     current_matches = str(current_payload.get("task_id") or "") == task_id
-    if has_active_turn and current_matches:
+    # Use shared validator: requires matching turn_context task_id + valid ctx + future score.
+    # Naked future ZSET without valid ctx/task match does not make it working.
+    has_valid_active_turn = current_matches and active_turn_valid_for_task(
+        redis_client, worker, task_id, checked_at
+    )
+    if has_valid_active_turn:
         state = "working"
         age_base = last_activity or dispatch_started_at or checked_at
         age_seconds = int(max(0.0, checked_at - age_base))
