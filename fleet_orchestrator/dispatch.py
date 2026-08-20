@@ -87,7 +87,11 @@ from .memory_tier import get_memory
 from .orch_schema import completed_task_satisfies_dependents_cypher
 from .rules_tier import get_rules
 from .session_topology import control_principal_for_session, session_family
-from .worker_liveness import register_worker_task_liveness
+from .worker_liveness import (
+    register_worker_task_liveness,
+    worker_task_liveness_dedup_key,
+    worker_task_liveness_key,
+)
 from .current_task_binding import (
     clear_matching_current_task,
     clear_session_current_task,
@@ -386,14 +390,19 @@ def _busy_current_task_error(worker: str, existing: Optional[dict[str, Any]],
 def _bind_current_task_checked(r: Any, worker: str, current_task: dict[str, Any],
                                set_parent: bool, supervisor: Optional[str],
                                dispatcher: Optional[str],
-                               *, force: bool = False) -> None:
+                               *, force: bool = False,
+                               parent_claim_out: Optional[dict[str, Any]] = None) -> None:
     from redis import WatchError
 
     key = _state_key(worker, "current_task")
+    parent_key = _state_key(worker, "parent")
     for attempt in range(_WATCH_MAX_ATTEMPTS):
         with r.pipeline() as pipe:
             try:
-                pipe.watch(key)
+                if set_parent and supervisor:
+                    pipe.watch(key, parent_key)
+                else:
+                    pipe.watch(key)
                 existing = _decode_current_task(pipe.get(key))
                 stale_existing: Optional[dict[str, Any]] = None
                 if not force:
@@ -410,13 +419,23 @@ def _bind_current_task_checked(r: Any, worker: str, current_task: dict[str, Any]
                     existing_status = _current_task_status(existing_task_id) if existing_task_id else None
                     if existing_task_id and existing_status is not None and not is_live_binding_status(existing_status):
                         stale_existing = {"task_id": existing_task_id, "status": existing_status}
+                prior_parent = pipe.get(parent_key) if set_parent and supervisor else None
+                prior_parent_present = prior_parent is not None
                 pipe.multi()
                 pipe.delete(_state_key(worker, "last_outcome"))
                 pipe.delete(_state_key("orch-watch-stuck", f"{worker}:{current_task['task_id']}"))
                 pipe.set(key, json.dumps(current_task))
                 if set_parent and supervisor:
-                    pipe.set(_state_key(worker, "parent"), supervisor)
+                    pipe.set(parent_key, supervisor)
                 pipe.execute()
+                if parent_claim_out is not None and set_parent and supervisor:
+                    parent_claim_out.update(
+                        {
+                            "prior_parent_present": prior_parent_present,
+                            "prior_parent": prior_parent,
+                            "expected_parent": supervisor,
+                        }
+                    )
                 if stale_existing:
                     logger.warning(
                         "stale current_task binding cleared during dispatch worker=%s stale_task=%s status=%s new_task=%s",
@@ -442,6 +461,8 @@ def bind_current_task(
     force: bool = False,
     guard_existing: bool = False,
     dispatcher: Optional[str] = None,
+    *,
+    parent_claim_out: Optional[dict[str, Any]] = None,
 ) -> float:
     """Write the canonical dispatch/current-task wire for ``worker``.
 
@@ -465,7 +486,16 @@ def bind_current_task(
         current_task["dispatcher"] = dispatcher
 
     if guard_existing:
-        _bind_current_task_checked(r, worker, current_task, set_parent, supervisor, dispatcher or supervisor, force=force)
+        _bind_current_task_checked(
+            r,
+            worker,
+            current_task,
+            set_parent,
+            supervisor,
+            dispatcher or supervisor,
+            force=force,
+            parent_claim_out=parent_claim_out,
+        )
     else:
         pipe = r.pipeline(transaction=True)
         pipe.delete(_state_key(worker, "last_outcome"))
@@ -665,109 +695,137 @@ def _rollback_claim_only(worker: str, task_id: str) -> None:
             "(task may linger in_progress as a phantom): %r", worker, task_id, exc)
 
 
-def _rollback_claim(worker: str, task_id: str, binding_nonce: Optional[float]) -> None:
-    """Undo a claim+bind when wake delivery fails, so a failed dispatch leaves
-    READY work (pending) rather than a phantom 'live resolver'.
-
-    dispatch() mutates state (claim -> status=in_progress; bind -> Redis
-    current_task) BEFORE the wake (taey-notify) is delivered. If the wake fails,
-    the task would otherwise stay in_progress -- counted live by
-    _LIVE_RESOLVER_STATUSES -- with nothing actually working it, so a supervisor
-    blocked_on it stops and the work dead-locks.
-
-    Identity-guarded (grok PR#25 audit V1/V2): ``binding_nonce`` is the claim
-    token written by bind_current_task. We revert ONLY if the worker's live
-    current_task is still THIS dispatch's binding (same task_id + nonce). If a
-    later same-worker dispatch has rebound current_task, this dispatch was
-    superseded -- we touch neither the task status nor the (newer) binding.
-
-    Observability-first (V4): the rollback never raises (the caller is already
-    raising the dispatch failure) but every internal failure is LOGGED, so a
-    cleanup that leaves the phantom is visible rather than silent.
-    """
+def _rollback_claim(
+    worker: str,
+    task_id: str,
+    binding_nonce: Optional[float],
+    *,
+    parent_claim: Optional[dict[str, Any]] = None,
+) -> None:
+    """Undo only the exact Redis binding and graph claim created by dispatch."""
     from redis import WatchError
 
-    key = _state_key(worker, "current_task")
-
-    # 1. Read the live binding and classify it relative to THIS dispatch.
     try:
         r = _redis_connect()
-        raw = r.get(key)
     except Exception as exc:
         logger.warning(
-            "dispatch rollback: could not read current_task to verify ownership "
-            "worker=%s task=%s -- NOT reverting blindly: %r", worker, task_id, exc)
-        return
-    try:
-        cur = json.loads(raw) if raw else None
-    except (TypeError, ValueError):
-        cur = None
-    live_task = cur.get("task_id") if isinstance(cur, dict) else None
-    live_nonce = cur.get("started_at") if isinstance(cur, dict) else None
-    is_ours = live_task == task_id and (binding_nonce is None or live_nonce == binding_nonce)
-    is_reclaim = live_task == task_id and not is_ours  # OUR task, but a NEWER dispatch rebound it
-
-    if is_reclaim:
-        # A newer dispatch re-claimed this same task on this worker. It is now
-        # legitimately in_progress under someone else's wake -- reverting would
-        # clobber that live re-claim (grok V1). Leave status AND binding alone.
+            "dispatch rollback: could not connect to Redis; no state changed "
+            "worker=%s task=%s: %r",
+            worker,
+            task_id,
+            exc,
+        )
         return
 
-    # 2. Revert the orch task to pending. Safe in BOTH remaining cases: it is
-    #    task_id + owner + status='in_progress' guarded, so it only ever touches
-    #    THIS task's failed claim -- never a different task the worker has since
-    #    moved to (grok V2: the worker may be on T2 now; reverting T1 does not
-    #    touch T2), and never another worker's claim.
+    current_key = _state_key(worker, "current_task")
+    parent_key = _state_key(worker, "parent")
+    liveness_key = worker_task_liveness_key(task_id)
+    liveness_dedup_key = worker_task_liveness_dedup_key(task_id)
+    redis_cleared = False
     try:
-        if _orch_task_exists(task_id):
-            cfg = OrchConfig()
-            with get_neo4j_session(cfg) as session:
-                session.run(
-                    """
-                    MATCH (t:OrchTask {id: $task_id})
-                    WHERE t.status = 'in_progress'
-                      AND (
-                          coalesce(t.dispatched_to, '') = $worker
-                          OR (coalesce(t.dispatched_to, '') = '' AND coalesce(t.owner, '') = $worker)
-                      )
-                    SET t.status = 'pending',
-                        t.dispatched_to = NULL,
-                        t.updated_at = datetime()
-                    """,
-                    task_id=task_id,
-                    worker=worker,
-                )
-    except Exception as exc:
-        logger.warning(
-            "dispatch rollback: neo revert to pending FAILED worker=%s task=%s "
-            "(task may linger in_progress as a phantom): %r", worker, task_id, exc)
-
-    # 3. Clear the binding ONLY if it is still OURS, atomically. If the worker has
-    #    moved to a different task (T2) the binding is T2's -- never delete it
-    #    (grok V2). WATCH guards against a rebind racing between step 1 and here.
-    if not is_ours:
-        return
-    try:
-        with r.pipeline() as pipe:
-            for _attempt in range(_WATCH_MAX_ATTEMPTS):
+        for attempt in range(_WATCH_MAX_ATTEMPTS):
+            with r.pipeline() as pipe:
                 try:
-                    pipe.watch(key)
-                    if not _binding_is_ours(pipe.get(key), task_id, binding_nonce):
+                    watched_keys = [current_key, liveness_key, liveness_dedup_key]
+                    if parent_claim:
+                        watched_keys.append(parent_key)
+                    pipe.watch(*watched_keys)
+                    if not _binding_is_ours(pipe.get(current_key), task_id, binding_nonce):
                         pipe.unwatch()
-                        break
+                        return
+
+                    claim = parent_claim or {}
+                    live_parent = pipe.get(parent_key) if claim else None
+                    expected_parent = str(claim.get("expected_parent") or "")
+                    if isinstance(live_parent, bytes):
+                        live_parent_text = live_parent.decode()
+                    else:
+                        live_parent_text = str(live_parent or "")
+                    restore_parent = bool(claim) and live_parent_text == expected_parent
+
                     pipe.multi()
-                    pipe.delete(key)
+                    pipe.delete(current_key, liveness_key, liveness_dedup_key)
+                    if restore_parent:
+                        if bool(claim.get("prior_parent_present")):
+                            pipe.set(parent_key, claim.get("prior_parent"))
+                        else:
+                            pipe.delete(parent_key)
                     pipe.execute()
+                    redis_cleared = True
                     break
                 except WatchError:
-                    # Bounded retry + small backoff so a hot current_task key cannot
-                    # livelock this loop (grok ws2-state WATCH-livelock note).
-                    time.sleep(_WATCH_BACKOFF_S * (_attempt + 1))
-                    continue
+                    if attempt == _WATCH_MAX_ATTEMPTS - 1:
+                        break
+                    time.sleep(_WATCH_BACKOFF_S * (attempt + 1))
     except Exception as exc:
         logger.warning(
-            "dispatch rollback: could not clear current_task binding worker=%s "
-            "task=%s: %r", worker, task_id, exc)
+            "dispatch rollback: Redis identity rollback FAILED worker=%s task=%s: %r",
+            worker,
+            task_id,
+            exc,
+        )
+        return
+
+    if not redis_cleared:
+        logger.warning(
+            "dispatch rollback: Redis identity changed repeatedly; graph preserved "
+            "worker=%s task=%s",
+            worker,
+            task_id,
+        )
+        return
+
+    try:
+        cfg = OrchConfig()
+        with get_neo4j_session(cfg) as session:
+            reverted = session.run(
+                """
+                MATCH (t:OrchTask {id: $task_id})
+                WHERE t.status = 'in_progress'
+                  AND (
+                      coalesce(t.dispatched_to, '') = $worker
+                      OR (coalesce(t.dispatched_to, '') = '' AND coalesce(t.owner, '') = $worker)
+                  )
+                  AND (
+                      t.worker_liveness_started_at IS NULL
+                      OR (
+                          t.worker_liveness_worker = $worker
+                          AND t.worker_liveness_started_at = $binding_nonce
+                      )
+                  )
+                SET t.status = 'pending',
+                    t.dispatched_to = NULL,
+                    t.worker_liveness_worker = NULL,
+                    t.worker_liveness_supervisor = NULL,
+                    t.worker_liveness_started_at = NULL,
+                    t.worker_liveness_heartbeat_at = NULL,
+                    t.worker_liveness_ttl_secs = NULL,
+                    t.worker_liveness_ack_at = NULL,
+                    t.worker_liveness_escalated_at = NULL,
+                    t.worker_liveness_escalation_reason = NULL,
+                    t.updated_at = datetime()
+                RETURN t.id AS task_id
+                """,
+                task_id=task_id,
+                worker=worker,
+                binding_nonce=binding_nonce,
+            ).single()
+        if reverted is None:
+            logger.warning(
+                "dispatch rollback: graph identity no longer matched after Redis rollback "
+                "worker=%s task=%s nonce=%s",
+                worker,
+                task_id,
+                binding_nonce,
+            )
+    except Exception as exc:
+        logger.warning(
+            "dispatch rollback: graph revert FAILED after exact Redis rollback "
+            "worker=%s task=%s: %r",
+            worker,
+            task_id,
+            exc,
+        )
 
 
 def _mark_in_progress_best_effort(task_id: str, worker: str) -> bool:
@@ -1059,6 +1117,7 @@ def dispatch(
         supervisor=supervisor,
         force=force,
     )
+    parent_claim: dict[str, Any] = {}
     try:
         binding_nonce = bind_current_task(
             worker=worker,
@@ -1069,6 +1128,7 @@ def dispatch(
             force=force,
             guard_existing=True,
             dispatcher=from_session,
+            parent_claim_out=parent_claim,
         )
     except WorkerBusy:
         _rollback_claim_only(worker, task_id)
@@ -1089,7 +1149,7 @@ def dispatch(
             },
         )
     except Exception as exc:
-        _rollback_claim(worker, task_id, binding_nonce)
+        _rollback_claim(worker, task_id, binding_nonce, parent_claim=parent_claim or None)
         raise RuntimeError(f"causal dispatch_claimed append failed: {exc}") from exc
     dispatch_event_id = _causal_event_id(dispatch_claimed_row)
     dispatch_body = _with_record_outcome_footer(
@@ -1154,7 +1214,7 @@ def dispatch(
             },
         )
     except Exception as exc:
-        _rollback_claim(worker, task_id, binding_nonce)
+        _rollback_claim(worker, task_id, binding_nonce, parent_claim=parent_claim or None)
         _append_dispatch_delivery_failed_causal_event(
             worker=worker,
             task_id=task_id,
@@ -1240,7 +1300,7 @@ def dispatch(
         # one a concurrent same-worker dispatch may have rebound (grok PR#25 V1/V2).
         # taey-notify exits non-zero only BEFORE it lpushes the inbox message, so rc!=0
         # means the wake was not delivered (V3): reverting is correct.
-        _rollback_claim(worker, task_id, binding_nonce)
+        _rollback_claim(worker, task_id, binding_nonce, parent_claim=parent_claim or None)
         _append_dispatch_delivery_failed_causal_event(
             worker=worker,
             task_id=task_id,
