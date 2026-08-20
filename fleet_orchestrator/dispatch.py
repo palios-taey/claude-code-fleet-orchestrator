@@ -559,7 +559,10 @@ def _claim_ready_orch_task(task_id: str, worker: str, *,
             f"""
             MATCH (t:OrchTask {{id: $task_id}})
             SET t._claim_lock = true
-            WITH t, coalesce(t.status, 'pending') AS prior_status
+            WITH t,
+                 coalesce(t.status, 'pending') AS prior_status,
+                 t.owner AS prior_owner,
+                 t.dispatched_to AS prior_dispatched_to
             WHERE (
                   prior_status = 'pending'
                   OR (prior_status = 'completed' AND coalesce(t.recurring, false) = true)
@@ -571,6 +574,10 @@ def _claim_ready_orch_task(task_id: str, worker: str, *,
                 t.dispatched_to = $worker,
                 t.dispatch_claim_worker = $worker,
                 t.dispatch_claim_started_at = $binding_nonce,
+                t.dispatch_claim_prior_captured = true,
+                t.dispatch_claim_prior_status = prior_status,
+                t.dispatch_claim_prior_owner = prior_owner,
+                t.dispatch_claim_prior_dispatched_to = prior_dispatched_to,
                 t.blocked_on = NULL,
                 t.reclaim_count = CASE
                     WHEN prior_status = 'completed' THEN coalesce(t.reclaim_count, 0) + 1
@@ -681,6 +688,54 @@ def _binding_is_ours(raw: Optional[str], task_id: str, binding_nonce: Optional[f
     return binding_nonce is None or cur.get("started_at") == binding_nonce
 
 
+def _dispatch_claim_graph_revert_cypher(*, clear_liveness: bool) -> str:
+    """Exact-identity claim revert: restore prior owner/status/dispatched_to when captured.
+
+    Claims stamp dispatch_claim_prior_* before mutating control fields. Rollback matches
+    only this dispatch's worker+nonce and restores those priors. Claims that predate the
+    capture fields keep the legacy pending/dispatched_to=NULL behavior and leave owner
+    untouched (cannot invent a prior).
+    """
+    liveness_clears = ""
+    if clear_liveness:
+        liveness_clears = """
+                    t.worker_liveness_worker = NULL,
+                    t.worker_liveness_supervisor = NULL,
+                    t.worker_liveness_started_at = NULL,
+                    t.worker_liveness_heartbeat_at = NULL,
+                    t.worker_liveness_ttl_secs = NULL,
+                    t.worker_liveness_ack_at = NULL,
+                    t.worker_liveness_escalated_at = NULL,
+                    t.worker_liveness_escalation_reason = NULL,"""
+    return f"""
+                MATCH (t:OrchTask {{id: $task_id}})
+                WHERE t.status = 'in_progress'
+                  AND t.dispatch_claim_worker = $worker
+                  AND t.dispatch_claim_started_at = $binding_nonce
+                WITH t, coalesce(t.dispatch_claim_prior_captured, false) AS captured
+                SET t.status = CASE
+                        WHEN captured THEN coalesce(t.dispatch_claim_prior_status, 'pending')
+                        ELSE 'pending'
+                    END,
+                    t.owner = CASE
+                        WHEN captured THEN t.dispatch_claim_prior_owner
+                        ELSE t.owner
+                    END,
+                    t.dispatched_to = CASE
+                        WHEN captured THEN t.dispatch_claim_prior_dispatched_to
+                        ELSE NULL
+                    END,
+                    t.dispatch_claim_worker = NULL,
+                    t.dispatch_claim_started_at = NULL,
+                    t.dispatch_claim_prior_captured = NULL,
+                    t.dispatch_claim_prior_status = NULL,
+                    t.dispatch_claim_prior_owner = NULL,
+                    t.dispatch_claim_prior_dispatched_to = NULL,{liveness_clears}
+                    t.updated_at = datetime()
+                RETURN t.id AS task_id
+                """
+
+
 def _rollback_claim_only(worker: str, task_id: str, binding_nonce: float) -> None:
     """Undo the OrchTask claim made before a guarded bind refusal."""
     try:
@@ -688,17 +743,7 @@ def _rollback_claim_only(worker: str, task_id: str, binding_nonce: float) -> Non
             cfg = OrchConfig()
             with get_neo4j_session(cfg) as session:
                 session.run(
-                    """
-                    MATCH (t:OrchTask {id: $task_id})
-                    WHERE t.status = 'in_progress'
-                      AND t.dispatch_claim_worker = $worker
-                      AND t.dispatch_claim_started_at = $binding_nonce
-                    SET t.status = 'pending',
-                        t.dispatched_to = NULL,
-                        t.dispatch_claim_worker = NULL,
-                        t.dispatch_claim_started_at = NULL,
-                        t.updated_at = datetime()
-                    """,
+                    _dispatch_claim_graph_revert_cypher(clear_liveness=False),
                     task_id=task_id,
                     worker=worker,
                     binding_nonce=binding_nonce,
@@ -813,26 +858,7 @@ def _rollback_claim(
         cfg = OrchConfig()
         with get_neo4j_session(cfg) as session:
             reverted = session.run(
-                """
-                MATCH (t:OrchTask {id: $task_id})
-                WHERE t.status = 'in_progress'
-                  AND t.dispatch_claim_worker = $worker
-                  AND t.dispatch_claim_started_at = $binding_nonce
-                SET t.status = 'pending',
-                    t.dispatched_to = NULL,
-                    t.dispatch_claim_worker = NULL,
-                    t.dispatch_claim_started_at = NULL,
-                    t.worker_liveness_worker = NULL,
-                    t.worker_liveness_supervisor = NULL,
-                    t.worker_liveness_started_at = NULL,
-                    t.worker_liveness_heartbeat_at = NULL,
-                    t.worker_liveness_ttl_secs = NULL,
-                    t.worker_liveness_ack_at = NULL,
-                    t.worker_liveness_escalated_at = NULL,
-                    t.worker_liveness_escalation_reason = NULL,
-                    t.updated_at = datetime()
-                RETURN t.id AS task_id
-                """,
+                _dispatch_claim_graph_revert_cypher(clear_liveness=True),
                 task_id=task_id,
                 worker=worker,
                 binding_nonce=binding_nonce,
