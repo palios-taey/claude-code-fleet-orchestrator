@@ -78,6 +78,10 @@ RULE_TRUNCATED_MARKER = (
 RULE_OMITTED_MARKER = (
     "[omitted: wake packet rule byte budget exhausted; open the rule source path for full text]"
 )
+KB_CONTENT_OMITTED_MARKER = (
+    "full content omitted to satisfy the wake packet hard cap; retrieve the exact "
+    "KnowledgeRevision by stable_key, revision_no, and content_sha256"
+)
 ENGINEERING_IDENTITY_CORE = "\n".join([
     "role: engineering",
     "- Operate as a scoped implementation or review agent for the local operator.",
@@ -1831,26 +1835,39 @@ def _budget_text(
 
 def _render_kb_context(items: List[Dict[str, Any]], nonce: str) -> List[str]:
     lines: List[str] = []
+    if any(item.get("content_omitted_for_budget") for item in items):
+        lines.extend([f"- {KB_CONTENT_OMITTED_MARKER}", ""])
     for idx, item in enumerate(items, start=1):
         stable_key = str(item.get("stable_key") or f"item-{idx}")
-        node_lines = [
-            f"stable_key: {stable_key}",
-            f"revision_no: {item.get('revision_no', '')}",
-            f"content_sha256: {item.get('content_sha256', '')}",
-            f"title: {item.get('title', '')}",
-            f"entity_type: {item.get('entity_type', '')}",
-            f"layer: {item.get('layer', '')}",
-            f"active_status: {item.get('active_status', '')}",
-            f"truth_register: {item.get('truth_register', '')}",
-        ]
+        if item.get("content_omitted_for_budget"):
+            node_lines = [
+                f"stable_key: {stable_key}",
+                f"revision_no: {item.get('revision_no', '')}",
+                f"content_sha256: {item.get('content_sha256', '')}",
+                "summary:",
+                str(item.get("summary") or "").strip(),
+                "content_omitted_for_budget: true",
+            ]
+        else:
+            node_lines = [
+                f"stable_key: {stable_key}",
+                f"revision_no: {item.get('revision_no', '')}",
+                f"content_sha256: {item.get('content_sha256', '')}",
+                f"title: {item.get('title', '')}",
+                f"entity_type: {item.get('entity_type', '')}",
+                f"layer: {item.get('layer', '')}",
+                f"active_status: {item.get('active_status', '')}",
+                f"truth_register: {item.get('truth_register', '')}",
+            ]
         if item.get("summary"):
-            node_lines.extend(["summary:", str(item.get("summary") or "").strip()])
+            if not item.get("content_omitted_for_budget"):
+                node_lines.extend(["summary:", str(item.get("summary") or "").strip()])
         if item.get("deduped"):
             node_lines.extend([
                 "deduped: true",
                 "deduped_reason: content already present in selected refs by content_sha256",
             ])
-        else:
+        elif not item.get("content_omitted_for_budget"):
             node_lines.extend(["deduped: false", "content:", str(item.get("content") or "").strip()])
         lines.append(f"### KB item {idx}")
         lines.extend(_render_untrusted(nonce, f"kb:{stable_key}", "\n".join(node_lines)))
@@ -1868,10 +1885,19 @@ def _trim_packet(packet: Dict[str, Any], cli: str, budget_bytes: int, max_refs_p
         memory = context.get("memory") or []
         if not memory:
             break
-        # KB context is intentionally not trim-able: selector-matched policy and
-        # process rulings are required context, like refs/rules/identity.
         memory.pop()
         context["memory"] = memory
+    if len(_render_packet(trimmed, cli, max_refs_per_tier).encode("utf-8")) > budget_bytes:
+        kb_context = context.get("kb_context") or []
+        eligible = [
+            item for item in kb_context
+            if not item.get("deduped")
+            and str(item.get("content") or "").strip()
+            and str(item.get("summary") or "").strip()
+        ]
+        for item in eligible:
+            item["content"] = ""
+            item["content_omitted_for_budget"] = True
     return trimmed
 
 
