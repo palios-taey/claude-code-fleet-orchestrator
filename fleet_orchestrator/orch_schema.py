@@ -3380,8 +3380,8 @@ def pin_audit_contract_on_task(
 
     cfg = config or OrchConfig()
     pin_next = (
-        f"Next step: issue X-Orch-Audit-Capability via orch-audit-capabilityd unix socket "
-        f"from the project-supervisor process (SO_PEERCRED session) for task={task_id} "
+        f"Next step: issue X-Orch-Audit-Capability via orch-audit-capabilityd "
+        f"(User=orch-cap; peercred uid→ORCH_AUDIT_CAPABILITY_UID_MAP) for task={task_id} "
         f"action=pin-audit-contract, then POST /api/tasks/{task_id}/pin-audit-contract; "
         f"inspect with GET /api/tasks/{task_id} or `taey-task status {task_id}`."
     )
@@ -3490,8 +3490,8 @@ def bind_audit_status_on_task(
 
     cfg = config or OrchConfig()
     bind_next = (
-        f"Next step: issue X-Orch-Audit-Capability via orch-audit-capabilityd unix socket "
-        f"from the project-supervisor process (SO_PEERCRED session) for task={task_id} "
+        f"Next step: issue X-Orch-Audit-Capability via orch-audit-capabilityd "
+        f"(User=orch-cap; peercred uid→ORCH_AUDIT_CAPABILITY_UID_MAP) for task={task_id} "
         f"action=bind-audit-status, then POST /api/tasks/{task_id}/bind-audit-status "
         f"with {{\"status_id\":<int>}}; inspect with GET /api/tasks/{task_id} or "
         f"`taey-task status {task_id}`."

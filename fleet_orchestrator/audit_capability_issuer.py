@@ -1,11 +1,14 @@
-"""Unix-socket / channel issuer for audit supervisor capabilities.
+"""Distinct-UID unix-socket issuer for audit supervisor capabilities.
 
-Deployable unit: ``scripts/orch-audit-capabilityd`` (socket server).
-Client: ``issue_audit_capability(task_id, action)`` connects to the socket;
-session identity is taken from the peer process, not the request body.
+CONTROL (task-05a27e83): ORCH_SESSION_ID from /proc/PID/environ is forgeable.
+Principal is derived from SO_PEERCRED **uid** via ORCH_AUDIT_CAPABILITY_UID_MAP
+(provisioned supervisor OS users → fleet session ids). Environ is never authority.
 
-Same-UID workers are denied because their peer ORCH_SESSION_ID is not the
-project supervisor — they cannot forge another process's SO_PEERCRED.
+Deploy: systemd unit User=orch-cap (or other dedicated uid). Private key file
+mode 0600 owned by that uid; API holds only the public key. Workers sharing
+mira uid cannot read the private key and are not in the uid→supervisor map.
+
+Deployable unit: ``scripts/orch-audit-capabilityd`` + ``deploy/systemd/orch-audit-capabilityd.*``.
 """
 from __future__ import annotations
 
@@ -20,91 +23,105 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from .audit_completion import AuditContractError
 from .audit_supervisor_capability import (
     CAPABILITY_ACTIONS,
-    _PEER_SESSION_OVERRIDE,
     default_key_paths,
     mint_signed_capability,
     write_keypair_files,
     _private_key,
 )
 
-# Linux SO_PEERCRED
 _SO_PEERCRED = getattr(socket, "SO_PEERCRED", 17)
 _CRED_FMT = "3i"  # pid, uid, gid
 _CRED_SIZE = struct.calcsize(_CRED_FMT)
 
-PeerSessionResolver = Callable[[Optional[int]], str]
+PeerCred = Tuple[int, int, int]  # pid, uid, gid
+PeerCredResolver = Callable[[], PeerCred]
 ProjectSupervisorLoader = Callable[[str], Optional[str]]
+UidMapLoader = Callable[[], Dict[int, str]]
+EuidGetter = Callable[[], int]
+StatUidGetter = Callable[[Path], Tuple[int, int]]  # (st_uid, mode)
 
-_PEER_RESOLVER: Optional[PeerSessionResolver] = None
+_PEER_CRED_RESOLVER: Optional[PeerCredResolver] = None
 _SUPERVISOR_LOADER: Optional[ProjectSupervisorLoader] = None
+_UID_MAP_LOADER: Optional[UidMapLoader] = None
+_EUID_GETTER: Optional[EuidGetter] = None
+_STAT_UID_GETTER: Optional[StatUidGetter] = None
 
 
 def set_issuer_hooks(
     *,
-    peer_resolver: Optional[PeerSessionResolver] = None,
+    peer_resolver: Optional[Callable[[Optional[int]], str]] = None,  # legacy unused
     supervisor_loader: Optional[ProjectSupervisorLoader] = None,
+    peer_cred_resolver: Optional[PeerCredResolver] = None,
+    uid_map_loader: Optional[UidMapLoader] = None,
+    euid_getter: Optional[EuidGetter] = None,
+    stat_uid_getter: Optional[StatUidGetter] = None,
 ) -> None:
-    """Isolated-test hooks for peer session + supervisor lookup."""
-    global _PEER_RESOLVER, _SUPERVISOR_LOADER
-    _PEER_RESOLVER = peer_resolver
+    """Isolated-test hooks. peer_resolver retained as unused kw for call-site compat."""
+    global _PEER_CRED_RESOLVER, _SUPERVISOR_LOADER, _UID_MAP_LOADER, _EUID_GETTER, _STAT_UID_GETTER
+    del peer_resolver  # environ-based resolvers are not authority
+    _PEER_CRED_RESOLVER = peer_cred_resolver
     _SUPERVISOR_LOADER = supervisor_loader
+    _UID_MAP_LOADER = uid_map_loader
+    _EUID_GETTER = euid_getter
+    _STAT_UID_GETTER = stat_uid_getter
 
 
-def read_proc_environ(pid: int) -> Dict[str, str]:
-    path = Path(f"/proc/{int(pid)}/environ")
+def load_uid_principal_map(env: Optional[Dict[str, str]] = None) -> Dict[int, str]:
+    """ORCH_AUDIT_CAPABILITY_UID_MAP: JSON object {\"1001\":\"conductor-codex\", ...}."""
+    if _UID_MAP_LOADER is not None:
+        return dict(_UID_MAP_LOADER())
+    values = os.environ if env is None else env
+    raw = str(values.get("ORCH_AUDIT_CAPABILITY_UID_MAP") or "").strip()
+    if not raw:
+        raise AuditContractError(
+            "ORCH_AUDIT_CAPABILITY_UID_MAP unset: provision distinct supervisor OS uids "
+            "mapped to fleet session ids (environ ORCH_SESSION_ID is not authority)"
+        )
     try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise AuditContractError(f"cannot read peer environ for pid={pid}: {exc}") from exc
-    env: Dict[str, str] = {}
-    for part in raw.split(b"\0"):
-        if not part or b"=" not in part:
-            continue
-        key, _, value = part.partition(b"=")
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AuditContractError("ORCH_AUDIT_CAPABILITY_UID_MAP must be JSON object") from exc
+    if not isinstance(parsed, dict) or not parsed:
+        raise AuditContractError("ORCH_AUDIT_CAPABILITY_UID_MAP must be a non-empty JSON object")
+    out: Dict[int, str] = {}
+    for key, value in parsed.items():
         try:
-            env[key.decode("utf-8", errors="replace")] = value.decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            continue
-    return env
+            uid = int(key)
+        except (TypeError, ValueError) as exc:
+            raise AuditContractError(f"uid map key must be int-like, got {key!r}") from exc
+        session = str(value or "").strip()
+        if not session:
+            raise AuditContractError(f"uid map entry for {uid} has empty session id")
+        out[uid] = session
+    return out
 
 
-def peer_session_from_environ(env: Dict[str, str]) -> str:
-    for key in (
-        "ORCH_SESSION_ID",
-        "ORCH_FLEET_SESSION",
-        "TAEY_SESSION_ID",
-        "FLEET_SESSION_ID",
-    ):
-        value = str(env.get(key) or "").strip()
-        if value:
-            return value
-    # tmux session name fallback: TMUX=/tmp/tmux-1000/default,123,0 — weak; prefer ORCH_SESSION_ID
-    tmux = str(env.get("TMUX") or "").strip()
-    if tmux:
-        # Not authoritative alone; still require ORCH_SESSION_ID for issuance.
-        pass
-    raise AuditContractError(
-        "peer process environ lacks ORCH_SESSION_ID/ORCH_FLEET_SESSION; "
-        "cannot establish supervisor principal from SO_PEERCRED"
-    )
+def peercred(conn: socket.socket) -> PeerCred:
+    try:
+        creds = conn.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED, _CRED_SIZE)
+    except OSError as exc:
+        raise AuditContractError(f"SO_PEERCRED unavailable: {exc}") from exc
+    pid, uid, gid = struct.unpack(_CRED_FMT, creds)
+    if int(pid) <= 0:
+        raise AuditContractError("SO_PEERCRED returned invalid pid")
+    return int(pid), int(uid), int(gid)
 
 
-def resolve_peer_session(pid: Optional[int]) -> str:
-    if _PEER_SESSION_OVERRIDE is not None:
-        text = str(_PEER_SESSION_OVERRIDE).strip()
-        if not text:
-            raise AuditContractError("peer session override empty")
-        return text
-    if _PEER_RESOLVER is not None:
-        return str(_PEER_RESOLVER(pid) or "").strip()
-    if pid is None:
-        raise AuditContractError("peer pid required to resolve session identity")
-    env = read_proc_environ(pid)
-    # Same-PID clients (threaded tests / rare in-process callers): /proc/<pid>/environ is
-    # the launch snapshot; merge live os.environ so ORCH_SESSION_ID set in-process is visible.
-    if int(pid) == int(os.getpid()):
-        env = {**env, **{str(k): str(v) for k, v in os.environ.items()}}
-    return peer_session_from_environ(env)
+def resolve_peer_principal(
+    *,
+    peer_uid: int,
+    peer_pid: Optional[int] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> str:
+    """Map peer UID → fleet supervisor session. Environ is intentionally ignored."""
+    del peer_pid  # pid is for audit logs only; not principal
+    mapping = load_uid_principal_map(env)
+    if int(peer_uid) not in mapping:
+        raise AuditContractError(
+            f"issuer denied: peer uid {peer_uid} is not a provisioned supervisor principal "
+            f"in ORCH_AUDIT_CAPABILITY_UID_MAP (spoofed ORCH_SESSION_ID is ignored)"
+        )
+    return mapping[int(peer_uid)]
 
 
 def _default_supervisor_loader(task_id: str) -> Optional[str]:
@@ -124,66 +141,127 @@ def load_project_supervisor(task_id: str) -> str:
     return supervisor
 
 
-def peercred_pid(conn: socket.socket) -> int:
-    try:
-        creds = conn.getsockopt(socket.SOL_SOCKET, _SO_PEERCRED, _CRED_SIZE)
-    except OSError as exc:
-        raise AuditContractError(f"SO_PEERCRED unavailable: {exc}") from exc
-    pid, _uid, _gid = struct.unpack(_CRED_FMT, creds)
-    if int(pid) <= 0:
-        raise AuditContractError("SO_PEERCRED returned invalid pid")
-    return int(pid)
+def assert_private_key_ownership(path: Path, *, env: Optional[Dict[str, str]] = None) -> None:
+    """Fail closed unless issuer euid owns mode-0600 private key (distinct-UID deploy)."""
+    del env
+    if _STAT_UID_GETTER is not None:
+        st_uid, mode = _STAT_UID_GETTER(path)
+    else:
+        if not path.is_file():
+            raise AuditContractError(f"issuer private key missing at {path}")
+        st = path.stat()
+        st_uid, mode = int(st.st_uid), int(st.st_mode)
+    euid = int(_EUID_GETTER() if _EUID_GETTER is not None else os.geteuid())
+    if mode & 0o077:
+        raise AuditContractError(
+            f"issuer private key {path} must be mode 0600 (no group/other access); "
+            f"got {oct(mode & 0o777)}"
+        )
+    if st_uid != euid:
+        raise AuditContractError(
+            f"issuer process euid={euid} does not own private key st_uid={st_uid} at {path}; "
+            "run orch-audit-capabilityd as the dedicated key owner (e.g. User=orch-cap)"
+        )
 
 
-def issue_for_peer_session(
+def issue_for_peer_principal(
     *,
-    peer_session: str,
+    peer_uid: int,
     task_id: str,
     action: str,
     ttl_sec: int = 300,
+    env: Optional[Dict[str, str]] = None,
+    peer_pid: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Core issuer: peer session must equal project supervisor."""
+    """Core issuer: peer UID map principal must equal project supervisor."""
     act = str(action or "").strip()
     if act not in CAPABILITY_ACTIONS:
         raise AuditContractError(f"unsupported action {act!r}")
+    principal = resolve_peer_principal(peer_uid=peer_uid, peer_pid=peer_pid, env=env)
     supervisor = load_project_supervisor(task_id)
-    session = str(peer_session or "").strip()
-    if session != supervisor:
+    if principal != supervisor:
         raise AuditContractError(
-            f"issuer denied: peer session {session!r} is not project supervisor "
-            f"{supervisor!r} for task {task_id!r} (same-UID workers cannot forge peercred)"
+            f"issuer denied: peer principal {principal!r} (uid={peer_uid}) is not project "
+            f"supervisor {supervisor!r} for task {task_id!r}"
         )
     token = mint_signed_capability(
-        session_id=session,
+        session_id=principal,
         task_id=task_id,
         action=act,
         ttl_sec=ttl_sec,
+        env=env,
     )
     return {
         "ok": True,
         "capability": token,
-        "session_id": session,
+        "session_id": principal,
+        "peer_uid": int(peer_uid),
         "task_id": task_id,
         "action": act,
         "supervisor": supervisor,
     }
 
 
+# Backward-compatible name used by older tests — now requires peer_uid, not session string.
+def issue_for_peer_session(
+    *,
+    peer_session: str = "",
+    peer_uid: Optional[int] = None,
+    task_id: str,
+    action: str,
+    ttl_sec: int = 300,
+    env: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Deprecated session-string entry: only valid when peer_uid maps to that session."""
+    if peer_uid is None:
+        raise AuditContractError(
+            "issue_for_peer_session requires peer_uid (environ session strings are not authority)"
+        )
+    result = issue_for_peer_principal(
+        peer_uid=int(peer_uid),
+        task_id=task_id,
+        action=action,
+        ttl_sec=ttl_sec,
+        env=env,
+    )
+    claimed = str(peer_session or "").strip()
+    if claimed and claimed != result["session_id"]:
+        raise AuditContractError(
+            f"claimed peer_session {claimed!r} conflicts with uid-mapped principal "
+            f"{result['session_id']!r} (environ spoof ignored)"
+        )
+    return result
+
+
 def handle_issuer_request(
     request: Dict[str, Any],
     *,
-    peer_session: str,
+    peer_uid: int,
+    peer_pid: Optional[int] = None,
+    env: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     cmd = str(request.get("cmd") or "issue").strip()
     if cmd == "ping":
-        return {"ok": True, "pong": True, "peer_session": peer_session}
+        return {
+            "ok": True,
+            "pong": True,
+            "peer_uid": int(peer_uid),
+            "principal": resolve_peer_principal(peer_uid=peer_uid, peer_pid=peer_pid, env=env),
+        }
     if cmd != "issue":
         raise AuditContractError(f"unknown issuer cmd {cmd!r}")
-    return issue_for_peer_session(
-        peer_session=peer_session,
+    # Ignore any client-supplied session_id / from fields.
+    if any(k in request for k in ("session_id", "from", "ORCH_SESSION_ID", "peer_session")):
+        # Soft ignore for identity; hard-reject if they try to override uid.
+        if "peer_uid" in request:
+            raise AuditContractError("client cannot supply peer_uid; SO_PEERCRED is authoritative")
+    return issue_for_peer_principal(
+        peer_uid=int(peer_uid),
+        peer_pid=peer_pid,
         task_id=str(request.get("task_id") or ""),
         action=str(request.get("action") or ""),
         ttl_sec=int(request.get("ttl_sec") or 300),
+        env=env,
     )
 
 
@@ -210,12 +288,14 @@ def _send_json(conn: socket.socket, payload: Dict[str, Any]) -> None:
     conn.sendall((json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
 
 
-def serve_client(conn: socket.socket, _addr: Any = None) -> None:
+def serve_client(conn: socket.socket, _addr: Any = None, *, env: Optional[Dict[str, str]] = None) -> None:
     try:
-        pid = peercred_pid(conn)
-        peer_session = resolve_peer_session(pid)
+        if _PEER_CRED_RESOLVER is not None:
+            pid, uid, _gid = _PEER_CRED_RESOLVER()
+        else:
+            pid, uid, _gid = peercred(conn)
         request = _recv_json(conn)
-        result = handle_issuer_request(request, peer_session=peer_session)
+        result = handle_issuer_request(request, peer_uid=uid, peer_pid=pid, env=env)
         _send_json(conn, result)
     except AuditContractError as exc:
         try:
@@ -240,29 +320,38 @@ def run_socket_server(
     init_keys: bool = False,
     env: Optional[Dict[str, str]] = None,
 ) -> None:
-    """Blocking socket server (deployable unit entry)."""
+    """Blocking socket server (deployable unit entry; run as dedicated uid)."""
     paths = default_key_paths(env)
     sock_path = Path(socket_path or paths["socket"])
     if init_keys or not paths["private"].is_file() or not paths["public"].is_file():
         write_keypair_files(paths["private"], paths["public"])
-    # Load and pin issuer private key in-process (workers/API never get this handle).
+    assert_private_key_ownership(paths["private"], env=env)
+
     from .audit_supervisor_capability import load_public_key, set_audit_capability_keys
 
     priv = _private_key(env)
     pub = load_public_key(paths["public"])
     set_audit_capability_keys(private_key=priv, public_key=pub)
+    # Fail closed if uid map missing (deploy must provision principals).
+    load_uid_principal_map(env)
 
     sock_path.parent.mkdir(parents=True, exist_ok=True)
     if sock_path.exists():
         sock_path.unlink()
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(sock_path))
+    # Distinct-UID deploy: socket 0660 owned by issuer uid; group may allow supervisor clients.
     os.chmod(sock_path, 0o660)
     server.listen(16)
     try:
         while True:
             conn, addr = server.accept()
-            threading.Thread(target=serve_client, args=(conn, addr), daemon=True).start()
+            threading.Thread(
+                target=serve_client,
+                args=(conn, addr),
+                kwargs={"env": env},
+                daemon=True,
+            ).start()
     finally:
         server.close()
         if sock_path.exists():
@@ -276,16 +365,24 @@ def issue_audit_capability(
     ttl_sec: int = 300,
     socket_path: Optional[Path] = None,
     env: Optional[Dict[str, str]] = None,
-    # In-process channel for isolated tests (no real socket): supply peer_session.
-    inprocess_peer_session: Optional[str] = None,
+    # In-process test channel: supply peer_uid (NOT session string).
+    inprocess_peer_uid: Optional[int] = None,
+    inprocess_peer_session: Optional[str] = None,  # if set, only checked against uid map result
 ) -> Dict[str, Any]:
-    """Client: issue through socket channel, or in-process peer simulation for tests."""
-    if inprocess_peer_session is not None:
+    """Client: issue through socket, or in-process peer_uid simulation for tests."""
+    if inprocess_peer_uid is not None:
         return issue_for_peer_session(
-            peer_session=inprocess_peer_session,
+            peer_uid=int(inprocess_peer_uid),
+            peer_session=str(inprocess_peer_session or ""),
             task_id=task_id,
             action=action,
             ttl_sec=ttl_sec,
+            env=env,
+        )
+    if inprocess_peer_session is not None and inprocess_peer_uid is None:
+        raise AuditContractError(
+            "inprocess_peer_session alone is not authority; supply inprocess_peer_uid "
+            "(spoofed environ session strings are rejected)"
         )
 
     paths = default_key_paths(env)
@@ -293,7 +390,7 @@ def issue_audit_capability(
     if not path.exists():
         raise AuditContractError(
             f"audit capability issuer socket missing at {path}; "
-            "start scripts/orch-audit-capabilityd (supervisor deployable unit)"
+            "start orch-audit-capabilityd as the dedicated User=orch-cap unit"
         )
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:

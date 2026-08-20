@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Deployable unix-socket issuer for audit supervisor capabilities.
+"""Deployable distinct-UID issuer for audit supervisor capabilities.
 
-Principal separation under shared-UID fleet topology:
-  - Private Ed25519 key stays with this process/file (0600).
-  - API loads only the public verify key.
-  - Client identity is SO_PEERCRED → /proc/<pid>/environ ORCH_SESSION_ID,
-    not JSON body.from and not a worker-held env mint secret.
+Principal = SO_PEERCRED uid mapped via ORCH_AUDIT_CAPABILITY_UID_MAP.
+ORCH_SESSION_ID in client environ is NOT authority (spoofable).
+
+Run as dedicated user (systemd User=orch-cap). Private key mode 0600 owned by
+that user. API verifies with the public key only.
 
 Usage:
   orch-audit-capabilityd --init-keys
-  orch-audit-capabilityd --socket /path/to/issuer.sock
+  orch-audit-capabilityd --serve
 """
 from __future__ import annotations
 
@@ -21,7 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fleet_orchestrator.audit_capability_issuer import run_socket_server  # noqa: E402
+from fleet_orchestrator.audit_capability_issuer import (  # noqa: E402
+    assert_private_key_ownership,
+    load_uid_principal_map,
+    run_socket_server,
+)
 from fleet_orchestrator.audit_supervisor_capability import (  # noqa: E402
     default_key_paths,
     write_keypair_files,
@@ -44,14 +48,21 @@ def main() -> int:
     args = parser.parse_args()
     paths = default_key_paths()
     if args.init_keys:
-        priv, _pub = write_keypair_files(paths["private"], paths["public"])
-        print(f"wrote private {paths['private']} mode 0600")
+        write_keypair_files(paths["private"], paths["public"])
+        assert_private_key_ownership(paths["private"])
+        print(f"wrote private {paths['private']} mode 0600 (owner must be issuer uid)")
         print(f"wrote public  {paths['public']} mode 0644")
         print(f"socket path   {paths['socket']}")
-        del priv
+        print("provision ORCH_AUDIT_CAPABILITY_UID_MAP before --serve")
         return 0
+    # Fail closed on missing uid map before listen.
+    load_uid_principal_map()
     socket_path = Path(args.socket) if args.socket else paths["socket"]
-    print(f"orch-audit-capabilityd listening on {socket_path}", flush=True)
+    print(
+        f"orch-audit-capabilityd listening on {socket_path} "
+        f"(principal=peer uid map; environ ignored)",
+        flush=True,
+    )
     run_socket_server(socket_path=socket_path, init_keys=False)
     return 0
 

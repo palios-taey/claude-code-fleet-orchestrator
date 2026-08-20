@@ -1,0 +1,14 @@
+[Unit]
+Description=Fleet orchestrator audit capability issuer socket
+Documentation=https://github.com/palios-taey/claude-code-fleet-orchestrator
+
+[Socket]
+ListenStream=/var/lib/fleet-orchestrator/audit-capability/issuer.sock
+SocketUser=orch-cap
+SocketGroup=orch-cap
+SocketMode=0660
+# Only the dedicated issuer uid owns the socket; supervisor clients that need
+# issuance should run as a uid listed in ORCH_AUDIT_CAPABILITY_UID_MAP (not mira workers).
+
+[Install]
+WantedBy=sockets.target

@@ -1,12 +1,10 @@
 """Principal-separated audit supervisor capabilities (task-05a27e83 CONTROL).
 
-Authority model (same-UID topology safe):
-  - Issuance identity comes from the connecting process (SO_PEERCRED → /proc/pid/environ),
-    never from JSON body.from or a worker-callable env mint helper.
-  - Issuer alone holds the Ed25519 private key (file mode 0600 / in-memory).
-  - API verifier loads only the public key and cannot mint.
-  - Worker connecting to the issuer is attested as the worker session and fails the
-    project-supervisor match; worker cannot forge supervisor peer credentials.
+Authority model (distinct-UID deploy):
+  - Issuance principal = SO_PEERCRED **uid** mapped by ORCH_AUDIT_CAPABILITY_UID_MAP.
+  - ORCH_SESSION_ID / body.from are never authority (spoofable).
+  - Issuer runs as dedicated uid (systemd User=orch-cap); private key 0600 owned by
+    that uid. API loads only the public verify key and cannot mint.
 
 Token: base64url(payload_json) + "." + base64url(ed25519_signature)
 Header: X-Orch-Audit-Capability
@@ -37,7 +35,6 @@ MAX_TTL_SEC = 3600
 # Test hooks (isolated acceptance only).
 _PRIVATE_KEY: Optional[Ed25519PrivateKey] = None
 _PUBLIC_KEY: Optional[Ed25519PublicKey] = None
-_PEER_SESSION_OVERRIDE: Optional[str] = None  # set only in tests to simulate peer environ
 
 
 def set_audit_capability_keys(
@@ -51,10 +48,12 @@ def set_audit_capability_keys(
     _PUBLIC_KEY = public_key
 
 
-def set_peer_session_override(session_id: Optional[str]) -> None:
-    """Test-only: simulate SO_PEERCRED-derived peer session."""
-    global _PEER_SESSION_OVERRIDE
-    _PEER_SESSION_OVERRIDE = session_id
+def set_peer_session_override(_session_id: Optional[str] = None) -> None:
+    """Removed: environ session overrides are forgeable and not authority."""
+    raise AuditContractError(
+        "peer session environ overrides are not authority; use ORCH_AUDIT_CAPABILITY_UID_MAP "
+        "+ SO_PEERCRED uid (distinct-UID issuer deploy)"
+    )
 
 
 def _b64url_encode(raw: bytes) -> str:
