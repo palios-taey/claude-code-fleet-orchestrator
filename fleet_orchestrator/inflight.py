@@ -86,20 +86,18 @@ def _terminal_outcome_for_task(r: Any, worker: str, task_id: str, *, details_req
 
 
 def active_turn_valid_for_task(r: Any, worker: str, task_id: str, current_time: float) -> bool:
-    """Shared read-only validator (per spec: bind via current_task + future ZSET).
+    """Shared read-only validator (per spec).
 
-    - Require current_task.task_id == queried task_id (Redis binding ties the lease to this OrchTask)
-    - Require future-scored member in taey:<worker>:active_turns (the durable lease signal; any turn id ok)
-    - Require turn_context present for the active turn (properly started lease, not naked ZADD)
-
-    Production ctx shape (no task_id): turn_id, seat_id, event_id, correlation_id, tool_profile, process_generation, started_at.
-    This + current_task binding ensures only the correct task sees 'working' from active long turn.
-    Naked lease (ZSET future but no/wrong current_task) does not activate for the task (peer mode too).
+    - Require current_task.task_id == queried task_id (binds lease to the OrchTask)
+    - Iterate future ZSET members (not just first via num=1)
+    - For ANY: HGET + JSON parse to object/dict + process_generation is 32 lowercase hex
+      (production shape from presence _turn_payload / PROCESS_GENERATION)
+    Rejects malformed ctx (e.g. 'x'), invalid gen, no valid lease among members.
     """
     if not task_id:
         return False
     try:
-        # bind task via current_task
+        # bind via current_task
         cur_raw = r.get(state_key(worker, "current_task"))
         cur = {}
         if cur_raw:
@@ -110,17 +108,26 @@ def active_turn_valid_for_task(r: Any, worker: str, task_id: str, current_time: 
         if str(cur.get("task_id") or "") != task_id:
             return False
 
-        # future ZSET (any)
+        # future members - iterate (bounded in practice; no num=1 to avoid masking)
         turn_key = state_key(worker, "active_turns")
-        members = r.zrangebyscore(turn_key, current_time, "+inf", start=0, num=1)
+        members = r.zrangebyscore(turn_key, current_time, "+inf")
         if not members:
             return False
 
-        # require ctx for the turn (valid started lease)
         ctx_key = state_key(worker, "turn_context")
         for m in members:
             tid_str = m.decode(errors="replace") if isinstance(m, (bytes, bytearray)) else str(m)
-            if r.hget(ctx_key, tid_str):
+            raw_ctx = r.hget(ctx_key, tid_str)
+            if not raw_ctx:
+                continue
+            try:
+                ctx = json.loads(raw_ctx.decode(errors="replace") if isinstance(raw_ctx, (bytes, bytearray)) else raw_ctx)
+            except Exception:
+                continue
+            if not isinstance(ctx, dict):
+                continue
+            gen = str(ctx.get("process_generation", ""))
+            if len(gen) == 32 and gen.islower() and all(c in "0123456789abcdef" for c in gen):
                 return True
         return False
     except Exception:
