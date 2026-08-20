@@ -191,15 +191,18 @@ TASK_CREATE_NEXT_STEP = (
     "'<task description>'` for default-project tasks."
 )
 AUDIT_PIN_NEXT_STEP = (
-    'Retry POST /api/task/{task_id}/pin-audit-contract as the project supervisor with body '
-    '{"from":"<supervisor>","audit_repo":"OWNER/REPO","audit_head":"<40-hex>",'
-    '"audit_base":"<40-hex>","audit_required_context":"<context>",'
-    '"audit_required_state":"success","audit_pr_number":<n>}; ordinary create/evidence cannot pin.'
+    'Issue X-Orch-Audit-Capability from the project-supervisor tmux pane via '
+    'scripts/orch-audit-capabilityd (SO_PEERCRED pid to tmux session; private key 0600), '
+    'then POST /api/task/{task_id}/pin-audit-contract with that header and body '
+    '{"audit_repo":"OWNER/REPO","audit_head":"<40-hex>","audit_base":"<40-hex>",'
+    '"audit_required_context":"<context>","audit_required_state":"success",'
+    '"audit_pr_number":<n>}. body.from is not authority; ordinary create/evidence cannot pin.'
 )
 AUDIT_BIND_NEXT_STEP = (
-    'Retry POST /api/task/{task_id}/bind-audit-status as the project supervisor with body '
-    '{"from":"<supervisor>","status_id":<github-status-id>} after the worker posts the '
-    'pinned context/state on the pinned head; ordinary API cannot bind or overwrite.'
+    'Issue X-Orch-Audit-Capability from the project-supervisor tmux pane via '
+    'scripts/orch-audit-capabilityd, then POST /api/task/{task_id}/bind-audit-status '
+    'with that header and body {"status_id":<github-status-id>}. body.from is not authority; '
+    'ordinary API cannot bind or overwrite.'
 )
 PROJECT_CREATE_NEXT_STEP = (
     'Retry POST /api/projects body {"id":"<project-id>","name":"<name>",'
@@ -880,35 +883,100 @@ async def create(req: Request) -> Dict[str, Any]:
     return {"ok": True, "task_id": task_id, "from": sender, "owner": owner, "task_type": task_type}
 
 
+def _attested_audit_actor_or_http_error(
+    req: Request,
+    *,
+    task_id: str,
+    action: str,
+    project_supervisor: Optional[str],
+    body_from: Optional[str],
+    next_step: str,
+) -> str:
+    from fleet_orchestrator.audit_completion import AuditContractError
+    from fleet_orchestrator.audit_supervisor_capability import (
+        CAPABILITY_HEADER,
+        resolve_attested_audit_actor,
+    )
+
+    token = req.headers.get(CAPABILITY_HEADER) or req.headers.get(CAPABILITY_HEADER.lower())
+    try:
+        return resolve_attested_audit_actor(
+            capability_token=token,
+            task_id=task_id,
+            action=action,
+            project_supervisor=project_supervisor,
+            body_from=body_from,
+        )
+    except AuditContractError as exc:
+        raise HTTPException(status_code=403, detail=f"{exc} Next step: {next_step}") from exc
+
+
 @app.post("/api/task/{task_id}/pin-audit-contract")
 async def pin_audit_contract_endpoint(task_id: str, req: Request) -> Dict[str, Any]:
     from fleet_orchestrator.audit_completion import AuditContractError
+    from fleet_orchestrator.completion_guard import _task_project_supervisor
 
-    data = await req.json()
+    try:
+        data = await req.json()
+    except (json.JSONDecodeError, ValueError, TypeError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"request body must be valid JSON: {exc}. Next step: {AUDIT_PIN_NEXT_STEP}",
+        )
     if not isinstance(data, dict):
         raise HTTPException(
             status_code=422,
             detail=f"request body must be a JSON object. Next step: {AUDIT_PIN_NEXT_STEP}",
         )
-    actor = str(data.get("from") or "").strip()
+    cfg = _cfg()
+    task_id = resolve_task_id(task_id, config=cfg)
+    if not load_task_record(task_id, config=cfg):
+        raise HTTPException(status_code=404, detail=_task_not_found_detail(task_id))
+    actor = _attested_audit_actor_or_http_error(
+        req,
+        task_id=task_id,
+        action="pin-audit-contract",
+        project_supervisor=_task_project_supervisor(task_id, cfg),
+        body_from=data.get("from"),
+        next_step=AUDIT_PIN_NEXT_STEP,
+    )
     try:
-        result = pin_audit_contract(task_id, data, actor=actor, config=_cfg())
+        result = pin_audit_contract(task_id, data, actor=actor, config=cfg)
     except AuditContractError as exc:
         raise HTTPException(status_code=400, detail=f"{exc} Next step: {AUDIT_PIN_NEXT_STEP}")
-    return {"ok": True, "task_id": task_id, **result}
+    return {"ok": True, "task_id": task_id, "attested_actor": actor, **result}
 
 
 @app.post("/api/task/{task_id}/bind-audit-status")
 async def bind_audit_status_endpoint(task_id: str, req: Request) -> Dict[str, Any]:
     from fleet_orchestrator.audit_completion import AuditContractError
+    from fleet_orchestrator.completion_guard import _task_project_supervisor
 
-    data = await req.json()
+    try:
+        data = await req.json()
+    except (json.JSONDecodeError, ValueError, TypeError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"request body must be valid JSON: {exc}. Next step: {AUDIT_BIND_NEXT_STEP}",
+        )
     if not isinstance(data, dict):
         raise HTTPException(
             status_code=422,
             detail=f"request body must be a JSON object. Next step: {AUDIT_BIND_NEXT_STEP}",
         )
-    actor = str(data.get("from") or "").strip()
+    cfg = _cfg()
+    task_id = resolve_task_id(task_id, config=cfg)
+    if not load_task_record(task_id, config=cfg):
+        raise HTTPException(status_code=404, detail=_task_not_found_detail(task_id))
+    for forbidden in ("pr_head_sha", "pr_base_sha", "audit_head", "audit_base", "audit_pr_number"):
+        if forbidden in data and data.get(forbidden) not in (None, "", [], {}):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"bind-audit-status rejects caller-supplied {forbidden}; "
+                    f"PR head/base are queried server-side from trusted pins. Next step: {AUDIT_BIND_NEXT_STEP}"
+                ),
+            )
     try:
         status_id = int(data.get("status_id"))
     except (TypeError, ValueError):
@@ -921,11 +989,19 @@ async def bind_audit_status_endpoint(task_id: str, req: Request) -> Dict[str, An
             status_code=400,
             detail=f"status_id must be a positive integer. Next step: {AUDIT_BIND_NEXT_STEP}",
         )
+    actor = _attested_audit_actor_or_http_error(
+        req,
+        task_id=task_id,
+        action="bind-audit-status",
+        project_supervisor=_task_project_supervisor(task_id, cfg),
+        body_from=data.get("from"),
+        next_step=AUDIT_BIND_NEXT_STEP,
+    )
     try:
-        result = bind_audit_status(task_id, status_id=status_id, actor=actor, config=_cfg())
+        result = bind_audit_status(task_id, status_id=status_id, actor=actor, config=cfg)
     except AuditContractError as exc:
         raise HTTPException(status_code=400, detail=f"{exc} Next step: {AUDIT_BIND_NEXT_STEP}")
-    return {"ok": True, "task_id": task_id, **result}
+    return {"ok": True, "task_id": task_id, "attested_actor": actor, **result}
 
 
 def _terminal_evidence_from_request(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:

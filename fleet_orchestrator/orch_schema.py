@@ -3178,7 +3178,6 @@ def pin_audit_contract(
     from .audit_completion import (
         AuditContractError,
         assert_no_status_id_at_pin,
-        is_audit_task,
         normalize_supervisor_pins,
         pins_from_task,
         require_supervisor_actor,
@@ -3203,34 +3202,14 @@ def pin_audit_contract(
                 "as the project supervisor after the task exists"
             )
         require_supervisor_actor(existing, actor, "pin-audit-contract")
-        if is_audit_task(existing):
-            current = pins_from_task(existing)
-            expected_pairs = {
-                "audit_repo": (current.audit_repo, normalized["audit_repo"]),
-                "audit_head": (current.audit_head, normalized["audit_head"]),
-                "audit_base": (current.audit_base, normalized["audit_base"]),
-                "audit_required_context": (
-                    current.audit_required_context,
-                    normalized["audit_required_context"],
-                ),
-                "audit_required_state": (
-                    current.audit_required_state,
-                    normalized["audit_required_state"],
-                ),
-                "audit_pr_number": (current.audit_pr_number, normalized["audit_pr_number"]),
-            }
-            mismatches = [key for key, (got, expected) in expected_pairs.items() if got != expected]
-            if mismatches:
-                raise AuditContractError(
-                    "trusted audit pins are immutable after creation; refuse overwrite of "
-                    + ", ".join(mismatches)
-                    + ". Next step: POST /api/task/{task_id}/bind-audit-status as supervisor "
-                    "with the observed GitHub status id"
-                )
-            return {"already_pinned": True, **normalized}
-        session.run(
+        pin_params = {
+            "task_id": task_id,
+            **{k: normalized[k] for k in normalized if k != "audit_bound_status_id"},
+        }
+        cas = session.run(
             """
             MATCH (t:OrchTask {id: $task_id})
+            WHERE coalesce(t.completion_class, 'standard') <> 'audit'
             SET t.completion_class = $completion_class,
                 t.audit_repo = $audit_repo,
                 t.audit_head = $audit_head,
@@ -3239,11 +3218,37 @@ def pin_audit_contract(
                 t.audit_required_state = $audit_required_state,
                 t.audit_pr_number = $audit_pr_number,
                 t.audit_bound_status_id = NULL
+            RETURN t.id AS id
             """,
-            task_id=task_id,
-            **{k: normalized[k] for k in normalized if k != "audit_bound_status_id"},
-        )
-    return {"already_pinned": False, **normalized}
+            **pin_params,
+        ).single()
+        if cas is not None:
+            return {"already_pinned": False, **normalized}
+        existing = _audit_task_row(session, task_id) or existing
+        current = pins_from_task(existing)
+        expected_pairs = {
+            "audit_repo": (current.audit_repo, normalized["audit_repo"]),
+            "audit_head": (current.audit_head, normalized["audit_head"]),
+            "audit_base": (current.audit_base, normalized["audit_base"]),
+            "audit_required_context": (
+                current.audit_required_context,
+                normalized["audit_required_context"],
+            ),
+            "audit_required_state": (
+                current.audit_required_state,
+                normalized["audit_required_state"],
+            ),
+            "audit_pr_number": (current.audit_pr_number, normalized["audit_pr_number"]),
+        }
+        mismatches = [key for key, (got, expected) in expected_pairs.items() if got != expected]
+        if mismatches:
+            raise AuditContractError(
+                "trusted audit pins are immutable after creation; refuse overwrite of "
+                + ", ".join(mismatches)
+                + ". Next step: POST /api/task/{task_id}/bind-audit-status as supervisor "
+                "with the observed GitHub status id"
+            )
+        return {"already_pinned": True, **normalized}
 
 
 def bind_audit_status(
@@ -3266,16 +3271,33 @@ def bind_audit_status(
             )
         require_supervisor_actor(existing, actor, "bind-audit-status")
         result = compare_once_bind_status(existing, status_id=int(status_id))
-        if not result.get("already_bound"):
-            session.run(
-                """
-                MATCH (t:OrchTask {id: $task_id})
-                SET t.audit_bound_status_id = $status_id
-                """,
-                task_id=task_id,
-                status_id=int(status_id),
-            )
-    return result
+        if result.get("already_bound"):
+            return result
+        cas = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            WHERE t.completion_class = 'audit' AND t.audit_bound_status_id IS NULL
+            SET t.audit_bound_status_id = $status_id
+            RETURN t.audit_bound_status_id AS bound
+            """,
+            task_id=task_id,
+            status_id=int(status_id),
+        ).single()
+        if cas is not None:
+            return result
+        raced = _audit_task_row(session, task_id) or {}
+        prior = raced.get("audit_bound_status_id")
+        try:
+            prior_id = int(prior) if prior is not None and str(prior).strip() != "" else None
+        except (TypeError, ValueError):
+            prior_id = None
+        if prior_id == int(status_id):
+            result["already_bound"] = True
+            return result
+        raise AuditContractError(
+            f"audit_bound_status_id already set to {prior_id}; compare-once CAS loser refused overwrite. "
+            f"Next step: POST /api/task/{task_id}/bind-audit-status with the already-bound status id"
+        )
 
 
 def set_overall_refs(refs: List[Dict[str, Any]], config: Optional[OrchConfig] = None) -> Dict[str, Any]:

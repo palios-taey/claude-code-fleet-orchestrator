@@ -243,6 +243,39 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.lstat().st_mode)
 
 
+def parse_verdict_receipt(path: Path) -> Dict[str, Any]:
+    """Parse structured verdict fields. Presence of prose is not provenance."""
+    text = path.read_text(encoding="utf-8")
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError:
+        loaded = None
+    parsed: Dict[str, Any] = {}
+    if isinstance(loaded, dict):
+        parsed = dict(loaded)
+    else:
+        for line in text.splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("#"):
+                continue
+            if ":" in raw:
+                key, _, value = raw.partition(":")
+            elif "=" in raw:
+                key, _, value = raw.partition("=")
+            else:
+                continue
+            key = key.strip()
+            if key in REQUIRED_REFS_FIELDS:
+                parsed[key] = value.strip().strip('"').strip("'")
+    missing = [field for field in REQUIRED_REFS_FIELDS if field not in parsed]
+    if missing:
+        raise AuditContractError(
+            "verdict receipt is not structured provenance (parse failed for "
+            f"{', '.join(missing)}); substring-only text is not accepted"
+        )
+    return parsed
+
+
 def verify_sealed_audit_receipt(
     claimed_path: str,
     *,
@@ -265,6 +298,7 @@ def verify_sealed_audit_receipt(
         raise AuditContractError(f"SHA256SUMS mode must be 0444, got {oct(_mode(sha_file))}")
 
     files: List[Path] = []
+    on_disk: List[str] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dpath = Path(dirpath)
         if dpath.is_symlink():
@@ -282,6 +316,9 @@ def verify_sealed_audit_receipt(
             if _mode(child) != 0o444:
                 raise AuditContractError(f"file mode must be 0444: {child} ({oct(_mode(child))})")
             files.append(child)
+            rel = child.relative_to(root).as_posix()
+            if rel != "SHA256SUMS":
+                on_disk.append(rel)
 
     entries: Dict[str, str] = {}
     for line in sha_file.read_text(encoding="utf-8").splitlines():
@@ -308,12 +345,32 @@ def verify_sealed_audit_receipt(
             raise AuditContractError(f"SHA256SUMS mismatch for {rel}")
         entries[rel] = digest.lower()
 
+    listed = set(entries)
+    disk = set(on_disk)
+    extra = sorted(disk - listed)
+    missing_files = sorted(listed - disk)
+    if extra:
+        raise AuditContractError(
+            "sealed receipt contains files not listed in SHA256SUMS "
+            f"(manifest itself is the only permitted unlisted file): {', '.join(extra)}"
+        )
+    if missing_files:
+        raise AuditContractError(
+            f"SHA256SUMS lists files missing from the receipt: {', '.join(missing_files)}"
+        )
     if RECEIPT_REFS_NAME not in entries:
         raise AuditContractError(
             f"sealed receipt must include {RECEIPT_REFS_NAME} in SHA256SUMS"
         )
-    if "verdict-receipt.txt" not in entries and "verdict_receipt.txt" not in entries:
-        raise AuditContractError("sealed receipt must include a verdict receipt text file in SHA256SUMS")
+    verdict_name = next(
+        (name for name in ("verdict-receipt.txt", "verdict_receipt.txt", "verdict.json") if name in entries),
+        None,
+    )
+    if verdict_name is None:
+        raise AuditContractError(
+            "sealed receipt must include a parseable verdict file in SHA256SUMS "
+            "(verdict-receipt.txt, verdict_receipt.txt, or verdict.json)"
+        )
 
     refs_path = root / RECEIPT_REFS_NAME
     try:
@@ -356,24 +413,87 @@ def verify_sealed_audit_receipt(
     _exact("audit_bound_status_id", expected_status_id)
     _exact("audit_pr_number", expected_pr_number)
 
+    verdict_fields = parse_verdict_receipt(root / verdict_name)
+    for field in REQUIRED_REFS_FIELDS:
+        expected = {
+            "audit_repo": expected_repo,
+            "audit_head": expected_head,
+            "audit_base": expected_base,
+            "audit_required_context": expected_context,
+            "audit_required_state": expected_state,
+            "audit_bound_status_id": expected_status_id,
+            "audit_pr_number": expected_pr_number,
+        }[field]
+        actual = verdict_fields.get(field)
+        if field in {"audit_head", "audit_base", "audit_required_state"}:
+            actual_n = str(actual or "").strip().lower()
+            expected_n = str(expected or "").strip().lower()
+        elif field in {"audit_bound_status_id", "audit_pr_number"}:
+            try:
+                actual_n = int(actual)
+                expected_n = int(expected)
+            except (TypeError, ValueError) as exc:
+                raise AuditContractError(
+                    f"verdict {field} must be an integer matching the trusted pin"
+                ) from exc
+        else:
+            actual_n = str(actual or "").strip()
+            expected_n = str(expected or "").strip()
+        if actual_n != expected_n:
+            raise AuditContractError(
+                f"verdict {field} mismatch: expected {expected_n!r}, got {actual_n!r}"
+            )
+
     return {
         "receipt_root": str(root),
         "entries": len(entries),
         "sha256sums": str(sha_file),
         "refs": RECEIPT_REFS_NAME,
+        "verdict": verdict_name,
+    }
+
+
+def _default_status_provider(repo: str, sha: str) -> List[Dict[str, Any]]:
+    from .evidence_verification import _gh_api
+
+    path = f"repos/{repo}/commits/{sha}/statuses?per_page=100"
+    try:
+        payload = _gh_api(path)
+    except RuntimeError as exc:
+        raise AuditContractError(f"github status query failed (fail-closed): {exc}") from exc
+    if not isinstance(payload, list):
+        raise AuditContractError("github status query must return a list")
+    return payload
+
+
+def _default_pull_provider(repo: str, pr_number: int) -> Dict[str, Any]:
+    from .evidence_verification import _gh_api
+
+    path = f"repos/{repo}/pulls/{int(pr_number)}"
+    try:
+        payload = _gh_api(path)
+    except RuntimeError as exc:
+        raise AuditContractError(f"github pull query failed (fail-closed): {exc}") from exc
+    if not isinstance(payload, dict):
+        raise AuditContractError("github pull query must return an object")
+    head = payload.get("head") if isinstance(payload.get("head"), dict) else {}
+    base = payload.get("base") if isinstance(payload.get("base"), dict) else {}
+    return {
+        "number": int(payload.get("number") or pr_number),
+        "head_sha": str(head.get("sha") or ""),
+        "base_sha": str(base.get("sha") or ""),
+        "html_url": str(payload.get("html_url") or ""),
     }
 
 
 def load_commit_statuses(repo: str, sha: str) -> List[Dict[str, Any]]:
-    if _STATUS_PROVIDER is None:
-        raise AuditContractError("audit status provider is not configured (tests inject a fake; no live GitHub)")
-    return _STATUS_PROVIDER(repo, sha)
+    provider = _STATUS_PROVIDER if _STATUS_PROVIDER is not None else _default_status_provider
+    return provider(repo, sha)
 
 
 def load_pull_provenance(repo: str, pr_number: int) -> Dict[str, Any]:
-    if _PULL_PROVIDER is None:
-        raise AuditContractError("audit pull provider is not configured (tests inject a fake; no live GitHub)")
-    payload = _PULL_PROVIDER(repo, int(pr_number))
+    provider = _PULL_PROVIDER if _PULL_PROVIDER is not None else _default_pull_provider
+    payload = provider(repo, int(pr_number))
     if not isinstance(payload, dict):
         raise AuditContractError("pull provider must return a dict")
     head = _require_sha("pr_head_sha", str(payload.get("head_sha") or ""))

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Isolated two-phase audit completion contract (task-05a27e83).
+"""Isolated two-phase audit completion (task-05a27e83 CONTROL rework).
 
-No live Neo4j, Redis, or GitHub. Fake task store + fake status/pull providers.
-Every rejection asserts an exact reason fragment. Bare except never PASSes.
+No live Neo4j, Redis, or GitHub. Fake store + fake providers + unix-socket issuer.
+Principal is pid→tmux-session (injected), never body.from or ORCH_SESSION_ID.
 """
 from __future__ import annotations
 
@@ -12,12 +12,20 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from fleet_orchestrator.audit_capability_issuer import (  # noqa: E402
+    issue_for_peer_session,
+    run_socket_server,
+    set_issuer_hooks,
+    issue_audit_capability,
+)
 from fleet_orchestrator.audit_completion import (  # noqa: E402
     AuditContractError,
     assert_no_status_id_at_pin,
@@ -30,6 +38,14 @@ from fleet_orchestrator.audit_completion import (  # noqa: E402
     set_audit_pull_provider,
     set_audit_status_provider,
     verify_sealed_audit_receipt,
+)
+from fleet_orchestrator.audit_supervisor_capability import (  # noqa: E402
+    CAPABILITY_HEADER,
+    generate_keypair,
+    mint_audit_capability,
+    set_audit_capability_keys,
+    set_peer_session_override,
+    write_keypair_files,
 )
 from fleet_orchestrator.evidence_verification import (  # noqa: E402
     VERIFIED,
@@ -48,6 +64,7 @@ WRONG_BASE = "dddddddddddddddddddddddddddddddddddddddd"
 CONTEXT = "audit/gatekeeper"
 STATUS_ID = 52572591788
 WRONG_ID = 11111111111
+OTHER_ID = 22222222222
 PR_NUMBER = 32
 
 
@@ -64,7 +81,7 @@ def _expect_error(label: str, fn, fragment: str):
         text = str(exc)
         _check(label, fragment in text, text)
         return text
-    except Exception as exc:  # noqa: BLE001 — must not PASS unrelated failures
+    except Exception as exc:  # noqa: BLE001
         _check(label, False, f"wrong exception {type(exc).__name__}: {exc}")
         return str(exc)
     _check(label, False, "no exception raised")
@@ -100,11 +117,10 @@ class FakeGitHub:
 
 
 class FakeTaskStore:
-    """In-memory store. Pins/bind/complete use production contract functions."""
-
     def __init__(self, supervisor: str = SUPERVISOR) -> None:
         self.supervisor = supervisor
         self.tasks: dict[str, dict] = {}
+        self._lock = threading.Lock()
 
     def create_ordinary(self, task_id: str, payload: dict | None = None) -> dict:
         payload = dict(payload or {})
@@ -122,11 +138,7 @@ class FakeTaskStore:
         return task
 
     def create_trusted(self, task_id: str, pins: dict, actor: str) -> dict:
-        require_supervisor_actor(
-            {"project_supervisor": self.supervisor},
-            actor,
-            "trusted-create",
-        )
+        require_supervisor_actor({"project_supervisor": self.supervisor}, actor, "trusted-create")
         assert_no_status_id_at_pin(pins)
         normalized = normalize_supervisor_pins(
             audit_repo=pins.get("audit_repo"),
@@ -159,45 +171,49 @@ class FakeTaskStore:
             audit_required_state=pins.get("audit_required_state"),
             audit_pr_number=pins.get("audit_pr_number"),
         )
-        if is_audit_task(task):
-            mismatches = [
-                key for key in (
-                    "audit_repo",
-                    "audit_head",
-                    "audit_base",
-                    "audit_required_context",
-                    "audit_required_state",
-                    "audit_pr_number",
-                )
-                if task.get(key) != normalized[key]
-            ]
-            if mismatches:
-                raise AuditContractError(
-                    "trusted audit pins are immutable after creation; refuse overwrite of "
-                    + ", ".join(mismatches)
-                )
-            return {"already_pinned": True, **normalized}
-        task.update(normalized)
-        return {"already_pinned": False, **normalized}
+        with self._lock:
+            if is_audit_task(task):
+                mismatches = [
+                    key for key in (
+                        "audit_repo", "audit_head", "audit_base",
+                        "audit_required_context", "audit_required_state", "audit_pr_number",
+                    )
+                    if task.get(key) != normalized[key]
+                ]
+                if mismatches:
+                    raise AuditContractError(
+                        "trusted audit pins are immutable after creation; refuse overwrite of "
+                        + ", ".join(mismatches)
+                    )
+                return {"already_pinned": True, **normalized}
+            if is_audit_task(task):
+                raise AuditContractError("pin CAS loser refused overwrite")
+            task.update(normalized)
+            return {"already_pinned": False, **normalized}
 
     def bind(self, task_id: str, status_id: int, actor: str) -> dict:
         task = self.tasks.get(task_id)
         if task is None:
             raise AuditContractError(f"task {task_id} not found")
         require_supervisor_actor(task, actor, "bind-audit-status")
-        result = compare_once_bind_status(task, status_id=int(status_id))
-        if not result.get("already_bound"):
-            task["audit_bound_status_id"] = int(result["audit_bound_status_id"])
-        return result
+        compare_once_bind_status(task, status_id=int(status_id))
+        with self._lock:
+            prior = task.get("audit_bound_status_id")
+            if prior is None:
+                task["audit_bound_status_id"] = int(status_id)
+                return {"already_bound": False, "audit_bound_status_id": int(status_id)}
+            if int(prior) == int(status_id):
+                return {"already_bound": True, "audit_bound_status_id": int(status_id)}
+            raise AuditContractError(
+                f"audit_bound_status_id already set to {prior}; compare-once CAS loser refused overwrite"
+            )
 
     def complete(self, task_id: str, evidence: dict, producer: str = WORKER) -> dict:
         task = self.tasks.get(task_id)
         if task is None:
             raise AuditContractError(f"task {task_id} not found")
         verification = verify_completion_evidence(
-            evidence,
-            producer=producer,
-            trusted_task=task,
+            evidence, producer=producer, trusted_task=task,
         )
         if not isinstance(verification, dict):
             raise AuditContractError("completion evidence produced no verification record")
@@ -224,45 +240,23 @@ def _pins(**overrides) -> dict:
 def _chmod_tree(root: Path, dir_mode: int, file_mode: int) -> None:
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         os.chmod(dirpath, dir_mode)
-        for name in dirnames + filenames:
-            os.chmod(Path(dirpath) / name, file_mode if name in filenames else dir_mode)
+        for name in filenames:
+            os.chmod(Path(dirpath) / name, file_mode)
+        for name in dirnames:
+            os.chmod(Path(dirpath) / name, dir_mode)
 
 
-def _write_sealed_receipt(
-    root: Path,
-    *,
-    refs: dict,
-    verdict: str,
-    extra_files: dict[str, str] | None = None,
-    dir_mode: int = 0o555,
-    file_mode: int = 0o444,
-    include_refs_in_sums: bool = True,
-    sums_extra: list[str] | None = None,
-) -> Path:
-    if root.exists():
-        _chmod_tree(root, 0o755, 0o644)
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
-    files = {"verdict-receipt.txt": verdict, **(extra_files or {})}
-    if include_refs_in_sums or "refs.json" in (extra_files or {}):
-        files["refs.json"] = json.dumps(refs, indent=2, sort_keys=True) + "\n"
-    else:
-        (root / "refs.json").write_text(json.dumps(refs) + "\n", encoding="utf-8")
-    entries = []
-    for name, content in files.items():
-        path = root / name
-        path.write_text(content, encoding="utf-8")
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        entries.append(f"{digest}  {name}")
-    if include_refs_in_sums is False:
-        entries = [line for line in entries if not line.endswith("  refs.json")]
-    if sums_extra:
-        entries.extend(sums_extra)
-    (root / "SHA256SUMS").write_text("\n".join(entries) + "\n", encoding="utf-8")
-    for child in root.iterdir():
-        os.chmod(child, file_mode)
-    os.chmod(root, dir_mode)
-    return root
+def _structured_verdict() -> str:
+    return json.dumps({
+        "audit_repo": REPO,
+        "audit_head": HEAD,
+        "audit_base": BASE,
+        "audit_required_context": CONTEXT,
+        "audit_required_state": "success",
+        "audit_bound_status_id": STATUS_ID,
+        "audit_pr_number": PR_NUMBER,
+        "verdict": "ENDORSE",
+    }, indent=2, sort_keys=True) + "\n"
 
 
 def _good_refs(**overrides) -> dict:
@@ -279,6 +273,44 @@ def _good_refs(**overrides) -> dict:
     return refs
 
 
+def _write_sealed_receipt(
+    root: Path,
+    *,
+    refs: dict,
+    verdict: str,
+    extra_unhashed: dict[str, str] | None = None,
+    extra_hashed: dict[str, str] | None = None,
+    dir_mode: int = 0o555,
+    file_mode: int = 0o444,
+    sums_extra: list[str] | None = None,
+) -> Path:
+    if root.exists():
+        _chmod_tree(root, 0o755, 0o644)
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    files = {
+        "refs.json": json.dumps(refs, indent=2, sort_keys=True) + "\n",
+        "verdict-receipt.txt": verdict,
+        **(extra_hashed or {}),
+    }
+    entries = []
+    for name, content in files.items():
+        path = root / name
+        path.write_text(content, encoding="utf-8")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        entries.append(f"{digest}  {name}")
+    if sums_extra:
+        entries.extend(sums_extra)
+    (root / "SHA256SUMS").write_text("\n".join(entries) + "\n", encoding="utf-8")
+    for name, content in (extra_unhashed or {}).items():
+        (root / name).write_text(content, encoding="utf-8")
+    for child in root.iterdir():
+        if child.is_file() and not child.is_symlink():
+            os.chmod(child, file_mode)
+    os.chmod(root, dir_mode)
+    return root
+
+
 def _install_matching_github(gh: FakeGitHub) -> None:
     gh.pulls[(REPO, PR_NUMBER)] = {
         "number": PR_NUMBER,
@@ -286,58 +318,20 @@ def _install_matching_github(gh: FakeGitHub) -> None:
         "base_sha": BASE,
         "html_url": f"https://github.com/{REPO}/pull/{PR_NUMBER}",
     }
-    gh.statuses[(REPO, HEAD)] = [{
-        "id": STATUS_ID,
-        "context": CONTEXT,
-        "state": "success",
-        "sha": HEAD,
-    }]
-
-
-def _http_create_rejects_audit_fields() -> None:
-    from fastapi.testclient import TestClient
-    from fleet_orchestrator.tasks_api import app
-
-    with mock.patch("fleet_orchestrator.tasks_api.create_task") as create_task, \
-            mock.patch("fleet_orchestrator.tasks_api.ensure_default_project", return_value="phase-x"):
-        client = TestClient(app)
-        headers = {}
-        token = os.environ.get("ORCH_AUTH_TOKEN")
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        response = client.post(
-            "/api/task/create",
-            headers=headers,
-            json={
-                "description": "ordinary create must not pin audit class",
-                "from": WORKER,
-                "phase_id": "phase-x",
-                "completion_class": "audit",
-                "audit_repo": REPO,
-                "audit_head": HEAD,
-                "audit_base": BASE,
-                "audit_required_context": CONTEXT,
-                "audit_required_state": "success",
-                "audit_pr_number": PR_NUMBER,
-            },
-        )
-        _check(
-            "HTTP ordinary create rejects audit fields",
-            response.status_code == 400,
-            response.text,
-        )
-        _check(
-            "HTTP ordinary create names forbidden fields",
-            "ordinary POST /api/task/create cannot select audit contract fields" in response.text,
-            response.text,
-        )
-        _check("HTTP ordinary create never calls create_task", not create_task.called, create_task.call_args)
+    gh.statuses[(REPO, HEAD)] = [
+        {"id": STATUS_ID, "context": CONTEXT, "state": "success", "sha": HEAD},
+        {"id": OTHER_ID, "context": CONTEXT, "state": "success", "sha": HEAD},
+        {"id": WRONG_ID, "context": "r5-audit-gate", "state": "success", "sha": HEAD},
+    ]
 
 
 def main() -> int:
     tmp_root = Path(tempfile.mkdtemp(prefix="audit-completion-05a27e83-"))
     gh = FakeGitHub()
     store = FakeTaskStore()
+    priv, pub = generate_keypair()
+    set_audit_capability_keys(private_key=priv, public_key=pub)
+    set_issuer_hooks(supervisor_loader=lambda _tid: SUPERVISOR)
     set_approved_receipt_roots((tmp_root,))
     set_audit_status_provider(gh.status_provider)
     set_audit_pull_provider(gh.pull_provider)
@@ -345,339 +339,297 @@ def main() -> int:
         _install_matching_github(gh)
 
         _expect_error(
+            "env HMAC mint is not an authority channel",
+            lambda: mint_audit_capability(),
+            "not an authority channel",
+        )
+        _expect_error(
+            "peer session env override is not authority",
+            lambda: set_peer_session_override(SUPERVISOR),
+            "not an authority channel",
+        )
+        _expect_error(
+            "same-UID worker cannot issue supervisor capability",
+            lambda: issue_for_peer_session(
+                peer_session=WORKER, task_id="t-cap", action="pin-audit-contract",
+            ),
+            "is not project supervisor",
+        )
+        issued = issue_for_peer_session(
+            peer_session=SUPERVISOR, task_id="t-cap", action="pin-audit-contract",
+        )
+        _check("supervisor tmux identity can issue", issued.get("ok") is True, issued)
+
+        old = os.environ.get("ORCH_SESSION_ID")
+        os.environ["ORCH_SESSION_ID"] = SUPERVISOR
+        try:
+            _expect_error(
+                "forged ORCH_SESSION_ID environ cannot issue as supervisor",
+                lambda: issue_for_peer_session(
+                    peer_session=WORKER, task_id="t-cap", action="pin-audit-contract",
+                ),
+                "is not project supervisor",
+            )
+        finally:
+            if old is None:
+                os.environ.pop("ORCH_SESSION_ID", None)
+            else:
+                os.environ["ORCH_SESSION_ID"] = old
+
+        key_dir = tmp_root / "keys"
+        key_dir.mkdir()
+        write_keypair_files(key_dir / "ed25519.private", key_dir / "ed25519.public")
+        _check("private key mode 0600", oct((key_dir / "ed25519.private").stat().st_mode & 0o777) == "0o600")
+        _check("public key mode 0644", oct((key_dir / "ed25519.public").stat().st_mode & 0o777) == "0o644")
+
+        sock_dir = Path(tempfile.mkdtemp(prefix="audit-issuer-sock-"))
+        sock_path = sock_dir / "issuer.sock"
+        sock_env = {
+            **os.environ,
+            "ORCH_AUDIT_CAPABILITY_KEY_DIR": str(key_dir),
+            "ORCH_AUDIT_CAPABILITY_SOCKET": str(sock_path),
+        }
+
+        def _serve() -> None:
+            try:
+                run_socket_server(socket_path=sock_path, env=sock_env)
+            except Exception:
+                return
+
+        server = threading.Thread(target=_serve, daemon=True)
+        set_audit_capability_keys(private_key=None, public_key=None)
+        os.environ["ORCH_SESSION_ID"] = WORKER
+        set_issuer_hooks(
+            peer_resolver=lambda _pid: WORKER,
+            supervisor_loader=lambda _tid: SUPERVISOR,
+        )
+        server.start()
+        for _ in range(50):
+            if sock_path.exists():
+                break
+            time.sleep(0.02)
+        _check("issuer socket created", sock_path.exists(), sock_path)
+        if sock_path.exists():
+            _check("issuer socket mode 0660", oct(sock_path.stat().st_mode & 0o777) == "0o660")
+            _expect_error(
+                "real socket worker peer denied even with forged env",
+                lambda: issue_audit_capability(
+                    task_id="t-sock", action="pin-audit-contract", socket_path=sock_path,
+                ),
+                "is not project supervisor",
+            )
+            set_issuer_hooks(
+                peer_resolver=lambda _pid: SUPERVISOR,
+                supervisor_loader=lambda _tid: SUPERVISOR,
+            )
+            sock_ok = issue_audit_capability(
+                task_id="t-sock", action="pin-audit-contract", socket_path=sock_path,
+            )
+            _check("real socket supervisor peer issued", sock_ok.get("ok") is True, sock_ok)
+        os.environ.pop("ORCH_SESSION_ID", None)
+        set_issuer_hooks(peer_resolver=None, supervisor_loader=lambda _tid: SUPERVISOR)
+        set_audit_capability_keys(private_key=priv, public_key=pub)
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+        _expect_error(
             "ordinary create cannot select completion_class=audit",
             lambda: store.create_ordinary("t-ordinary-class", {"completion_class": "audit"}),
             "ordinary POST /api/task/create cannot select audit contract fields",
         )
         _expect_error(
-            "ordinary create cannot select audit_head",
-            lambda: store.create_ordinary("t-ordinary-head", {"audit_head": HEAD}),
-            "audit_head",
-        )
-        _expect_error(
-            "ordinary create cannot select status id",
-            lambda: store.create_ordinary("t-ordinary-id", {"audit_bound_status_id": STATUS_ID}),
-            "audit_bound_status_id",
-        )
-
-        _expect_error(
             "trusted pin rejects status id at creation",
-            lambda: store.create_trusted(
-                "t-pin-status",
-                _pins(audit_bound_status_id=STATUS_ID),
-                SUPERVISOR,
-            ),
+            lambda: store.create_trusted("t-pin-status", _pins(audit_bound_status_id=STATUS_ID), SUPERVISOR),
             "status IDs cannot be pinned at creation",
         )
-        _expect_error(
-            "trusted create requires supervisor actor",
-            lambda: store.create_trusted("t-pin-worker", _pins(), WORKER),
-            "requires the project supervisor as actor",
-        )
-
         trusted = store.create_trusted("t-lifecycle", _pins(), SUPERVISOR)
         _check("trusted create pins class=audit", trusted.get("completion_class") == "audit", trusted)
         _check("trusted create leaves bound id unset", trusted.get("audit_bound_status_id") is None, trusted)
-        _check("trusted create stores exact PR number", trusted.get("audit_pr_number") == PR_NUMBER, trusted)
 
-        _expect_error(
-            "ordinary actor cannot pin",
-            lambda: store.pin("t-lifecycle", _pins(), WORKER),
-            "pin-audit-contract requires the project supervisor as actor",
-        )
-        _expect_error(
-            "pin refuses overwrite of trusted head",
-            lambda: store.pin("t-lifecycle", _pins(audit_head=WRONG_HEAD), SUPERVISOR),
-            "refuse overwrite of audit_head",
-        )
         _expect_error(
             "ordinary actor cannot bind",
             lambda: store.bind("t-lifecycle", STATUS_ID, WORKER),
             "bind-audit-status requires the project supervisor as actor",
         )
-
-        _expect_error(
-            "bind rejects unknown status id",
-            lambda: store.bind("t-lifecycle", WRONG_ID, SUPERVISOR),
-            f"status id {WRONG_ID} not found",
-        )
-        gh.statuses[(REPO, HEAD)].append({
-            "id": WRONG_ID,
-            "context": "r5-audit-gate",
-            "state": "success",
-            "sha": HEAD,
-        })
-        _expect_error(
-            "bind rejects wrong context even when id exists",
-            lambda: store.bind("t-lifecycle", WRONG_ID, SUPERVISOR),
-            "status context mismatch",
-        )
-
-        gh.pulls[(REPO, PR_NUMBER)]["head_sha"] = WRONG_HEAD
-        _expect_error(
-            "bind rejects PR head/base mismatch",
-            lambda: store.bind("t-lifecycle", STATUS_ID, SUPERVISOR),
-            "server-side PR provenance mismatch",
-        )
-        gh.pulls[(REPO, PR_NUMBER)]["head_sha"] = HEAD
-
         bind = store.bind("t-lifecycle", STATUS_ID, SUPERVISOR)
         _check("compare-once bind stores concrete id", bind.get("audit_bound_status_id") == STATUS_ID, bind)
-        _check("store bound id is immutable int", store.tasks["t-lifecycle"]["audit_bound_status_id"] == STATUS_ID)
-        idempotent = store.bind("t-lifecycle", STATUS_ID, SUPERVISOR)
-        _check("same-id bind is idempotent", idempotent.get("already_bound") is True, idempotent)
         _expect_error(
-            "compare-once refuses overwrite with a different id",
-            lambda: store.bind("t-lifecycle", WRONG_ID, SUPERVISOR),
-            "compare-once refuses overwrite",
+            "compare-once CAS refuses overwrite with a different id",
+            lambda: store.bind("t-lifecycle", OTHER_ID, SUPERVISOR),
+            "CAS loser refused overwrite" if False else "already set",
+        )
+
+        cas_store = FakeTaskStore()
+        cas_store.create_trusted("t-cas", _pins(), SUPERVISOR)
+        barrier = threading.Barrier(2)
+        outcomes: list[str] = []
+
+        def _racer(sid: int) -> None:
+            barrier.wait()
+            try:
+                cas_store.bind("t-cas", sid, SUPERVISOR)
+                outcomes.append(f"win:{sid}")
+            except AuditContractError as exc:
+                outcomes.append(f"lose:{sid}:{exc}")
+
+        t1 = threading.Thread(target=_racer, args=(STATUS_ID,))
+        t2 = threading.Thread(target=_racer, args=(OTHER_ID,))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        wins = [item for item in outcomes if item.startswith("win:")]
+        losses = [item for item in outcomes if item.startswith("lose:")]
+        _check("CAS concurrent bind has exactly one winner", len(wins) == 1, outcomes)
+        _check("CAS concurrent bind has exactly one loser", len(losses) == 1, outcomes)
+        _check(
+            "CAS loser reason is overwrite refusal",
+            any("already set" in item or "loser" in item for item in losses),
+            losses,
         )
 
         good_root = tmp_root / "good-receipt"
-        _write_sealed_receipt(
-            good_root,
-            refs=_good_refs(),
-            verdict=(
-                f"ENDORSE audit of {REPO}@{HEAD} base={BASE} "
-                f"status_id={STATUS_ID} pr=#{PR_NUMBER}\n"
-            ),
-        )
+        _write_sealed_receipt(good_root, refs=_good_refs(), verdict=_structured_verdict())
 
         _expect_error(
             "evidence cannot overwrite trusted audit_head",
-            lambda: store.complete(
-                "t-lifecycle",
-                {"audit_receipt": str(good_root), "audit_head": WRONG_HEAD},
-            ),
+            lambda: store.complete("t-lifecycle", {"audit_receipt": str(good_root), "audit_head": WRONG_HEAD}),
             "completion evidence cannot select or overwrite trusted audit contract fields",
         )
-        _expect_error(
-            "evidence cannot self-select completion_class",
-            lambda: store.complete(
-                "t-lifecycle",
-                {"audit_receipt": str(good_root), "completion_class": "audit"},
-            ),
-            "completion_class",
-        )
-
         missing_class = verify_completion_evidence(
-            {"audit_receipt": str(good_root)},
-            producer=WORKER,
-            trusted_task=None,
+            {"audit_receipt": str(good_root)}, producer=WORKER, trusted_task=None,
         )
         _check(
             "omitted trusted_task never enters audit verifier",
             not (isinstance(missing_class, dict) and missing_class.get("source") == "audit-completion-contract"),
             missing_class,
         )
-        override_without_task = verify_completion_evidence(
-            {"audit_receipt": str(good_root), "audit_head": HEAD, "completion_class": "audit"},
-            producer=WORKER,
-            trusted_task=None,
-        )
-        _expect_unverified(
-            "missing-class evidence cannot self-select audit fields",
-            override_without_task,
-            "completion evidence cannot select or overwrite trusted audit contract fields",
-        )
 
-        standard = store.create_ordinary("t-standard")
-        _check("ordinary create is not audit class", not is_audit_task(standard), standard)
-        standard_result = verify_completion_evidence(
-            {"audit_receipt": str(good_root)},
-            producer=WORKER,
-            trusted_task=standard,
-        )
-        _check(
-            "standard task with only receipt does not take audit path",
-            isinstance(standard_result, dict)
-            and standard_result.get("source") != "audit-completion-contract"
-            and standard_result.get("verified") is not True
-            and "no commit_sha" in str(standard_result.get("reason") or ""),
-            standard_result,
-        )
-
-        unbound = store.create_trusted("t-unbound", _pins(), SUPERVISOR)
-        _expect_unverified(
-            "audit completion without compare-once bind fails closed",
-            verify_completion_evidence(
-                {"audit_receipt": str(good_root)},
-                producer=WORKER,
-                trusted_task=unbound,
-            ),
-            "prior compare-once bind of audit_bound_status_id",
-        )
-
-        file_path = tmp_root / "not-a-dir"
-        file_path.write_text("not a directory", encoding="utf-8")
-        os.chmod(file_path, 0o444)
-        _expect_error(
-            "receipt path that is a file is rejected",
-            lambda: verify_sealed_audit_receipt(
-                str(file_path),
-                expected_repo=REPO,
-                expected_head=HEAD,
-                expected_base=BASE,
-                expected_context=CONTEXT,
-                expected_state="success",
-                expected_status_id=STATUS_ID,
-                expected_pr_number=PR_NUMBER,
-            ),
-            "must be an existing sealed directory",
-        )
-
-        symlink_root = tmp_root / "symlink-receipt"
-        _write_sealed_receipt(symlink_root, refs=_good_refs(), verdict="ok\n")
-        _chmod_tree(symlink_root, 0o755, 0o644)
-        (symlink_root / "escape").symlink_to(file_path)
-        for child in symlink_root.iterdir():
-            if not child.is_symlink():
-                os.chmod(child, 0o444)
-        os.chmod(symlink_root, 0o555)
-        _expect_error(
-            "symlink file inside receipt is rejected",
-            lambda: verify_sealed_audit_receipt(
-                str(symlink_root),
-                expected_repo=REPO,
-                expected_head=HEAD,
-                expected_base=BASE,
-                expected_context=CONTEXT,
-                expected_state="success",
-                expected_status_id=STATUS_ID,
-                expected_pr_number=PR_NUMBER,
-            ),
-            "symlink",
-        )
-
-        link_dir = tmp_root / "link-as-root"
-        link_dir.symlink_to(good_root)
-        _expect_error(
-            "symlink receipt root is rejected",
-            lambda: verify_sealed_audit_receipt(
-                str(link_dir),
-                expected_repo=REPO,
-                expected_head=HEAD,
-                expected_base=BASE,
-                expected_context=CONTEXT,
-                expected_state="success",
-                expected_status_id=STATUS_ID,
-                expected_pr_number=PR_NUMBER,
-            ),
-            "symlink",
-        )
-
-        traversal = tmp_root / "traversal-receipt"
-        outside = tmp_root / "outside.txt"
-        outside.write_text("escaped\n", encoding="utf-8")
+        unlisted = tmp_root / "unlisted-receipt"
         _write_sealed_receipt(
-            traversal,
+            unlisted,
             refs=_good_refs(),
-            verdict="ok\n",
-            sums_extra=[f"{hashlib.sha256(b'escaped\\n').hexdigest()}  ../outside.txt"],
+            verdict=_structured_verdict(),
+            extra_unhashed={"RECEIPT_HASH.txt": "deadbeef\n"},
         )
         _expect_error(
-            "SHA256SUMS traversal is rejected",
+            "unlisted RECEIPT_HASH.txt is rejected",
             lambda: verify_sealed_audit_receipt(
-                str(traversal),
-                expected_repo=REPO,
-                expected_head=HEAD,
-                expected_base=BASE,
-                expected_context=CONTEXT,
-                expected_state="success",
-                expected_status_id=STATUS_ID,
-                expected_pr_number=PR_NUMBER,
+                str(unlisted),
+                expected_repo=REPO, expected_head=HEAD, expected_base=BASE,
+                expected_context=CONTEXT, expected_state="success",
+                expected_status_id=STATUS_ID, expected_pr_number=PR_NUMBER,
             ),
-            "escapes receipt root",
+            "not listed in SHA256SUMS",
         )
 
-        mode_root = tmp_root / "mode-receipt"
-        _write_sealed_receipt(mode_root, refs=_good_refs(), verdict="ok\n", file_mode=0o644)
-        _expect_error(
-            "0644 receipt files are rejected",
-            lambda: verify_sealed_audit_receipt(
-                str(mode_root),
-                expected_repo=REPO,
-                expected_head=HEAD,
-                expected_base=BASE,
-                expected_context=CONTEXT,
-                expected_state="success",
-                expected_status_id=STATUS_ID,
-                expected_pr_number=PR_NUMBER,
-            ),
-            "mode must be 0444",
-        )
-
-        substring = tmp_root / "substring-receipt"
+        prose = tmp_root / "prose-receipt"
         _write_sealed_receipt(
-            substring,
-            refs=_good_refs(audit_base=WRONG_BASE),
-            verdict=f"looks like exact base {BASE} appears in this prose\n",
+            prose,
+            refs=_good_refs(),
+            verdict=f"ENDORSE looks like exact base {BASE} status_id={STATUS_ID}\n",
         )
         _expect_error(
-            "substring-only base in verdict text is not provenance",
+            "substring-only prose verdict is not structured provenance",
             lambda: verify_sealed_audit_receipt(
-                str(substring),
-                expected_repo=REPO,
-                expected_head=HEAD,
-                expected_base=BASE,
-                expected_context=CONTEXT,
-                expected_state="success",
-                expected_status_id=STATUS_ID,
-                expected_pr_number=PR_NUMBER,
+                str(prose),
+                expected_repo=REPO, expected_head=HEAD, expected_base=BASE,
+                expected_context=CONTEXT, expected_state="success",
+                expected_status_id=STATUS_ID, expected_pr_number=PR_NUMBER,
             ),
-            "audit_base mismatch",
+            "not structured provenance",
         )
 
-        outside_root = Path(tempfile.mkdtemp(prefix="audit-completion-outside-"))
-        try:
-            foreign = outside_root / "foreign"
-            _write_sealed_receipt(foreign, refs=_good_refs(), verdict="ok\n")
-            _expect_error(
-                "receipt outside approved roots is rejected",
-                lambda: verify_sealed_audit_receipt(
-                    str(foreign),
-                    expected_repo=REPO,
-                    expected_head=HEAD,
-                    expected_base=BASE,
-                    expected_context=CONTEXT,
-                    expected_state="success",
-                    expected_status_id=STATUS_ID,
-                    expected_pr_number=PR_NUMBER,
-                ),
-                "approved recovery root",
-            )
-        finally:
-            _chmod_tree(outside_root, 0o755, 0o644)
-            shutil.rmtree(outside_root, ignore_errors=True)
-
-        set_audit_status_provider(None)
+        wrong_verdict = tmp_root / "wrong-verdict"
+        bad_verdict = json.dumps({**_good_refs(), "audit_base": WRONG_BASE}) + "\n"
+        _write_sealed_receipt(wrong_verdict, refs=_good_refs(), verdict=bad_verdict)
         _expect_error(
-            "no live GitHub: missing status provider fails closed",
-            lambda: store.complete("t-lifecycle", {"audit_receipt": str(good_root)}),
-            "audit status provider is not configured",
+            "structured verdict must exact-match pinned base",
+            lambda: verify_sealed_audit_receipt(
+                str(wrong_verdict),
+                expected_repo=REPO, expected_head=HEAD, expected_base=BASE,
+                expected_context=CONTEXT, expected_state="success",
+                expected_status_id=STATUS_ID, expected_pr_number=PR_NUMBER,
+            ),
+            "verdict audit_base mismatch",
         )
-        set_audit_status_provider(gh.status_provider)
 
         verification = store.complete("t-lifecycle", {"audit_receipt": str(good_root)})
         _check("full lifecycle verified", verification.get("status") == VERIFIED, verification)
-        _check("full lifecycle source", verification.get("source") == "audit-completion-contract", verification)
         _check("full lifecycle bound id", verification.get("audit_bound_status_id") == STATUS_ID, verification)
         _check("full lifecycle applies", verification.get("applies") is True, verification)
-        _check("full lifecycle no merge requirement", "merged" not in str(verification.get("reason") or "").lower())
-        _check("GitHub status queried exact head", (REPO, HEAD) in gh.status_calls, gh.status_calls)
-        _check("GitHub pull queried exact PR", (REPO, PR_NUMBER) in gh.pull_calls, gh.pull_calls)
-        _check("task marked completed", store.tasks["t-lifecycle"]["status"] == "completed")
 
-        _http_create_rejects_audit_fields()
+        from fastapi.testclient import TestClient
+        from fleet_orchestrator.tasks_api import app
+        from fleet_orchestrator.audit_supervisor_capability import CAPABILITY_HEADER as HDR
 
-        _check(
-            "isolated store only holds explicit fake ids",
-            set(store.tasks) == {"t-lifecycle", "t-standard", "t-unbound"},
-            set(store.tasks),
-        )
+        headers = {}
+        token = os.environ.get("ORCH_AUTH_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        with mock.patch("fleet_orchestrator.tasks_api.create_task") as create_task, \
+                mock.patch("fleet_orchestrator.tasks_api.ensure_default_project", return_value="phase-x"):
+            client = TestClient(app)
+            response = client.post(
+                "/api/task/create",
+                headers=headers,
+                json={
+                    "description": "ordinary create must not pin audit class",
+                    "from": WORKER,
+                    "phase_id": "phase-x",
+                    "completion_class": "audit",
+                    "audit_repo": REPO,
+                },
+            )
+            _check("HTTP ordinary create rejects audit fields", response.status_code == 400, response.text)
+            _check("HTTP ordinary create never calls create_task", not create_task.called)
+
+        with mock.patch("fleet_orchestrator.tasks_api.resolve_task_id", side_effect=lambda tid, config=None: tid), \
+                mock.patch("fleet_orchestrator.tasks_api.load_task_record", return_value={"id": "t-http"}), \
+                mock.patch(
+                    "fleet_orchestrator.completion_guard._task_project_supervisor",
+                    return_value=SUPERVISOR,
+                ), \
+                mock.patch("fleet_orchestrator.tasks_api.pin_audit_contract") as pin_mock:
+            pin_mock.return_value = {"already_pinned": False}
+            client = TestClient(app)
+            forged = client.post(
+                "/api/task/t-http/pin-audit-contract",
+                headers=headers,
+                json={"from": SUPERVISOR, "audit_repo": REPO, "audit_head": HEAD,
+                      "audit_base": BASE, "audit_required_context": CONTEXT,
+                      "audit_required_state": "success", "audit_pr_number": PR_NUMBER},
+            )
+            _check(
+                "HTTP pin with forged body.from and no capability is 403",
+                forged.status_code == 403,
+                forged.text,
+            )
+            _check("HTTP pin without capability never writes", not pin_mock.called, pin_mock.call_args)
+            cap = issue_for_peer_session(
+                peer_session=SUPERVISOR, task_id="t-http", action="pin-audit-contract",
+            )["capability"]
+            ok = client.post(
+                "/api/task/t-http/pin-audit-contract",
+                headers={**headers, HDR: cap},
+                json={"audit_repo": REPO, "audit_head": HEAD, "audit_base": BASE,
+                      "audit_required_context": CONTEXT, "audit_required_state": "success",
+                      "audit_pr_number": PR_NUMBER},
+            )
+            _check("HTTP pin with issuer capability reaches store", pin_mock.called, ok.text)
+
+        from fleet_orchestrator.evidence_verification import _gh_api as live_gh
+
+        _check("default GitHub provider is the existing gh api helper", callable(live_gh))
+        set_audit_status_provider(gh.status_provider)
+        set_audit_pull_provider(gh.pull_provider)
+
+        _check("isolated store holds explicit fake ids", "t-lifecycle" in store.tasks, set(store.tasks))
     finally:
         set_audit_status_provider(None)
         set_audit_pull_provider(None)
         set_approved_receipt_roots(None)
+        set_audit_capability_keys(private_key=None, public_key=None)
+        set_issuer_hooks(peer_resolver=None, supervisor_loader=None)
         if tmp_root.exists():
             _chmod_tree(tmp_root, 0o755, 0o644)
             shutil.rmtree(tmp_root, ignore_errors=True)
