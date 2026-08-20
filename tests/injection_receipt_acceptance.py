@@ -43,7 +43,7 @@ def _context() -> dict[str, object]:
         "rules": [],
         "snapshot": {
             "repo_head": "acceptance",
-            "session_id": "worker",
+            "session_id": "worker-codex",
             "cli": "codex",
             "requested_task_id": "proj::task",
             "resolved_work": {
