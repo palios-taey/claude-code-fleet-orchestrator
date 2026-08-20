@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Post audit/* GitHub commit status under live outward authorization.
+
+P0 safety (task-f396305d): requires a live current_task binding for --session
+(or ORCH_OUTWARD_SESSION / tmux session). Unbind/revocation denies mutation even
+if the worker process is still running.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from fleet_orchestrator.outward_github_mutation import (  # noqa: E402
+    OutwardAuthorizationError,
+    post_commit_status,
+    resolve_session_id,
+)
+
+MAX_STATUS_DESCRIPTION_CHARS = 140
+VALID_STATES = {"error", "failure", "pending", "success"}
+
+
+def _run_gh_api(args: list[str]) -> Any:
+    result = subprocess.run(
+        ["gh", "api", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"gh api failed: {detail}")
+    try:
+        return json.loads(result.stdout or "null")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"gh api returned invalid JSON: {exc}") from exc
+
+
+def _fit_description(description: str) -> tuple[str, bool]:
+    if len(description) <= MAX_STATUS_DESCRIPTION_CHARS:
+        return description, False
+    suffix = "..."
+    return description[: MAX_STATUS_DESCRIPTION_CHARS - len(suffix)].rstrip() + suffix, True
+
+
+def _latest_context_status(statuses: list[dict[str, Any]], context: str) -> dict[str, Any] | None:
+    matches = [status for status in statuses if status.get("context") == context]
+    if not matches:
+        return None
+    return sorted(
+        matches,
+        key=lambda status: status.get("created_at") or status.get("updated_at") or "",
+        reverse=True,
+    )[0]
+
+
+def _verify_status(*, repo: str, sha: str, state: str, context: str, description: str) -> dict[str, Any]:
+    payload = _run_gh_api([f"repos/{repo}/commits/{sha}/statuses?per_page=100"])
+    statuses = payload if isinstance(payload, list) else payload.get("statuses") if isinstance(payload, dict) else None
+    if not isinstance(statuses, list):
+        raise RuntimeError("status verification response did not include a status list")
+    status = _latest_context_status(statuses, context)
+    if not status:
+        raise RuntimeError(f"status verification failed: context {context!r} is missing on {sha}")
+    if status.get("state") != state:
+        raise RuntimeError(
+            f"status verification failed: context {context!r} state is {status.get('state')!r}, expected {state!r}"
+        )
+    if status.get("description") != description:
+        raise RuntimeError(
+            "status verification failed: latest description differs "
+            f"({status.get('description')!r} != {description!r})"
+        )
+    return status
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Post an audit/* GitHub commit status under live outward authorization."
+    )
+    parser.add_argument("--repo", required=True, help="GitHub repository as OWNER/REPO")
+    parser.add_argument("--sha", required=True, help="Commit SHA to stamp")
+    parser.add_argument("--context", required=True, help="Commit status context, for example audit/grok")
+    parser.add_argument("--state", required=True, choices=sorted(VALID_STATES))
+    parser.add_argument("--description", required=True)
+    parser.add_argument("--target-url")
+    parser.add_argument(
+        "--session",
+        help="Worker session for live current_task authorization (default: ORCH_OUTWARD_SESSION / tmux #S)",
+    )
+    args = parser.parse_args()
+
+    session = resolve_session_id(args.session)
+    if not session:
+        print(
+            "SAFETY DENY: --session (or ORCH_OUTWARD_SESSION / tmux session) is required "
+            "for outward GitHub status mutation",
+            file=sys.stderr,
+        )
+        return 1
+
+    description, clipped = _fit_description(args.description)
+    try:
+        posted = post_commit_status(
+            session_id=session,
+            repo=args.repo,
+            sha=args.sha,
+            state=args.state,
+            context=args.context,
+            description=description,
+            target_url=args.target_url,
+            gh_api=_run_gh_api,
+        )
+        verified = _verify_status(
+            repo=args.repo,
+            sha=args.sha,
+            state=args.state,
+            context=args.context,
+            description=description,
+        )
+    except OutwardAuthorizationError as exc:
+        print(f"SAFETY DENY: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"STATUS POST FAILED: {exc}", file=sys.stderr)
+        return 1
+
+    if clipped:
+        print(
+            f"description clipped to {MAX_STATUS_DESCRIPTION_CHARS} chars for GitHub status API",
+            file=sys.stderr,
+        )
+    print(
+        "STATUS POST VERIFIED "
+        f"repo={args.repo} sha={args.sha} context={args.context} state={args.state} "
+        f"session={session} id={verified.get('id') or posted.get('id')}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
