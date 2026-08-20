@@ -27,13 +27,23 @@ This policy covers this repository only.
 ## GitHub outward broker
 
 Worker processes must not hold a GitHub credential or an authenticated `gh`
-binary. `scripts/github-brokerd` is the credential principal: it listens on
-`ORCH_GITHUB_BROKER_SOCKET`, checks live `current_task` capability, and runs
-inner `gh` with a token from the broker process environment only. Worker
-`scripts/gh-outward` is a socket client. Production deploy (CONTROL) runs the
-daemon as Unix user `github-broker` with a 0600 EnvironmentFile workers cannot
-read; see `deploy/systemd/github-broker.service`. This repository does not
-enable that unit.
+binary. `scripts/github-brokerd` is the credential principal. It listens on two
+Unix sockets:
+
+- **exec** (`ORCH_GITHUB_BROKER_SOCKET`, group-writable): `op=exec` only. Mint
+  and revoke are denied here even for a uid that is also a control principal.
+- **control** (`ORCH_GITHUB_BROKER_CONTROL_SOCKET`, 0600 in a broker-private
+  dir): `op=mint` / `op=revoke` only, and only after `SO_PEERCRED` uid matches
+  `ORCH_GITHUB_BROKER_CONTROL_UIDS`. `bind_current_task` mints and delivers the
+  handle via tmux session env (never Redis/`current_task`).
+  `session_unbind_current_task` revokes before Redis clear.
+
+Worker `scripts/gh-outward` is an exec-socket client and never sends mint or
+revoke. Production deploy (CONTROL) runs the daemon as Unix user
+`github-broker` with a 0600 EnvironmentFile workers cannot read and distinct
+worker UIDs; see `deploy/systemd/github-broker.service`. This repository does
+not enable that unit. Same-UID `/proc` or tmux-env theft remains a residual
+until that deploy.
 
 ## Threat model
 

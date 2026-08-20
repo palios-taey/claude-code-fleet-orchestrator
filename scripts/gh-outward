@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Worker GitHub client — talks only to the outward broker socket.
+"""Worker GitHub client — talks only to the outward broker exec socket.
 
 This process has no GitHub credential and does not know the inner gh path.
-Mutating argv is authorized inside the broker against the live current_task.
+It never mints or revokes handles. Mutating argv is authorized inside the
+broker against a possession handle delivered at bind time.
 """
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,18 +41,56 @@ def _split_session(argv: list[str]) -> tuple[str, list[str]]:
     return session, forwarded
 
 
+def _tmux_possession_handle() -> str:
+    """Read the handle from this process's tmux session env, never TAEY_NODE_ID."""
+    try:
+        session = subprocess.run(
+            ["tmux", "display-message", "-p", "#S"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        name = (session.stdout or "").strip()
+        if session.returncode != 0 or not name:
+            return ""
+        shown = subprocess.run(
+            ["tmux", "show-environment", "-t", name, "ORCH_OUTWARD_HANDLE"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if shown.returncode != 0:
+            return ""
+        line = (shown.stdout or "").strip()
+        prefix = "ORCH_OUTWARD_HANDLE="
+        if line.startswith(prefix):
+            return line[len(prefix):].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _possession_handle() -> str:
+    handle = str(os.environ.get("ORCH_OUTWARD_HANDLE") or "").strip()
+    if handle:
+        return handle
+    return _tmux_possession_handle()
+
+
 def main() -> int:
     socket_path = str(os.environ.get("ORCH_GITHUB_BROKER_SOCKET") or "").strip()
     if not socket_path:
         print("SAFETY DENY: ORCH_GITHUB_BROKER_SOCKET is required", file=sys.stderr)
         return 1
     session_flag, argv = _split_session(sys.argv[1:])
-    handle = str(os.environ.get("ORCH_OUTWARD_HANDLE") or "").strip()
     try:
         payload = call_broker(
             socket_path,
             argv,
-            handle=handle,
+            op="exec",
+            handle=_possession_handle(),
             claimed_session=session_flag,
         )
     except GitHubBrokerClientError as exc:

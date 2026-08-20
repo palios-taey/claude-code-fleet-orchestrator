@@ -465,6 +465,7 @@ def bind_current_task(
     *,
     parent_claim_out: Optional[dict[str, Any]] = None,
     binding_nonce: Optional[float] = None,
+    outward_handle_out: Optional[dict[str, Any]] = None,
 ) -> float:
     """Write the canonical dispatch/current-task wire for ``worker``.
 
@@ -525,6 +526,18 @@ def bind_current_task(
         raise RuntimeError(
             f"worker binding lost authority during liveness registration: {worker}:{task_id}"
         )
+    from .github_broker import mint_and_deliver_outward_handle, revoke_and_clear_outward_handle
+
+    # Revoke any prior handle for this session, then mint on the control
+    # channel. Redis current_task never stores the handle. No-op when the
+    # control socket is unset (broker not configured; GitHub writes fail-closed).
+    revoke_and_clear_outward_handle(worker)
+    mint_and_deliver_outward_handle(
+        worker,
+        task_id,
+        current_task["started_at"],
+        outward_handle_out=outward_handle_out,
+    )
     return current_task["started_at"]
 
 

@@ -12,7 +12,9 @@ Type=simple
 User=github-broker
 Group=github-broker
 EnvironmentFile=/etc/orch/github-broker.env
-# EnvironmentFile must set GH_TOKEN, ORCH_GITHUB_BROKER_SOCKET, ORCH_GITHUB_BROKER_INNER
+# EnvironmentFile must set GH_TOKEN, ORCH_GITHUB_BROKER_SOCKET,
+# ORCH_GITHUB_BROKER_CONTROL_SOCKET, ORCH_GITHUB_BROKER_INNER,
+# ORCH_GITHUB_BROKER_CONTROL_UIDS, ORCH_GITHUB_BROKER_WORKER_UIDS.
 ExecStart=/usr/bin/python3 /usr/local/lib/claude-code-fleet-orchestrator/scripts/github-brokerd
 Restart=on-failure
 NoNewPrivileges=true

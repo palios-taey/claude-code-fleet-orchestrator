@@ -4,16 +4,17 @@
 CONTROL rework for task-7107c13f:
 
 - token lives only in the broker process env, never in the worker tree
-- worker client shim contains the socket path only
-- inner gh is broker-private, not on worker PATH
-- simulated /usr/bin/gh without token cannot write
-- unknown/write argv fail closed after unbind
+- worker exec socket rejects mint/revoke (control channel only)
+- SO_PEERCRED uid must match the broker-owned control principal map
+- bind_current_task mints; session_unbind revokes; handle never in Redis
+- worker mint-as-victim and revoke-victim on the exec socket are denied
 - live prefixes refused (no deploy)
 
 No live Redis/Neo/GitHub.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import stat
@@ -26,11 +27,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from fleet_orchestrator.dispatch import bind_current_task  # noqa: E402
 from fleet_orchestrator.github_broker import (  # noqa: E402
     GitHubBrokerInstallError,
     call_broker,
     install_github_broker,
+    mint_and_deliver_outward_handle,
+    peer_may_control,
     prefix_is_live,
+    revoke_and_clear_outward_handle,
 )
 from fleet_orchestrator.notify_state import state_key  # noqa: E402
 
@@ -64,6 +69,34 @@ class FileRedis:
                 deleted += 1
         self._save(store)
         return deleted
+
+    def pipeline(self, transaction: bool = True):
+        del transaction
+        return _Pipe(self)
+
+
+class _Pipe:
+    def __init__(self, redis: FileRedis) -> None:
+        self.redis = redis
+        self.ops: list[tuple] = []
+
+    def delete(self, *keys: str):
+        self.ops.append(("delete", keys))
+        return self
+
+    def set(self, key: str, value: str):
+        self.ops.append(("set", key, value))
+        return self
+
+    def execute(self):
+        results = []
+        for op in self.ops:
+            if op[0] == "delete":
+                results.append(self.redis.delete(*op[1]))
+            else:
+                results.append(self.redis.set(op[1], op[2]))
+        self.ops.clear()
+        return results
 
 
 FAILURES: list[str] = []
@@ -117,11 +150,40 @@ def _tree_contains(root: Path, needle: str) -> bool:
     return False
 
 
+def _start_broker(env: dict, socket_path: Path) -> subprocess.Popen:
+    proc = subprocess.Popen(
+        [sys.executable, str(ROOT / "scripts" / "github-brokerd")],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    for _attempt in range(50):
+        if socket_path.exists():
+            break
+        time.sleep(0.05)
+    return proc
+
+
+def _stop_broker(proc: subprocess.Popen) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
 def main() -> int:
-    session = "taey-ed-grok"
+    session = "taey-ed-grok-fixture"
     supervisor = "conductor-codex"
     task_id = "task-7107c13f-broker-fixture"
+    victim = "victim-grok"
+    victim_task = "task-victim-live"
     _check("live /usr prefix refused by classifier", prefix_is_live(Path("/usr/bin")))
+    _check(
+        "uid 1 is not a default control principal",
+        not peer_may_control(1, {"control": {os.getuid()}, "worker": set()}),
+    )
     try:
         install_github_broker(
             Path("/usr/local"),
@@ -132,6 +194,15 @@ def main() -> int:
         _check("live prefix install refused", False, "expected GitHubBrokerInstallError")
     except GitHubBrokerInstallError as exc:
         _check("live prefix install refused", "refusing live prefix" in str(exc), exc)
+
+    bind_src = inspect.getsource(bind_current_task)
+    unbind_src = (ROOT / "fleet_orchestrator" / "tasks_api.py").read_text(encoding="utf-8")
+    _check("bind_current_task calls control mint", "mint_and_deliver_outward_handle" in bind_src)
+    _check("bind_current_task revokes prior handles", "revoke_and_clear_outward_handle" in bind_src)
+    _check(
+        "session_unbind_current_task calls control revoke",
+        "revoke_and_clear_outward_handle" in unbind_src,
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         prefix = Path(tmp) / "prefix"
@@ -146,15 +217,25 @@ def main() -> int:
             python_executable=sys.executable,
         )
         worker_root = Path(installed["worker_root"])
-        broker_dir = Path(installed["broker_dir"])
         socket_path = Path(installed["socket"])
+        control_socket = Path(installed["control_socket"])
         _check("worker tree has no token", not _tree_contains(worker_root, TOKEN), worker_root)
         _check(
             "worker client does not name inner gh",
             "gh-real" not in Path(installed["worker_gh"]).read_text(),
             Path(installed["worker_gh"]).read_text(),
         )
+        _check(
+            "worker client does not name control socket",
+            "control" not in Path(installed["worker_gh"]).read_text(),
+            Path(installed["worker_gh"]).read_text(),
+        )
         _check("inner gh is outside worker tree", not str(installed["inner_gh"]).startswith(str(worker_root)))
+        _check(
+            "control socket is outside worker tree",
+            not str(control_socket).startswith(str(worker_root)),
+            control_socket,
+        )
 
         redis_file = Path(tmp) / "broker-redis.json"
         redis_file.write_text("{}", encoding="utf-8")
@@ -200,33 +281,92 @@ def main() -> int:
             encoding="utf-8",
         )
 
-        broker_env = os.environ.copy()
-        broker_env["GH_TOKEN"] = TOKEN
-        broker_env["ORCH_GITHUB_BROKER_SOCKET"] = str(socket_path)
-        broker_env["ORCH_GITHUB_BROKER_INNER"] = installed["inner_gh"]
-        broker_env["PYTHONPATH"] = str(Path(tmp)) + os.pathsep + str(ROOT)
-        broker_proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "scripts" / "github-brokerd")],
-            env=broker_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        base_env = os.environ.copy()
+        base_env["GH_TOKEN"] = TOKEN
+        base_env["ORCH_GITHUB_BROKER_SOCKET"] = str(socket_path)
+        base_env["ORCH_GITHUB_BROKER_CONTROL_SOCKET"] = str(control_socket)
+        base_env["ORCH_GITHUB_BROKER_INNER"] = installed["inner_gh"]
+        base_env["PYTHONPATH"] = str(Path(tmp)) + os.pathsep + str(ROOT)
+        base_env["ORCH_GITHUB_BROKER_WORKER_UIDS"] = str(os.getuid())
+
+        deny_env = dict(base_env)
+        deny_env["ORCH_GITHUB_BROKER_CONTROL_UIDS"] = "1"
+        deny_proc = _start_broker(deny_env, socket_path)
         try:
+            _check("broker socket exists (unmapped control)", socket_path.exists(), socket_path)
             for _attempt in range(50):
-                if socket_path.exists():
+                if control_socket.exists():
                     break
                 time.sleep(0.05)
-            _check("broker socket exists", socket_path.exists(), socket_path)
-            minted = call_broker(
-                str(socket_path),
+            unmapped = call_broker(
+                str(control_socket),
                 op="mint",
                 session=session,
                 task_id=task_id,
                 started_at=1.0,
             )
-            handle = str(minted.get("handle") or "")
-            _check("broker minted handle", bool(handle), minted)
+            _check(
+                "SO_PEERCRED unmapped uid cannot mint on control",
+                int(unmapped.get("rc") or 0) != 0 and "control principal not mapped" in str(unmapped.get("stderr") or ""),
+                unmapped,
+            )
+        finally:
+            _stop_broker(deny_proc)
+            if socket_path.exists():
+                socket_path.unlink()
+            if control_socket.exists():
+                control_socket.unlink()
+
+        broker_env = dict(base_env)
+        broker_env["ORCH_GITHUB_BROKER_CONTROL_UIDS"] = str(os.getuid())
+        broker_proc = _start_broker(broker_env, socket_path)
+        prior_control = os.environ.get("ORCH_GITHUB_BROKER_CONTROL_SOCKET")
+        os.environ["ORCH_GITHUB_BROKER_CONTROL_SOCKET"] = str(control_socket)
+        try:
+            for _attempt in range(50):
+                if control_socket.exists():
+                    break
+                time.sleep(0.05)
+            _check("broker socket exists", socket_path.exists(), socket_path)
+            _check("control socket exists", control_socket.exists(), control_socket)
+
+            victim_mint = call_broker(
+                str(socket_path),
+                op="mint",
+                session=victim,
+                task_id=victim_task,
+            )
+            _check(
+                "worker mint-as-victim on exec denied",
+                int(victim_mint.get("rc") or 0) != 0
+                and "authenticated control channel" in str(victim_mint.get("stderr") or ""),
+                victim_mint,
+            )
+            victim_revoke = call_broker(str(socket_path), op="revoke", session=victim)
+            _check(
+                "worker revoke-victim on exec denied",
+                int(victim_revoke.get("rc") or 0) != 0
+                and "authenticated control channel" in str(victim_revoke.get("stderr") or ""),
+                victim_revoke,
+            )
+
+            import fleet_orchestrator.dispatch as dispatch_mod
+
+            dispatch_mod._redis_connect = lambda: redis  # type: ignore[attr-defined]
+            dispatch_mod._mark_in_progress_best_effort = lambda *a, **k: None  # type: ignore[attr-defined]
+            dispatch_mod.register_worker_task_liveness = lambda **k: True  # type: ignore[attr-defined]
+            dispatch_mod.worker_task_liveness_enabled = lambda: False  # type: ignore[attr-defined]
+
+            handle_out: dict = {}
+            bind_current_task(
+                session,
+                task_id,
+                "fixture",
+                supervisor=supervisor,
+                outward_handle_out=handle_out,
+            )
+            handle = str(handle_out.get("handle") or "")
+            _check("bind_current_task minted handle via control", bool(handle), handle_out)
             dumped = json.loads(redis.get(state_key(session, "current_task")) or "{}")
             _check("current_task does not contain handle", "outward_handle" not in dumped, dumped)
             stolen = str(dumped.get("outward_handle") or "")
@@ -237,6 +377,7 @@ def main() -> int:
                 env.pop("GH_TOKEN", None)
                 env.pop("GITHUB_TOKEN", None)
                 env.pop("ORCH_OUTWARD_HANDLE", None)
+                env.pop("ORCH_GITHUB_BROKER_CONTROL_SOCKET", None)
                 if handle_value:
                     env["ORCH_OUTWARD_HANDLE"] = handle_value
                 if session_value:
@@ -303,7 +444,8 @@ def main() -> int:
             )
             _check("system gh did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
 
-            call_broker(str(socket_path), op="revoke", session=session, task_id=task_id)
+            removed = revoke_and_clear_outward_handle(session, task_id)
+            _check("unbind helper revoked handle", removed >= 1, removed)
             redis.delete(state_key(session, "current_task"))
             stolen_replay = run_worker(["pr", "merge", "32"], handle_value=stolen or "not-a-handle")
             _check(
@@ -333,12 +475,31 @@ def main() -> int:
                 get_status.returncode == 0,
                 (get_status.returncode, get_status.stdout, get_status.stderr),
             )
+
+            lifecycle_out: dict = {}
+            redis.set(
+                state_key(session, "current_task"),
+                json.dumps(
+                    {
+                        "task_id": task_id,
+                        "description": "fixture",
+                        "supervisor": supervisor,
+                        "started_at": 1.0,
+                    }
+                ),
+            )
+            mint_and_deliver_outward_handle(session, task_id, 1.0, outward_handle_out=lifecycle_out)
+            _check(
+                "production mint helper returns a handle",
+                bool(lifecycle_out.get("handle")),
+                lifecycle_out,
+            )
         finally:
-            broker_proc.terminate()
-            try:
-                broker_proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                broker_proc.kill()
+            if prior_control is None:
+                os.environ.pop("ORCH_GITHUB_BROKER_CONTROL_SOCKET", None)
+            else:
+                os.environ["ORCH_GITHUB_BROKER_CONTROL_SOCKET"] = prior_control
+            _stop_broker(broker_proc)
 
     if FAILURES:
         print(f"FAIL: {len(FAILURES)} check(s): {FAILURES}")
