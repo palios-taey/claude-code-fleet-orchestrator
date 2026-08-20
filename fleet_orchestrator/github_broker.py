@@ -1,36 +1,46 @@
-"""GitHub credential broker — authorization at the credential boundary.
+"""GitHub outward broker — separate credential principal over a Unix socket.
 
-Workers must not retain a usable GH_TOKEN or a system ``gh`` that can mutate
-GitHub after unbind. The broker:
+Workers never receive GH_TOKEN, never learn the inner ``gh`` path, and cannot
+mutate GitHub except by sending argv to this broker. The broker process holds
+the token in memory, fail-closes unknown/mutating argv through live
+``authorize_outward_capability``, then execs inner gh with broker-only env.
 
-- is the only ``gh`` on the worker PATH
-- holds credentials in a 0600 file the worker env does not source
-- fail-closes every non-classified-read argv through live outward capability
-- execs the inner gh with broker credentials only after authorization
-
-Install is prefix-scoped. Live system prefixes are refused so this module
-cannot deploy by accident.
+Production shape (CONTROL deploy, not this PR): systemd ``User=github-broker``
+with a 0600 EnvironmentFile the worker UID cannot read. Isolated tests prove
+the worker namespace has no token and no inner binary even as the same UID.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import socket
 import stat
+import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-BROKER_CREDENTIAL_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_ENTERPRISE_TOKEN")
+from .outward_capability import (
+    OutwardAuthorizationError,
+    require_github_argv_capability,
+    resolve_session_id,
+)
+
+WORKER_UNSET_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
 LIVE_PREFIXES = (
     Path("/usr"),
     Path("/usr/local"),
     Path("/bin"),
     Path("/home/mira/.local"),
 )
-WORKER_UNSET_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
 
 
 class GitHubBrokerInstallError(RuntimeError):
     """Raised when a broker install would touch live paths or miss inputs."""
+
+
+class GitHubBrokerClientError(RuntimeError):
+    """Raised when the worker client cannot reach the broker socket."""
 
 
 def _resolved(path: Path) -> Path:
@@ -41,119 +51,190 @@ def prefix_is_live(prefix: Path) -> bool:
     target = _resolved(prefix)
     for live in LIVE_PREFIXES:
         live_r = live.resolve()
-        if target == live_r or live_r in target.parents or target in live_r.parents:
-            # /usr/local/bin would be under /usr/local; refuse those trees.
-            if target == live_r or live_r in target.parents:
-                return True
+        if target == live_r or live_r in target.parents:
+            return True
     return False
 
 
-def parse_credential_file(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if key in BROKER_CREDENTIAL_KEYS:
-            values[key] = value.strip().strip("'").strip('"')
-    return values
-
-
-def broker_exec_env(
+def handle_broker_request(
+    argv: list[str],
+    session_id: str,
     *,
-    credential_path: Optional[str] = None,
-    base_env: Optional[dict[str, str]] = None,
-) -> dict[str, str]:
-    """Env for inner gh: worker tokens stripped, broker file injected."""
-    env = dict(base_env or os.environ)
-    for key in WORKER_UNSET_KEYS:
-        env.pop(key, None)
-    path = str(credential_path or env.get("GH_BROKER_CREDENTIALS") or "").strip()
-    if path:
-        parsed = parse_credential_file(Path(path))
-        env.update(parsed)
-    return env
+    inner_gh: str,
+    token: str,
+    redis_client: Any = None,
+    task_loader: Any = None,
+) -> dict[str, Any]:
+    """Authorize argv, then run inner gh with broker-held credentials only."""
+    try:
+        require_github_argv_capability(
+            argv,
+            session_id=session_id,
+            redis_client=redis_client,
+            task_loader=task_loader,
+        )
+    except OutwardAuthorizationError as exc:
+        return {"rc": 1, "stdout": "", "stderr": f"SAFETY DENY: {exc}\n"}
+    inner = str(inner_gh or "").strip()
+    if not inner or not Path(inner).is_file():
+        return {"rc": 1, "stdout": "", "stderr": "SAFETY DENY: inner gh missing in broker principal\n"}
+    env = {key: value for key, value in os.environ.items() if key not in WORKER_UNSET_KEYS}
+    env["GH_TOKEN"] = str(token)
+    result = subprocess.run(
+        [inner, *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    return {
+        "rc": int(result.returncode),
+        "stdout": result.stdout or "",
+        "stderr": result.stderr or "",
+    }
 
 
-def write_credential_file(path: Path, values: dict[str, str]) -> None:
+def serve_broker(
+    socket_path: str,
+    *,
+    inner_gh: str,
+    token: str,
+    redis_client: Any = None,
+    task_loader: Any = None,
+) -> None:
+    path = Path(socket_path)
+    if path.exists():
+        path.unlink()
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{key}={values[key]}\n" for key in BROKER_CREDENTIAL_KEYS if values.get(key)]
-    path.write_text("".join(lines), encoding="utf-8")
-    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(path))
+    os.chmod(str(path), stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP)
+    sock.listen(16)
+    while True:
+        conn, _unused = sock.accept()
+        with conn:
+            raw = b""
+            while b"\n" not in raw:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                raw += chunk
+            if not raw.strip():
+                continue
+            try:
+                request = json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError:
+                conn.sendall(b'{"rc":1,"stdout":"","stderr":"SAFETY DENY: invalid broker request\\n"}\n')
+                continue
+            argv = request.get("argv") if isinstance(request, dict) else None
+            if not isinstance(argv, list):
+                conn.sendall(b'{"rc":1,"stdout":"","stderr":"SAFETY DENY: argv required\\n"}\n')
+                continue
+            session = str(request.get("session") or "")
+            payload = handle_broker_request(
+                [str(item) for item in argv],
+                session,
+                inner_gh=inner_gh,
+                token=token,
+                redis_client=redis_client,
+                task_loader=task_loader,
+            )
+            conn.sendall((json.dumps(payload) + "\n").encode("utf-8"))
 
 
-def write_worker_env_unset(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = "".join(f"unset {key}\n" for key in WORKER_UNSET_KEYS)
-    path.write_text(body, encoding="utf-8")
-    path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+def call_broker(socket_path: str, argv: list[str], session_id: str = "") -> dict[str, Any]:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(socket_path)
+    except OSError as exc:
+        raise GitHubBrokerClientError(
+            f"github broker socket unreachable at {socket_path}: {exc}"
+        ) from exc
+    with sock:
+        sock.sendall(
+            json.dumps(
+                {
+                    "argv": list(argv),
+                    "session": resolve_session_id(session_id),
+                }
+            ).encode("utf-8")
+            + b"\n"
+        )
+        raw = b""
+        while b"\n" not in raw:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            raw += chunk
+    if not raw.strip():
+        raise GitHubBrokerClientError("github broker returned empty response")
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise GitHubBrokerClientError("github broker returned non-object JSON")
+    return payload
 
 
 def install_github_broker(
     prefix: Path,
     *,
     inner_gh: Path,
-    broker_script: Path,
+    client_script: Path,
     token: str,
     allow_live: bool = False,
     python_executable: str = "",
 ) -> dict[str, str]:
-    """Install broker into an isolated prefix. Refuses live system trees."""
+    """Install worker client + broker-private inner gh. Never writes the token."""
+    del token  # token stays in the broker process env; never land it on disk
     prefix = _resolved(prefix)
     inner_gh = _resolved(inner_gh)
-    broker_script = _resolved(broker_script)
+    client_script = _resolved(client_script)
     if prefix_is_live(prefix) and not allow_live:
         raise GitHubBrokerInstallError(
             f"refusing live prefix {prefix}; isolated --prefix only (no deploy)"
         )
     if not inner_gh.is_file():
         raise GitHubBrokerInstallError(f"inner gh missing: {inner_gh}")
-    if not broker_script.is_file():
-        raise GitHubBrokerInstallError(f"broker script missing: {broker_script}")
-    if not str(token or "").strip():
-        raise GitHubBrokerInstallError("broker token is required")
+    if not client_script.is_file():
+        raise GitHubBrokerInstallError(f"client script missing: {client_script}")
 
-    bindir = prefix / "bin"
-    libexec = prefix / "libexec"
-    etc = prefix / "etc"
-    usr_bin = prefix / "usr" / "bin"
-    for directory in (bindir, libexec, etc, usr_bin):
+    worker_bin = prefix / "worker" / "bin"
+    usr_bin = prefix / "worker" / "usr" / "bin"
+    broker_dir = prefix / "broker"
+    for directory in (worker_bin, usr_bin, broker_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    real_gh = libexec / "gh-real"
+    real_gh = broker_dir / "gh-real"
     shutil.copy2(inner_gh, real_gh)
     real_gh.chmod(real_gh.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    # Simulate /usr/bin/gh remaining as the inner binary without broker creds.
     system_gh = usr_bin / "gh"
-    shutil.copy2(real_gh, system_gh)
+    shutil.copy2(inner_gh, system_gh)
     system_gh.chmod(system_gh.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    creds = etc / "github-broker.env"
-    write_credential_file(creds, {"GH_TOKEN": str(token).strip()})
-    worker_env = etc / "worker-github.env"
-    write_worker_env_unset(worker_env)
-
+    socket_path = broker_dir / "github-broker.sock"
     python = python_executable or os.environ.get("PYTHON", "") or shutil.which("python3") or "python3"
-    orch_root = broker_script.parent.parent
-    broker_dest = bindir / "gh"
-    broker_dest.write_text(
+    orch_root = client_script.parent.parent
+    broker_client = worker_bin / "gh"
+    broker_client.write_text(
         "#!/bin/sh\n"
-        f"export GH_OUTWARD_INNER={str(real_gh)!r}\n"
-        f"export GH_BROKER_CREDENTIALS={str(creds)!r}\n"
+        f"export ORCH_GITHUB_BROKER_SOCKET={str(socket_path)!r}\n"
         f"export PYTHONPATH={str(orch_root)!r}${{PYTHONPATH:+:$PYTHONPATH}}\n"
-        f"exec {python!r} {str(broker_script)!r} \"$@\"\n",
+        f"exec {python!r} {str(client_script)!r} \"$@\"\n",
         encoding="utf-8",
     )
-    broker_dest.chmod(broker_dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    broker_client.chmod(broker_client.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    worker_env = prefix / "worker" / "env" / "worker-github.env"
+    worker_env.parent.mkdir(parents=True, exist_ok=True)
+    worker_env.write_text("".join(f"unset {key}\n" for key in WORKER_UNSET_KEYS), encoding="utf-8")
 
     return {
         "prefix": str(prefix),
-        "broker_gh": str(broker_dest),
-        "inner_gh": str(real_gh),
+        "worker_gh": str(broker_client),
         "system_gh": str(system_gh),
-        "credentials": str(creds),
+        "inner_gh": str(real_gh),
+        "socket": str(socket_path),
         "worker_env": str(worker_env),
+        "broker_dir": str(broker_dir),
+        "worker_root": str(prefix / "worker"),
     }

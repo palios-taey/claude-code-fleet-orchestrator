@@ -1,0 +1,24 @@
+# Example CONTROL-deploy unit. This PR does not enable or start it.
+# Create Unix user github-broker, then:
+#   install -m 600 -o github-broker -g github-broker github-broker.env /etc/orch/github-broker.env
+# Worker UIDs must not be able to read that file or exec the inner gh except via the socket.
+
+[Unit]
+Description=PALIOS GitHub outward credential broker
+After=network.target
+
+[Service]
+Type=simple
+User=github-broker
+Group=github-broker
+EnvironmentFile=/etc/orch/github-broker.env
+# EnvironmentFile must set GH_TOKEN, ORCH_GITHUB_BROKER_SOCKET, ORCH_GITHUB_BROKER_INNER
+ExecStart=/usr/bin/python3 /usr/local/lib/claude-code-fleet-orchestrator/scripts/github-brokerd
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-"""GitHub outward broker: fail-closed writes at the credential boundary.
+"""Worker GitHub client — talks only to the outward broker socket.
 
-Classified reads pass. Every other argv requires live current_task. Inner gh
-is exec'd with broker credentials from GH_BROKER_CREDENTIALS; worker GH_TOKEN
-is stripped so a leftover worker credential cannot ride along.
-
-Inner binary: GH_OUTWARD_INNER, else <prefix>/libexec/gh-real beside this
-script, else the first ``gh`` on PATH that is not this script.
+This process has no GitHub credential and does not know the inner gh path.
+Mutating argv is authorized inside the broker against the live current_task.
 """
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -19,35 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fleet_orchestrator.github_broker import broker_exec_env  # noqa: E402
-from fleet_orchestrator.outward_capability import (  # noqa: E402
-    OutwardAuthorizationError,
-    require_github_argv_capability,
+from fleet_orchestrator.github_broker import (  # noqa: E402
+    GitHubBrokerClientError,
+    call_broker,
 )
-
-
-def _inner_gh() -> str:
-    explicit = str(os.environ.get("GH_OUTWARD_INNER") or "").strip()
-    if explicit:
-        return explicit
-    this = Path(__file__).resolve()
-    sibling = this.parent.parent / "libexec" / "gh-real"
-    if sibling.is_file() and os.access(sibling, os.X_OK):
-        return str(sibling)
-    for candidate in os.environ.get("PATH", "").split(os.pathsep):
-        probe = Path(candidate) / "gh"
-        try:
-            if probe.resolve() == this:
-                continue
-        except OSError:
-            continue
-        if probe.is_file() and os.access(probe, os.X_OK):
-            return str(probe)
-    found = shutil.which("gh")
-    if found and Path(found).resolve() != this:
-        return found
-    print("SAFETY DENY: inner gh binary not found", file=sys.stderr)
-    sys.exit(1)
 
 
 def _split_session(argv: list[str]) -> tuple[str, list[str]]:
@@ -70,16 +40,20 @@ def _split_session(argv: list[str]) -> tuple[str, list[str]]:
 
 
 def main() -> int:
+    socket_path = str(os.environ.get("ORCH_GITHUB_BROKER_SOCKET") or "").strip()
+    if not socket_path:
+        print("SAFETY DENY: ORCH_GITHUB_BROKER_SOCKET is required", file=sys.stderr)
+        return 1
     session_flag, argv = _split_session(sys.argv[1:])
     try:
-        require_github_argv_capability(argv, session_id=session_flag)
-    except OutwardAuthorizationError as exc:
+        payload = call_broker(socket_path, argv, session_id=session_flag)
+    except GitHubBrokerClientError as exc:
         print(f"SAFETY DENY: {exc}", file=sys.stderr)
         return 1
-    inner = _inner_gh()
-    env = broker_exec_env(credential_path=os.environ.get("GH_BROKER_CREDENTIALS"))
-    os.execve(inner, [inner, *argv], env)
-    return 1
+    sys.stdout.write(str(payload.get("stdout") or ""))
+    sys.stderr.write(str(payload.get("stderr") or ""))
+    rc = payload.get("rc")
+    return 1 if rc is None else int(rc)
 
 
 if __name__ == "__main__":

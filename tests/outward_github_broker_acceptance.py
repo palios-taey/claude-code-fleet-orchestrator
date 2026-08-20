@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Acceptance: GitHub mutations go through a credential broker, not worker gh.
+"""Acceptance: GitHub mutations require a separate-principal socket broker.
 
-Proves CONTROL rework for task-7107c13f in an isolated prefix:
+CONTROL rework for task-7107c13f:
 
-- classified reads pass without capability
-- unknown/write argv is fail-closed
-- worker env has no GH_TOKEN after install
-- simulated /usr/bin/gh without the broker token cannot write the sink
-- bound broker may write; after unbind the same still-running actor is denied
-- live prefixes are refused (no deploy)
+- token lives only in the broker process env, never in the worker tree
+- worker client shim contains the socket path only
+- inner gh is broker-private, not on worker PATH
+- simulated /usr/bin/gh without token cannot write
+- unknown/write argv fail closed after unbind
+- live prefixes refused (no deploy)
 
 No live Redis/Neo/GitHub.
 """
@@ -20,9 +20,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
-
-
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -36,7 +35,7 @@ from fleet_orchestrator.notify_state import state_key  # noqa: E402
 
 
 FAILURES: list[str] = []
-TOKEN = "broker-secret-token"
+TOKEN = "broker-secret-token-not-for-workers"
 
 
 def _check(label: str, condition: bool, detail: object = "") -> None:
@@ -51,7 +50,7 @@ def _write_fake_inner(path: Path, sink: Path) -> None:
         "import json, os, sys\n"
         "from pathlib import Path\n"
         f"SINK = Path({str(sink)!r})\n"
-        "WRITE_HINTS = ('-X', 'POST', 'PATCH', 'PUT', 'DELETE', 'merge', 'close', 'create', 'comment', 'delete')\n"
+        "WRITE_HINTS = ('POST', 'PATCH', 'PUT', 'DELETE', 'merge', 'close', 'create', 'comment', 'delete')\n"
         "args = sys.argv[1:]\n"
         "is_write = any(token in WRITE_HINTS or token.upper() in WRITE_HINTS for token in args)\n"
         "if is_write and not os.environ.get('GH_TOKEN'):\n"
@@ -73,6 +72,19 @@ def _sink_events(sink: Path) -> list:
     return json.loads(sink.read_text())
 
 
+def _tree_contains(root: Path, needle: str) -> bool:
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if needle in text:
+            return True
+    return False
+
+
 def main() -> int:
     session = "taey-ed-grok"
     supervisor = "conductor-codex"
@@ -82,32 +94,35 @@ def main() -> int:
         install_github_broker(
             Path("/usr/local"),
             inner_gh=Path("/bin/true"),
-            broker_script=ROOT / "scripts" / "gh-outward",
-            token=TOKEN,
+            client_script=ROOT / "scripts" / "gh-outward",
+            token="",
         )
         _check("live prefix install refused", False, "expected GitHubBrokerInstallError")
     except GitHubBrokerInstallError as exc:
-        _check("live prefix install refused", "refusing live prefix" in str(exc), exc)
-    except Exception as exc:  # noqa: BLE001
         _check("live prefix install refused", "refusing live prefix" in str(exc), exc)
 
     with tempfile.TemporaryDirectory() as tmp:
         prefix = Path(tmp) / "prefix"
         sink = Path(tmp) / "sink.json"
-        inner = Path(tmp) / "inner-gh"
-        _write_fake_inner(inner, sink)
+        inner_src = Path(tmp) / "inner-gh"
+        _write_fake_inner(inner_src, sink)
         installed = install_github_broker(
             prefix,
-            inner_gh=inner,
-            broker_script=ROOT / "scripts" / "gh-outward",
-            token=TOKEN,
+            inner_gh=inner_src,
+            client_script=ROOT / "scripts" / "gh-outward",
+            token="",
             python_executable=sys.executable,
         )
-        worker_env_file = Path(installed["worker_env"])
-        worker_unset = worker_env_file.read_text()
-        _check("worker env unsets GH_TOKEN", "unset GH_TOKEN" in worker_unset, worker_unset)
-        creds = Path(installed["credentials"])
-        _check("broker creds mode 0600", oct(creds.stat().st_mode & 0o777) == "0o600", oct(creds.stat().st_mode))
+        worker_root = Path(installed["worker_root"])
+        broker_dir = Path(installed["broker_dir"])
+        socket_path = Path(installed["socket"])
+        _check("worker tree has no token", not _tree_contains(worker_root, TOKEN), worker_root)
+        _check(
+            "worker client does not name inner gh",
+            "gh-real" not in Path(installed["worker_gh"]).read_text(),
+            Path(installed["worker_gh"]).read_text(),
+        )
+        _check("inner gh is outside worker tree", not str(installed["inner_gh"]).startswith(str(worker_root)))
 
         sitecustomize = Path(tmp) / "sitecustomize.py"
         sitecustomize.write_text(
@@ -130,77 +145,146 @@ def main() -> int:
             encoding="utf-8",
         )
 
-        def run_gh(argv, *, bound: bool, path_kind: str) -> subprocess.CompletedProcess:
+        broker_env = os.environ.copy()
+        broker_env["GH_TOKEN"] = TOKEN
+        broker_env["ORCH_GITHUB_BROKER_SOCKET"] = str(socket_path)
+        broker_env["ORCH_GITHUB_BROKER_INNER"] = installed["inner_gh"]
+        broker_env["PYTHONPATH"] = str(Path(tmp)) + os.pathsep + str(ROOT)
+        broker_env["BROKER_BOUND"] = "1"
+        broker_proc = subprocess.Popen(
+            [sys.executable, str(ROOT / "scripts" / "github-brokerd")],
+            env=broker_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            for _attempt in range(50):
+                if socket_path.exists():
+                    break
+                time.sleep(0.05)
+            _check("broker socket exists", socket_path.exists(), socket_path)
+
+            def run_worker(argv, *, bound: bool, path_kind: str) -> subprocess.CompletedProcess:
+                env = os.environ.copy()
+                env.pop("GH_TOKEN", None)
+                env.pop("GITHUB_TOKEN", None)
+                env["ORCH_OUTWARD_SESSION"] = session
+                env["ORCH_GITHUB_BROKER_SOCKET"] = str(socket_path)
+                env["PYTHONPATH"] = str(ROOT)
+                if path_kind == "broker":
+                    env["PATH"] = str(worker_root / "bin") + os.pathsep + env.get("PATH", "")
+                    binary = str(worker_root / "bin" / "gh")
+                else:
+                    env["PATH"] = str(worker_root / "usr" / "bin") + os.pathsep + env.get("PATH", "")
+                    binary = str(worker_root / "usr" / "bin" / "gh")
+                # Rebind broker's FakeRedis by restarting is heavy; BROKER_BOUND is
+                # read at broker import. Toggle by env on a new connection is not
+                # enough. Send session and rely on broker process env BROKER_BOUND.
+                return subprocess.run(
+                    [binary, *argv],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    check=False,
+                )
+
+            bound_write = run_worker(
+                ["api", "-X", "POST", "repos/palios-taey/x/statuses/abc", "-f", "state=success"],
+                bound=True,
+                path_kind="broker",
+            )
+            _check(
+                "bound broker write reaches inner gh with token",
+                bound_write.returncode == 0 and any(e.get("token") == TOKEN for e in _sink_events(sink)),
+                (bound_write.returncode, bound_write.stderr, _sink_events(sink)),
+            )
+            before = list(_sink_events(sink))
+
+            system_write = run_worker(
+                ["api", "-X", "POST", "repos/palios-taey/x/statuses/abc"],
+                bound=True,
+                path_kind="system",
+            )
+            _check(
+                "system gh without token cannot write",
+                system_write.returncode != 0 and "NO_TOKEN" in system_write.stderr,
+                (system_write.returncode, system_write.stderr),
+            )
+            _check("system gh did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
+        finally:
+            broker_proc.terminate()
+            try:
+                broker_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                broker_proc.kill()
+
+        # Restart broker unbound (no current_task) to prove revocation.
+        broker_env["BROKER_BOUND"] = "0"
+        broker_proc = subprocess.Popen(
+            [sys.executable, str(ROOT / "scripts" / "github-brokerd")],
+            env=broker_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            if socket_path.exists():
+                socket_path.unlink()
+            for _attempt in range(50):
+                if socket_path.exists():
+                    break
+                time.sleep(0.05)
             env = os.environ.copy()
             env.pop("GH_TOKEN", None)
-            env.pop("GITHUB_TOKEN", None)
-            env["BROKER_BOUND"] = "1" if bound else "0"
             env["ORCH_OUTWARD_SESSION"] = session
-            env["PYTHONPATH"] = str(Path(tmp)) + os.pathsep + str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            if path_kind == "broker":
-                env["PATH"] = str(prefix / "bin") + os.pathsep + env.get("PATH", "")
-                binary = str(prefix / "bin" / "gh")
-            else:
-                env["PATH"] = str(prefix / "usr" / "bin") + os.pathsep + env.get("PATH", "")
-                binary = str(prefix / "usr" / "bin" / "gh")
-            return subprocess.run(
-                [binary, *argv],
+            env["ORCH_GITHUB_BROKER_SOCKET"] = str(socket_path)
+            env["PYTHONPATH"] = str(ROOT)
+            env["PATH"] = str(worker_root / "bin") + os.pathsep + env.get("PATH", "")
+            before = list(_sink_events(sink))
+            unbound_merge = subprocess.run(
+                [str(worker_root / "bin" / "gh"), "pr", "merge", "32"],
                 capture_output=True,
                 text=True,
                 env=env,
                 check=False,
             )
-
-        bound_write = run_gh(
-            ["api", "-X", "POST", "repos/palios-taey/x/statuses/abc", "-f", "state=success"],
-            bound=True,
-            path_kind="broker",
-        )
-        _check(
-            "bound broker write reaches inner gh with token",
-            bound_write.returncode == 0 and any(e.get("token") == TOKEN for e in _sink_events(sink)),
-            (bound_write.returncode, bound_write.stderr, _sink_events(sink)),
-        )
-        before = list(_sink_events(sink))
-
-        unbound_merge = run_gh(["pr", "merge", "32"], bound=False, path_kind="broker")
-        _check(
-            "unbound broker pr merge denied",
-            unbound_merge.returncode == 1 and "SAFETY DENY" in unbound_merge.stderr,
-            (unbound_merge.returncode, unbound_merge.stderr),
-        )
-        _check("unbound broker pr merge did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
-
-        unknown = run_gh(["mystery", "mutate"], bound=False, path_kind="broker")
-        _check(
-            "unbound unknown argv fail-closed",
-            unknown.returncode == 1 and "SAFETY DENY" in unknown.stderr,
-            (unknown.returncode, unknown.stderr),
-        )
-        _check("unknown argv did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
-
-        system_write = run_gh(
-            ["api", "-X", "POST", "repos/palios-taey/x/statuses/abc"],
-            bound=False,
-            path_kind="system",
-        )
-        _check(
-            "system gh without token cannot write",
-            system_write.returncode != 0 and "NO_TOKEN" in system_write.stderr,
-            (system_write.returncode, system_write.stderr),
-        )
-        _check("system gh did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
-
-        unbound_read = run_gh(
-            ["api", "repos/palios-taey/x/commits/abc/statuses?per_page=100"],
-            bound=False,
-            path_kind="broker",
-        )
-        _check(
-            "classified GET still works after unbind",
-            unbound_read.returncode == 0,
-            (unbound_read.returncode, unbound_read.stdout, unbound_read.stderr),
-        )
+            _check(
+                "unbound broker pr merge denied",
+                unbound_merge.returncode == 1 and "SAFETY DENY" in unbound_merge.stderr,
+                (unbound_merge.returncode, unbound_merge.stderr),
+            )
+            _check("unbound broker pr merge did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
+            unknown = subprocess.run(
+                [str(worker_root / "bin" / "gh"), "mystery", "mutate"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            _check(
+                "unbound unknown argv fail-closed",
+                unknown.returncode == 1 and "SAFETY DENY" in unknown.stderr,
+                (unknown.returncode, unknown.stderr),
+            )
+            get_status = subprocess.run(
+                [str(worker_root / "bin" / "gh"), "api", "repos/palios-taey/x/commits/abc/statuses?per_page=100"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            _check(
+                "classified GET still works after unbind",
+                get_status.returncode == 0,
+                (get_status.returncode, get_status.stdout, get_status.stderr),
+            )
+        finally:
+            broker_proc.terminate()
+            try:
+                broker_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                broker_proc.kill()
 
     if FAILURES:
         print(f"FAIL: {len(FAILURES)} check(s): {FAILURES}")

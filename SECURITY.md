@@ -24,6 +24,17 @@ Do not file public GitHub issues for security disclosures.
 
 This policy covers this repository only.
 
+## GitHub outward broker
+
+Worker processes must not hold a GitHub credential or an authenticated `gh`
+binary. `scripts/github-brokerd` is the credential principal: it listens on
+`ORCH_GITHUB_BROKER_SOCKET`, checks live `current_task` capability, and runs
+inner `gh` with a token from the broker process environment only. Worker
+`scripts/gh-outward` is a socket client. Production deploy (CONTROL) runs the
+daemon as Unix user `github-broker` with a 0600 EnvironmentFile workers cannot
+read; see `deploy/systemd/github-broker.service`. This repository does not
+enable that unit.
+
 ## Threat model
 
 - Local single-user deployment on a trusted host.
