@@ -15,8 +15,8 @@ Registry rules:
 Summary:
 
 - Enumerated surfaces: 268.
-- Teaches: 127.
-- Needs-fix baseline debt: 48.
+- Teaches: 130.
+- Needs-fix baseline debt: 47.
 - Exempt reviewed rows: 91.
 
 <!-- ai-native-surfaces:start -->
