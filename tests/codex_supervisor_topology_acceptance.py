@@ -13,6 +13,7 @@ sys.path.insert(0, _REPO)
 from fleet_orchestrator.completion_guard import _autonomous_peer_supervisor  # noqa: E402
 from fleet_orchestrator.config import OrchConfigError, _parse_session_ids  # noqa: E402
 from fleet_orchestrator.control_principal_migration import codex_supervisor_mappings  # noqa: E402
+from fleet_orchestrator.dispatch import _resolve_dispatch_owner  # noqa: E402
 from fleet_orchestrator.session_topology import (  # noqa: E402
     control_principal_for_session,
     session_aliases,
@@ -163,10 +164,49 @@ def _authority_contract() -> None:
     _check("unrelated worker remains rejected", rejected)
 
 
+def _ownership_write_contract() -> None:
+    explicit = SimpleNamespace(session_ids=["conductor-codex", "weaver-codex"])
+    _check(
+        "cutover ownership resolve prefers supervisor control principal",
+        _resolve_dispatch_owner(
+            "conductor-grok",
+            supervisor="conductor-codex",
+            config=explicit,
+        )
+        == "conductor-codex",
+    )
+    _check(
+        "cutover ownership resolve from worker alone stays conductor-codex",
+        _resolve_dispatch_owner("conductor-grok", config=explicit) == "conductor-codex",
+    )
+    _check(
+        "cutover ownership resolve never returns bare conductor",
+        _resolve_dispatch_owner("conductor", supervisor="conductor-codex", config=explicit)
+        == "conductor-codex",
+    )
+    try:
+        _resolve_dispatch_owner(
+            "conductor-grok",
+            supervisor="conductor-codex",
+            config=SimpleNamespace(session_ids=[]),
+        )
+        empty_rejected = False
+        empty_detail = ""
+    except OrchConfigError as exc:
+        empty_rejected = "ORCH_SESSION_IDS" in str(exc)
+        empty_detail = str(exc)
+    _check(
+        "empty ORCH_SESSION_IDS fails loud on ownership resolve",
+        empty_rejected,
+        empty_detail,
+    )
+
+
 def main() -> int:
     _config_contract()
     _topology_contract()
     _authority_contract()
+    _ownership_write_contract()
     if FAILURES:
         print(f"\nFAIL - {len(FAILURES)} assertion(s): {FAILURES}")
         return 1

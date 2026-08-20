@@ -62,7 +62,14 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .config import OrchConfig, _parse_product_owner_map, _parse_session_ids, get_neo4j_session, notify_cli
+from .config import (
+    OrchConfig,
+    OrchConfigError,
+    _parse_product_owner_map,
+    _parse_session_ids,
+    get_neo4j_session,
+    notify_cli,
+)
 from .causal_ledger import (
     UNKNOWN as CAUSAL_UNKNOWN,
     append_event as append_causal_event,
@@ -495,6 +502,44 @@ def _orch_task_exists(task_id: str) -> bool:
     return record is not None
 
 
+def _resolve_dispatch_owner(
+    worker: str,
+    *,
+    supervisor: Optional[str] = None,
+    config: Optional[OrchConfig] = None,
+) -> str:
+    """Resolve the authoritative control principal that owns a dispatched task.
+
+    Ownership writes must not fall through to suffix-stripping when
+    ``ORCH_SESSION_IDS`` is empty — that rewrites ``conductor-codex`` /
+    ``conductor-grok`` to bare ``conductor`` and breaks CONTROL close.
+    """
+    cfg = config or OrchConfig()
+    registered = list(cfg.session_ids or [])
+    if not registered:
+        raise OrchConfigError(
+            "ORCH_SESSION_IDS is required to assign task ownership; "
+            "refusing suffix-strip fallback that would spoof control identity"
+        )
+    supervisor_owner = control_principal_for_session(
+        str(supervisor or "").strip(),
+        registered,
+    )
+    owner = supervisor_owner or control_principal_for_session(worker, registered)
+    if not owner:
+        raise OrchConfigError(
+            f"could not resolve a control principal owner for worker={worker!r} "
+            f"supervisor={supervisor!r}"
+        )
+    registered_lookup = {item.lower(): item for item in registered}
+    if owner.lower() not in registered_lookup:
+        raise OrchConfigError(
+            f"resolved owner {owner!r} is not a registered ORCH_SESSION_IDS control "
+            f"(worker={worker!r} supervisor={supervisor!r})"
+        )
+    return registered_lookup[owner.lower()]
+
+
 def _claim_ready_orch_task(task_id: str, worker: str, *,
                            supervisor: Optional[str] = None,
                            force: bool = False) -> None:
@@ -502,14 +547,7 @@ def _claim_ready_orch_task(task_id: str, worker: str, *,
         return
 
     cfg = OrchConfig()
-    supervisor_owner = control_principal_for_session(
-        str(supervisor or "").strip(),
-        cfg.session_ids,
-    )
-    owner = supervisor_owner or control_principal_for_session(
-        worker,
-        cfg.session_ids,
-    )
+    owner = _resolve_dispatch_owner(worker, supervisor=supervisor, config=cfg)
     with get_neo4j_session(cfg) as session:
         record = session.run(
             f"""
@@ -544,6 +582,26 @@ def _claim_ready_orch_task(task_id: str, worker: str, *,
         ).single()
 
         if record is not None:
+            return
+
+        # Same-worker redispatch of an already in_progress task: repair stale
+        # bare-family owners to the registered control principal without
+        # requiring force=True (force is for cross-dispatcher clobber).
+        repaired = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            WHERE coalesce(t.status, 'pending') = 'in_progress'
+              AND coalesce(t.dispatched_to, '') = $worker
+              AND coalesce(t.owner, '') <> $owner
+            SET t.owner = $owner,
+                t.updated_at = datetime()
+            RETURN t.id AS task_id, t.owner AS owner
+            """,
+            task_id=task_id,
+            worker=worker,
+            owner=owner,
+        ).single()
+        if repaired is not None:
             return
 
         detail = session.run(
@@ -777,7 +835,10 @@ def _mark_in_progress_best_effort(task_id: str, worker: str) -> bool:
     if not _orch_task_exists(task_id):
         return False
     cfg = OrchConfig()
-    owner = control_principal_for_session(worker, cfg.session_ids)
+    try:
+        owner = _resolve_dispatch_owner(worker, config=cfg)
+    except OrchConfigError:
+        return False
     with get_neo4j_session(cfg) as session:
         record = session.run(
             f"""
