@@ -167,6 +167,67 @@ def main() -> int:
         _check("repair sets pending", row2.get("status") == "pending", row2)
         _check("repair clears dispatched_to", row2.get("dispatched_to") in (None, ""), row2)
         _check("repair preserves owner", row2.get("owner") == SUP, row2)
+
+        # Adversarial: nonexistent task_id must fail loud (no Redis-only success)
+        ghost = CLIENT.delete(f"/api/sessions/{PEER}/current-task?task_id={_PFX}-does-not-exist")
+        _check("repair nonexistent task is 404", ghost.status_code == 404, ghost.json())
+
+        # Adversarial: already-pending arbitrary owned task is nothing-to-repair
+        other = f"{PROJECT}::other"
+        create_task(PHASE, other, "already pending", owner=SUP, priority=2, config=CFG)
+        pending_only = CLIENT.delete(f"/api/sessions/{PEER}/current-task?task_id={other}")
+        _check(
+            "repair already-pending task is 409",
+            pending_only.status_code == 409,
+            pending_only.json(),
+        )
+        # Ensure we did not invent a dispatched_to clear on an unbound pending task
+        with get_neo4j_driver(CFG).session(database=CFG.neo4j_db) as session:
+            other_row = session.run(
+                "MATCH (t:OrchTask {id:$id}) RETURN t.status AS status, t.dispatched_to AS dispatched_to, t.owner AS owner",
+                id=other,
+            ).single()
+        _check("already-pending task left pending", (other_row or {}).get("status") == "pending", other_row)
+        _check("already-pending owner preserved", (other_row or {}).get("owner") == SUP, other_row)
+
+        # Adversarial: concurrent rebind after graph reconcile must not delete new sidecars
+        from fleet_orchestrator.tasks_api import (
+            _clear_repair_session_unbind_redis,
+            _reconcile_session_unbind_graph,
+        )
+
+        _seed_bound()
+        R.delete(state_key(PEER, "current_task"), state_key(PEER, "last_outcome"))
+        graph = _reconcile_session_unbind_graph(PEER, TASK, None, config=CFG, repair=True)
+        _check("adversarial reconcile changed live claim", graph.get("changed") is True, graph)
+        # Simulate concurrent redispatch: new current_task + liveness/outcome sidecars appear
+        rebind_started = time.time()
+        R.set(
+            state_key(PEER, "current_task"),
+            f'{{"task_id":"{TASK}","description":"rebound","supervisor":"{SUP}","started_at":{rebind_started}}}',
+        )
+        R.set(
+            worker_task_liveness_key(TASK),
+            f'{{"task_id":"{TASK}","worker":"{PEER}","dispatch_started_at":{rebind_started}}}',
+        )
+        R.set(state_key(PEER, "last_outcome"), '{"outcome":"interrupted","details":"probe"}')
+        raced = _clear_repair_session_unbind_redis(PEER, TASK)
+        _check("repair CAS reports superseded on rebind", raced.get("superseded") is True, raced)
+        _check(
+            "repair CAS left new current_task intact",
+            R.get(state_key(PEER, "current_task")) not in (None, b""),
+            R.get(state_key(PEER, "current_task")),
+        )
+        _check(
+            "repair CAS left new liveness sidecar intact",
+            R.get(worker_task_liveness_key(TASK)) not in (None, b""),
+            R.get(worker_task_liveness_key(TASK)),
+        )
+        _check(
+            "repair CAS left last_outcome intact",
+            R.get(state_key(PEER, "last_outcome")) not in (None, b""),
+            R.get(state_key(PEER, "last_outcome")),
+        )
     finally:
         clear_worker_task_liveness(TASK, config=CFG)
         _cleanup()

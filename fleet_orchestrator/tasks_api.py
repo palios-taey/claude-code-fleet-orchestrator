@@ -1940,10 +1940,30 @@ def _reconcile_session_unbind_graph(
 
         state = _observe_unbind_task(session, task_id)
         if state is None:
-            return {"task_exists": False, "changed": False, "prior": None, "after": None}
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": f"OrchTask {task_id} not found; refusing unbind/repair with no authoritative claim",
+                    "session": session_id,
+                    "task_id": task_id,
+                    "repair": repair,
+                },
+            )
 
         if _already_reconciled_unbind_state(state):
-            return {"task_exists": True, "changed": False, "prior": state, "after": state}
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": (
+                        f"task {task_id} is already pending/unbound for session {session_id}; "
+                        "nothing to repair — refusing success that would only clear Redis sidecars"
+                    ),
+                    "session": session_id,
+                    "task_id": task_id,
+                    "repair": repair,
+                    "task_state": state,
+                },
+            )
         raise HTTPException(
             status_code=409,
             detail={
@@ -1967,6 +1987,7 @@ def _clear_exact_session_unbind_redis(
     task_id: str,
     expected_current: Any,
 ) -> Dict[str, Any]:
+    """CAS clear for normal unbind: current_task must still equal the pre-reconcile bind."""
     redis_client = notify_redis_connect()
     current_key = notify_state_key(session_id, "current_task")
     outcome_key = notify_state_key(session_id, "last_outcome")
@@ -2006,6 +2027,62 @@ def _clear_exact_session_unbind_redis(
             "error": "current_task changed repeatedly during unbind; graph is pending and Redis was not cleared blindly",
             "session": session_id,
             "task_id": task_id,
+        },
+    )
+
+
+def _clear_repair_session_unbind_redis(session_id: str, task_id: str) -> Dict[str, Any]:
+    """CAS clear for repair: current_task must stay absent while sidecars are deleted.
+
+    Prevents a concurrent redispatch from binding the session after graph reconcile
+    and then having repair delete the new bind's liveness/outcome sidecars.
+    """
+    redis_client = notify_redis_connect()
+    current_key = notify_state_key(session_id, "current_task")
+    outcome_key = notify_state_key(session_id, "last_outcome")
+    liveness_key = worker_task_liveness_key(task_id)
+    liveness_dedup_key = worker_task_liveness_dedup_key(task_id)
+    for attempt in range(5):
+        with redis_client.pipeline() as pipe:
+            try:
+                pipe.watch(current_key, outcome_key, liveness_key, liveness_dedup_key)
+                live_current = pipe.get(current_key)
+                if live_current not in (None, b"", ""):
+                    current = decode_current_task(live_current)
+                    pipe.unwatch()
+                    return {
+                        "cleared": False,
+                        "superseded": True,
+                        "repair": True,
+                        "live_task_id": str((current or {}).get("task_id") or "") or None,
+                        "live_started_at": (current or {}).get("started_at"),
+                    }
+                prior_outcome = decode_current_task(pipe.get(outcome_key))
+                pipe.multi()
+                # current_task is confirmed absent under WATCH; only delete sidecars.
+                pipe.delete(outcome_key, liveness_key, liveness_dedup_key)
+                deleted = pipe.execute()
+                return {
+                    "cleared": True,
+                    "superseded": False,
+                    "repair": True,
+                    "deleted_keys": int(deleted[0] or 0),
+                    "prior_outcome": prior_outcome,
+                }
+            except WatchError:
+                if attempt == 4:
+                    break
+                time.sleep(0.01 * (attempt + 1))
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": (
+                "current_task raced during repair Redis clear; graph may be pending but "
+                "sidecars were not cleared blindly"
+            ),
+            "session": session_id,
+            "task_id": task_id,
+            "repair": True,
         },
     )
 
@@ -2096,21 +2173,21 @@ def session_unbind_current_task(
         config=_cfg(),
         repair=repair,
     )
+    if not graph.get("changed"):
+        # Soft success without a live graph mutation is fail-open: never clear Redis alone.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "unbind did not mutate an authoritative live graph claim; refusing Redis-only clear",
+                "session": session_id,
+                "task_id": target_task_id,
+                "repair": repair,
+                "graph": graph,
+            },
+        )
     try:
         if expected_current is None:
-            # Repair: Redis bind already absent — still clear scoped sidecar keys.
-            redis_client = notify_redis_connect()
-            deleted = redis_client.delete(
-                notify_state_key(session_id, "last_outcome"),
-                worker_task_liveness_key(target_task_id),
-                worker_task_liveness_dedup_key(target_task_id),
-            )
-            redis_result = {
-                "cleared": True,
-                "superseded": False,
-                "deleted_keys": int(deleted or 0),
-                "repair": True,
-            }
+            redis_result = _clear_repair_session_unbind_redis(session_id, target_task_id)
         else:
             redis_result = _clear_exact_session_unbind_redis(
                 session_id, target_task_id, expected_current
