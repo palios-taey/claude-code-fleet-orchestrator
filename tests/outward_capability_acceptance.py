@@ -273,6 +273,78 @@ def main() -> int:
         )
         _check("wrong executor denied", (not wrong.allowed) and "not the live executor" in wrong.reason, wrong)
 
+        empty = oc.authorize_outward_capability(
+            "",
+            redis_client=redis,
+            task_loader=task_loader,
+        )
+        _check(
+            "empty session fail-closed",
+            (not empty.allowed) and "session_id is required" in empty.reason,
+            empty,
+        )
+
+        redis.set(
+            state_key(session, "current_task"),
+            json.dumps({"task_id": task_id, "started_at": time.time()}),
+        )
+        missing_sup = oc.authorize_outward_capability(
+            session,
+            redis_client=redis,
+            task_loader=task_loader,
+        )
+        _check(
+            "missing supervisor denied",
+            (not missing_sup.allowed) and "lacks supervisor" in missing_sup.reason,
+            missing_sup,
+        )
+
+        redis.set(
+            state_key(session, "current_task"),
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "supervisor": supervisor,
+                    "started_at": time.time(),
+                }
+            ),
+        )
+
+        def completed_loader(tid: str) -> Optional[Dict[str, Any]]:
+            task = task_loader(tid)
+            assert task is not None
+            task = dict(task)
+            task["status"] = "completed"
+            return task
+
+        completed = oc.authorize_outward_capability(
+            session,
+            redis_client=redis,
+            task_loader=completed_loader,
+        )
+        _check(
+            "non-live task status denied",
+            (not completed.allowed) and "is not live" in completed.reason,
+            completed,
+        )
+
+        class BoomRedis(FakeRedis):
+            def get(self, key: str) -> Optional[str]:
+                from redis import RedisError
+
+                raise RedisError("isolated redis boom")
+
+        boom = oc.authorize_outward_capability(
+            session,
+            redis_client=BoomRedis(),
+            task_loader=task_loader,
+        )
+        _check(
+            "redis error fail-closed",
+            (not boom.allowed) and "fail-closed" in boom.reason,
+            boom,
+        )
+
     finally:
         oc.authorize_outward_capability = real_authorize  # type: ignore[assignment]
 
