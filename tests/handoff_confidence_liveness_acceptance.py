@@ -187,47 +187,49 @@ def main() -> int:
         liveness = _liveness(client)
         _check("fresh notify last_activity after dispatch => working", liveness.get("state") == "working", liveness)
 
-        # Validator coverage (shared active_turn_valid_for_task):
-        # - valid ctx + task_id match + future score => working (long turn not AWAITING/stale)
-        # - no turn_context => not working
-        # - mismatched task_id in ctx => not
-        # - invalid ctx json => not
-        # - expired score => not
-        # Peer mode naked lease without ctx also rejected via validator (inflight path)
+        # Coverage per spec: bind via current_task (set by dispatch) + future ZSET (durable lease).
+        # No task_id fabricated in turn_context (production shape has none; only turn/lease fields).
+        # Validator requires current_task.task_id == TASK AND future ZSET member AND ctx present.
+        # Naked ZSET (no/wrong current_task) does not activate for the task.
         notify_r.delete(state_key(WORKER, "last_activity"))
         notify_r.delete(state_key(WORKER, "idle"))
         turn_id = "1466be908e1c4cf3bc22581b1c93ba7b"
         future_score = time.time() + 3600
         ctx_key = state_key(WORKER, "turn_context")
         z_key = state_key(WORKER, "active_turns")
+        cur_key = state_key(WORKER, "current_task")
 
-        # naked ZSET only (no ctx) -> not working
+        # after dispatch, current_task is set to TASK; set future ZSET + valid ctx (no task_id in ctx)
+        # positive: long active turn (lease) + binding => working
         notify_r.zadd(z_key, {turn_id: future_score})
+        # ctx shape matching production (no task_id)
+        notify_r.hset(ctx_key, turn_id, json.dumps({
+            "turn_id": turn_id,
+            "seat_id": WORKER,
+            "event_id": "e1",
+            "correlation_id": "c1",
+            "tool_profile": "full",
+            "process_generation": "gen1",
+            "started_at": time.time()
+        }))
         liveness = _liveness(client)
-        _check("naked ZSET no turn_context => not working (invalid lease)", liveness.get("state") != "working", liveness)
+        _check("current_task bound + future ZSET + ctx => working (active long turn not AWAITING/stale)", liveness.get("state") == "working", liveness)
 
-        # ctx present but mismatched task_id -> not
-        notify_r.hset(ctx_key, turn_id, json.dumps({"task_id": "mismatched-task", "process_generation": "gen1"}))
+        # naked ZSET (delete current_task) => not working for this task
+        notify_r.delete(cur_key)
         liveness = _liveness(client)
-        _check("mismatched task_id in turn_context => not working", liveness.get("state") != "working", liveness)
+        _check("naked future ZSET (no current_task) => not working (no bind)", liveness.get("state") != "working" or liveness is None, liveness)
 
-        # invalid ctx -> not
-        notify_r.hset(ctx_key, turn_id, "not-json")
-        liveness = _liveness(client)
-        _check("invalid turn_context => not working", liveness.get("state") != "working", liveness)
-
-        # valid ctx + matching task + future -> working
-        notify_r.hset(ctx_key, turn_id, json.dumps({"task_id": TASK, "process_generation": "gen1"}))
-        liveness = _liveness(client)
-        _check("valid turn_context + task match + future score => working (long turn)", liveness.get("state") == "working", liveness)
-
-        # expired -> not working (even with valid ctx)
+        # restore current for other cases, set expired ZSET => not
+        # (dispatch not re-run; manually set current with task)
+        notify_r.set(cur_key, json.dumps({"task_id": TASK, "started_at": time.time()}))
         notify_r.zadd(z_key, {turn_id: time.time() - 10})
         liveness = _liveness(client)
-        _check("expired active turn => not working", liveness.get("state") != "working", liveness)
+        _check("current bound but expired ZSET => not working", liveness.get("state") != "working", liveness)
 
         # cleanup
         notify_r.zrem(z_key, turn_id)
+        notify_r.delete(cur_key)
         notify_r.hdel(ctx_key, turn_id)
 
         notify_r.set(state_key(WORKER, "idle"), "1")

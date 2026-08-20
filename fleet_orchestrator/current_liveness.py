@@ -88,10 +88,10 @@ def current_task_liveness(session_id: str,
         ttl = float(worker_task_liveness_ttl_secs())
     ttl = max(1.0, ttl)
 
-    current_matches = str(current_payload.get("task_id") or "") == task_id
-    # Use shared validator: requires matching turn_context task_id + valid ctx + future score.
-    # Naked future ZSET without valid ctx/task match does not make it working.
-    has_valid_active_turn = current_matches and active_turn_valid_for_task(
+    # Derive from durable active-turn: current_task binding (task_id match) + future ZSET member.
+    # Validator enforces current_task.task_id == task_id AND future lease (ZSET) + ctx present.
+    # No task_id inside turn_context (production shape); binding is the current_task Redis key.
+    has_valid_active_turn = active_turn_valid_for_task(
         redis_client, worker, task_id, checked_at
     )
     if has_valid_active_turn:

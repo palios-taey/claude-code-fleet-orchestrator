@@ -86,38 +86,41 @@ def _terminal_outcome_for_task(r: Any, worker: str, task_id: str, *, details_req
 
 
 def active_turn_valid_for_task(r: Any, worker: str, task_id: str, current_time: float) -> bool:
-    """One shared read-only validator for the durable active-turn lease (taey-presence ZSET + turn_context).
+    """Shared read-only validator (per spec: bind via current_task + future ZSET).
 
-    Requires ALL of:
-    (d) score (expiry) > now in taey:<worker>:active_turns
-    (b) turn_context HASH entry for the turn_id is present and JSON-decodable to dict
-    (a) ctx['task_id'] (or top_task_id / id equiv) exactly matches the queried task_id
-    (c) process_generation matches if present in ctx (presence validates proper start; no strict current-gen here as not threaded to all call sites)
+    - Require current_task.task_id == queried task_id (Redis binding ties the lease to this OrchTask)
+    - Require future-scored member in taey:<worker>:active_turns (the durable lease signal; any turn id ok)
+    - Require turn_context present for the active turn (properly started lease, not naked ZADD)
 
-    Rejects naked ZADD, corrupt/stale ctx, mismatched task, expired, invalid-context, no-start.
-    Used by current_liveness (for label), inflight (all modes, so worker_liveness escalation too).
+    Production ctx shape (no task_id): turn_id, seat_id, event_id, correlation_id, tool_profile, process_generation, started_at.
+    This + current_task binding ensures only the correct task sees 'working' from active long turn.
+    Naked lease (ZSET future but no/wrong current_task) does not activate for the task (peer mode too).
     """
     if not task_id:
         return False
     try:
-        turn_key = state_key(worker, "active_turns")
-        ctx_key = state_key(worker, "turn_context")
-        turn_ids = r.zrangebyscore(turn_key, current_time, "+inf")
-        for tid in turn_ids:
-            tid_str = tid.decode(errors="replace") if isinstance(tid, (bytes, bytearray)) else str(tid)
-            raw_ctx = r.hget(ctx_key, tid_str)
-            if not raw_ctx:
-                continue
+        # bind task via current_task
+        cur_raw = r.get(state_key(worker, "current_task"))
+        cur = {}
+        if cur_raw:
             try:
-                ctx = json.loads(raw_ctx.decode(errors="replace") if isinstance(raw_ctx, (bytes, bytearray)) else raw_ctx)
+                cur = json.loads(cur_raw.decode(errors="replace") if isinstance(cur_raw, (bytes, bytearray)) else cur_raw)
             except Exception:
-                continue
-            if not isinstance(ctx, dict):
-                continue
-            ctx_task = str(ctx.get("task_id") or ctx.get("top_task_id") or ctx.get("id") or "").strip()
-            if ctx_task and ctx_task == task_id:
-                # process_generation: if present in ctx, accept (the lease was created with gen by presence)
-                # strict cross-gen match would be added if orchestrator threads current gen
+                cur = {}
+        if str(cur.get("task_id") or "") != task_id:
+            return False
+
+        # future ZSET (any)
+        turn_key = state_key(worker, "active_turns")
+        members = r.zrangebyscore(turn_key, current_time, "+inf", start=0, num=1)
+        if not members:
+            return False
+
+        # require ctx for the turn (valid started lease)
+        ctx_key = state_key(worker, "turn_context")
+        for m in members:
+            tid_str = m.decode(errors="replace") if isinstance(m, (bytes, bytearray)) else str(m)
+            if r.hget(ctx_key, tid_str):
                 return True
         return False
     except Exception:
