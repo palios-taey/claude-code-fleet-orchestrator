@@ -490,54 +490,58 @@ def bind_current_task(
     if dispatcher:
         current_task["dispatcher"] = dispatcher
 
-    if guard_existing:
-        _bind_current_task_checked(
-            r,
-            worker,
-            current_task,
-            set_parent,
-            supervisor,
-            dispatcher or supervisor,
-            force=force,
-            parent_claim_out=parent_claim_out,
-        )
-    else:
-        pipe = r.pipeline(transaction=True)
-        pipe.delete(_state_key(worker, "last_outcome"))
-        pipe.delete(_state_key("orch-watch-stuck", f"{worker}:{task_id}"))
-        pipe.set(_state_key(worker, "current_task"), json.dumps(current_task))
-        if set_parent and supervisor:
-            pipe.set(_state_key(worker, "parent"), supervisor)
-        pipe.execute()
-
-    # Binding a task means the worker is working it — flip it to in_progress so
-    # next-ready stops re-surfacing it.
-    # Best-effort: no-op for ad-hoc tasks / already-claimed / dep-blocked.
-    _mark_in_progress_best_effort(task_id, worker)
-    liveness_registered = register_worker_task_liveness(
-        worker=worker,
-        task_id=task_id,
-        description=description,
-        supervisor=supervisor,
-        started_at=current_task["started_at"],
-        require_binding=require_liveness_binding,
-    )
-    if require_liveness_binding and worker_task_liveness_enabled() and not liveness_registered:
-        raise RuntimeError(
-            f"worker binding lost authority during liveness registration: {worker}:{task_id}"
-        )
     from .github_broker import mint_and_deliver_outward_handle, revoke_and_clear_outward_handle
 
-    # Revoke any prior handle for this session, then mint on the control
-    # channel. Redis current_task never stores the handle. No-op when the
-    # control socket is unset (broker not configured; GitHub writes fail-closed).
+    # Mint before Redis/graph so a bind failure can revoke without leaving a
+    # live handle. No-op when the control socket is unset.
     revoke_and_clear_outward_handle(worker)
-    mint_and_deliver_outward_handle(
+    minted = mint_and_deliver_outward_handle(
         worker,
         task_id,
         current_task["started_at"],
         outward_handle_out=outward_handle_out,
     )
+    try:
+        if guard_existing:
+            _bind_current_task_checked(
+                r,
+                worker,
+                current_task,
+                set_parent,
+                supervisor,
+                dispatcher or supervisor,
+                force=force,
+                parent_claim_out=parent_claim_out,
+            )
+        else:
+            pipe = r.pipeline(transaction=True)
+            pipe.delete(_state_key(worker, "last_outcome"))
+            pipe.delete(_state_key("orch-watch-stuck", f"{worker}:{task_id}"))
+            pipe.set(_state_key(worker, "current_task"), json.dumps(current_task))
+            if set_parent and supervisor:
+                pipe.set(_state_key(worker, "parent"), supervisor)
+            pipe.execute()
+
+        # Binding a task means the worker is working it — flip it to in_progress so
+        # next-ready stops re-surfacing it.
+        # Best-effort: no-op for ad-hoc tasks / already-claimed / dep-blocked.
+        _mark_in_progress_best_effort(task_id, worker)
+        liveness_registered = register_worker_task_liveness(
+            worker=worker,
+            task_id=task_id,
+            description=description,
+            supervisor=supervisor,
+            started_at=current_task["started_at"],
+            require_binding=require_liveness_binding,
+        )
+        if require_liveness_binding and worker_task_liveness_enabled() and not liveness_registered:
+            raise RuntimeError(
+                f"worker binding lost authority during liveness registration: {worker}:{task_id}"
+            )
+    except Exception:
+        if minted:
+            revoke_and_clear_outward_handle(worker, task_id)
+        raise
     return current_task["started_at"]
 
 
@@ -776,6 +780,18 @@ def _rollback_claim(
 ) -> None:
     """Undo only the exact Redis binding and graph claim created by dispatch."""
     from redis import WatchError
+
+    from .github_broker import GitHubBrokerClientError, revoke_and_clear_outward_handle
+
+    try:
+        revoke_and_clear_outward_handle(worker, task_id)
+    except GitHubBrokerClientError as exc:
+        logger.warning(
+            "dispatch rollback: control revoke FAILED worker=%s task=%s: %r",
+            worker,
+            task_id,
+            exc,
+        )
 
     try:
         r = _redis_connect()

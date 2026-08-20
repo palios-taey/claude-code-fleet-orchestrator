@@ -209,6 +209,32 @@ def require_outward_capability(session_id: str, **kwargs: Any) -> OutwardAuthDec
     return decision
 
 
+def require_outward_handle(handle: str, *, channel: str = "", **kwargs: Any) -> OutwardAuthDecision:
+    """Authorize from a possession handle, never caller-selected tmux/env identity."""
+    token = str(handle or "").strip()
+    if not token:
+        raise OutwardAuthorizationError("missing or revoked outward possession handle")
+    from .github_broker import GitHubBrokerClientError, call_broker
+
+    socket_path = str(os.environ.get("ORCH_GITHUB_BROKER_SOCKET") or "").strip()
+    if not socket_path:
+        raise OutwardAuthorizationError(
+            "outward possession handle cannot be resolved; broker socket required"
+        )
+    try:
+        payload = call_broker(socket_path, op="resolve", handle=token)
+    except GitHubBrokerClientError as exc:
+        raise OutwardAuthorizationError(f"handle resolve failed (fail-closed): {exc}") from exc
+    rc = payload.get("rc")
+    if (1 if rc is None else int(rc)) != 0:
+        detail = str(payload.get("stderr") or "missing or revoked outward possession handle").strip()
+        raise OutwardAuthorizationError(detail)
+    session = str(payload.get("session") or "").strip()
+    if not session:
+        raise OutwardAuthorizationError("possession handle has no session")
+    return require_outward_capability(session, channel=channel, **kwargs)
+
+
 # Back-compat aliases used by earlier PR revision / call sites.
 authorize_outward_github_mutation = authorize_outward_capability
 require_outward_github_mutation = require_outward_capability
@@ -271,7 +297,7 @@ _GH_READ_TOP_LEVEL = frozenset({"help", "version", "--help", "-h", "--version"})
 
 
 def _gh_api_method_and_path(api_args: list[str]) -> tuple[str, str]:
-    method = "GET"
+    method = ""
     path = ""
     idx = 0
     while idx < len(api_args):
@@ -294,6 +320,28 @@ def _gh_api_method_and_path(api_args: list[str]) -> tuple[str, str]:
     return method, path
 
 
+def _gh_api_has_request_params(api_args: list[str]) -> bool:
+    """True when gh would add a request body/field (implicit POST).
+
+    Installed ``gh api --help``: adding ``-f/--raw-field``, ``-F/--field``, or
+    ``--input`` automatically switches the method to POST unless ``--method``
+    forces GET/HEAD.
+    """
+    idx = 0
+    while idx < len(api_args):
+        token = str(api_args[idx])
+        if token in {"-f", "--raw-field", "-F", "--field", "--input"}:
+            return True
+        if token.startswith(("--raw-field=", "--field=", "--input=")):
+            return True
+        if token.startswith("-f") and len(token) > 2 and not token.startswith("-f-"):
+            return True
+        if token.startswith("-F") and len(token) > 2 and not token.startswith("-F-"):
+            return True
+        idx += 1
+    return False
+
+
 def github_argv_is_classified_read(argv: list[str]) -> bool:
     """True only for mechanically classified GitHub reads.
 
@@ -307,8 +355,13 @@ def github_argv_is_classified_read(argv: list[str]) -> bool:
         return True
     rest = [str(item) for item in argv[1:] if not str(item).startswith("--session")]
     if cmd == "api":
-        method, _path = _gh_api_method_and_path(rest)
-        return method in _GH_READ_METHODS
+        method, path = _gh_api_method_and_path(rest)
+        if str(path or "").strip().lower() == "graphql":
+            return method in _GH_READ_METHODS
+        has_params = _gh_api_has_request_params(rest)
+        if method:
+            return method in _GH_READ_METHODS
+        return not has_params
     allowed = _GH_READ_SUBCOMMANDS.get(cmd)
     if allowed is None:
         return False

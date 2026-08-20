@@ -289,8 +289,22 @@ def _serve_one(
                 _deny_payload("mint/revoke only on authenticated control channel"),
             )
             return
+        if op == "resolve":
+            binding = lookup_broker_handle(str(request.get("handle") or ""))
+            if not binding:
+                _send_json(conn, _deny_payload("missing or revoked outward possession handle"))
+                return
+            _send_json(
+                conn,
+                {
+                    "rc": 0,
+                    "session": str(binding.get("session") or ""),
+                    "task_id": str(binding.get("task_id") or ""),
+                },
+            )
+            return
         if op != "exec":
-            _send_json(conn, _deny_payload("exec socket accepts op=exec only"))
+            _send_json(conn, _deny_payload("exec socket accepts op=exec or op=resolve only"))
             return
         argv = request.get("argv")
         if not isinstance(argv, list):

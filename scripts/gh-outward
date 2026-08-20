@@ -8,7 +8,6 @@ broker against a possession handle delivered at bind time.
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -41,42 +40,9 @@ def _split_session(argv: list[str]) -> tuple[str, list[str]]:
     return session, forwarded
 
 
-def _tmux_possession_handle() -> str:
-    """Read the handle from this process's tmux session env, never TAEY_NODE_ID."""
-    try:
-        session = subprocess.run(
-            ["tmux", "display-message", "-p", "#S"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-        name = (session.stdout or "").strip()
-        if session.returncode != 0 or not name:
-            return ""
-        shown = subprocess.run(
-            ["tmux", "show-environment", "-t", name, "ORCH_OUTWARD_HANDLE"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-        if shown.returncode != 0:
-            return ""
-        line = (shown.stdout or "").strip()
-        prefix = "ORCH_OUTWARD_HANDLE="
-        if line.startswith(prefix):
-            return line[len(prefix):].strip()
-    except OSError:
-        pass
-    return ""
-
-
 def _possession_handle() -> str:
-    handle = str(os.environ.get("ORCH_OUTWARD_HANDLE") or "").strip()
-    if handle:
-        return handle
-    return _tmux_possession_handle()
+    """Possession handle from this process env only. Tmux/TAEY_NODE_ID are not identity."""
+    return str(os.environ.get("ORCH_OUTWARD_HANDLE") or "").strip()
 
 
 def main() -> int:

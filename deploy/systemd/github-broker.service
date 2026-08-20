@@ -1,5 +1,14 @@
 # Example CONTROL-deploy unit. This PR does not enable or start it.
-# Create Unix user github-broker, then:
+#
+# Production-viable principal separation (observed live: orch API + workers are
+# all uid 1000, so SO_PEERCRED uid mapping cannot distinguish them):
+#   useradd --system --no-create-home github-broker
+#   groupadd --system github-workers
+#   usermod -aG github-workers mira
+#   # orch control client (taey-task/dispatch) must run as github-broker or
+#   # supplementary group github-broker so it can open the 0600 control socket.
+#   # Workers stay uid mira / group github-workers and can open only the 0660
+#   # exec socket. Same-uid 0600 admits both; do not chown control to mira.
 #   install -m 600 -o github-broker -g github-broker github-broker.env /etc/orch/github-broker.env
 # Worker UIDs must not be able to read that file or exec the inner gh except via the socket.
 

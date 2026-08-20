@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from fleet_orchestrator.dispatch import bind_current_task  # noqa: E402
+from fleet_orchestrator.dispatch import _rollback_claim, bind_current_task  # noqa: E402
 from fleet_orchestrator.github_broker import (  # noqa: E402
     GitHubBrokerInstallError,
     call_broker,
@@ -203,6 +203,10 @@ def main() -> int:
         "session_unbind_current_task calls control revoke",
         "revoke_and_clear_outward_handle" in unbind_src,
     )
+    _check(
+        "dispatch rollback revokes minted handles",
+        "revoke_and_clear_outward_handle" in inspect.getsource(_rollback_claim),
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         prefix = Path(tmp) / "prefix"
@@ -329,6 +333,11 @@ def main() -> int:
                 time.sleep(0.05)
             _check("broker socket exists", socket_path.exists(), socket_path)
             _check("control socket exists", control_socket.exists(), control_socket)
+            _check(
+                "control socket mode 0600",
+                stat.S_IMODE(control_socket.stat().st_mode) == 0o600,
+                oct(stat.S_IMODE(control_socket.stat().st_mode)),
+            )
 
             victim_mint = call_broker(
                 str(socket_path),
@@ -409,6 +418,65 @@ def main() -> int:
                 (bound_write.returncode, bound_write.stderr, _sink_events(sink)),
             )
             before = list(_sink_events(sink))
+
+            implicit_unbound = run_worker(
+                ["api", "repos/palios-taey/x/issues", "-f", "title=x"],
+                handle_value="",
+            )
+            _check(
+                "implicit gh api -f POST without handle denied",
+                implicit_unbound.returncode == 1 and "SAFETY DENY" in implicit_unbound.stderr,
+                (implicit_unbound.returncode, implicit_unbound.stderr),
+            )
+            _check(
+                "implicit gh api -f POST did not mutate sink",
+                _sink_events(sink) == before,
+                _sink_events(sink),
+            )
+            implicit_bound = run_worker(
+                ["api", "repos/palios-taey/x/issues", "-f", "title=x"],
+                handle_value=handle,
+            )
+            _check(
+                "bound implicit gh api -f POST reaches inner gh",
+                implicit_bound.returncode == 0,
+                (implicit_bound.returncode, implicit_bound.stderr),
+            )
+            before = list(_sink_events(sink))
+
+            class BoomRedis(FileRedis):
+                def pipeline(self, transaction: bool = True):
+                    del transaction
+                    raise RuntimeError("isolated redis bind failure")
+
+            boom_file = Path(tmp) / "boom-redis.json"
+            boom_out: dict = {}
+            dispatch_mod._redis_connect = lambda: BoomRedis(boom_file)  # type: ignore[attr-defined]
+            try:
+                bind_current_task(
+                    "boom-worker",
+                    task_id,
+                    "fixture",
+                    supervisor=supervisor,
+                    outward_handle_out=boom_out,
+                )
+                _check("bind redis failure raised", False, "expected RuntimeError")
+            except RuntimeError as exc:
+                _check(
+                    "bind redis failure raised",
+                    "isolated redis bind failure" in str(exc),
+                    exc,
+                )
+            leaked = str(boom_out.get("handle") or "")
+            _check("failed bind produced a handle that must be revoked", bool(leaked), boom_out)
+            failed_bind_write = run_worker(["pr", "merge", "32"], handle_value=leaked)
+            _check(
+                "handle from failed bind is revoked",
+                failed_bind_write.returncode == 1
+                and "revoked outward possession handle" in failed_bind_write.stderr,
+                (failed_bind_write.returncode, failed_bind_write.stderr),
+            )
+            dispatch_mod._redis_connect = lambda: redis  # type: ignore[attr-defined]
 
             spoof = run_worker(
                 ["pr", "merge", "32"],

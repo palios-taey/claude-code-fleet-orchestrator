@@ -124,6 +124,40 @@ def main() -> int:
         "api PATCH requires capability",
         github_argv_requires_outward_capability(["api", "-X", "PATCH", "repos/org/x"]),
     )
+    _check(
+        "gh api issues -f title=x is implicit POST and requires capability",
+        github_argv_requires_outward_capability(
+            ["api", "repos/palios-taey/x/issues", "-f", "title=x"]
+        ),
+    )
+    _check(
+        "gh api --raw-field is implicit POST and requires capability",
+        github_argv_requires_outward_capability(
+            ["api", "repos/palios-taey/x/issues", "--raw-field", "title=x"]
+        ),
+    )
+    _check(
+        "gh api -F field is implicit POST and requires capability",
+        github_argv_requires_outward_capability(
+            ["api", "repos/palios-taey/x/issues/1/comments", "-F", "body=x"]
+        ),
+    )
+    _check(
+        "gh api --input is implicit POST and requires capability",
+        github_argv_requires_outward_capability(
+            ["api", "repos/palios-taey/x/issues", "--input", "-"]
+        ),
+    )
+    _check(
+        "explicit GET with -f is classified read (query string)",
+        not github_argv_requires_outward_capability(
+            ["api", "-X", "GET", "repos/palios-taey/x/issues", "-f", "state=open"]
+        ),
+    )
+    _check(
+        "graphql without explicit GET requires capability",
+        github_argv_requires_outward_capability(["api", "graphql", "-f", "query=x"]),
+    )
 
     redis.set(
         state_key(session, "current_task"),

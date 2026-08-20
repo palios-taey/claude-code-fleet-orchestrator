@@ -42,8 +42,15 @@ Worker `scripts/gh-outward` is an exec-socket client and never sends mint or
 revoke. Production deploy (CONTROL) runs the daemon as Unix user
 `github-broker` with a 0600 EnvironmentFile workers cannot read and distinct
 worker UIDs; see `deploy/systemd/github-broker.service`. This repository does
-not enable that unit. Same-UID `/proc` or tmux-env theft remains a residual
-until that deploy.
+not enable that unit.
+
+Observed live: fleet-orchestrator API and worker Codex/Grok/Taey processes
+share uid 1000. SO_PEERCRED uid mapping cannot distinguish control from
+workers on that host. A 0600 socket owned by `github-broker` denies both;
+making it accessible to uid 1000 admits both. Isolated tests prove an
+unmapped control uid cannot mint and the worker exec socket cannot
+mint/revoke. Same-UID `/proc` or tmux-env theft remains a residual until
+that deploy.
 
 ## Threat model
 
