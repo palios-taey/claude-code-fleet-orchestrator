@@ -11,6 +11,7 @@ _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO)
 
 from fleet_orchestrator.completion_guard import _autonomous_peer_supervisor  # noqa: E402
+from fleet_orchestrator import cli_orch_watch as watch  # noqa: E402
 from fleet_orchestrator.config import OrchConfigError, _parse_session_ids  # noqa: E402
 from fleet_orchestrator.control_principal_migration import codex_supervisor_mappings  # noqa: E402
 from fleet_orchestrator.session_topology import (  # noqa: E402
@@ -102,6 +103,47 @@ def _topology_contract() -> None:
         )
         == "conductor-codex",
     )
+
+    original = os.environ.get("ORCH_SESSION_IDS")
+    try:
+        os.environ["ORCH_SESSION_IDS"] = "conductor-codex,weaver-codex,treasurer-codex,job-seeker-codex"
+        parentless = SimpleNamespace(get=lambda _key: None)
+        stale_parent = SimpleNamespace(get=lambda _key: "conductor")
+        _check(
+            "orch-watch keeps a parentless codex control at the control seat",
+            watch.resolve_supervisor(parentless, "conductor-codex") == "conductor-codex",
+        )
+        _check(
+            "orch-watch maps workers through configured codex topology",
+            watch.resolve_supervisor(parentless, "conductor-grok") == "conductor-codex",
+        )
+        _check(
+            "orch-watch configured topology beats a stale Redis parent",
+            watch.resolve_supervisor(stale_parent, "conductor-grok") == "conductor-codex",
+        )
+        _check(
+            "orch-watch task authority still precedes configured topology",
+            watch.resolve_supervisor(
+                parentless,
+                "conductor-grok",
+                task={"supervisor": "delegating-control"},
+            )
+            == "delegating-control",
+        )
+        _check(
+            "orch-watch normalizes stale task authority to the configured control",
+            watch.resolve_supervisor(
+                parentless,
+                "job-seeker-codex",
+                task={"supervisor": "treasurer"},
+            )
+            == "treasurer-codex",
+        )
+    finally:
+        if original is None:
+            os.environ.pop("ORCH_SESSION_IDS", None)
+        else:
+            os.environ["ORCH_SESSION_IDS"] = original
     _check(
         "explicit codex worker roster includes Claude and excludes itself",
         supervised_worker_sessions("conductor-codex", explicit) == expected_workers,

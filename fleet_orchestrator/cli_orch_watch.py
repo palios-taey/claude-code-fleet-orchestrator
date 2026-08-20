@@ -98,7 +98,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from fleet_orchestrator.config import OrchConfig
+from fleet_orchestrator.config import OrchConfig, _parse_session_ids
 from fleet_orchestrator.evidence_contract import TERMINAL_STATUSES
 from fleet_orchestrator.handoff_validation import handoff_index_key, process_expired_handoffs
 from fleet_orchestrator.notify_state import (
@@ -106,6 +106,7 @@ from fleet_orchestrator.notify_state import (
     key_prefix as notify_key_prefix,
     state_key as notify_state_key,
 )
+from fleet_orchestrator.session_topology import configured_supervisor_for_session
 
 import redis as redis_lib
 
@@ -253,7 +254,7 @@ def _supervisor_candidate(r, value: object) -> Optional[str]:
     if not host or candidate != host:
         return candidate
     try:
-        if candidate in set(OrchConfig().session_ids or []):
+        if candidate in set(_parse_session_ids()):
             return candidate
     except Exception:
         pass
@@ -269,12 +270,23 @@ def resolve_supervisor(r, node_id: str, task: Optional[dict] = None) -> Optional
     """Resolve the deliverable supervisor for a worker alert.
 
     Current-task payloads are the dispatch contract, so their supervisor or
-    dispatcher wins over legacy parent/suffix fallback. A local hostname fallback
-    is ignored unless it is also configured or visible as a real local session.
+    dispatcher wins over configured control-principal topology, then legacy
+    parent/suffix fallback. A local hostname fallback is ignored unless it is
+    also configured or visible as a real local session.
     """
     candidates: list[object] = []
+    registered = _parse_session_ids()
     if isinstance(task, dict):
-        candidates.extend([task.get("supervisor"), task.get("dispatcher")])
+        for value in (task.get("supervisor"), task.get("dispatcher")):
+            task_candidate = str(value or "").strip()
+            if task_candidate:
+                candidates.append(
+                    configured_supervisor_for_session(task_candidate, registered)
+                    or task_candidate
+                )
+    configured = configured_supervisor_for_session(node_id, registered)
+    if configured:
+        candidates.append(configured)
     try:
         explicit = r.get(state_key(node_id, "parent"))
         if explicit:
