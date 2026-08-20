@@ -1,0 +1,20 @@
+[Unit]
+Description=Fleet orchestrator audit capability issuer socket
+Documentation=https://github.com/palios-taey/claude-code-fleet-orchestrator
+
+[Socket]
+ListenStream=/var/lib/fleet-orchestrator/audit-capability/issuer.sock
+# Issuer daemon owns the socket; supervisor client uids join orch-audit-clients.
+SocketUser=orch-cap
+SocketGroup=orch-audit-clients
+SocketMode=0660
+DirectoryMode=0750
+# Reachability model (distinct UIDs):
+#   useradd --system orch-cap
+#   groupadd orch-audit-clients
+#   useradd --system orch-sup-conductor   # uid listed in ORCH_AUDIT_CAPABILITY_UID_MAP
+#   usermod -aG orch-audit-clients orch-sup-conductor
+# Shared mira/worker uid 1000 must NOT be in orch-audit-clients.
+
+[Install]
+WantedBy=sockets.target

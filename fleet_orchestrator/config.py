@@ -147,6 +147,18 @@ OPTIONAL_ENV = (
      "loopback-only bind for the single-user local product; non-loopback is an explicit operator opt-in"),
     ("ORCH_AUTH_TOKEN", "unset (mutable API tokenless)",
      "default loopback deployments need no token; when set, mutable HTTP methods require the token"),
+    ("ORCH_AUDIT_CAPABILITY_PRIVATE_KEY_PATH", "ORCH_DATA_DIR/audit-capability/ed25519.private",
+     "Ed25519 private key for orch-audit-capabilityd only (mode 0600, owned by dedicated issuer uid)"),
+    ("ORCH_AUDIT_CAPABILITY_PUBLIC_KEY_PATH", "ORCH_DATA_DIR/audit-capability/ed25519.public",
+     "Ed25519 public key for API verify-only of X-Orch-Audit-Capability tokens"),
+    ("ORCH_AUDIT_CAPABILITY_SOCKET", "ORCH_DATA_DIR/audit-capability/issuer.sock",
+     "unix socket for distinct-UID issuer daemon (deploy/systemd/orch-audit-capabilityd.*)"),
+    ("ORCH_AUDIT_CAPABILITY_UID_MAP", "unset",
+     "JSON map of supervisor OS uid→fleet session id; peercred uid is the principal "
+     "(ORCH_SESSION_ID environ is not authority)"),
+    ("ORCH_AUDIT_CAPABILITY_CLIENT_GROUP", "orch-audit-clients",
+     "systemd SocketGroup for issuer.sock; supervisor client uids must be members, "
+     "shared mira/worker uid must not"),
     ("ORCH_DATA_DIR", "$XDG_DATA_HOME or ~/.local/share (XDG Base Dir spec)",
      "standard local-tool data location; zero-config by design for a single-user local product"),
     ("ORCH_WORLD_MANIFEST_PATH", "ORCH_DATA_DIR/provenance/world-manifest-v0.json",

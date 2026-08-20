@@ -137,6 +137,8 @@ from fleet_orchestrator.orch_schema import (
     set_project_user_stop_conditions,
     update_project_priority,
     update_task_status,
+    bind_audit_status_on_task,
+    pin_audit_contract_on_task,
     validate_source_path_for_refs,
     _resolve_supervisor_session,
 )
@@ -756,6 +758,210 @@ def get_task(task_id: str) -> Dict[str, Any]:
     return task
 
 
+def _audit_capability_next_step(task_id: str, action: str) -> str:
+    return (
+        "Next step: run `deploy/systemd/orch-audit-capabilityd.service` as User=orch-cap "
+        "(distinct uid; ORCH_AUDIT_CAPABILITY_UID_MAP provisions supervisor OS uids). "
+        "From a process whose uid is mapped to the project supervisor, "
+        f"`issue_audit_capability(task_id={task_id!r}, action={action!r})` via the issuer "
+        "socket (peercred uid is authority; ORCH_SESSION_ID environ is ignored). "
+        "Send X-Orch-Audit-Capability on "
+        f"POST /api/tasks/{task_id}/{action}; inspect with GET /api/tasks/{task_id} "
+        f"or `taey-task status {task_id}`."
+    )
+
+
+def _attested_audit_actor_or_http_error(
+    req: Request,
+    *,
+    task_id: str,
+    action: str,
+    project_supervisor: Optional[str],
+    body_from: Optional[str],
+) -> str:
+    from fleet_orchestrator.audit_completion import AuditContractError
+    from fleet_orchestrator.audit_supervisor_capability import (
+        CAPABILITY_HEADER,
+        resolve_attested_audit_actor,
+    )
+
+    token = req.headers.get(CAPABILITY_HEADER) or req.headers.get(CAPABILITY_HEADER.lower())
+    try:
+        return resolve_attested_audit_actor(
+            capability_token=token,
+            task_id=task_id,
+            action=action,
+            project_supervisor=project_supervisor,
+            body_from=body_from,
+        )
+    except AuditContractError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"{exc}. {_audit_capability_next_step(task_id, action)}",
+        ) from exc
+
+
+@app.post("/api/tasks/{task_id}/pin-audit-contract")
+async def pin_audit_contract(task_id: str, req: Request) -> Dict[str, Any]:
+    """Supervisor/internal authority: pin immutable audit contract (no status ID).
+
+    Actor is derived from X-Orch-Audit-Capability (HMAC session attestation bound to
+    this task_id + action). body.from is not authority. Ordinary create cannot set pins.
+    """
+    from fleet_orchestrator.completion_guard import _task_project_supervisor
+
+    try:
+        data = await req.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"request body must be valid JSON: {exc}. "
+                f"{_audit_capability_next_step(task_id, 'pin-audit-contract')}"
+            ),
+        )
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"request body must be a JSON object. "
+                f"{_audit_capability_next_step(task_id, 'pin-audit-contract')}"
+            ),
+        )
+    cfg = _cfg()
+    task_id = resolve_task_id(task_id, config=cfg)
+    task = load_task_record(task_id, config=cfg)
+    if not task:
+        raise HTTPException(status_code=404, detail=_task_not_found_detail(task_id))
+    project_supervisor = _task_project_supervisor(task_id, cfg)
+    actor = _attested_audit_actor_or_http_error(
+        req,
+        task_id=task_id,
+        action="pin-audit-contract",
+        project_supervisor=project_supervisor,
+        body_from=data.get("from"),
+    )
+    try:
+        result = pin_audit_contract_on_task(
+            task_id,
+            actor=actor,
+            audit_repo=str(data.get("audit_repo") or ""),
+            audit_head=str(data.get("audit_head") or ""),
+            audit_base=str(data.get("audit_base") or ""),
+            audit_required_context=str(data.get("audit_required_context") or ""),
+            audit_required_state=str(data.get("audit_required_state") or ""),
+            audit_pr_number=data.get("audit_pr_number"),
+            config=cfg,
+        )
+    except CompletionEvidenceError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    task_after = load_task_record(task_id, config=cfg) or {}
+    return {
+        "ok": True,
+        **result,
+        "attested_actor": actor,
+        "completion_class": task_after.get("completion_class"),
+        "audit_repo": task_after.get("audit_repo"),
+        "audit_head": task_after.get("audit_head"),
+        "audit_base": task_after.get("audit_base"),
+        "audit_required_context": task_after.get("audit_required_context"),
+        "audit_required_state": task_after.get("audit_required_state"),
+        "audit_pr_number": task_after.get("audit_pr_number"),
+        "audit_bound_status_id": task_after.get("audit_bound_status_id"),
+    }
+
+
+@app.post("/api/tasks/{task_id}/bind-audit-status")
+async def bind_audit_status(task_id: str, req: Request) -> Dict[str, Any]:
+    """Compare-once supervisor bind of concrete GitHub status ID.
+
+    Actor is derived from X-Orch-Audit-Capability (not body.from). Body: status_id only.
+    PR head/base are queried server-side from trusted audit_repo + audit_pr_number pins.
+    """
+    from fleet_orchestrator.completion_guard import _task_project_supervisor
+
+    try:
+        data = await req.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"request body must be valid JSON: {exc}. "
+                f"{_audit_capability_next_step(task_id, 'bind-audit-status')}"
+            ),
+        )
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"request body must be a JSON object. "
+                f"{_audit_capability_next_step(task_id, 'bind-audit-status')}"
+            ),
+        )
+
+    cfg = _cfg()
+    task_id = resolve_task_id(task_id, config=cfg)
+    task = load_task_record(task_id, config=cfg)
+    if not task:
+        raise HTTPException(status_code=404, detail=_task_not_found_detail(task_id))
+
+    # Callers must not supply PR SHAs — server queries from pinned repo/PR identity.
+    for forbidden in ("pr_head_sha", "pr_base_sha", "audit_head", "audit_base", "audit_pr_number"):
+        if forbidden in data and data.get(forbidden) not in (None, "", [], {}):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"bind-audit-status rejects caller-supplied {forbidden}; "
+                    "PR head/base are queried server-side from trusted pins. "
+                    + _audit_capability_next_step(task_id, "bind-audit-status")
+                ),
+            )
+
+    project_supervisor = _task_project_supervisor(task_id, cfg)
+    actor = _attested_audit_actor_or_http_error(
+        req,
+        task_id=task_id,
+        action="bind-audit-status",
+        project_supervisor=project_supervisor,
+        body_from=data.get("from"),
+    )
+    raw_status_id = data.get("status_id")
+    try:
+        status_id = int(raw_status_id)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "status_id must be an integer GitHub commit status ID. "
+                + _audit_capability_next_step(task_id, "bind-audit-status")
+            ),
+        )
+    try:
+        result = bind_audit_status_on_task(
+            task_id,
+            actor=actor,
+            status_id=status_id,
+            config=cfg,
+        )
+    except CompletionEvidenceError as exc:
+        status = 403 if "not project supervisor" in str(exc) or "requires authenticated supervisor" in str(exc) or "capability" in str(exc).lower() else 400
+        raise HTTPException(status_code=status, detail=str(exc))
+    task_after = load_task_record(task_id, config=cfg) or {}
+    return {
+        "ok": True,
+        **result,
+        "attested_actor": actor,
+        "completion_class": task_after.get("completion_class"),
+        "audit_repo": task_after.get("audit_repo"),
+        "audit_head": task_after.get("audit_head"),
+        "audit_base": task_after.get("audit_base"),
+        "audit_required_context": task_after.get("audit_required_context"),
+        "audit_required_state": task_after.get("audit_required_state"),
+        "audit_pr_number": task_after.get("audit_pr_number"),
+        "audit_bound_status_id": task_after.get("audit_bound_status_id"),
+    }
+
+
 @app.delete("/api/tasks/{task_id}/dependencies/{depends_on_id}")
 def remove_task_dependency(task_id: str, depends_on_id: str) -> Dict[str, Any]:
     cfg = _cfg()
@@ -828,6 +1034,25 @@ async def create(req: Request) -> Dict[str, Any]:
     file_blast_radius = data.get("file_blast_radius", [])
     estimated_tokens = int(data.get("estimated_tokens", 50_000))
     initial_status = data.get("initial_status", data.get("status", "pending"))
+
+    # Ordinary create cannot select audit contract fields — project supervisor pins
+    # via POST /api/tasks/{id}/pin-audit-contract after create.
+    from fleet_orchestrator.audit_completion import (
+        AuditContractError,
+        reject_ordinary_create_audit_fields,
+    )
+
+    try:
+        reject_ordinary_create_audit_fields(data)
+    except AuditContractError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{exc}. Next step: create a standard task, then the project supervisor "
+                "pins the contract with POST /api/tasks/{task_id}/pin-audit-contract; "
+                f"or {TASK_CREATE_NEXT_STEP}"
+            ),
+        )
 
     cfg = _cfg()
     requested_phase_id = data.get("phase_id")
