@@ -14,10 +14,10 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 268.
+- Enumerated surfaces: 270.
 - Teaches: 130.
 - Needs-fix baseline debt: 47.
-- Exempt reviewed rows: 91.
+- Exempt reviewed rows: 93.
 
 <!-- ai-native-surfaces:start -->
 | File | Function | Kind | Ordinal | Line Hint | Fingerprint | Classification | Teaching Evidence | Rationale | Review |
@@ -268,10 +268,12 @@ Summary:
 | fleet_orchestrator/tasks_api.py | pause_session_endpoint | http_exception_detail | 1 | 1808 | c76409965486615c | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | _reconcile_session_unbind_graph | http_exception_detail | 1 | 1906 | bcf1d20c068e60b2 | exempt |  | Exact executor/liveness mismatch is a fail-closed safety boundary; the response returns the conflicting binding identity and task state for authoritative reconciliation rather than client-side mutation. | task-1fe784f4:identity-fail-closed |
 | fleet_orchestrator/tasks_api.py | _clear_exact_session_unbind_redis | http_exception_detail | 1 | 1956 | f7e01ebaa8e5b678 | exempt |  | Compare-and-set exhaustion is an internal concurrency conflict; the rejection preserves Redis state and forbids a blind clear, so no further client mutation is safe. | task-1fe784f4:concurrency-fail-closed |
-| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 1 | 1973 | 3ff178c921829b8d | exempt |  | Redis transport failure occurs before any state change and is an operator/service-health concern, not a client-correctable workflow surface. | task-1fe784f4:internal-transport |
-| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 2 | 1998 | 565c6955c6ee3fc4 | exempt |  | Malformed binding identity is rejected before mutation; repair requires authoritative control-plane reconciliation rather than guessing a task or nonce. | task-1fe784f4:identity-fail-closed |
-| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 3 | 2010 | 85d2d4dede5606ca | exempt |  | Redis failed after graph reconciliation, so the response exposes the partial state for operator recovery and deliberately offers no unsafe automated retry. | task-1fe784f4:partial-state-fail-closed |
-| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 4 | 2020 | d20450a93680f185 | exempt |  | A superseding binding is a concurrency boundary; the response reports both graph and live Redis observations while refusing to clear the newer binding. | task-1fe784f4:concurrency-fail-closed |
+| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 1 | 1978 | 3ff178c921829b8d | exempt |  | Redis transport failure occurs before any state change and is an operator/service-health concern, not a client-correctable workflow surface. | task-1fe784f4:internal-transport |
+| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 2 | 1986 | e7435645fbcc750e | exempt |  | Control-channel revoke failed with no Redis current_task; handles may remain and repair is an operator/broker-health concern, not a client-correctable workflow surface. | task-7107c13f:control-revoke-fail-closed |
+| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 3 | 2010 | 565c6955c6ee3fc4 | exempt |  | Malformed binding identity is rejected before mutation; repair requires authoritative control-plane reconciliation rather than guessing a task or nonce. | task-1fe784f4:identity-fail-closed |
+| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 4 | 2021 | 77c98e9259571a62 | exempt |  | Control-channel revoke failed before Redis/graph unbind started; GitHub capability may remain and repair is an operator/broker-health concern, not a client-correctable workflow surface. | task-7107c13f:control-revoke-fail-closed |
+| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 5 | 2029 | 85d2d4dede5606ca | exempt |  | Redis failed after graph reconciliation, so the response exposes the partial state for operator recovery and deliberately offers no unsafe automated retry. | task-1fe784f4:partial-state-fail-closed |
+| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 6 | 2039 | d20450a93680f185 | exempt |  | A superseding binding is a concurrency boundary; the response reports both graph and live Redis observations while refusing to clear the newer binding. | task-1fe784f4:concurrency-fail-closed |
 | fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 1 | 2053 | 10789411811a64cf | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 2 | 2068 | 2a638aa2f069ce00 | teaches | taey-notify | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 3 | 2078 | d235f23d0cd8ae89 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
