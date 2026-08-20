@@ -89,6 +89,7 @@ from .rules_tier import get_rules
 from .session_topology import control_principal_for_session, session_family
 from .worker_liveness import (
     register_worker_task_liveness,
+    worker_task_liveness_enabled,
     worker_task_liveness_dedup_key,
     worker_task_liveness_key,
 )
@@ -477,6 +478,7 @@ def bind_current_task(
     (not one a subsequent dispatch for the same worker may have rebound).
     """
     r = _redis_connect()
+    require_liveness_binding = binding_nonce is not None
     started_at = time.time() if binding_nonce is None else float(binding_nonce)
     current_task = {
         "task_id": task_id,
@@ -511,13 +513,18 @@ def bind_current_task(
     # next-ready stops re-surfacing it.
     # Best-effort: no-op for ad-hoc tasks / already-claimed / dep-blocked.
     _mark_in_progress_best_effort(task_id, worker)
-    register_worker_task_liveness(
+    liveness_registered = register_worker_task_liveness(
         worker=worker,
         task_id=task_id,
         description=description,
         supervisor=supervisor,
         started_at=current_task["started_at"],
+        require_binding=require_liveness_binding,
     )
+    if require_liveness_binding and worker_task_liveness_enabled() and not liveness_registered:
+        raise RuntimeError(
+            f"worker binding lost authority during liveness registration: {worker}:{task_id}"
+        )
     return current_task["started_at"]
 
 
@@ -742,14 +749,21 @@ def _rollback_claim(
                     if raw_current and current is None:
                         pipe.unwatch()
                         return
-                    live_task_id = str((current or {}).get("task_id") or "")
                     binding_is_ours = _binding_is_ours(raw_current, task_id, binding_nonce)
-                    if live_task_id == task_id and not binding_is_ours:
-                        pipe.unwatch()
-                        return
-
+                    liveness = _decode_current_task(pipe.get(liveness_key))
+                    liveness_is_ours = (
+                        isinstance(liveness, dict)
+                        and liveness.get("task_id") == task_id
+                        and liveness.get("worker") == worker
+                        and liveness.get("dispatch_started_at") == binding_nonce
+                    )
                     if not binding_is_ours:
-                        pipe.unwatch()
+                        if liveness_is_ours:
+                            pipe.multi()
+                            pipe.delete(liveness_key, liveness_dedup_key)
+                            pipe.execute()
+                        else:
+                            pipe.unwatch()
                         graph_rollback_allowed = True
                         break
 
@@ -761,14 +775,6 @@ def _rollback_claim(
                     else:
                         live_parent_text = str(live_parent or "")
                     restore_parent = bool(claim) and live_parent_text == expected_parent
-                    liveness = _decode_current_task(pipe.get(liveness_key))
-                    liveness_is_ours = (
-                        isinstance(liveness, dict)
-                        and liveness.get("task_id") == task_id
-                        and liveness.get("worker") == worker
-                        and liveness.get("dispatch_started_at") == binding_nonce
-                    )
-
                     pipe.multi()
                     pipe.delete(current_key)
                     if liveness_is_ours:
