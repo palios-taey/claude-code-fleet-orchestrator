@@ -45,8 +45,14 @@ def main() -> int:
         print("SAFETY DENY: ORCH_GITHUB_BROKER_SOCKET is required", file=sys.stderr)
         return 1
     session_flag, argv = _split_session(sys.argv[1:])
+    handle = str(os.environ.get("ORCH_OUTWARD_HANDLE") or "").strip()
     try:
-        payload = call_broker(socket_path, argv, session_id=session_flag)
+        payload = call_broker(
+            socket_path,
+            argv,
+            handle=handle,
+            claimed_session=session_flag,
+        )
     except GitHubBrokerClientError as exc:
         print(f"SAFETY DENY: {exc}", file=sys.stderr)
         return 1

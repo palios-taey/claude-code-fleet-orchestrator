@@ -20,10 +20,11 @@ import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
+from .current_task_binding import lookup_outward_handle
 from .outward_capability import (
     OutwardAuthorizationError,
+    github_argv_requires_outward_capability,
     require_github_argv_capability,
-    resolve_session_id,
 )
 
 WORKER_UNSET_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
@@ -58,23 +59,40 @@ def prefix_is_live(prefix: Path) -> bool:
 
 def handle_broker_request(
     argv: list[str],
-    session_id: str,
     *,
+    handle: str,
+    claimed_session: str = "",
     inner_gh: str,
     token: str,
     redis_client: Any = None,
     task_loader: Any = None,
 ) -> dict[str, Any]:
-    """Authorize argv, then run inner gh with broker-held credentials only."""
-    try:
-        require_github_argv_capability(
-            argv,
-            session_id=session_id,
-            redis_client=redis_client,
-            task_loader=task_loader,
-        )
-    except OutwardAuthorizationError as exc:
-        return {"rc": 1, "stdout": "", "stderr": f"SAFETY DENY: {exc}\n"}
+    """Authorize mutating argv from a possession handle, never a claimed session."""
+    mutating = github_argv_requires_outward_capability(argv)
+    if mutating:
+        binding = lookup_outward_handle(handle, redis_client=redis_client)
+        if not binding:
+            return {
+                "rc": 1,
+                "stdout": "",
+                "stderr": "SAFETY DENY: missing or revoked outward possession handle\n",
+            }
+        bound_session = str(binding.get("session") or "").strip()
+        if claimed_session and claimed_session != bound_session:
+            return {
+                "rc": 1,
+                "stdout": "",
+                "stderr": "SAFETY DENY: possession handle cannot be exchanged for another session\n",
+            }
+        try:
+            require_github_argv_capability(
+                argv,
+                session_id=bound_session,
+                redis_client=redis_client,
+                task_loader=task_loader,
+            )
+        except OutwardAuthorizationError as exc:
+            return {"rc": 1, "stdout": "", "stderr": f"SAFETY DENY: {exc}\n"}
     inner = str(inner_gh or "").strip()
     if not inner or not Path(inner).is_file():
         return {"rc": 1, "stdout": "", "stderr": "SAFETY DENY: inner gh missing in broker principal\n"}
@@ -130,10 +148,10 @@ def serve_broker(
             if not isinstance(argv, list):
                 conn.sendall(b'{"rc":1,"stdout":"","stderr":"SAFETY DENY: argv required\\n"}\n')
                 continue
-            session = str(request.get("session") or "")
             payload = handle_broker_request(
                 [str(item) for item in argv],
-                session,
+                handle=str(request.get("handle") or ""),
+                claimed_session=str(request.get("session") or ""),
                 inner_gh=inner_gh,
                 token=token,
                 redis_client=redis_client,
@@ -142,7 +160,13 @@ def serve_broker(
             conn.sendall((json.dumps(payload) + "\n").encode("utf-8"))
 
 
-def call_broker(socket_path: str, argv: list[str], session_id: str = "") -> dict[str, Any]:
+def call_broker(
+    socket_path: str,
+    argv: list[str],
+    *,
+    handle: str = "",
+    claimed_session: str = "",
+) -> dict[str, Any]:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.connect(socket_path)
@@ -155,7 +179,8 @@ def call_broker(socket_path: str, argv: list[str], session_id: str = "") -> dict
             json.dumps(
                 {
                     "argv": list(argv),
-                    "session": resolve_session_id(session_id),
+                    "handle": str(handle or ""),
+                    "session": str(claimed_session or ""),
                 }
             ).encode("utf-8")
             + b"\n"

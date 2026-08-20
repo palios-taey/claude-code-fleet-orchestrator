@@ -1940,8 +1940,15 @@ def _clear_exact_session_unbind_redis(
                         "live_started_at": (current or {}).get("started_at"),
                     }
                 prior_outcome = decode_current_task(pipe.get(outcome_key))
+                live_binding = decode_current_task(live_current) or {}
+                handle = str(live_binding.get("outward_handle") or "").strip()
                 pipe.multi()
-                pipe.delete(current_key, outcome_key, liveness_key, liveness_dedup_key)
+                delete_keys = [current_key, outcome_key, liveness_key, liveness_dedup_key]
+                if handle:
+                    from fleet_orchestrator.current_task_binding import outward_handle_key
+
+                    delete_keys.append(outward_handle_key(handle))
+                pipe.delete(*delete_keys)
                 deleted = pipe.execute()
                 return {
                     "cleared": True,

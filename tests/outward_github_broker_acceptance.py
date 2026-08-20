@@ -26,12 +26,47 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from fleet_orchestrator.current_task_binding import (  # noqa: E402
+    mint_outward_handle,
+    revoke_outward_handle,
+)
 from fleet_orchestrator.github_broker import (  # noqa: E402
     GitHubBrokerInstallError,
     install_github_broker,
     prefix_is_live,
 )
 from fleet_orchestrator.notify_state import state_key  # noqa: E402
+
+
+class FileRedis:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        if not path.exists():
+            path.write_text("{}", encoding="utf-8")
+
+    def _load(self) -> dict:
+        return json.loads(self.path.read_text(encoding="utf-8") or "{}")
+
+    def _save(self, store: dict) -> None:
+        self.path.write_text(json.dumps(store), encoding="utf-8")
+
+    def get(self, key: str):
+        return self._load().get(key)
+
+    def set(self, key: str, value: str) -> None:
+        store = self._load()
+        store[key] = value
+        self._save(store)
+
+    def delete(self, *keys: str) -> int:
+        store = self._load()
+        deleted = 0
+        for key in keys:
+            if key in store:
+                del store[key]
+                deleted += 1
+        self._save(store)
+        return deleted
 
 
 FAILURES: list[str] = []
@@ -124,23 +159,48 @@ def main() -> int:
         )
         _check("inner gh is outside worker tree", not str(installed["inner_gh"]).startswith(str(worker_root)))
 
+        redis_file = Path(tmp) / "broker-redis.json"
+        redis_file.write_text("{}", encoding="utf-8")
+        redis = FileRedis(redis_file)
+        handle = mint_outward_handle(session, task_id, 1.0, redis_client=redis)
+        redis.set(
+            state_key(session, "current_task"),
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "description": "fixture",
+                    "supervisor": supervisor,
+                    "started_at": 1.0,
+                    "outward_handle": handle,
+                }
+            ),
+        )
         sitecustomize = Path(tmp) / "sitecustomize.py"
         sitecustomize.write_text(
             "import json, os, sys\n"
+            "from pathlib import Path\n"
             f"sys.path.insert(0, {str(ROOT)!r})\n"
             "import fleet_orchestrator.outward_capability as oc\n"
-            "class FakeRedis:\n"
-            "    def __init__(self):\n"
-            "        self.store = {}\n"
+            "import fleet_orchestrator.current_task_binding as ctb\n"
+            "class FileRedis:\n"
+            "    def __init__(self, path):\n"
+            "        self.path = Path(path)\n"
+            "    def _load(self):\n"
+            "        return json.loads(self.path.read_text() or '{}')\n"
+            "    def _save(self, store):\n"
+            "        self.path.write_text(json.dumps(store))\n"
             "    def get(self, key):\n"
-            "        return self.store.get(key)\n"
+            "        return self._load().get(key)\n"
             "    def set(self, key, value):\n"
-            "        self.store[key] = value\n"
-            "redis = FakeRedis()\n"
-            f"KEY = {state_key(session, 'current_task')!r}\n"
-            "if os.environ.get('BROKER_BOUND', '1') == '1':\n"
-            f"    redis.set(KEY, json.dumps({{'task_id': {task_id!r}, 'description': 'fixture', 'supervisor': {supervisor!r}, 'started_at': 1.0}}))\n"
+            "        store = self._load(); store[key] = value; self._save(store)\n"
+            "    def delete(self, *keys):\n"
+            "        store = self._load()\n"
+            "        for key in keys:\n"
+            "            store.pop(key, None)\n"
+            "        self._save(store)\n"
+            f"redis = FileRedis({str(redis_file)!r})\n"
             "oc.redis_connect = lambda: redis\n"
+            "ctb.redis_connect = lambda: redis\n"
             f"oc._default_task_loader = lambda tid, *, config=None: ({{'id': {task_id!r}, 'status': 'in_progress', 'dispatched_to': {session!r}, 'owner': {supervisor!r}}} if tid == {task_id!r} else None)\n",
             encoding="utf-8",
         )
@@ -150,7 +210,6 @@ def main() -> int:
         broker_env["ORCH_GITHUB_BROKER_SOCKET"] = str(socket_path)
         broker_env["ORCH_GITHUB_BROKER_INNER"] = installed["inner_gh"]
         broker_env["PYTHONPATH"] = str(Path(tmp)) + os.pathsep + str(ROOT)
-        broker_env["BROKER_BOUND"] = "1"
         broker_proc = subprocess.Popen(
             [sys.executable, str(ROOT / "scripts" / "github-brokerd")],
             env=broker_env,
@@ -165,11 +224,15 @@ def main() -> int:
                 time.sleep(0.05)
             _check("broker socket exists", socket_path.exists(), socket_path)
 
-            def run_worker(argv, *, bound: bool, path_kind: str) -> subprocess.CompletedProcess:
+            def run_worker(argv, *, handle_value: str = "", session_value: str = "", path_kind: str = "broker"):
                 env = os.environ.copy()
                 env.pop("GH_TOKEN", None)
                 env.pop("GITHUB_TOKEN", None)
-                env["ORCH_OUTWARD_SESSION"] = session
+                env.pop("ORCH_OUTWARD_HANDLE", None)
+                if handle_value:
+                    env["ORCH_OUTWARD_HANDLE"] = handle_value
+                if session_value:
+                    env["ORCH_OUTWARD_SESSION"] = session_value
                 env["ORCH_GITHUB_BROKER_SOCKET"] = str(socket_path)
                 env["PYTHONPATH"] = str(ROOT)
                 if path_kind == "broker":
@@ -178,11 +241,9 @@ def main() -> int:
                 else:
                     env["PATH"] = str(worker_root / "usr" / "bin") + os.pathsep + env.get("PATH", "")
                     binary = str(worker_root / "usr" / "bin" / "gh")
-                # Rebind broker's FakeRedis by restarting is heavy; BROKER_BOUND is
-                # read at broker import. Toggle by env on a new connection is not
-                # enough. Send session and rely on broker process env BROKER_BOUND.
+                extra = ["--session", session_value] if session_value else []
                 return subprocess.run(
-                    [binary, *argv],
+                    [binary, *extra, *argv],
                     capture_output=True,
                     text=True,
                     env=env,
@@ -191,8 +252,7 @@ def main() -> int:
 
             bound_write = run_worker(
                 ["api", "-X", "POST", "repos/palios-taey/x/statuses/abc", "-f", "state=success"],
-                bound=True,
-                path_kind="broker",
+                handle_value=handle,
             )
             _check(
                 "bound broker write reaches inner gh with token",
@@ -201,9 +261,31 @@ def main() -> int:
             )
             before = list(_sink_events(sink))
 
+            spoof = run_worker(
+                ["pr", "merge", "32"],
+                handle_value="",
+                session_value=session,
+            )
+            _check(
+                "stale worker spoofing victim session without handle denied",
+                spoof.returncode == 1 and "possession handle" in spoof.stderr,
+                (spoof.returncode, spoof.stderr),
+            )
+            _check("session spoof did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
+
+            swap = run_worker(
+                ["pr", "merge", "32"],
+                handle_value=handle,
+                session_value="other-victim",
+            )
+            _check(
+                "handle cannot be exchanged for another session",
+                swap.returncode == 1 and "cannot be exchanged" in swap.stderr,
+                (swap.returncode, swap.stderr),
+            )
+
             system_write = run_worker(
                 ["api", "-X", "POST", "repos/palios-taey/x/statuses/abc"],
-                bound=True,
                 path_kind="system",
             )
             _check(
@@ -212,67 +294,25 @@ def main() -> int:
                 (system_write.returncode, system_write.stderr),
             )
             _check("system gh did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
-        finally:
-            broker_proc.terminate()
-            try:
-                broker_proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                broker_proc.kill()
 
-        # Restart broker unbound (no current_task) to prove revocation.
-        broker_env["BROKER_BOUND"] = "0"
-        broker_proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "scripts" / "github-brokerd")],
-            env=broker_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            if socket_path.exists():
-                socket_path.unlink()
-            for _attempt in range(50):
-                if socket_path.exists():
-                    break
-                time.sleep(0.05)
-            env = os.environ.copy()
-            env.pop("GH_TOKEN", None)
-            env["ORCH_OUTWARD_SESSION"] = session
-            env["ORCH_GITHUB_BROKER_SOCKET"] = str(socket_path)
-            env["PYTHONPATH"] = str(ROOT)
-            env["PATH"] = str(worker_root / "bin") + os.pathsep + env.get("PATH", "")
-            before = list(_sink_events(sink))
-            unbound_merge = subprocess.run(
-                [str(worker_root / "bin" / "gh"), "pr", "merge", "32"],
-                capture_output=True,
-                text=True,
-                env=env,
-                check=False,
-            )
+            revoke_outward_handle(handle, redis_client=redis)
+            redis.delete(state_key(session, "current_task"))
+            stale = run_worker(["pr", "merge", "32"], handle_value=handle)
             _check(
-                "unbound broker pr merge denied",
-                unbound_merge.returncode == 1 and "SAFETY DENY" in unbound_merge.stderr,
-                (unbound_merge.returncode, unbound_merge.stderr),
+                "revoked handle denied after unbind",
+                stale.returncode == 1 and "revoked outward possession handle" in stale.stderr,
+                (stale.returncode, stale.stderr),
             )
-            _check("unbound broker pr merge did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
-            unknown = subprocess.run(
-                [str(worker_root / "bin" / "gh"), "mystery", "mutate"],
-                capture_output=True,
-                text=True,
-                env=env,
-                check=False,
-            )
+            _check("revoked handle did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
+            unknown = run_worker(["mystery", "mutate"], handle_value="")
             _check(
                 "unbound unknown argv fail-closed",
                 unknown.returncode == 1 and "SAFETY DENY" in unknown.stderr,
                 (unknown.returncode, unknown.stderr),
             )
-            get_status = subprocess.run(
-                [str(worker_root / "bin" / "gh"), "api", "repos/palios-taey/x/commits/abc/statuses?per_page=100"],
-                capture_output=True,
-                text=True,
-                env=env,
-                check=False,
+            get_status = run_worker(
+                ["api", "repos/palios-taey/x/commits/abc/statuses?per_page=100"],
+                handle_value="",
             )
             _check(
                 "classified GET still works after unbind",
