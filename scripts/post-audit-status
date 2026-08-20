@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fleet_orchestrator.outward_github_mutation import (  # noqa: E402
+from fleet_orchestrator.outward_capability import (  # noqa: E402
     OutwardAuthorizationError,
     post_commit_status,
     resolve_session_id,
