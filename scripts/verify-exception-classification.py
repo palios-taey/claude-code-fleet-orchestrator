@@ -210,6 +210,10 @@ def check(
         if handler is None:
             errors.append(f"{entry.label} is classified but no matching handler exists")
             continue
+        if entry.line_hint != handler.line:
+            errors.append(
+                f"{entry.label} line hint does not match AST handler line {handler.line}"
+            )
         if entry.category == "defect" and not LOGGING_CALL_RE.search(handler.source):
             errors.append(f"{entry.label} defect handler lacks observable logging")
         if not entry.rationale:

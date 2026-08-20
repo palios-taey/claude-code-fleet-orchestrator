@@ -65,8 +65,9 @@ def _events_for_task(rows: list[dict], task_id: str) -> list[dict]:
 def _fake_bind(fake: FakeRedis):
     def bind_current_task(*, worker: str, task_id: str, description: str, supervisor: str | None,
                           set_parent: bool, force: bool, guard_existing: bool,
-                          dispatcher: str | None) -> float:
-        started_at = 123.0
+                          dispatcher: str | None, parent_claim_out: dict | None = None,
+                          binding_nonce: float | None = None) -> float:
+        started_at = 123.0 if binding_nonce is None else binding_nonce
         current_task = {
             "task_id": task_id,
             "description": description,
@@ -75,6 +76,16 @@ def _fake_bind(fake: FakeRedis):
             "dispatcher": dispatcher,
         }
         fake.set(dispatch_module._state_key(worker, "current_task"), json.dumps(current_task))
+        if set_parent and supervisor:
+            parent_key = dispatch_module._state_key(worker, "parent")
+            prior_parent = fake.get(parent_key)
+            fake.set(parent_key, supervisor)
+            if parent_claim_out is not None:
+                parent_claim_out.update({
+                    "prior_parent_present": prior_parent is not None,
+                    "prior_parent": prior_parent,
+                    "expected_parent": supervisor,
+                })
         return started_at
 
     return bind_current_task
@@ -126,9 +137,16 @@ def main() -> int:
             raise RuntimeError("simulated wake_delivered append failure")
         return append_event(event_type, **kwargs)
 
-    def fake_rollback(worker_arg: str, task_id_arg: str, binding_nonce: float | None) -> None:
+    def fake_rollback(worker_arg: str, task_id_arg: str, binding_nonce: float | None, *,
+                      parent_claim: dict | None = None) -> None:
         captured_rollbacks.append((worker_arg, task_id_arg, binding_nonce))
         fake.delete(dispatch_module._state_key(worker_arg, "current_task"))
+        if parent_claim:
+            parent_key = dispatch_module._state_key(worker_arg, "parent")
+            if parent_claim.get("prior_parent_present"):
+                fake.set(parent_key, parent_claim.get("prior_parent"))
+            else:
+                fake.delete(parent_key)
 
     def fake_clear(worker_arg: str, task_id_arg: str, redis_client: FakeRedis, reason: str) -> bool:
         fake.delete(dispatch_module._state_key(worker_arg, "current_task"))

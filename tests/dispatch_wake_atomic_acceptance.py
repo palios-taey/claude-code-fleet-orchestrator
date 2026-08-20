@@ -10,7 +10,7 @@ Cases:
   2. successful wake -> in_progress + binding set                                  (no regression)
   3. worker moved to T2 (overlap): rollback(T1) reverts T1 (safe) but PRESERVES T2 binding (V2)
   4. T1 re-claimed by a newer nonce: rollback(old) leaves status AND binding alone (V1)
-  5. rollback neo failure is LOGGED, never raised                                   (V4)
+  5. rollback graph failure is LOGGED, never raised                                 (V4)
 
 Env: ORCH_NEO4J_URI, ORCH_NEO4J_DB, ORCH_REDIS_HOST/PORT, ORCH_DASHBOARD_URL, ORCH_NOTIFY_LIB_ROOT.
 """
@@ -59,9 +59,22 @@ def main() -> int:
             r = s.run("MATCH (t:OrchTask {id:$i}) RETURN t.status AS st", i=tid).single()
             return r["st"] if r else None
 
-    def set_status(tid: str, st: str):
+    def set_status(tid: str, st: str, binding_nonce: float):
         with drv.session(database=cfg.neo4j_db) as s:
-            s.run("MATCH (t:OrchTask {id:$i}) SET t.status=$st, t.owner=$w", i=tid, st=st, w=_WORKER)
+            s.run(
+                """
+                MATCH (t:OrchTask {id:$i})
+                SET t.status=$st,
+                    t.owner=$w,
+                    t.dispatched_to=$w,
+                    t.dispatch_claim_worker=$w,
+                    t.dispatch_claim_started_at=$binding_nonce
+                """,
+                i=tid,
+                st=st,
+                w=_WORKER,
+                binding_nonce=binding_nonce,
+            )
 
     def get_ct(worker: str):
         return D._redis_connect().get(D._state_key(worker, "current_task"))
@@ -126,7 +139,7 @@ def main() -> int:
 
         # 3. OVERLAP (V2): worker moved to T2; rollback(T1) reverts T1 but keeps T2's binding
         t1, t2 = f"{_PFX}::t1", f"{_PFX}::t2"
-        set_status(t1, "in_progress")
+        set_status(t1, "in_progress", 111.0)
         set_ct(_WORKER, t2, 222.0)          # worker is now bound to T2
         D._rollback_claim(_WORKER, t1, 111.0)  # T1's failed dispatch (nonce 111 != live 222/T2)
         _check("overlap: T1 reverted to pending (T1-specific, safe)", task_status(t1) == "pending", task_status(t1))
@@ -135,7 +148,7 @@ def main() -> int:
                bool(ct) and json.loads(ct)["task_id"] == t2, ct)
 
         # 4. RE-CLAIM (V1): T1 re-dispatched with a newer nonce; rollback(old nonce) is a no-op
-        set_status(t1, "in_progress")
+        set_status(t1, "in_progress", 999.0)
         set_ct(_WORKER, t1, 999.0)          # T1 re-bound with a NEW nonce
         D._rollback_claim(_WORKER, t1, 111.0)  # the OLD dispatch's stale rollback
         _check("reclaim: T1 stays in_progress (newer claim not clobbered)",
@@ -144,9 +157,9 @@ def main() -> int:
         _check("reclaim: newer T1 binding untouched",
                bool(ct) and json.loads(ct)["started_at"] == 999.0, ct)
 
-        # 5. OBSERVABILITY (V4): a neo failure during rollback is LOGGED, never raised
+        # 5. OBSERVABILITY (V4): a graph failure during rollback is LOGGED, never raised
         tlog = f"{_PFX}::tlog"
-        set_status(tlog, "in_progress")
+        set_status(tlog, "in_progress", 333.0)
         set_ct(_WORKER, tlog, 333.0)
         orig = D.get_neo4j_session
         D.get_neo4j_session = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("forced neo down"))
@@ -155,14 +168,14 @@ def main() -> int:
         D.logger.addHandler(h); D.logger.setLevel(logging.WARNING)
         try:
             D._rollback_claim(_WORKER, tlog, 333.0)  # must NOT raise
-            _check("observability: rollback does not raise on neo failure", True)
+            _check("observability: rollback does not raise on graph failure", True)
         except Exception as e:
-            _check("observability: rollback does not raise on neo failure", False, repr(e))
+            _check("observability: rollback does not raise on graph failure", False, repr(e))
         finally:
             D.get_neo4j_session = orig
             D.logger.removeHandler(h)
-        _check("observability: neo revert failure is LOGGED",
-               any("neo revert" in m for m in cap), str(cap))
+        _check("observability: graph revert failure is LOGGED",
+               any("graph revert" in m for m in cap), str(cap))
     finally:
         clean()
         os.environ.pop("ORCH_NOTIFY_CLI", None)

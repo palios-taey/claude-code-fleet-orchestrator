@@ -78,7 +78,30 @@ def main() -> None:
             critical_files=("fleet_orchestrator/orch_schema.py",),
             registry_path=registry,
         )
-        assert errors == [], errors
+        assert errors == [
+            "fleet_orchestrator/orch_schema.py:4 known except Exception#1 "
+            "line hint does not match AST handler line 5"
+        ], errors
+        _write_registry(
+            registry,
+            [
+                (
+                    "fleet_orchestrator/orch_schema.py",
+                    "known",
+                    "Exception",
+                    1,
+                    5,
+                    "harmless-best-effort",
+                    "line hint matches the AST handler",
+                    "no behavior change",
+                )
+            ],
+        )
+        assert gate.check(
+            temp_root,
+            critical_files=("fleet_orchestrator/orch_schema.py",),
+            registry_path=registry,
+        ) == []
 
     with tempfile.TemporaryDirectory() as tmp:
         temp_root = Path(tmp)
