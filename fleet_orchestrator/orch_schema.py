@@ -3003,6 +3003,15 @@ def create_task(
     initial_status: str = "pending",
     wake_owner_if_ready: bool = True,
     delivery_gate: Optional[bool] = None,
+    # Trusted immutable audit contract (P0 fix): set only at creation by supervisor/plan (supervisor-only).
+    # Evidence/producer CANNOT select class or overwrite pins. completion_class="audit" loads
+    # exact repo/head/base + task-pinned contexts/states/ids for verifier (no merge required).
+    completion_class: str = "standard",
+    audit_repo: Optional[str] = None,
+    audit_head: Optional[str] = None,
+    audit_base: Optional[str] = None,
+    required_audit_contexts: Optional[List[str]] = None,
+    audit_receipt: Optional[str] = None,
     config: Optional[OrchConfig] = None,
 ) -> str:
     """Create an OrchTask linked to a phase."""
@@ -3055,7 +3064,14 @@ def create_task(
                 t.delivery_gate = CASE
                     WHEN $delivery_gate IS NULL THEN coalesce(t.delivery_gate, false)
                     ELSE $delivery_gate
-                END
+                END,
+                # Trusted immutable (loaded from OrchTask, not producer evidence)
+                t.completion_class = $completion_class,
+                t.audit_repo = $audit_repo,
+                t.audit_head = $audit_head,
+                t.audit_base = $audit_base,
+                t.required_audit_contexts = $required_audit_contexts,
+                t.audit_receipt = $audit_receipt
             MERGE (ph)-[:HAS_TASK]->(t)
             RETURN t.id AS id
         """,
@@ -3074,6 +3090,12 @@ def create_task(
             heartbeat_exempt_secs=heartbeat_exempt_secs,
             initial_status=initial_status,
             delivery_gate=delivery_gate,
+            completion_class=completion_class,
+            audit_repo=audit_repo,
+            audit_head=audit_head,
+            audit_base=audit_base,
+            required_audit_contexts=required_audit_contexts or [],
+            audit_receipt=audit_receipt,
         )
         record = result.single()
         if record is None:
@@ -3367,8 +3389,21 @@ def update_task_status(task_id: str, status: str, owner: str = "",
             delivery_gate=delivery_gate,
         )
         completed_by_value = completed_by or owner or ""
+        # Load trusted audit contract from OrchTask (immutable); pass to verifier so evidence cannot select/overwrite
+        task_audit = None
+        if status == "completed":
+            ta = session.run("""
+                MATCH (t:OrchTask {id: $task_id})
+                RETURN t.completion_class AS completion_class,
+                       t.audit_repo AS audit_repo, t.audit_head AS audit_head,
+                       t.audit_base AS audit_base,
+                       t.required_audit_contexts AS required_audit_contexts,
+                       t.audit_receipt AS audit_receipt
+            """, task_id=task_id).single()
+            if ta:
+                task_audit = dict(ta)
         completion_verification_value = (
-            verify_completion_evidence(completion_evidence_value, producer=completed_by_value)
+            verify_completion_evidence(completion_evidence_value, producer=completed_by_value, trusted_task_audit=task_audit)
             if status == "completed"
             else None
         )

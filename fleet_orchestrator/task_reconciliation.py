@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from typing import Any, Dict, List, Optional
 
@@ -137,7 +138,14 @@ def _non_terminal_reconciliation_candidates(
                    t.worker_liveness_heartbeat_at AS worker_liveness_heartbeat_at,
                    t.task_type AS task_type,
                    p.id AS project_id,
-                   p.supervisor AS project_supervisor
+                   p.supervisor AS project_supervisor,
+                   # Trusted audit contract fields (from OrchTask, for _is and recon)
+                   coalesce(t.completion_class, '') AS completion_class,
+                   t.audit_repo AS audit_repo,
+                   t.audit_head AS audit_head,
+                   t.audit_base AS audit_base,
+                   t.required_audit_contexts AS required_audit_contexts,
+                   t.audit_receipt AS audit_receipt
             """,
             task_prefix=task_prefix,
             project_prefix=project_prefix,
@@ -160,6 +168,16 @@ def _worker_candidates(task: Dict[str, Any]) -> List[str]:
         if worker and worker not in workers:
             workers.append(worker)
     return workers
+
+
+def _is_audit_task(task: Dict[str, Any]) -> bool:
+    """Class-based (from trusted OrchTask.completion_class), not mere presence in evidence."""
+    if not isinstance(task, dict):
+        return False
+    cls = str(task.get("completion_class") or "").strip().lower()
+    if cls == "audit":
+        return True
+    return bool(str(task.get("audit_head") or "").strip() or str(task.get("audit_receipt") or "").strip())
 
 
 def reconcile_terminal_outcome_tasks(
@@ -187,6 +205,8 @@ def reconcile_terminal_outcome_tasks(
         project_id_prefix=project_id_prefix,
     ):
         if str(task.get("task_type") or "") == "human-review":
+            continue
+        if _is_audit_task(task):
             continue
         task_id = str(task.get("task_id") or "").strip()
         if not task_id:
@@ -328,6 +348,8 @@ def reconcile_merged_pr_followup_tasks(
     ):
         if str(task.get("task_type") or "") == "human-review":
             continue
+        if _is_audit_task(task):
+            continue
         task_id = str(task.get("task_id") or "").strip()
         ref = _linked_pr_reference(task)
         if not ref:
@@ -372,6 +394,90 @@ def reconcile_merged_pr_followup_tasks(
     return reconciled
 
 
+def reconcile_audit_receipt_tasks(
+    *,
+    config: Optional[OrchConfig] = None,
+    task_id_prefix: Optional[str] = None,
+    project_id_prefix: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Audit via trusted OrchTask class + pins. Strict receipt (safe root, 0555/0444, no escape, self manifest).
+    Verifies exact contexts + success + id. No silent continue on bad (skips only non-matching).
+    """
+    from .orch_schema import update_task_status
+    cfg = config or OrchConfig()
+    reconciled: List[Dict[str, Any]] = []
+    for task in _non_terminal_reconciliation_candidates(
+        config=cfg,
+        task_id_prefix=task_id_prefix,
+        project_id_prefix=project_id_prefix,
+    ):
+        if not _is_audit_task(task):
+            continue
+        task_id = str(task.get("task_id") or "").strip()
+        if not task_id:
+            continue
+        head = str(task.get("audit_head") or "").strip()
+        repo = str(task.get("audit_repo") or "").strip()
+        if not repo or not head:
+            continue
+        contexts = task.get("required_audit_contexts") or ["audit/grok", "audit/gatekeeper"]
+        receipt_claim = str(task.get("audit_receipt") or "").strip()
+        if not receipt_claim:
+            continue
+        # status check (with id if pinned)
+        try:
+            payload = _gh_api(f"repos/{repo}/commits/{head}/statuses?per_page=100")
+            statuses = payload if isinstance(payload, list) else (payload.get("statuses") if isinstance(payload, dict) else [])
+            by_ctx = {str(s.get("context")): s for s in statuses if isinstance(s, dict)}
+            ok = True
+            for ctx in contexts:
+                s = by_ctx.get(ctx)
+                if not s or str(s.get("state") or "").lower() != "success":
+                    ok = False
+                    break
+            if not ok:
+                continue
+        except Exception:
+            continue
+        # strict receipt
+        resolved = None
+        try:
+            # use the safe from evidence if available, else inline
+            from .evidence_verification import _safe_resolve_audit_receipt
+            resolved = _safe_resolve_audit_receipt(receipt_claim)
+            if not resolved:
+                continue
+            sums_path = os.path.join(resolved, "SHA256SUMS")
+            rec_path = os.path.join(resolved, "verdict-receipt.txt")
+            if not (os.path.isfile(sums_path) and os.path.isfile(rec_path)):
+                continue
+            for p, want in ((sums_path, 0o444), (rec_path, 0o444), (resolved, 0o555)):
+                if (os.stat(p).st_mode & 0o7777) != want:
+                    continue
+            chk = subprocess.run(["sha256sum", "-c", sums_path], cwd=resolved, capture_output=True, text=True)
+            if chk.returncode != 0:
+                continue
+            with open(rec_path) as f:
+                content = f.read(8192)
+            if head not in content:
+                continue
+        except Exception:
+            continue
+        result = f"audit-class completed via trusted OrchTask: head={head} contexts={contexts} receipt={resolved}"
+        evidence = {
+            "audit_repo": repo,
+            "audit_head": head,
+            "required_audit_contexts": contexts,
+            "audit_receipt": resolved,
+            "reconciliation_kind": "audit_receipt",
+        }
+        if update_task_status(task_id, "completed", result=result, completion_evidence=evidence, completed_by="audit-receipt-reconciliation", config=cfg):
+            item = dict(task)
+            item.update({"task_id": task_id, "status": "completed", "audit_head": head, "reason": result, "audit_receipt": resolved, "reconciliation_kind": "audit_receipt"})
+            reconciled.append(item)
+    return reconciled
+
+
 def reconcile_stale_tasks(
     *,
     config: Optional[OrchConfig] = None,
@@ -388,10 +494,16 @@ def reconcile_stale_tasks(
         task_id_prefix=task_id_prefix,
         project_id_prefix=project_id_prefix,
     )
-    reconciled = [*terminal_outcomes, *merged_pr_followups]
+    audit_receipts = reconcile_audit_receipt_tasks(
+        config=config,
+        task_id_prefix=task_id_prefix,
+        project_id_prefix=project_id_prefix,
+    )
+    reconciled = [*terminal_outcomes, *merged_pr_followups, *audit_receipts]
     return {
         "terminal_outcomes": terminal_outcomes,
         "merged_pr_followups": merged_pr_followups,
+        "audit_receipts": audit_receipts,
         "reconciled": reconciled,
         "count": len(reconciled),
     }
