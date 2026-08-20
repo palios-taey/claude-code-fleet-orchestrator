@@ -133,8 +133,8 @@ def peer_self_completion_rejection(task_id: str,
     peer = str(sender or "").strip()
     if not peer:
         return None
-    supervisor = _autonomous_peer_supervisor(peer, config=config)
-    if not supervisor:
+    natural_supervisor = _autonomous_peer_supervisor(peer, config=config)
+    if not natural_supervisor:
         return None
 
     dispatched_to = str(task_before.get("dispatched_to") or "").strip()
@@ -144,7 +144,12 @@ def peer_self_completion_rejection(task_id: str,
         return None
 
     project_supervisor = _task_project_supervisor(task_id, config)
-    if project_supervisor != supervisor:
+    supervisor = owner if owner and owner != peer else project_supervisor
+    if (
+        not supervisor
+        or supervisor == peer
+        or supervisor.strip().lower() in {"unassigned", "unknown", "none", "null"}
+    ):
         return None
 
     return {
@@ -155,7 +160,7 @@ def peer_self_completion_rejection(task_id: str,
         ),
         "task_id": task_id,
         "status": task_before.get("status"),
-        "supervisor": project_supervisor,
+        "supervisor": supervisor,
         "next_step": f"taey-task outcome {outcome_command} --details '<short outcome summary>'",
     }
 

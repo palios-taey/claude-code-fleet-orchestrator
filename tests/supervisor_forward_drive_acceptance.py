@@ -5,7 +5,8 @@ Issue #154 root cause: a supervised peer could mark its own task completed,
 which removed it from the supervisor stop-engine path before the supervisor
 audited the result. The contract is now:
 
-1. A supervised autonomous peer cannot PATCH its own task to completed.
+1. A supervised autonomous peer, including a cross-family worker, cannot PATCH
+   its own task to completed.
 2. The peer reports done with record_outcome().
 3. The done report wakes the supervisor and leaves the task gateable.
 4. The supervisor closes the task with evidence.
@@ -70,7 +71,7 @@ PROJECT = f"{PFX}-project"
 PHASE = f"{PROJECT}::phase"
 TASK = f"{PROJECT}::peer-task"
 SUP = f"{PFX}-sup"
-PEER = f"{SUP}-gemini"
+PEER = f"{PFX}-specialist-gemini"
 FAILURES: list[str] = []
 
 
@@ -146,6 +147,7 @@ def main() -> int:
             },
         )
         _check("peer PATCH completed is rejected", rejected.status_code == 409, rejected.text)
+        _check("peer rejection names controlling supervisor", rejected.json().get("supervisor") == SUP, rejected.text)
         task = get_task(TASK, config=CFG)
         _check("rejected peer self-completion leaves task in_progress", task.get("status") == "in_progress", task)
 
