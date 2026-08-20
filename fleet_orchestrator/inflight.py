@@ -115,9 +115,10 @@ def active_turn_valid_for_task(r: Any, worker: str, task_id: str, current_time: 
         if str(cur.get("task_id") or "") != task_id:
             return False
 
-        # 2. future lease members
+        # 2. future lease members (strict > current_time for the lease expiry)
+        # Use exclusive-min syntax so score == current_time is not accepted.
         turn_key = state_key(worker, "active_turns")
-        members = r.zrangebyscore(turn_key, current_time, "+inf")
+        members = r.zrangebyscore(turn_key, f"({current_time}", "+inf")
         if not members:
             return False
 

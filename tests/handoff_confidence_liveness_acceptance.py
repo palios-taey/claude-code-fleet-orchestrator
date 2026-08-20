@@ -242,7 +242,61 @@ def main() -> int:
             liveness = _liveness(client)
             _check(f"malformed ctx: {label} => not working", liveness.get("state") != "working", liveness)
 
-        # cleanup this block
+        # cleanup field negatives
+        notify_r.zrem(z_key, turn_id)
+        notify_r.delete(cur_key)
+        notify_r.hdel(ctx_key, turn_id)
+
+        # Multi-member regression: invalid first + valid later must still produce working
+        # (validator must not short-circuit on first invalid member)
+        turn_bad = "bad-first-member"
+        turn_good = "good-later-member"
+        future1 = time.time() + 500
+        future2 = time.time() + 600
+        notify_r.zadd(z_key, {turn_bad: future1, turn_good: future2})
+        # bad ctx for first (bad gen)
+        notify_r.hset(ctx_key, turn_bad, json.dumps({**base_ctx, "turn_id": turn_bad, "process_generation": "bad"}))
+        # good ctx for later
+        good_gen = "0123456789abcdef0123456789abcdef"
+        notify_r.hset(ctx_key, turn_good, json.dumps({
+            "turn_id": turn_good,
+            "seat_id": WORKER,
+            "event_id": "e-good",
+            "correlation_id": "c-good",
+            "tool_profile": "full",
+            "process_generation": good_gen,
+            "started_at": time.time() - 5
+        }))
+        notify_r.set(cur_key, json.dumps({"task_id": TASK, "started_at": time.time()}))
+        liveness = _liveness(client)
+        _check("invalid first + valid later member => working (multi-member regression)", liveness.get("state") == "working", liveness)
+
+        # cleanup
+        notify_r.zrem(z_key, turn_bad)
+        notify_r.zrem(z_key, turn_good)
+        notify_r.delete(cur_key)
+        notify_r.hdel(ctx_key, turn_bad)
+        notify_r.hdel(ctx_key, turn_good)
+
+        # Equal-score regression: score == current_time must NOT be accepted as future lease
+        # Use direct validator call with controlled current_time for exact boundary test
+        from fleet_orchestrator.inflight import active_turn_valid_for_task
+        eq_time = 1730000000.0
+        notify_r.zadd(z_key, {turn_id: eq_time})
+        notify_r.hset(ctx_key, turn_id, json.dumps({
+            "turn_id": turn_id,
+            "seat_id": WORKER,
+            "event_id": "e-eq",
+            "correlation_id": "c-eq",
+            "tool_profile": "full",
+            "process_generation": good_gen,
+            "started_at": eq_time - 100
+        }))
+        notify_r.set(cur_key, json.dumps({"task_id": TASK, "started_at": eq_time - 50}))
+        valid_at_eq = active_turn_valid_for_task(notify_r, WORKER, TASK, eq_time)
+        _check("equal-score (== current_time) => not valid lease (strict >)", not valid_at_eq, valid_at_eq)
+
+        # cleanup
         notify_r.zrem(z_key, turn_id)
         notify_r.delete(cur_key)
         notify_r.hdel(ctx_key, turn_id)
