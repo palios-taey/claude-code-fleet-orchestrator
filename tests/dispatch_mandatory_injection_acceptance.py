@@ -85,6 +85,10 @@ def _dispatch_body(*, worker: str, supervisor: str, prompt_body: str | None,
             "SUPERVISOR_RULE_MANDATORY_DISPATCH",
             encoding="utf-8",
         )
+        (rules_root / "supervisors" / f"{supervisor}.md").write_text(
+            "SUPERVISOR_RULE_MANDATORY_DISPATCH",
+            encoding="utf-8",
+        )
         (rules_root / "projects" / f"{project_id}.md").write_text(
             "PROJECT_RULE_MANDATORY_DISPATCH",
             encoding="utf-8",
@@ -97,6 +101,10 @@ def _dispatch_body(*, worker: str, supervisor: str, prompt_body: str | None,
             encoding="utf-8",
         )
         (memory_root / "supervisors" / f"{worker.removesuffix('-codex')}.md").write_text(
+            "---\nname: supervisor dispatch memory\ndescription: dispatch supervisor\n---\nSUPERVISOR_MEMORY_MANDATORY_DISPATCH\n",
+            encoding="utf-8",
+        )
+        (memory_root / "supervisors" / f"{supervisor}.md").write_text(
             "---\nname: supervisor dispatch memory\ndescription: dispatch supervisor\n---\nSUPERVISOR_MEMORY_MANDATORY_DISPATCH\n",
             encoding="utf-8",
         )
@@ -131,7 +139,11 @@ def _dispatch_body(*, worker: str, supervisor: str, prompt_body: str | None,
                  mock.patch.object(dispatch_module, "_claim_ready_orch_task"), \
                  mock.patch.object(dispatch_module, "mark_superseded_for_task"), \
                  mock.patch.object(dispatch_module, "bind_current_task", return_value=123.0), \
-                 mock.patch.object(dispatch_module, "OrchConfig", return_value=SimpleNamespace(notify_cli_path="notify")), \
+                 mock.patch.object(
+                     dispatch_module,
+                     "OrchConfig",
+                     return_value=SimpleNamespace(notify_cli_path="notify", session_ids=[]),
+                 ), \
                  mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
                  mock.patch.object(dispatch_module.subprocess, "run", side_effect=fake_run), \
                  mock.patch.object(dispatch_module, "maybe_emit_decision_receipt"), \

@@ -14,6 +14,7 @@ sys.path.insert(0, _REPO)
 from fleet_orchestrator.completion_guard import _autonomous_peer_supervisor  # noqa: E402
 from fleet_orchestrator import cli_orch_watch as watch  # noqa: E402
 from fleet_orchestrator import context_assembler  # noqa: E402
+from fleet_orchestrator import dispatch as orchestrator_dispatch  # noqa: E402
 from fleet_orchestrator import tasks_api  # noqa: E402
 from fleet_orchestrator.config import OrchConfigError, _parse_session_ids  # noqa: E402
 from fleet_orchestrator.control_principal_migration import codex_supervisor_mappings  # noqa: E402
@@ -144,6 +145,25 @@ def _topology_contract() -> None:
             "wake endpoint fails open before returning cross-seat context",
             mismatch.get("ok") is False and "recipient mismatch" in mismatch.get("error", ""),
             mismatch,
+        )
+        with mock.patch.object(
+            orchestrator_dispatch,
+            "select_wake_context",
+            side_effect=RuntimeError("forced ordinary fallback"),
+        ):
+            fallback_context, warning = orchestrator_dispatch._select_dispatch_context(
+                "conductor",
+                "demo::fallback",
+                "fallback recipient binding",
+                "conductor-codex",
+                "claude",
+            )
+        _check(
+            "dispatch fallback snapshot remains bound to the exact worker seat",
+            fallback_context["snapshot"]["session_id"] == "conductor"
+            and fallback_context["snapshot"]["resolved_work"]["dispatched_to"] == "conductor"
+            and "forced ordinary fallback" in warning,
+            {"context": fallback_context, "warning": warning},
         )
         _check(
             "orch-watch keeps a parentless codex control at the control seat",

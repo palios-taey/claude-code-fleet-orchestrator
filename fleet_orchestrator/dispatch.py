@@ -844,7 +844,7 @@ def _memory_root_from_env() -> Optional[Path]:
 def _minimal_dispatch_context(worker: str, task_id: str, description: str,
                               supervisor: Optional[str], cli: str) -> dict[str, Any]:
     cfg = OrchConfig()
-    session = control_principal_for_session(supervisor or worker, cfg.session_ids)
+    control_session = control_principal_for_session(supervisor or worker, cfg.session_ids)
     project = _project_hint_from_task_id(task_id)
     return {
         "overall_refs": [],
@@ -854,13 +854,13 @@ def _minimal_dispatch_context(worker: str, task_id: str, description: str,
         "task_refs": [],
         "identity": {},
         "supervisor_affordance": {},
-        "memory": get_memory(session, project=project, memory_root=_memory_root_from_env()),
-        "rules": get_rules(session, project=project, rules_root=_rules_root_from_env()),
+        "memory": get_memory(control_session, project=project, memory_root=_memory_root_from_env()),
+        "rules": get_rules(control_session, project=project, rules_root=_rules_root_from_env()),
         "rules_meta": {},
         "budget_used": 0,
         "snapshot": {
             "repo_head": "",
-            "session_id": session,
+            "session_id": worker,
             "cli": cli,
             "requested_task_id": task_id,
             "resolved_work": {
@@ -906,6 +906,14 @@ def _assemble_dispatch_prompt(worker: str, task_id: str, description: str,
     cli = _cli_for_worker(worker)
     context, warning = _select_dispatch_context(worker, task_id, description, supervisor, cli)
     packet = build_wake_packet(worker, context)
+    generated_for = str(packet.get("generated_for") or "").strip()
+    snapshot_session = str((packet.get("snapshot") or {}).get("session_id") or "").strip()
+    if generated_for != worker or snapshot_session != worker:
+        raise RuntimeError(
+            "dispatch wake packet recipient mismatch: "
+            f"worker={worker!r} generated_for={generated_for!r} "
+            f"snapshot_session={snapshot_session!r}"
+        )
     world_publication = publish_world_manifest_v0(
         subject={"worker": worker, "task_id": task_id, "supervisor": supervisor or CAUSAL_UNKNOWN},
         parents=causal_event_ids or [],
