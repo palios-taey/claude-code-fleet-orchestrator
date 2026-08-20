@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import io
+import json
 import os
 import re
 import sys
@@ -186,6 +187,120 @@ def main() -> int:
         liveness = _liveness(client)
         _check("fresh notify last_activity after dispatch => working", liveness.get("state") == "working", liveness)
 
+        # Strict ctx validation coverage (independent negatives for every required field).
+        # Positive uses production-shaped ctx: correct turn_id/seat_id, nonempty event/corr,
+        # allowed tool_profile, 32-hex gen, sane started_at, + current_task bound + future lease.
+        notify_r.delete(state_key(WORKER, "last_activity"))
+        notify_r.delete(state_key(WORKER, "idle"))
+        turn_id = "1466be908e1c4cf3bc22581b1c93ba7b"
+        future_score = time.time() + 3600
+        ctx_key = state_key(WORKER, "turn_context")
+        z_key = state_key(WORKER, "active_turns")
+        cur_key = state_key(WORKER, "current_task")
+
+        base_ctx = {
+            "turn_id": turn_id,
+            "seat_id": WORKER,
+            "event_id": "e1",
+            "correlation_id": "c1",
+            "tool_profile": "full",
+            "process_generation": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+            "started_at": time.time() - 10
+        }
+
+        def _set_ctx(d):
+            notify_r.hset(ctx_key, turn_id, json.dumps(d))
+
+        # ensure clean state for this block
+        notify_r.delete(cur_key)
+        notify_r.zrem(z_key, turn_id)
+        notify_r.hdel(ctx_key, turn_id)
+
+        # positive
+        notify_r.set(cur_key, json.dumps({"task_id": TASK, "started_at": time.time()}))
+        notify_r.zadd(z_key, {turn_id: future_score})
+        _set_ctx(base_ctx)
+        liveness = _liveness(client)
+        _check("valid ctx + current_task + future lease => working", liveness.get("state") == "working", liveness)
+
+        # independent negatives (keep current_task and ZSET, corrupt only one thing in ctx)
+        bad_cases = [
+            ("turn_id mismatch", {**base_ctx, "turn_id": "wrong-turn"}),
+            ("seat_id mismatch", {**base_ctx, "seat_id": "wrong-seat"}),
+            ("empty event_id", {**base_ctx, "event_id": ""}),
+            ("empty correlation_id", {**base_ctx, "correlation_id": ""}),
+            ("bad tool_profile", {**base_ctx, "tool_profile": "evil"}),
+            ("bad process_generation (not 32-hex)", {**base_ctx, "process_generation": "gen1"}),
+            ("bad process_generation (wrong chars)", {**base_ctx, "process_generation": "G"*32}),
+            ("bad started_at (future)", {**base_ctx, "started_at": time.time() + 1000}),
+            ("bad started_at (negative)", {**base_ctx, "started_at": -5}),
+            ("bad started_at (not number)", {**base_ctx, "started_at": "now"}),
+            ("missing fields (only gen)", {"process_generation": "a"*32}),
+        ]
+        for label, bad_ctx in bad_cases:
+            _set_ctx(bad_ctx)
+            liveness = _liveness(client)
+            _check(f"malformed ctx: {label} => not working", liveness.get("state") != "working", liveness)
+
+        # cleanup field negatives
+        notify_r.zrem(z_key, turn_id)
+        notify_r.delete(cur_key)
+        notify_r.hdel(ctx_key, turn_id)
+
+        # Multi-member regression: invalid first + valid later must still produce working
+        # (validator must not short-circuit on first invalid member)
+        turn_bad = "bad-first-member"
+        turn_good = "good-later-member"
+        future1 = time.time() + 500
+        future2 = time.time() + 600
+        notify_r.zadd(z_key, {turn_bad: future1, turn_good: future2})
+        # bad ctx for first (bad gen)
+        notify_r.hset(ctx_key, turn_bad, json.dumps({**base_ctx, "turn_id": turn_bad, "process_generation": "bad"}))
+        # good ctx for later
+        good_gen = "0123456789abcdef0123456789abcdef"
+        notify_r.hset(ctx_key, turn_good, json.dumps({
+            "turn_id": turn_good,
+            "seat_id": WORKER,
+            "event_id": "e-good",
+            "correlation_id": "c-good",
+            "tool_profile": "full",
+            "process_generation": good_gen,
+            "started_at": time.time() - 5
+        }))
+        notify_r.set(cur_key, json.dumps({"task_id": TASK, "started_at": time.time()}))
+        liveness = _liveness(client)
+        _check("invalid first + valid later member => working (multi-member regression)", liveness.get("state") == "working", liveness)
+
+        # cleanup
+        notify_r.zrem(z_key, turn_bad)
+        notify_r.zrem(z_key, turn_good)
+        notify_r.delete(cur_key)
+        notify_r.hdel(ctx_key, turn_bad)
+        notify_r.hdel(ctx_key, turn_good)
+
+        # Equal-score regression: score == current_time must NOT be accepted as future lease
+        # Use direct validator call with controlled current_time for exact boundary test
+        from fleet_orchestrator.inflight import active_turn_valid_for_task
+        eq_time = 1730000000.0
+        notify_r.zadd(z_key, {turn_id: eq_time})
+        notify_r.hset(ctx_key, turn_id, json.dumps({
+            "turn_id": turn_id,
+            "seat_id": WORKER,
+            "event_id": "e-eq",
+            "correlation_id": "c-eq",
+            "tool_profile": "full",
+            "process_generation": good_gen,
+            "started_at": eq_time - 100
+        }))
+        notify_r.set(cur_key, json.dumps({"task_id": TASK, "started_at": eq_time - 50}))
+        valid_at_eq = active_turn_valid_for_task(notify_r, WORKER, TASK, eq_time)
+        _check("equal-score (== current_time) => not valid lease (strict >)", not valid_at_eq, valid_at_eq)
+
+        # cleanup
+        notify_r.zrem(z_key, turn_id)
+        notify_r.delete(cur_key)
+        notify_r.hdel(ctx_key, turn_id)
+
         notify_r.set(state_key(WORKER, "idle"), "1")
         notify_r.set(state_key(WORKER, "last_activity"), str(time.time()))
         liveness = _liveness(client)
@@ -213,7 +328,7 @@ def main() -> int:
     if FAILURES:
         print(f"\nFAIL -- {len(FAILURES)}: {FAILURES}")
         return 1
-    print("\nPASS -- current-task handoff liveness is derived from notify Redis activity.")
+    print("\nPASS -- current-task handoff liveness derives working from durable active-turn ZSET signal (or last_activity).")
     return 0
 
 

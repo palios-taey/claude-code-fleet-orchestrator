@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from redis import RedisError
 
 from .config import OrchConfig
+from .inflight import active_turn_valid_for_task
 from .notify_state import redis_connect, state_key
 from .worker_liveness import worker_task_liveness_ttl_secs
 
@@ -87,7 +88,18 @@ def current_task_liveness(session_id: str,
         ttl = float(worker_task_liveness_ttl_secs())
     ttl = max(1.0, ttl)
 
-    if dispatch_started_at is None or last_activity is None or last_activity <= dispatch_started_at:
+    # Derive from durable active-turn: current_task binding (task_id match) + future ZSET member.
+    # Validator enforces current_task.task_id == task_id AND future lease (ZSET) + ctx present.
+    # No task_id inside turn_context (production shape); binding is the current_task Redis key.
+    has_valid_active_turn = active_turn_valid_for_task(
+        redis_client, worker, task_id, checked_at
+    )
+    if has_valid_active_turn:
+        state = "working"
+        age_base = last_activity or dispatch_started_at or checked_at
+        age_seconds = int(max(0.0, checked_at - age_base))
+        summary = "active turn (durable lease)"
+    elif dispatch_started_at is None or last_activity is None or last_activity <= dispatch_started_at:
         state = "awaiting_start"
         age_seconds = int(max(0.0, checked_at - dispatch_started_at)) if dispatch_started_at is not None else None
         summary = "dispatched, peer not yet started"

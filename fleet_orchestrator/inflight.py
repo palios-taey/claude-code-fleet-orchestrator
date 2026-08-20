@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
@@ -85,6 +86,98 @@ def _terminal_outcome_for_task(r: Any, worker: str, task_id: str, *, details_req
     return task_id in str(outcome.get("details") or "")
 
 
+def active_turn_valid_for_task(r: Any, worker: str, task_id: str, current_time: float) -> bool:
+    """Shared read-only validator for durable active-turn lease + binding.
+
+    Requires for at least one future ZSET member:
+    - current_task.task_id == queried task_id (the OrchTask binding)
+    - ctx.turn_id == ZSET member (tid)
+    - ctx.seat_id == worker
+    - ctx.event_id and ctx.correlation_id nonempty
+    - ctx.tool_profile in production allowlist ("full", "manual-chat-ui")
+    - ctx.process_generation exactly 32 [0-9a-f] (full match, not islower)
+    - ctx.started_at is finite and 0 < started_at <= current_time
+    - ZSET score (lease) > current_time
+
+    Rejects any malformed/mismatched field independently.
+    """
+    if not task_id:
+        return False
+    try:
+        # 1. current_task binding
+        cur_raw = r.get(state_key(worker, "current_task"))
+        cur = {}
+        if cur_raw:
+            try:
+                cur = json.loads(cur_raw.decode(errors="replace") if isinstance(cur_raw, (bytes, bytearray)) else cur_raw)
+            except Exception:
+                cur = {}
+        if str(cur.get("task_id") or "") != task_id:
+            return False
+
+        # 2. future lease members (strict > current_time for the lease expiry)
+        # Use exclusive-min syntax so score == current_time is not accepted.
+        turn_key = state_key(worker, "active_turns")
+        members = r.zrangebyscore(turn_key, f"({current_time}", "+inf")
+        if not members:
+            return False
+
+        ctx_key = state_key(worker, "turn_context")
+        allowed_profiles = {"full", "manual-chat-ui"}
+
+        for m in members:
+            tid_str = m.decode(errors="replace") if isinstance(m, (bytes, bytearray)) else str(m)
+
+            raw_ctx = r.hget(ctx_key, tid_str)
+            if not raw_ctx:
+                continue
+            try:
+                ctx = json.loads(raw_ctx.decode(errors="replace") if isinstance(raw_ctx, (bytes, bytearray)) else raw_ctx)
+            except Exception:
+                continue
+            if not isinstance(ctx, dict):
+                continue
+
+            # turn_id must match the ZSET member exactly
+            if str(ctx.get("turn_id") or "") != tid_str:
+                continue
+            # seat_id must match worker
+            if str(ctx.get("seat_id") or "") != worker:
+                continue
+
+            # event_id and correlation_id nonempty
+            if not str(ctx.get("event_id") or "").strip():
+                continue
+            if not str(ctx.get("correlation_id") or "").strip():
+                continue
+
+            # tool_profile in allowlist
+            profile = str(ctx.get("tool_profile") or "")
+            if profile not in allowed_profiles:
+                continue
+
+            # process_generation exactly 32 lowercase hex (full match)
+            gen = str(ctx.get("process_generation") or "")
+            if not re.fullmatch(r"[0-9a-f]{32}", gen):
+                continue
+
+            # started_at sane: finite, >0 and <= now
+            started = ctx.get("started_at")
+            try:
+                started_f = float(started)
+            except (TypeError, ValueError):
+                continue
+            if not (0 < started_f <= current_time):
+                continue
+
+            # If we reach here, this member has a fully valid ctx + we already have current_task match + future score
+            return True
+
+        return False
+    except Exception:
+        return False
+
+
 def active_inflight_signal(
     task_id: Optional[str],
     *,
@@ -136,6 +229,10 @@ def active_inflight_signal(
             if raise_on_probe_error:
                 raise InFlightProbeError(f"terminal outcome probe failed for {worker}") from exc
             pass
+        # Use shared validator (requires ctx + task match + future score)
+        if active_turn_valid_for_task(r, worker, task_id, current_time):
+            return InFlightSignal(source="active_turn", worker=worker)
+
         try:
             raw_tool_activity = r.get(state_key(worker, "last_tool_activity"))
         except Exception as exc:
