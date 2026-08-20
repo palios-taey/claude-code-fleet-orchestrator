@@ -2359,6 +2359,12 @@ def session_wake_packet(
     except HTTPException:
         raise
     except Exception as exc:
+        LOGGER.exception(
+            "wake_packet_assembly failed session=%s cli=%s task=%s",
+            session_id,
+            cli_key,
+            task_id,
+        )
         return {
             "ok": False,
             "enabled": True,

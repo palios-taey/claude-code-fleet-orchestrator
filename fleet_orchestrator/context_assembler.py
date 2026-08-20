@@ -82,6 +82,10 @@ KB_CONTENT_OMITTED_MARKER = (
     "full content omitted to satisfy the wake packet hard cap; retrieve the exact "
     "KnowledgeRevision by stable_key, revision_no, and content_sha256"
 )
+KB_POINTERS_OMITTED_MARKER = (
+    "KB bodies and summaries omitted to satisfy the wake packet hard cap; "
+    "retrieve each KnowledgeRevision by stable_key, revision_no, and content_sha256"
+)
 ENGINEERING_IDENTITY_CORE = "\n".join([
     "role: engineering",
     "- Operate as a scoped implementation or review agent for the local operator.",
@@ -1834,6 +1838,8 @@ def _budget_text(
 
 
 def _render_kb_context(items: List[Dict[str, Any]], nonce: str) -> List[str]:
+    if any(item.get("payload_omitted_for_budget") for item in items):
+        return _render_kb_provenance_pointers(items, nonce)
     lines: List[str] = []
     if any(item.get("content_omitted_for_budget") for item in items):
         lines.extend([f"- {KB_CONTENT_OMITTED_MARKER}", ""])
@@ -1875,29 +1881,64 @@ def _render_kb_context(items: List[Dict[str, Any]], nonce: str) -> List[str]:
     return lines
 
 
+def _render_kb_provenance_pointers(items: List[Dict[str, Any]], nonce: str) -> List[str]:
+    pointer_lines: List[str] = []
+    for item in items:
+        pointer_lines.extend([
+            f"stable_key: {item.get('stable_key', '')}",
+            f"revision_no: {item.get('revision_no', '')}",
+            f"content_sha256: {item.get('content_sha256', '')}",
+        ])
+        if item.get("deduped"):
+            pointer_lines.append("deduped: true")
+    return [
+        f"- {KB_POINTERS_OMITTED_MARKER}",
+        "",
+        *_render_untrusted(nonce, "kb:aggregate", "\n".join(pointer_lines)),
+        "",
+    ]
+
+
+def _packet_render_size(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> int:
+    return len(_render_packet(packet, cli, max_refs_per_tier).encode("utf-8"))
+
+
+def _omit_kb_revision_bodies(items: List[Dict[str, Any]]) -> None:
+    for item in items:
+        if (
+            not item.get("deduped")
+            and str(item.get("content") or "").strip()
+            and str(item.get("summary") or "").strip()
+        ):
+            item["content"] = ""
+            item["content_omitted_for_budget"] = True
+
+
+def _compact_kb_to_provenance_pointers(items: List[Dict[str, Any]]) -> None:
+    for item in items:
+        item["content"] = ""
+        item["content_omitted_for_budget"] = True
+        item["payload_omitted_for_budget"] = True
+
+
 def _trim_packet(packet: Dict[str, Any], cli: str, budget_bytes: int, max_refs_per_tier: int) -> Dict[str, Any]:
     trimmed = json.loads(json.dumps(packet))
     context = trimmed.setdefault("context", {})
-    while True:
-        size = len(_render_packet(trimmed, cli, max_refs_per_tier).encode("utf-8"))
-        if size <= budget_bytes:
-            break
+    while _packet_render_size(trimmed, cli, max_refs_per_tier) > budget_bytes:
         memory = context.get("memory") or []
         if not memory:
             break
         memory.pop()
         context["memory"] = memory
-    if len(_render_packet(trimmed, cli, max_refs_per_tier).encode("utf-8")) > budget_bytes:
-        kb_context = context.get("kb_context") or []
-        eligible = [
-            item for item in kb_context
-            if not item.get("deduped")
-            and str(item.get("content") or "").strip()
-            and str(item.get("summary") or "").strip()
-        ]
-        for item in eligible:
-            item["content"] = ""
-            item["content_omitted_for_budget"] = True
+    if _packet_render_size(trimmed, cli, max_refs_per_tier) <= budget_bytes:
+        return trimmed
+    kb_context = context.get("kb_context") or []
+    if not kb_context:
+        return trimmed
+    _omit_kb_revision_bodies(kb_context)
+    if _packet_render_size(trimmed, cli, max_refs_per_tier) <= budget_bytes:
+        return trimmed
+    _compact_kb_to_provenance_pointers(kb_context)
     return trimmed
 
 
