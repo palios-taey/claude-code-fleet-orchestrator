@@ -1799,14 +1799,25 @@ def check_previous_task(worker: str) -> Optional[dict]:
     return task
 
 
-def clear_current_task(worker: str) -> None:
-    """Force-clear the worker's current_task + last_outcome keys.
+def clear_current_task(worker: str) -> Dict[str, Any]:
+    """Force-clear the worker's live bind (Redis) and matching Neo4j liveness.
 
-    Normally the Stop hook clears these after notifying the supervisor —
+    Normally the Stop hook clears Redis after notifying the supervisor —
     but ONLY when the recorded outcome was ``done``. For ``error`` /
     ``interrupted`` / ``unknown`` outcomes the keys persist as a signal
     to the next dispatcher. This helper is the supervisor's explicit
     "I've seen the previous task's outcome, I'm moving on" acknowledgment
     — call it after investigating or after deciding to cancel.
+
+    Authoritative live binding is Redis ``current_task``. Status/plan
+    "WORKING" also reads Neo4j ``worker_liveness_*``; clearing only Redis
+    leaves a stale executor relation. Clear both for the previously bound
+    task id.
     """
-    clear_session_current_task(worker, redis_client=_redis_connect())
+    from .worker_liveness import clear_worker_task_liveness
+
+    cleared = clear_session_current_task(worker, redis_client=_redis_connect())
+    previous_task_id = str(cleared.get("previous_task_id") or "").strip()
+    if previous_task_id:
+        clear_worker_task_liveness(previous_task_id)
+    return cleared

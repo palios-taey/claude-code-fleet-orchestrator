@@ -114,13 +114,39 @@ def register_worker_task_liveness(
 
 
 def clear_worker_task_liveness(task_id: str, *, config: Optional[OrchConfig] = None) -> None:
+    """Clear live worker-task liveness for one OrchTask (Redis sidecar + Neo4j fields).
+
+    Redis ``current_task`` alone is not authoritative for status/plan "WORKING"
+    surfaces — those also read Neo4j ``worker_liveness_*``. Unbind and terminal
+    transitions must clear both, or the executor relation keeps refreshing.
+    """
     if not task_id:
         return
     try:
         _redis_connect().delete(worker_task_liveness_key(task_id))
     except Exception as exc:
         LOG.warning("worker task liveness Redis cleanup failed task=%s: %s", task_id, exc)
-        return
+    cfg = config or OrchConfig()
+    try:
+        driver = get_neo4j_driver(cfg)
+        with driver.session(database=cfg.neo4j_db) as session:
+            session.run(
+                """
+                MATCH (t:OrchTask {id: $task_id})
+                SET t.worker_liveness_worker = NULL,
+                    t.worker_liveness_supervisor = NULL,
+                    t.worker_liveness_started_at = NULL,
+                    t.worker_liveness_heartbeat_at = NULL,
+                    t.worker_liveness_ttl_secs = NULL,
+                    t.worker_liveness_ack_at = NULL,
+                    t.worker_liveness_escalated_at = NULL,
+                    t.worker_liveness_escalation_reason = NULL,
+                    t.updated_at = datetime()
+                """,
+                task_id=task_id,
+            )
+    except Exception as exc:
+        LOG.warning("worker task liveness Neo4j cleanup failed task=%s: %s", task_id, exc)
 
 
 def _json_dict(raw: Any) -> Optional[Dict[str, Any]]:

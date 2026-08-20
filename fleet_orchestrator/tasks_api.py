@@ -1610,11 +1610,20 @@ def supervisor_badges() -> Dict[str, Any]:
 
 @app.get("/api/sessions/{session_id}/current")
 def session_current(session_id: str) -> Dict[str, Any]:
-    """What this session is currently executing — top in_progress task with project/phase context."""
+    """What this session is currently executing — live Redis bind + Neo4j context.
+
+    Authoritative live binding is Redis ``current_task``. Neo4j in_progress /
+    ``dispatched_to`` alone must not keep showing WORKING after ``taey-task unbind``.
+    """
     cfg = _cfg()
     activity = get_session_liveness(session_id, config=cfg)
-    work = get_session_current_work(session_id, config=cfg)
-    if not work:
+    from fleet_orchestrator.current_task_binding import decode_current_task
+    from fleet_orchestrator.notify_state import redis_connect as _bind_redis
+    from fleet_orchestrator.notify_state import state_key as _bind_state_key
+
+    bound = decode_current_task(_bind_redis().get(_bind_state_key(session_id, "current_task"))) or {}
+    bound_task_id = str(bound.get("task_id") or "").strip()
+    if not bound_task_id:
         return {
             "session": session_id,
             "current": None,
@@ -1624,6 +1633,21 @@ def session_current(session_id: str) -> Dict[str, Any]:
                 f"No current task is bound for {session_id}. Run `taey-plan next {session_id}` "
                 f"or GET /api/sessions/{session_id}/next-ready to find ready work; inspect projects with "
                 f"GET /api/sessions/{session_id}/projects."
+            ),
+        }
+    work = get_session_current_work(session_id, config=cfg)
+    work_task_id = str((work or {}).get("top_task_id") or (work or {}).get("task_id") or "").strip()
+    if not work or work_task_id != bound_task_id:
+        return {
+            "session": session_id,
+            "current": None,
+            "activity": activity,
+            "liveness": None,
+            "bound_task_id": bound_task_id,
+            "next_action": (
+                f"Redis bind points at {bound_task_id} but Neo4j has no matching in-progress "
+                f"current work for {session_id}. Inspect `taey-task status {bound_task_id}` or "
+                f"re-dispatch / unbind."
             ),
         }
     from fleet_orchestrator.current_liveness import safe_current_task_liveness
@@ -1802,11 +1826,13 @@ async def clear_pause_session_endpoint(session_id: str, req: Request) -> Dict[st
 
 @app.delete("/api/sessions/{session_id}/current-task")
 def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
-    clear_current_task(session_id)
+    cleared = clear_current_task(session_id)
+    previous_task_id = str((cleared or {}).get("previous_task_id") or "").strip()
     return {
         "ok": True,
         "session": session_id,
         "unbound": True,
+        "previous_task_id": previous_task_id or None,
         "next_step": (
             f"Retry dispatch or inspect the session with GET /api/sessions/{session_id}/current "
             f"and `taey-task status <task-id>`."
