@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
@@ -86,18 +87,24 @@ def _terminal_outcome_for_task(r: Any, worker: str, task_id: str, *, details_req
 
 
 def active_turn_valid_for_task(r: Any, worker: str, task_id: str, current_time: float) -> bool:
-    """Shared read-only validator (per spec).
+    """Shared read-only validator for durable active-turn lease + binding.
 
-    - Require current_task.task_id == queried task_id (binds lease to the OrchTask)
-    - Iterate future ZSET members (not just first via num=1)
-    - For ANY: HGET + JSON parse to object/dict + process_generation is 32 lowercase hex
-      (production shape from presence _turn_payload / PROCESS_GENERATION)
-    Rejects malformed ctx (e.g. 'x'), invalid gen, no valid lease among members.
+    Requires for at least one future ZSET member:
+    - current_task.task_id == queried task_id (the OrchTask binding)
+    - ctx.turn_id == ZSET member (tid)
+    - ctx.seat_id == worker
+    - ctx.event_id and ctx.correlation_id nonempty
+    - ctx.tool_profile in production allowlist ("full", "manual-chat-ui")
+    - ctx.process_generation exactly 32 [0-9a-f] (full match, not islower)
+    - ctx.started_at is finite and 0 < started_at <= current_time
+    - ZSET score (lease) > current_time
+
+    Rejects any malformed/mismatched field independently.
     """
     if not task_id:
         return False
     try:
-        # bind via current_task
+        # 1. current_task binding
         cur_raw = r.get(state_key(worker, "current_task"))
         cur = {}
         if cur_raw:
@@ -108,15 +115,18 @@ def active_turn_valid_for_task(r: Any, worker: str, task_id: str, current_time: 
         if str(cur.get("task_id") or "") != task_id:
             return False
 
-        # future members - iterate (bounded in practice; no num=1 to avoid masking)
+        # 2. future lease members
         turn_key = state_key(worker, "active_turns")
         members = r.zrangebyscore(turn_key, current_time, "+inf")
         if not members:
             return False
 
         ctx_key = state_key(worker, "turn_context")
+        allowed_profiles = {"full", "manual-chat-ui"}
+
         for m in members:
             tid_str = m.decode(errors="replace") if isinstance(m, (bytes, bytearray)) else str(m)
+
             raw_ctx = r.hget(ctx_key, tid_str)
             if not raw_ctx:
                 continue
@@ -126,9 +136,42 @@ def active_turn_valid_for_task(r: Any, worker: str, task_id: str, current_time: 
                 continue
             if not isinstance(ctx, dict):
                 continue
-            gen = str(ctx.get("process_generation", ""))
-            if len(gen) == 32 and gen.islower() and all(c in "0123456789abcdef" for c in gen):
-                return True
+
+            # turn_id must match the ZSET member exactly
+            if str(ctx.get("turn_id") or "") != tid_str:
+                continue
+            # seat_id must match worker
+            if str(ctx.get("seat_id") or "") != worker:
+                continue
+
+            # event_id and correlation_id nonempty
+            if not str(ctx.get("event_id") or "").strip():
+                continue
+            if not str(ctx.get("correlation_id") or "").strip():
+                continue
+
+            # tool_profile in allowlist
+            profile = str(ctx.get("tool_profile") or "")
+            if profile not in allowed_profiles:
+                continue
+
+            # process_generation exactly 32 lowercase hex (full match)
+            gen = str(ctx.get("process_generation") or "")
+            if not re.fullmatch(r"[0-9a-f]{32}", gen):
+                continue
+
+            # started_at sane: finite, >0 and <= now
+            started = ctx.get("started_at")
+            try:
+                started_f = float(started)
+            except (TypeError, ValueError):
+                continue
+            if not (0 < started_f <= current_time):
+                continue
+
+            # If we reach here, this member has a fully valid ctx + we already have current_task match + future score
+            return True
+
         return False
     except Exception:
         return False

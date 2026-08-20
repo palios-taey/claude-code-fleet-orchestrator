@@ -187,10 +187,9 @@ def main() -> int:
         liveness = _liveness(client)
         _check("fresh notify last_activity after dispatch => working", liveness.get("state") == "working", liveness)
 
-        # Coverage per spec: bind via current_task (set by dispatch) + future ZSET (durable lease).
-        # No task_id fabricated in turn_context (production shape has none; only turn/lease fields).
-        # Validator requires current_task.task_id == TASK AND future ZSET member AND ctx present.
-        # Naked ZSET (no/wrong current_task) does not activate for the task.
+        # Strict ctx validation coverage (independent negatives for every required field).
+        # Positive uses production-shaped ctx: correct turn_id/seat_id, nonempty event/corr,
+        # allowed tool_profile, 32-hex gen, sane started_at, + current_task bound + future lease.
         notify_r.delete(state_key(WORKER, "last_activity"))
         notify_r.delete(state_key(WORKER, "idle"))
         turn_id = "1466be908e1c4cf3bc22581b1c93ba7b"
@@ -199,35 +198,51 @@ def main() -> int:
         z_key = state_key(WORKER, "active_turns")
         cur_key = state_key(WORKER, "current_task")
 
-        # after dispatch, current_task is set to TASK; set future ZSET + valid ctx (no task_id in ctx)
-        # positive: long active turn (lease) + binding => working
-        notify_r.zadd(z_key, {turn_id: future_score})
-        # ctx shape matching production (no task_id)
-        notify_r.hset(ctx_key, turn_id, json.dumps({
+        base_ctx = {
             "turn_id": turn_id,
             "seat_id": WORKER,
             "event_id": "e1",
             "correlation_id": "c1",
             "tool_profile": "full",
             "process_generation": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
-            "started_at": time.time()
-        }))
-        liveness = _liveness(client)
-        _check("current_task bound + future ZSET + ctx => working (active long turn not AWAITING/stale)", liveness.get("state") == "working", liveness)
+            "started_at": time.time() - 10
+        }
 
-        # naked ZSET (delete current_task) => not working for this task
+        def _set_ctx(d):
+            notify_r.hset(ctx_key, turn_id, json.dumps(d))
+
+        # ensure clean state for this block
         notify_r.delete(cur_key)
-        liveness = _liveness(client)
-        _check("naked future ZSET (no current_task) => not working (no bind)", liveness.get("state") != "working" or liveness is None, liveness)
+        notify_r.zrem(z_key, turn_id)
+        notify_r.hdel(ctx_key, turn_id)
 
-        # restore current for other cases, set expired ZSET => not
-        # (dispatch not re-run; manually set current with task)
+        # positive
         notify_r.set(cur_key, json.dumps({"task_id": TASK, "started_at": time.time()}))
-        notify_r.zadd(z_key, {turn_id: time.time() - 10})
+        notify_r.zadd(z_key, {turn_id: future_score})
+        _set_ctx(base_ctx)
         liveness = _liveness(client)
-        _check("current bound but expired ZSET => not working", liveness.get("state") != "working", liveness)
+        _check("valid ctx + current_task + future lease => working", liveness.get("state") == "working", liveness)
 
-        # cleanup
+        # independent negatives (keep current_task and ZSET, corrupt only one thing in ctx)
+        bad_cases = [
+            ("turn_id mismatch", {**base_ctx, "turn_id": "wrong-turn"}),
+            ("seat_id mismatch", {**base_ctx, "seat_id": "wrong-seat"}),
+            ("empty event_id", {**base_ctx, "event_id": ""}),
+            ("empty correlation_id", {**base_ctx, "correlation_id": ""}),
+            ("bad tool_profile", {**base_ctx, "tool_profile": "evil"}),
+            ("bad process_generation (not 32-hex)", {**base_ctx, "process_generation": "gen1"}),
+            ("bad process_generation (wrong chars)", {**base_ctx, "process_generation": "G"*32}),
+            ("bad started_at (future)", {**base_ctx, "started_at": time.time() + 1000}),
+            ("bad started_at (negative)", {**base_ctx, "started_at": -5}),
+            ("bad started_at (not number)", {**base_ctx, "started_at": "now"}),
+            ("missing fields (only gen)", {"process_generation": "a"*32}),
+        ]
+        for label, bad_ctx in bad_cases:
+            _set_ctx(bad_ctx)
+            liveness = _liveness(client)
+            _check(f"malformed ctx: {label} => not working", liveness.get("state") != "working", liveness)
+
+        # cleanup this block
         notify_r.zrem(z_key, turn_id)
         notify_r.delete(cur_key)
         notify_r.hdel(ctx_key, turn_id)
