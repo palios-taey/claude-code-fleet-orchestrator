@@ -8,6 +8,8 @@ CONTROL rework for task-7107c13f:
 - SO_PEERCRED uid must match the broker-owned control principal map
 - bind_current_task mints; session_unbind revokes; handle never in Redis
 - worker mint-as-victim and revoke-victim on the exec socket are denied
+- exec and control use disjoint runtime parents; nested/overlapping fail closed
+- path mode/group topology is asserted without treating owner connect as EACCES
 - live prefixes refused (no deploy)
 
 No live Redis/Neo/GitHub.
@@ -36,6 +38,8 @@ from fleet_orchestrator.github_broker import (  # noqa: E402
     GitHubBrokerPrincipalError,
     call_broker,
     cgroup_is_control_principal,
+    default_control_socket_path,
+    first_blocking_ancestor,
     install_github_broker,
     mint_and_deliver_outward_handle,
     peer_is_control_principal,
@@ -44,6 +48,7 @@ from fleet_orchestrator.github_broker import (  # noqa: E402
     process_is_orch_api_controller,
     resolve_group_id,
     revoke_and_clear_outward_handle,
+    runtime_parents_overlap,
 )
 from fleet_orchestrator.notify_state import state_key  # noqa: E402
 
@@ -306,6 +311,27 @@ def main() -> int:
         broker_unit,
     )
     _check(
+        "broker unit uses disjoint RuntimeDirectory parents",
+        "RuntimeDirectory=github-broker github-broker-control" in broker_unit,
+        broker_unit,
+    )
+    default_control = Path(
+        default_control_socket_path("/run/github-broker/github-broker.sock")
+    )
+    _check(
+        "default control socket is sibling runtime parent",
+        str(default_control) == "/run/github-broker-control/github-broker-control.sock",
+        default_control,
+    )
+    _check(
+        "default control parent is not nested under exec parent",
+        not runtime_parents_overlap(
+            Path("/run/github-broker/github-broker.sock"),
+            default_control,
+        ),
+        default_control,
+    )
+    _check(
         "this tmux worker cgroup is not the API controller",
         not process_is_orch_api_controller(os.getpid()),
     )
@@ -338,6 +364,7 @@ def main() -> int:
     )
 
     with tempfile.TemporaryDirectory() as tmp:
+        os.chmod(tmp, 0o755)
         prefix = Path(tmp) / "prefix"
         sink = Path(tmp) / "sink.json"
         inner_src = Path(tmp) / "inner-gh"
@@ -368,6 +395,11 @@ def main() -> int:
             "control socket is outside worker tree",
             not str(control_socket).startswith(str(worker_root)),
             control_socket,
+        )
+        _check(
+            "install uses disjoint exec and control parents",
+            not runtime_parents_overlap(socket_path, control_socket),
+            (socket_path.parent, control_socket.parent),
         )
 
         redis_file = Path(tmp) / "broker-redis.json"
@@ -484,8 +516,8 @@ def main() -> int:
             timeout=5,
             env={
                 **base_env,
-                "ORCH_GITHUB_BROKER_SOCKET": str(Path(tmp) / "missing-group.sock"),
-                "ORCH_GITHUB_BROKER_CONTROL_SOCKET": str(Path(tmp) / "missing-group-control.sock"),
+                "ORCH_GITHUB_BROKER_SOCKET": str(Path(tmp) / "missing-exec" / "sock"),
+                "ORCH_GITHUB_BROKER_CONTROL_SOCKET": str(Path(tmp) / "missing-control" / "sock"),
                 "ORCH_GITHUB_BROKER_CONTROL_GROUP": "no-such-group-7107c13f",
             },
             check=False,
@@ -502,8 +534,8 @@ def main() -> int:
             timeout=5,
             env={
                 **base_env,
-                "ORCH_GITHUB_BROKER_SOCKET": str(Path(tmp) / "relative-cg.sock"),
-                "ORCH_GITHUB_BROKER_CONTROL_SOCKET": str(Path(tmp) / "relative-cg-control.sock"),
+                "ORCH_GITHUB_BROKER_SOCKET": str(Path(tmp) / "relative-exec" / "sock"),
+                "ORCH_GITHUB_BROKER_CONTROL_SOCKET": str(Path(tmp) / "relative-control" / "sock"),
                 "ORCH_GITHUB_BROKER_CONTROL_CGROUP": "app.slice/lookalike.service",
             },
             check=False,
@@ -512,6 +544,46 @@ def main() -> int:
             "broker fails closed on relative cgroup path",
             relative_cg.returncode != 0 and "absolute cgroup path" in (relative_cg.stderr or ""),
             relative_cg.stderr,
+        )
+        nested_paths = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "github-brokerd")],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={
+                **base_env,
+                "ORCH_GITHUB_BROKER_SOCKET": str(Path(tmp) / "nested-exec" / "sock"),
+                "ORCH_GITHUB_BROKER_CONTROL_SOCKET": str(
+                    Path(tmp) / "nested-exec" / "control" / "sock"
+                ),
+            },
+            check=False,
+        )
+        _check(
+            "broker fails closed when control nests under exec parent",
+            nested_paths.returncode != 0
+            and "disjoint top-level runtime parents" in (nested_paths.stderr or ""),
+            nested_paths.stderr,
+        )
+        same_parent = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "github-brokerd")],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={
+                **base_env,
+                "ORCH_GITHUB_BROKER_SOCKET": str(Path(tmp) / "same-parent" / "exec.sock"),
+                "ORCH_GITHUB_BROKER_CONTROL_SOCKET": str(
+                    Path(tmp) / "same-parent" / "control.sock"
+                ),
+            },
+            check=False,
+        )
+        _check(
+            "broker fails closed when exec and control share a parent",
+            same_parent.returncode != 0
+            and "disjoint top-level runtime parents" in (same_parent.stderr or ""),
+            same_parent.stderr,
         )
 
         broker_env = dict(base_env)
@@ -554,6 +626,43 @@ def main() -> int:
                 "control parent st_gid is CONTROL_GROUP",
                 control_socket.parent.stat().st_gid == control_gid,
                 control_socket.parent.stat().st_gid,
+            )
+            _check(
+                "exec parent mode 0750",
+                stat.S_IMODE(socket_path.parent.stat().st_mode) == 0o750,
+                oct(stat.S_IMODE(socket_path.parent.stat().st_mode)),
+            )
+            _check(
+                "control parent mode 0750",
+                stat.S_IMODE(control_socket.parent.stat().st_mode) == 0o750,
+                oct(stat.S_IMODE(control_socket.parent.stat().st_mode)),
+            )
+            _check(
+                "live exec/control parents are disjoint",
+                not runtime_parents_overlap(socket_path, control_socket),
+                (socket_path.parent, control_socket.parent),
+            )
+            _check(
+                "CONTROL_GROUP traversal to control is unblocked by mode/gid",
+                first_blocking_ancestor(control_socket, control_gid) is None,
+                first_blocking_ancestor(control_socket, control_gid),
+            )
+            _check(
+                "EXEC_GROUP traversal to exec is unblocked by mode/gid",
+                first_blocking_ancestor(socket_path, exec_gid) is None,
+                first_blocking_ancestor(socket_path, exec_gid),
+            )
+            _check(
+                "exec parent blocks CONTROL_GROUP by mode/gid not owner connect",
+                first_blocking_ancestor(socket_path, control_gid)
+                == socket_path.parent.resolve(),
+                first_blocking_ancestor(socket_path, control_gid),
+            )
+            _check(
+                "control parent blocks EXEC_GROUP by mode/gid not owner connect",
+                first_blocking_ancestor(control_socket, exec_gid)
+                == control_socket.parent.resolve(),
+                first_blocking_ancestor(control_socket, exec_gid),
             )
             _check(
                 "authorized process can open control socket",

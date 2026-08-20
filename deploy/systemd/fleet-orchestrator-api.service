@@ -6,7 +6,9 @@
 # user.slice/.../tmux-spawn-*.scope and cannot join this cgroup.
 #
 # Socket open(2): this unit alone gets SupplementaryGroups=github-control
-# so it can open the 0660 github-broker:github-control socket. Do not
+# so it can traverse the disjoint 0750 github-control runtime parent and
+# open the 0660 github-broker:github-control socket. It does not join
+# github-workers and therefore cannot traverse the exec parent. Do not
 # usermod mira into github-control (every seat is uid mira).
 
 [Unit]

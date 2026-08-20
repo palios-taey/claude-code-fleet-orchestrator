@@ -8,7 +8,8 @@ and looks up the in-memory handle; workers never receive a bearer token.
 
 Production shape (CONTROL deploy, not this PR): systemd ``User=github-broker``
 with a 0600 EnvironmentFile the worker UID cannot read, distinct worker UIDs,
-and a 0600 control socket the worker principal cannot open.
+and disjoint 0750 runtime parents (exec=github-workers, control=github-control)
+so the API principal can traverse to the control socket.
 """
 from __future__ import annotations
 
@@ -62,10 +63,77 @@ def _resolved(path: Path) -> Path:
     return path.expanduser().resolve()
 
 
+_DIR_GROUP_TRAVERSE = (
+    stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
+)
+
+
+def _resolved_socket_parent(path: Path) -> Path:
+    return path.expanduser().resolve().parent
+
+
+def runtime_parents_overlap(left: Path, right: Path) -> bool:
+    """True if socket parents are the same or one nests under the other."""
+    a = _resolved_socket_parent(left)
+    b = _resolved_socket_parent(right)
+    if a == b:
+        return True
+    a_parts = a.parts
+    b_parts = b.parts
+    return a_parts == b_parts[: len(a_parts)] or b_parts == a_parts[: len(b_parts)]
+
+
+def require_disjoint_runtime_parents(exec_path: Path, control_path: Path) -> None:
+    """Fail closed when control and exec share or nest runtime parents.
+
+    A 0750 exec parent (github-workers) that is an ancestor of the control
+    socket blocks github-control from traversing to mint/revoke. Same-UID
+    owner tests cannot see that EACCES.
+    """
+    if runtime_parents_overlap(exec_path, control_path):
+        raise GitHubBrokerPrincipalError(
+            "exec and control sockets require disjoint top-level runtime "
+            f"parents; got exec={exec_path} control={control_path}"
+        )
+
+
+def path_mode_allows_group_traverse(path: Path, gid: int) -> bool:
+    """Whether a non-owner member of gid can traverse this directory.
+
+    Owner bits are ignored: same-UID isolated tests mask production EACCES.
+    """
+    st = path.stat()
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & stat.S_IXOTH:
+        return True
+    return bool(mode & stat.S_IXGRP) and int(st.st_gid) == int(gid)
+
+
+def first_blocking_ancestor(path: Path, gid: int) -> Optional[Path]:
+    """First directory a non-owner member of gid cannot traverse, or None."""
+    current = path.expanduser().resolve().parent
+    while True:
+        if not path_mode_allows_group_traverse(current, gid):
+            return current
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
+def require_principal_traversal(path: Path, gid: int, *, role: str) -> None:
+    blocked = first_blocking_ancestor(path, gid)
+    if blocked is not None:
+        raise GitHubBrokerPrincipalError(
+            f"{role} principal gid={gid} cannot traverse {blocked} to {path}"
+        )
+
+
 def default_control_socket_path(exec_socket: str) -> str:
-    """Control socket lives in a broker-private sibling dir, not worker PATH."""
-    parent = Path(exec_socket).expanduser()
-    return str(parent.parent / "control" / "github-broker-control.sock")
+    """Control socket uses a sibling runtime parent, never a child of exec."""
+    exec_parent = Path(exec_socket).expanduser().parent
+    control_parent = exec_parent.parent / f"{exec_parent.name}-control"
+    return str(control_parent / "github-broker-control.sock")
 
 
 def parse_uid_set(raw: str) -> set[int]:
@@ -542,16 +610,11 @@ def serve_broker(
     control_gid = resolve_group_id(
         os.environ.get("ORCH_GITHUB_BROKER_CONTROL_GROUP") or "github-control"
     )
-    _prepare_group_dir(
-        exec_path.parent,
-        exec_gid,
-        stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP,
-    )
-    _prepare_group_dir(
-        control_path.parent,
-        control_gid,
-        stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP,
-    )
+    require_disjoint_runtime_parents(exec_path, control_path)
+    _prepare_group_dir(exec_path.parent, exec_gid, _DIR_GROUP_TRAVERSE)
+    _prepare_group_dir(control_path.parent, control_gid, _DIR_GROUP_TRAVERSE)
+    require_principal_traversal(exec_path, exec_gid, role="exec")
+    require_principal_traversal(control_path, control_gid, role="control")
     exec_sock = _bind_unix_socket(
         exec_path,
         stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP,
@@ -704,16 +767,14 @@ def install_github_broker(
 
     worker_bin = prefix / "worker" / "bin"
     usr_bin = prefix / "worker" / "usr" / "bin"
-    broker_dir = prefix / "broker"
-    control_dir = broker_dir / "control"
-    for directory in (worker_bin, usr_bin, broker_dir, control_dir):
+    exec_dir = prefix / "broker-exec"
+    control_dir = prefix / "broker-control"
+    for directory in (worker_bin, usr_bin, exec_dir, control_dir):
         directory.mkdir(parents=True, exist_ok=True)
-    os.chmod(
-        str(control_dir),
-        stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP,
-    )
+    os.chmod(str(exec_dir), _DIR_GROUP_TRAVERSE)
+    os.chmod(str(control_dir), _DIR_GROUP_TRAVERSE)
 
-    real_gh = broker_dir / "gh-real"
+    real_gh = exec_dir / "gh-real"
     shutil.copy2(inner_gh, real_gh)
     real_gh.chmod(real_gh.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
@@ -721,7 +782,7 @@ def install_github_broker(
     shutil.copy2(inner_gh, system_gh)
     system_gh.chmod(system_gh.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    socket_path = broker_dir / "github-broker.sock"
+    socket_path = exec_dir / "github-broker.sock"
     control_socket = control_dir / "github-broker-control.sock"
     python = python_executable or os.environ.get("PYTHON", "") or shutil.which("python3") or "python3"
     orch_root = client_script.parent.parent
@@ -747,7 +808,7 @@ def install_github_broker(
         "socket": str(socket_path),
         "control_socket": str(control_socket),
         "worker_env": str(worker_env),
-        "broker_dir": str(broker_dir),
+        "broker_dir": str(exec_dir),
         "control_dir": str(control_dir),
         "worker_root": str(prefix / "worker"),
     }
