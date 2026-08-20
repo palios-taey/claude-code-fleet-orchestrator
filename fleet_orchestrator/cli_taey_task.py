@@ -13,7 +13,7 @@ Usage:
     taey-task status <task-id>        # Check a task's status
     taey-task dispatch <task-id> <peer>  # Claim/bind/wake peer work
     taey-task dispatch <task-id> <peer> --force  # Explicitly replace a peer's live current_task
-    taey-task unbind <peer>              # Clear a stale peer current_task binding
+    taey-task unbind <peer> [--task-id ID]  # Clear bind; --task-id repairs stale graph when Redis empty
     taey-task remove-dependency <task-id> <depends-on-task-id>
     taey-task update <task-id> completed --evidence '{"commit_sha":"abc123","repo":"OWNER/REPO","production_observation":"verified live"}'
     taey-task update <task-id> completed --evidence-file /tmp/evidence.json
@@ -366,9 +366,19 @@ def cmd_remove_dependency(args):
 
 def cmd_unbind(args):
     """Clear one session's current_task binding through the API."""
-    result = api_call("DELETE", f"/api/sessions/{args.peer}/current-task")
+    endpoint = f"/api/sessions/{args.peer}/current-task"
+    task_id = str(getattr(args, "task_id", "") or "").strip()
+    if task_id:
+        from urllib.parse import quote
+
+        endpoint = f"{endpoint}?task_id={quote(task_id, safe='')}"
+    result = api_call("DELETE", endpoint)
     if result.get("ok"):
-        print(f"OK: unbound current_task for {args.peer}")
+        mode = "repair-" if result.get("repair") else ""
+        print(
+            f"OK: {mode}unbound current_task for {args.peer}"
+            + (f" task={result.get('previous_task_id') or task_id}" if (result.get('previous_task_id') or task_id) else "")
+        )
     else:
         print(f"ERROR: {result.get('error', 'unknown')}", file=sys.stderr)
         sys.exit(1)
@@ -409,6 +419,12 @@ def main():
 
     p_unbind = sub.add_parser("unbind", help="Clear a peer session's current_task binding")
     p_unbind.add_argument("peer", help="Peer session to unbind")
+    p_unbind.add_argument(
+        "--task-id",
+        dest="task_id",
+        default=None,
+        help="Explicit repair when Redis current_task is already absent but a stale dispatched_to claim remains",
+    )
 
     p_update = sub.add_parser("update", help="Update task status")
     p_update.add_argument("task_id", help="Task ID")
