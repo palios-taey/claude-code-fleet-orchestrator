@@ -80,39 +80,36 @@ def _assert_product_lookup_is_optional() -> None:
 
 def _assert_cli_dispatch_without_orch_redis() -> None:
     task_id = "dispatch-optional-config::task"
-    fake_redis = FakeRedis()
-    notify_calls: list[list[str]] = []
-
-    def fake_run(args: list[str], **_kwargs: object) -> SimpleNamespace:
-        notify_calls.append(args)
-        return SimpleNamespace(returncode=0, stdout="OK", stderr="")
+    api_calls: list[tuple[str, str, object]] = []
 
     def fake_api(method: str, endpoint: str, data=None):
+        api_calls.append((method, endpoint, data))
         if method == "GET" and endpoint == f"/api/tasks/{task_id}":
             return {"id": task_id, "description": "dispatch with optional product config"}
+        if method == "POST" and endpoint == "/api/sessions/jd-reader-gemini/notify":
+            return {"ok": True}
         raise AssertionError((method, endpoint, data))
 
     args = SimpleNamespace(task_id=task_id, peer="jd-reader-gemini", priority="normal", force=False)
     with _dispatch_env(), \
          mock.patch.object(cli_task, "api_call", side_effect=fake_api), \
-         mock.patch.object(cli_task, "conflicting_binding", return_value=None), \
-         mock.patch.object(dispatch_module, "_redis_connect", return_value=fake_redis), \
-         mock.patch.object(dispatch_module, "hook_installation_status", return_value=SimpleNamespace(ok=True, detail="hooked")), \
-         mock.patch.object(dispatch_module, "_claim_ready_orch_task") as claim, \
-         mock.patch.object(dispatch_module, "bind_current_task", return_value=123.0) as bind, \
-         mock.patch.object(dispatch_module, "mark_superseded_for_task"), \
-         mock.patch.object(dispatch_module, "_assemble_dispatch_prompt", return_value=("PACKET", {"refs": {}, "rules": []})), \
-         mock.patch.object(dispatch_module, "maybe_emit_decision_receipt"), \
-         mock.patch.object(dispatch_module.subprocess, "run", side_effect=fake_run):
+         mock.patch.object(cli_task, "conflicting_binding", return_value=None):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli_task.cmd_dispatch(args)
 
     _check("taey-task dispatch succeeds without ORCH_REDIS_HOST", "OK: dispatched" in out.getvalue(), out.getvalue())
-    _check("dispatch claimed the task", claim.called, claim.call_args_list)
-    _check("dispatch bound current_task", bind.called, bind.call_args_list)
-    _check("notify CLI was invoked once", len(notify_calls) == 1, notify_calls)
-    _check("no product bug-lock key read when map absent", fake_redis.reads == [], fake_redis.reads)
+    _check("dispatch mutation routes through the API", api_calls[-1] == (
+        "POST",
+        "/api/sessions/jd-reader-gemini/notify",
+        {
+            "dispatch": True,
+            "task_id": task_id,
+            "from": "supervisor",
+            "priority": "normal",
+            "force": False,
+        },
+    ), api_calls)
 
 
 def _assert_bug_lock_still_enforced_when_product_map_exists() -> None:
