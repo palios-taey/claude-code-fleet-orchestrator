@@ -741,7 +741,7 @@ def _load_task(task_id: str, cfg: OrchConfig) -> Dict[str, Any]:
 def get_task(task_id: str) -> Dict[str, Any]:
     cfg = _cfg()
     task_id = resolve_task_id(task_id, config=cfg)  # bare id -> canonical namespaced node
-    task = load_task_record(task_id, config=cfg)
+    task = load_task_record(task_id, config=cfg, include_depends_on=True)
     if not task:
         raise HTTPException(status_code=404, detail=_task_not_found_detail(task_id))
     return task
