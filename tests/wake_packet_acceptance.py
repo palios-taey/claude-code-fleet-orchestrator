@@ -1,6 +1,7 @@
 """Ship-gate e2e — dynamic wake packet endpoint is additive, endpoint-gated, and provenance-bound."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -882,6 +883,53 @@ def _required_context_never_truncated_contract() -> None:
     _check("required context can still render under explicit larger budget", report["under_budget"] is True, report)
 
 
+def _oversized_kb_content_summary_fallback_contract() -> None:
+    full_content = "KB_FULL_START\n" + ("K" * 12000) + "\nKB_FULL_END"
+    summary = "Binding policy summary retained when the exact revision body exceeds the packet budget."
+    content_sha = hashlib.sha256(full_content.encode("utf-8")).hexdigest()
+    packet = {
+        "packet_id": "packet-large-kb-summary-fallback",
+        "generated_for": "treasurer-codex",
+        "generated_at_commit": "test",
+        "provenance_hash": "",
+        "context": {
+            "overall_refs": [],
+            "supervisor_refs": [],
+            "project_refs": [],
+            "phase_refs": [],
+            "task_refs": [],
+            "identity": {"role": "engineering", "mode": "lean_role_core", "source": "acceptance"},
+            "memory": [],
+            "kb_context": [{
+                "stable_key": "policy::oversized",
+                "revision_no": 7,
+                "content_sha256": content_sha,
+                "title": "Oversized binding policy",
+                "entity_type": "policy",
+                "layer": "control",
+                "active_status": "active",
+                "truth_register": "Observed",
+                "summary": summary,
+                "content": full_content,
+                "deduped": False,
+            }],
+            "rules": [],
+            "budget_used": 0,
+        },
+        "cycle": {},
+        "human": {},
+        "stop": {},
+    }
+
+    rendered = assembler.assemble(packet, "codex", budget_bytes=assembler.CORE_BUDGET_BYTES)
+
+    _check("oversized KB packet remains under the hard cap", len(rendered.encode("utf-8")) <= assembler.CORE_BUDGET_BYTES, len(rendered))
+    _check("KB summary survives budget fallback", summary in rendered, rendered)
+    _check("KB revision identity survives budget fallback", "policy::oversized" in rendered and content_sha in rendered, rendered)
+    _check("KB full body is visibly omitted", "KB_FULL_START" not in rendered and assembler.KB_CONTENT_OMITTED_MARKER in rendered, rendered)
+    _check("packet state records KB body omission", packet["context"]["kb_context"][0].get("content_omitted_for_budget") is True, packet)
+
+
 def _rules_tier_budget_contract() -> None:
     rule = "RULE_START\n" + ("R" * 9000) + "\nRULE_END"
     packet = {
@@ -1087,6 +1135,7 @@ def main() -> int:
     _untrusted_envelope_contract()
     _context_selection_error_contract()
     _required_context_never_truncated_contract()
+    _oversized_kb_content_summary_fallback_contract()
     _rules_tier_budget_contract()
     _rules_and_identity_dedupe_contract()
     _empty_work_context_contract()
