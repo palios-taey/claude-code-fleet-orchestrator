@@ -31,6 +31,10 @@ from fleet_orchestrator.paths import repo_root
 from fleet_orchestrator.kb_context import select_kb_context
 from fleet_orchestrator.memory_tier import get_memory
 from fleet_orchestrator.rules_tier import RULES_ROOT, get_rules
+from fleet_orchestrator.session_topology import (
+    control_principal_for_session,
+    session_aliases as topology_session_aliases,
+)
 from fleet_orchestrator.world_manifest import build_world_manifest_v0
 
 
@@ -189,12 +193,12 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
                    max_memory: int = DEFAULT_MAX_MEMORY,
                    session_roots: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     raw_session = (session or "").strip()
-    session_key = _normalize_session(session)
-    aliases = _session_aliases(raw_session, session_key)
+    registered_sessions = _load_registered_sessions()
+    session_key = _normalize_session(session, registered_sessions)
+    aliases = _session_aliases(raw_session, session_key, registered_sessions)
     base_roots = session_roots if session_roots is not None else _load_session_roots()
     scoped_env = _read_session_env(aliases, base_roots)
     roots = _load_session_roots(scoped_env) if "ORCH_SESSION_ROOTS" in scoped_env else base_roots
-    registered_sessions = _load_registered_sessions(scoped_env)
     work = _resolve_work(session_key, task_id)
     summary = get_project_summary(work["project_id"]) if work.get("project_id") else None
 
@@ -288,7 +292,7 @@ def build_packet(session: str, context: Dict[str, Any]) -> Dict[str, Any]:
     )
     packet = {
         "packet_id": str(uuid.uuid4()),
-        "generated_for": _normalize_session(session),
+        "generated_for": _normalize_session(session, _load_registered_sessions()),
         "generated_at_commit": generated_at_commit,
         "provenance_hash": "",
         "snapshot": snapshot,
@@ -616,24 +620,18 @@ def _proof_unknown(reason: str) -> Dict[str, str]:
     return {"register": PROOF_UNKNOWN, "reason": reason}
 
 
-def _normalize_session(session: str) -> str:
-    value = (session or "").strip()
-    for suffix in ("-codex", "-gemini", "-grok"):
-        if value.endswith(suffix):
-            return value[: -len(suffix)]
-    return value
+def _normalize_session(session: str, registered_sessions: Optional[Iterable[str]] = None) -> str:
+    registered = list(registered_sessions) if registered_sessions is not None else _load_registered_sessions()
+    return control_principal_for_session(session, registered)
 
 
-def _session_aliases(raw_session: str, normalized_session: str) -> List[str]:
-    aliases = []
-    for value in (raw_session, normalized_session):
-        if value and value not in aliases:
-            aliases.append(value)
-    for suffix in ("-codex", "-gemini", "-grok"):
-        value = f"{normalized_session}{suffix}"
-        if normalized_session and value not in aliases:
-            aliases.append(value)
-    return aliases
+def _session_aliases(
+    raw_session: str,
+    normalized_session: str,
+    registered_sessions: Optional[Iterable[str]] = None,
+) -> List[str]:
+    registered = list(registered_sessions) if registered_sessions is not None else _load_registered_sessions()
+    return list(topology_session_aliases(raw_session or normalized_session, registered))
 
 
 def _resolve_work(session: str, task_id: Optional[str]) -> Dict[str, Any]:

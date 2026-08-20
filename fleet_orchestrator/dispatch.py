@@ -62,7 +62,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .config import OrchConfig, _parse_product_owner_map, get_neo4j_session, notify_cli
+from .config import OrchConfig, _parse_product_owner_map, _parse_session_ids, get_neo4j_session, notify_cli
 from .causal_ledger import (
     UNKNOWN as CAUSAL_UNKNOWN,
     append_event as append_causal_event,
@@ -86,6 +86,7 @@ from .hook_installation import hook_installation_status
 from .memory_tier import get_memory
 from .orch_schema import completed_task_satisfies_dependents_cypher
 from .rules_tier import get_rules
+from .session_topology import control_principal_for_session, session_family
 from .worker_liveness import register_worker_task_liveness
 from .current_task_binding import (
     clear_matching_current_task,
@@ -134,10 +135,7 @@ class ChangesRequestedError(Exception):
 
 
 def _base_session_name(worker: str) -> str:
-    for suffix in ("-codex", "-gemini", "-grok", "-claude"):
-        if worker.endswith(suffix):
-            return worker[: -len(suffix)]
-    return worker
+    return session_family(worker, _parse_session_ids())
 
 
 def _cli_for_worker(worker: str) -> str:
@@ -504,11 +502,13 @@ def _claim_ready_orch_task(task_id: str, worker: str, *,
         return
 
     cfg = OrchConfig()
-    supervisor_owner = str(supervisor or "").strip()
-    owner = (
-        supervisor_owner
-        if supervisor_owner and supervisor_owner != worker
-        else _base_session_name(worker)
+    supervisor_owner = control_principal_for_session(
+        str(supervisor or "").strip(),
+        cfg.session_ids,
+    )
+    owner = supervisor_owner or control_principal_for_session(
+        worker,
+        cfg.session_ids,
     )
     with get_neo4j_session(cfg) as session:
         record = session.run(
@@ -777,7 +777,7 @@ def _mark_in_progress_best_effort(task_id: str, worker: str) -> bool:
     if not _orch_task_exists(task_id):
         return False
     cfg = OrchConfig()
-    owner = _base_session_name(worker)
+    owner = control_principal_for_session(worker, cfg.session_ids)
     with get_neo4j_session(cfg) as session:
         record = session.run(
             f"""
@@ -843,7 +843,8 @@ def _memory_root_from_env() -> Optional[Path]:
 
 def _minimal_dispatch_context(worker: str, task_id: str, description: str,
                               supervisor: Optional[str], cli: str) -> dict[str, Any]:
-    session = _base_session_name(worker)
+    cfg = OrchConfig()
+    session = control_principal_for_session(supervisor or worker, cfg.session_ids)
     project = _project_hint_from_task_id(task_id)
     return {
         "overall_refs": [],

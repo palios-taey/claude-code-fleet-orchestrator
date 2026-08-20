@@ -123,9 +123,10 @@ OPTIONAL_ENV = (
     ("ORCH_PRODUCT_OWNER_MAP", "{} (no remap)",
      "no product remap -> dispatch routes session->worker directly; the common single-fleet case"),
     ("ORCH_SESSION_IDS", "[] (notify/wake unrestricted; plan ingest requires configured supervisors)",
-     "registered supervisor ids; source of truth for supervisor plan/root affordances and "
-     "plan-modeling role detection. Also an optional notify/wake target filter: when SET, "
-     "an unlisted target raises 400; when EMPTY, that filter is OFF."),
+     "registered control-principal ids; source of truth for exact supervisor plan/root affordances, "
+     "plan-modeling role detection, and derived worker topology. Also an optional notify/wake target "
+     "filter: when SET, only registered controls and their workers are admitted; when EMPTY, that "
+     "filter is OFF."),
     ("ORCH_BADGE_FALLBACK_SUPERVISOR", "unset (drop non-dashboard badge work)",
      "optional explicit dashboard supervisor bucket for badge work whose effective supervisor "
      "is not itself a dashboard session; unset keeps the dashboard fail-closed"),
@@ -228,8 +229,33 @@ def _parse_session_ids() -> list[str]:
     raw = _optional_env("ORCH_SESSION_IDS", "")
     if not raw:
         return []
-    items = [item.strip() for item in raw.replace(";", ",").split(",")]
-    return [item for item in items if item]
+    items = [item.strip() for item in raw.replace(";", ",").split(",") if item.strip()]
+    lowered = [item.lower() for item in items]
+    if len(lowered) != len(set(lowered)):
+        raise OrchConfigError("ORCH_SESSION_IDS contains duplicate control principals")
+    families: dict[str, str] = {}
+    for item in items:
+        if item.lower().endswith(("-gemini", "-grok")):
+            raise OrchConfigError(
+                f"ORCH_SESSION_IDS entry {item!r} is a worker session, not a control principal"
+            )
+        family = (
+            item[: -len("-codex")]
+            if item.lower().endswith("-codex")
+            else item
+        ).lower()
+        if not family:
+            raise OrchConfigError("ORCH_SESSION_IDS contains an empty codex supervisor family")
+        if item.lower().endswith("-codex") and family.endswith(("-codex", "-gemini", "-grok")):
+            raise OrchConfigError(f"ORCH_SESSION_IDS entry {item!r} nests a peer suffix")
+        previous = families.get(family)
+        if previous and previous.lower() != item.lower():
+            raise OrchConfigError(
+                "ORCH_SESSION_IDS contains conflicting control principals for one family: "
+                f"{previous}, {item}"
+            )
+        families[family] = item
+    return items
 
 
 def ensure_notify_importable() -> None:

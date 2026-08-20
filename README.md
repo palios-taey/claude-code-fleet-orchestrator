@@ -154,7 +154,8 @@ By default the dashboard binds `127.0.0.1`, reachable only from the machine it r
 
 Fleet and context:
 
-- `ORCH_SESSION_IDS`: comma-separated registered supervisor session names. The dashboard notify form and wake-packet endpoint use it as an optional target allowlist, and plan ingest uses it as the required source of truth for supervisor role detection.
+- `ORCH_SESSION_IDS`: comma-separated registered control-principal session names. A listed `family-codex` controls the bare `family` Claude and the Gemini/Grok/Claude suffix workers; a listed bare `family` preserves the legacy supervisor topology. The dashboard shows exact registered controls, worker API targets are derived from them, and plan/root supervisor access remains exact.
+- Existing graph state can be inspected and transactionally migrated after changing that list with `python -m fleet_orchestrator.control_principal_migration` and then the same command with `--apply`; stop API writers during the migration.
 - `ORCH_NOTIFY_LIB_ROOT`: path to `claude-code-fleet-notify` if it is not importable and not a sibling checkout. Required for managed Claude Code hook wiring and stop discipline.
 - `ORCH_NOTIFY_CLI`: notify CLI name. Default is `taey-notify`.
 - `ORCH_REF_ALLOWED_ROOT`: one or more explicit trusted roots for plan/source refs.

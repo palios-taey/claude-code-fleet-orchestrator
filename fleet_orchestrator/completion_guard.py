@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from .config import OrchConfig, get_neo4j_driver
+from .config import OrchConfig, _parse_session_ids, get_neo4j_driver
 from .current_task_binding import current_task_matches
+from .session_topology import configured_supervisor_for_session, seat_family
 
 
-_AUTONOMOUS_PEER_SUFFIXES = ("-codex", "-gemini", "-grok", "-claude")
 _PEER_TERMINAL_OUTCOMES = {
     "completed": "done",
     "failed": "error",
@@ -15,11 +15,20 @@ _PEER_TERMINAL_OUTCOMES = {
 }
 
 
-def _autonomous_peer_supervisor(session_id: str) -> Optional[str]:
+def _autonomous_peer_supervisor(
+    session_id: str,
+    config: Optional[OrchConfig] = None,
+) -> Optional[str]:
     node = str(session_id or "").strip()
-    for suffix in _AUTONOMOUS_PEER_SUFFIXES:
-        if node.endswith(suffix):
-            return node[: -len(suffix)]
+    if not node:
+        return None
+    registered = config.session_ids if config is not None else _parse_session_ids()
+    configured = configured_supervisor_for_session(node, registered)
+    if configured:
+        return None if configured == node else configured
+    family = seat_family(node)
+    if family != node:
+        return family
     return None
 
 
@@ -39,12 +48,14 @@ def _task_project_supervisor(task_id: str, config: OrchConfig) -> Optional[str]:
 def peer_execution_binding_rejection(task_id: str,
                                      task_before: dict[str, Any],
                                      sender: str,
-                                     status: str) -> Optional[dict[str, Any]]:
+                                     status: str,
+                                     *,
+                                     config: Optional[OrchConfig] = None) -> Optional[dict[str, Any]]:
     """Reject supervised peer execution writes that are not backed by current_task."""
     peer = str(sender or "").strip()
     if not peer:
         return None
-    supervisor = _autonomous_peer_supervisor(peer)
+    supervisor = _autonomous_peer_supervisor(peer, config=config)
     if not supervisor:
         return None
 
@@ -122,7 +133,7 @@ def peer_self_completion_rejection(task_id: str,
     peer = str(sender or "").strip()
     if not peer:
         return None
-    supervisor = _autonomous_peer_supervisor(peer)
+    supervisor = _autonomous_peer_supervisor(peer, config=config)
     if not supervisor:
         return None
 

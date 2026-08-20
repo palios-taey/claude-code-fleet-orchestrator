@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .careers_loop_proof import normalize_loop_proof_evidence
-from .config import OrchConfig, get_neo4j_driver
+from .config import OrchConfig, _parse_session_ids, get_neo4j_driver
 from .evidence_verification import (
     UNVERIFIED,
     VERIFIED,
@@ -37,6 +37,11 @@ from .inflight import PEER_HEARTBEAT_STALE_SEC as _DEFAULT_PEER_HEARTBEAT_STALE_
 from .inflight import task_actively_in_flight
 from .notify_state import redis_connect as _notify_redis_connect
 from .notify_state import state_key as _notify_state_key
+from .session_topology import (
+    configured_supervisor_for_session,
+    control_principal_for_session,
+    supervised_worker_sessions,
+)
 
 
 SCHEMA_CONSTRAINTS = [
@@ -540,12 +545,9 @@ def _validate_terminal_status_write(
     return None
 
 
-def _normalize_owner_session(owner: str) -> str:
-    owner = (owner or "").strip()
-    for suffix in ("-codex", "-gemini", "-grok"):
-        if owner.endswith(suffix):
-            return owner[: -len(suffix)]
-    return owner
+def _normalize_owner_session(owner: str, config: Optional[OrchConfig] = None) -> str:
+    registered = config.session_ids if config is not None else _parse_session_ids()
+    return control_principal_for_session(owner, registered)
 
 
 def _condition_view(condition: Dict[str, Any]) -> Dict[str, Any]:
@@ -1279,58 +1281,38 @@ def _session_pause_active(session_id: str, config: Optional[OrchConfig] = None) 
     return True
 
 
-def _is_configured_dashboard_supervisor_session(session_id: str, cfg: OrchConfig) -> bool:
-    session = str(session_id or "").strip().lower()
-    if not session:
-        return False
-    return session in {
-        _dashboard_supervisor_session(str(raw_session or ""))
-        for raw_session in cfg.session_ids or []
-    }
-
-
 def _resolve_supervisor_session(session_id: str, config: Optional[OrchConfig] = None) -> str:
     cfg = config or OrchConfig()
     session = str(session_id or "").strip()
-    if _is_configured_dashboard_supervisor_session(session, cfg):
-        return _normalize_owner_session(session)
+    configured = configured_supervisor_for_session(session, cfg.session_ids)
+    if configured:
+        return configured
     r = _fleet_state_redis()
     try:
         explicit = r.get(_state_key(session, "parent"))
     except Exception:
         explicit = None
-    if explicit and str(explicit).strip() != session:
-        return str(explicit)
-    for suffix in ("-codex", "-gemini", "-grok", "-claude"):
-        if session.endswith(suffix):
-            base = session[: -len(suffix)]
-            if base:
-                return base
-    return session
+    return control_principal_for_session(
+        session,
+        cfg.session_ids,
+        explicit_parent=str(explicit or "").strip() or None,
+    )
 
 
 def _session_is_supervisor_context(session_id: str, supervisor: str) -> bool:
     return str(session_id or "").strip() == str(supervisor or "").strip()
 
 
-def _dashboard_supervisor_session(value: Any) -> str:
-    session = str(value or "").strip()
-    lowered = session.lower()
-    for suffix in ("-codex", "-gemini", "-grok"):
-        if lowered.endswith(suffix):
-            session = session[: -len(suffix)]
-            break
-    return _normalize_owner_session(session).lower()
+def _dashboard_supervisor_session(value: Any, config: Optional[OrchConfig] = None) -> str:
+    registered = config.session_ids if config is not None else _parse_session_ids()
+    return control_principal_for_session(str(value or ""), registered).lower()
 
 
 def _configured_dashboard_supervisor_session(session_id: str, cfg: OrchConfig) -> str:
     value = str(session_id or "").strip()
     if not value:
         return ""
-    lowered = value.lower()
-    if any(lowered.endswith(suffix) for suffix in ("-codex", "-gemini", "-grok")):
-        value = _resolve_supervisor_session(value, config=cfg)
-    return _dashboard_supervisor_session(value)
+    return _dashboard_supervisor_session(value, config=cfg)
 
 
 def _configured_dashboard_supervisors(config: Optional[OrchConfig] = None) -> set[str]:
@@ -1364,13 +1346,13 @@ def list_dashboard_sessions(config: Optional[OrchConfig] = None) -> list:
             "MATCH (p:OrchProject) WHERE coalesce(p.supervisor, '') <> '' "
             "RETURN DISTINCT p.supervisor AS s"
         ):
-            supervisor = _dashboard_supervisor_session(record["s"])
+            supervisor = _dashboard_supervisor_session(record["s"], config=cfg)
             if supervisor in allowlist:
                 found.add(supervisor)
         for record in session.run(
             "MATCH (s:OrchSupervisor) WHERE coalesce(s.session, '') <> '' RETURN s.session AS s"
         ):
-            supervisor = _dashboard_supervisor_session(record["s"])
+            supervisor = _dashboard_supervisor_session(record["s"], config=cfg)
             if supervisor in allowlist:
                 found.add(supervisor)
     return sorted(found)
@@ -2010,9 +1992,6 @@ def _reason_required_block_reason(active_conditions: list[dict[str, Any]]) -> st
 # supervisor stop while peer work was pending or in-flight. The keep-going invariant has
 # no off-switch; see _raw_stop_decision.
 
-_AUTONOMOUS_PEER_SUFFIXES = ("-codex", "-gemini", "-grok", "-claude")
-
-
 def get_supervisor_dispatchable_peer_task(supervisor: str, project_id: str,
                                           config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
     """Top task in ``project_id`` that is dispatchable to an AUTONOMOUS PEER of
@@ -2021,7 +2000,7 @@ def get_supervisor_dispatchable_peer_task(supervisor: str, project_id: str,
     must not block the supervisor), blocked_on empty, all DEPENDS_ON satisfied,
     project live. Returns enough to build a dispatch reason, or None."""
     cfg = config or OrchConfig()
-    peer_owners = [f"{supervisor}{suf}" for suf in _AUTONOMOUS_PEER_SUFFIXES]
+    peer_owners = list(supervised_worker_sessions(supervisor, cfg.session_ids))
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         record = session.run(
@@ -2183,7 +2162,7 @@ def get_supervisor_inflight_peer_task(supervisor: str, project_id: str,
     7-hour-stop hole) and it still BLOCKs. Returns the gate/investigate task,
     or None."""
     cfg = config or OrchConfig()
-    peer_owners = [f"{supervisor}{suf}" for suf in _AUTONOMOUS_PEER_SUFFIXES]
+    peer_owners = list(supervised_worker_sessions(supervisor, cfg.session_ids))
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         rows = [dict(record) for record in session.run(
@@ -2235,7 +2214,7 @@ def has_active_inflight_peer_task(supervisor: str, project_id: str,
     peer's RESPONSE_READY/peer_idle re-wakes it.
     """
     cfg = config or OrchConfig()
-    peer_owners = [f"{supervisor}{suf}" for suf in _AUTONOMOUS_PEER_SUFFIXES]
+    peer_owners = list(supervised_worker_sessions(supervisor, cfg.session_ids))
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         rows = [dict(record) for record in session.run(
@@ -2834,7 +2813,7 @@ def create_project(project_id: str, name: str, description: str = "",
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     created_by = ingested_by or "unknown"
-    supervisor_value = supervisor or _normalize_owner_session(created_by) or "unassigned"
+    supervisor_value = _normalize_owner_session(supervisor or created_by, config=cfg) or "unassigned"
     if (not migration_exempt) and supervisor_value == "unassigned":
         raise ValueError(
             "supervisor must be non-empty and not 'unassigned' unless migration_exempt=true. "
@@ -3120,10 +3099,10 @@ def set_overall_refs(refs: List[Dict[str, Any]], config: Optional[OrchConfig] = 
 
 def set_supervisor_refs(session_id: str, refs: List[Dict[str, Any]],
                         config: Optional[OrchConfig] = None) -> Dict[str, Any]:
-    session_value = _normalize_owner_session(session_id)
+    cfg = config or OrchConfig()
+    session_value = _normalize_owner_session(session_id, config=cfg)
     if not session_value:
         raise ValueError("supervisor session must be non-empty")
-    cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         row = session.run("""
@@ -3162,8 +3141,8 @@ def get_overall_refs(config: Optional[OrchConfig] = None) -> Dict[str, Any]:
 
 
 def get_supervisor_refs(session_id: str, config: Optional[OrchConfig] = None) -> Dict[str, Any]:
-    session_value = _normalize_owner_session(session_id)
     cfg = config or OrchConfig()
+    session_value = _normalize_owner_session(session_id, config=cfg)
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         row = session.run("""

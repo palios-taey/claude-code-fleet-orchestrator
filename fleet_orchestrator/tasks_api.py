@@ -56,6 +56,10 @@ from fleet_orchestrator.evidence_contract import REQUEST_TERMINAL_EVIDENCE_KEYS,
 from fleet_orchestrator.feature_flags import TRUE_ENV_VALUES, chat_enabled, wake_packet_endpoint_enabled
 from fleet_orchestrator.handoff_validation import ensure_handoff_index_backfilled
 from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect
+from fleet_orchestrator.session_topology import (
+    configured_supervisor_for_session,
+    control_principal_for_session,
+)
 from fleet_orchestrator.loop_engine import (
     ArtifactNotObservedError,
     ArtifactStore,
@@ -123,7 +127,6 @@ from fleet_orchestrator.orch_schema import (
     get_task_phase,
     reset_project,
     resolve_human_review_hold,
-    supervisor_access_resolution,
     session_registration_error_detail,
     set_project_stop_reason,
     set_session_pause,
@@ -577,22 +580,26 @@ def _validated_source_path(
 
 def _ensure_registered_session(session_id: str, cfg: OrchConfig) -> None:
     configured = set(cfg.session_ids)
-    if configured and not supervisor_access_resolution(session_id, config=cfg)["registered"]:
+    registered_control = configured_supervisor_for_session(session_id, cfg.session_ids)
+    if configured and not registered_control:
         raise HTTPException(
             status_code=400,
             detail=session_registration_error_detail(session_id, cfg),
         )
 
 
-def _infer_dispatch_supervisor(target: str, data: Dict[str, Any]) -> Optional[str]:
+def _infer_dispatch_supervisor(
+    target: str,
+    data: Dict[str, Any],
+    config: Optional[OrchConfig] = None,
+) -> Optional[str]:
+    cfg = config or _cfg()
     for key in ("from", "sender", "supervisor", "dispatcher"):
         value = str(data.get(key) or "").strip()
         if value:
-            return value
-    for suffix in ("-codex", "-gemini", "-grok", "-claude"):
-        if target.endswith(suffix):
-            return target[: -len(suffix)]
-    return None
+            return control_principal_for_session(value, cfg.session_ids)
+    supervisor = control_principal_for_session(target, cfg.session_ids)
+    return supervisor if supervisor and supervisor != target else None
 
 
 def _dispatch_description(task_id: str, message: str, cfg: OrchConfig) -> str:
@@ -974,6 +981,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
             task_before,
             sender,
             status,
+            config=cfg,
         )
         if binding_rejection:
             return JSONResponse(status_code=409, content=binding_rejection)
@@ -988,7 +996,7 @@ async def update(task_id: str, req: Request) -> Dict[str, Any]:
         if rejection:
             return JSONResponse(status_code=409, content=rejection)
 
-        sender_supervisor = _autonomous_peer_supervisor(sender) if sender else None
+        sender_supervisor = _autonomous_peer_supervisor(sender, config=cfg) if sender else None
         normalized_status = str(status or "").strip().lower()
         project_supervisor = _task_project_supervisor(task_id, cfg) if sender and owner == sender else None
         should_bind_self_start = (
@@ -1847,7 +1855,7 @@ async def session_notify(target: str, req: Request) -> Dict[str, Any]:
     _ensure_registered_session(target, cfg)
 
     if command_task_id:
-        supervisor = _infer_dispatch_supervisor(target, data)
+        supervisor = _infer_dispatch_supervisor(target, data, config=cfg)
         description = _dispatch_description(command_task_id, message, cfg)
         try:
             dispatch_task(
