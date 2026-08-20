@@ -165,6 +165,59 @@ def _topology_contract() -> None:
             and "forced ordinary fallback" in warning,
             {"context": fallback_context, "warning": warning},
         )
+        with mock.patch.object(orchestrator_dispatch, "hook_installation_status") as hooks, \
+             mock.patch.object(orchestrator_dispatch, "_redis_connect") as redis_connect:
+            try:
+                orchestrator_dispatch.dispatch(
+                    "weaver-codex",
+                    "demo::control-target",
+                    "must target a worker seat",
+                    supervisor="conductor-codex",
+                )
+            except orchestrator_dispatch.ControlSeatTarget:
+                control_target_rejected = True
+            else:
+                control_target_rejected = False
+        _check(
+            "cross-supervisor dispatch rejects a codex control before mutation",
+            control_target_rejected and not hooks.called and not redis_connect.called,
+            {
+                "rejected": control_target_rejected,
+                "hook_calls": hooks.call_count,
+                "redis_calls": redis_connect.call_count,
+            },
+        )
+        with mock.patch.object(
+            orchestrator_dispatch,
+            "hook_installation_status",
+            return_value=SimpleNamespace(ok=True, detail="hooked"),
+        ), mock.patch.object(orchestrator_dispatch, "_redis_connect") as redis_connect, \
+             mock.patch.object(orchestrator_dispatch, "_resolve_product_id", return_value=None), \
+             mock.patch.object(orchestrator_dispatch, "_claim_ready_orch_task"), \
+             mock.patch.object(orchestrator_dispatch, "bind_current_task", return_value=123.0) as bind, \
+             mock.patch.object(
+                 orchestrator_dispatch,
+                 "append_causal_event",
+                 side_effect=RuntimeError("stop after bind"),
+             ), mock.patch.object(orchestrator_dispatch, "_rollback_claim"):
+            redis_connect.return_value.get.return_value = None
+            try:
+                orchestrator_dispatch.dispatch(
+                    "conductor-codex",
+                    "demo::control-self-start",
+                    "control-owned work",
+                    supervisor="conductor-codex",
+                )
+            except RuntimeError as exc:
+                self_start_stopped_after_bind = "causal dispatch_claimed" in str(exc)
+            else:
+                self_start_stopped_after_bind = False
+        _check(
+            "self-started codex control work never writes a parent route",
+            self_start_stopped_after_bind
+            and bind.call_args.kwargs.get("set_parent") is False,
+            {"stopped_after_bind": self_start_stopped_after_bind, "bind": bind.call_args},
+        )
         _check(
             "orch-watch keeps a parentless codex control at the control seat",
             watch.resolve_supervisor(parentless, "conductor-codex") == "conductor-codex",
