@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""gh wrapper: authorize status/comment writes at the actual gh mutation boundary.
+
+P0 safety (task-7107c13f / task-f396305d): direct ``gh api`` / ``gh pr comment``
+must not bypass the live current_task capability. Reads and non-status/comment
+commands exec the inner gh unchanged.
+
+Inner binary: GH_OUTWARD_INNER, else the first ``gh`` on PATH that is not this
+script. Session: --session (stripped from argv) or ORCH_OUTWARD_SESSION / tmux.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from fleet_orchestrator.outward_capability import (  # noqa: E402
+    OutwardAuthorizationError,
+    require_github_argv_capability,
+)
+
+
+def _inner_gh() -> str:
+    explicit = str(os.environ.get("GH_OUTWARD_INNER") or "").strip()
+    if explicit:
+        return explicit
+    this = Path(__file__).resolve()
+    for candidate in os.environ.get("PATH", "").split(os.pathsep):
+        probe = Path(candidate) / "gh"
+        try:
+            if probe.resolve() == this:
+                continue
+        except OSError:
+            continue
+        if probe.is_file() and os.access(probe, os.X_OK):
+            return str(probe)
+    found = shutil.which("gh")
+    if found and Path(found).resolve() != this:
+        return found
+    print("SAFETY DENY: inner gh binary not found", file=sys.stderr)
+    sys.exit(1)
+
+
+def _split_session(argv: list[str]) -> tuple[str, list[str]]:
+    session = ""
+    forwarded: list[str] = []
+    idx = 0
+    while idx < len(argv):
+        token = argv[idx]
+        if token == "--session" and idx + 1 < len(argv):
+            session = argv[idx + 1]
+            idx += 2
+            continue
+        if token.startswith("--session="):
+            session = token.split("=", 1)[1]
+            idx += 1
+            continue
+        forwarded.append(token)
+        idx += 1
+    return session, forwarded
+
+
+def main() -> int:
+    session_flag, argv = _split_session(sys.argv[1:])
+    try:
+        require_github_argv_capability(argv, session_id=session_flag)
+    except OutwardAuthorizationError as exc:
+        print(f"SAFETY DENY: {exc}", file=sys.stderr)
+        return 1
+    inner = _inner_gh()
+    os.execv(inner, [inner, *argv])
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

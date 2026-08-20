@@ -257,6 +257,70 @@ def resolve_session_id(explicit: Optional[str] = None) -> str:
     return ""
 
 
+_GH_WRITE_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
+
+
+def _gh_api_method_and_path(api_args: list[str]) -> tuple[str, str]:
+    method = "GET"
+    path = ""
+    idx = 0
+    while idx < len(api_args):
+        token = str(api_args[idx])
+        if token in {"-X", "--method"} and idx + 1 < len(api_args):
+            method = str(api_args[idx + 1]).upper()
+            idx += 2
+            continue
+        if token.startswith("-X") and len(token) > 2:
+            method = token[2:].upper()
+            idx += 1
+            continue
+        if token.startswith("--method="):
+            method = token.split("=", 1)[1].upper()
+            idx += 1
+            continue
+        if not token.startswith("-") and not path:
+            path = token
+        idx += 1
+    return method, path
+
+
+def github_argv_requires_outward_capability(argv: list[str]) -> bool:
+    """True for GitHub status/comment writes — the incident mutation surface.
+
+    Direct ``gh api -X POST .../statuses|comments`` and ``gh pr/issue comment``
+    must hit the same live-binding gate as the helper CLIs. Reads and other
+    gh subcommands pass through.
+    """
+    if not argv:
+        return False
+    cmd = str(argv[0] or "").strip()
+    rest = [str(item) for item in argv[1:]]
+    if cmd == "api":
+        method, path = _gh_api_method_and_path(rest)
+        if method not in _GH_WRITE_METHODS:
+            return False
+        lowered = path.lower()
+        return "/statuses" in lowered or "/comments" in lowered
+    if cmd == "pr" and rest and rest[0] == "comment":
+        return True
+    if cmd == "issue" and rest and rest[0] == "comment":
+        return True
+    return False
+
+
+def require_github_argv_capability(
+    argv: list[str],
+    *,
+    session_id: str = "",
+    **kwargs: Any,
+) -> Optional[OutwardAuthDecision]:
+    """Authorize mutating GitHub status/comment argv, or return None if a no-op."""
+    if not github_argv_requires_outward_capability(argv):
+        return None
+    session = resolve_session_id(session_id)
+    return require_outward_capability(session, channel="github_cli", **kwargs)
+
+
 def post_commit_status(
     *,
     session_id: str,
