@@ -98,7 +98,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from fleet_orchestrator.config import OrchConfig
+from fleet_orchestrator.config import OrchConfig, _parse_session_ids
 from fleet_orchestrator.evidence_contract import TERMINAL_STATUSES
 from fleet_orchestrator.handoff_validation import handoff_index_key, process_expired_handoffs
 from fleet_orchestrator.notify_state import (
@@ -254,7 +254,7 @@ def _supervisor_candidate(r, value: object) -> Optional[str]:
     if not host or candidate != host:
         return candidate
     try:
-        if candidate in set(OrchConfig().session_ids or []):
+        if candidate in set(_parse_session_ids()):
             return candidate
     except Exception:
         pass
@@ -275,7 +275,7 @@ def resolve_supervisor(r, node_id: str, task: Optional[dict] = None) -> Optional
     also configured or visible as a real local session.
     """
     candidates: list[object] = []
-    registered = OrchConfig().session_ids
+    registered = _parse_session_ids()
     if isinstance(task, dict):
         for value in (task.get("supervisor"), task.get("dispatcher")):
             task_candidate = str(value or "").strip()
