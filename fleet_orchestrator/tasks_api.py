@@ -2007,6 +2007,18 @@ def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
                 "graph_reconciled": True,
             },
         ) from exc
+    if redis_result.get("superseded"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "current_task was superseded during unbind; Redis was not cleared",
+                "session": session_id,
+                "task_id": task_id,
+                "graph_reconciled": bool(graph.get("task_exists")),
+                "graph_changed": bool(graph.get("changed")),
+                "redis_result": redis_result,
+            },
+        )
     return {
         "ok": True,
         "session": session_id,
