@@ -44,7 +44,6 @@ os.environ["ORCH_SESSION_IDS"] = ",".join([
     BOTH,
     IDLE,
     PEER_SUPERVISOR,
-    PEER,
 ])
 os.environ["ORCH_PUBLIC_SHOW_SESSIONS"] = os.environ["ORCH_SESSION_IDS"]
 os.environ["ORCH_PUBLIC_HIDE_SESSIONS"] = ""

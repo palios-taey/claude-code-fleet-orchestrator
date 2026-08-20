@@ -204,7 +204,9 @@ jobs:
           ORCH_REDIS_PORT: "6381"
           ORCH_DASHBOARD_URL: http://127.0.0.1:5002
           ORCH_DOTENV: empty
-        run: python tests/standalone_sessions_acceptance.py
+        run: |
+          python tests/standalone_sessions_acceptance.py
+          python tests/codex_supervisor_topology_acceptance.py
       - name: Ship-gate — evidence gate (ws0 keystone — evidence-less 'completed' must be rejected)
         env:
           ORCH_NEO4J_URI: bolt://localhost:7687

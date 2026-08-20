@@ -30,6 +30,7 @@ sys.path.insert(0, _REPO)
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     _dashboard_supervisor_session,
     _resolve_supervisor_session,
+    _supervisor_badge_session,
     create_project,
     get_neo4j_driver,
     init_schema,
@@ -122,10 +123,12 @@ def main() -> int:
         create_project(project_id=f"{_PFX}-orphan", name="orphan", supervisor=f"{_PFX}-fixture", config=CFG)
         _check("dashboard sessions empty without configured allowlist", list_dashboard_sessions(config=replace(CFG, session_ids=[])) == [])
         derived = list_dashboard_sessions(config=replace(CFG, session_ids=[peer_a]))
-        _check("dashboard sessions include canonical configured supervisor", derived == [sup_a])
-        _check("dashboard sessions exclude configured peer spelling", peer_a not in derived)
+        _check("dashboard sessions preserve explicitly configured codex supervisor", derived == [peer_a])
+        _check("dashboard sessions exclude its bare Claude worker", sup_a not in derived)
         _check("dashboard sessions exclude unconfigured data supervisor", sup_b not in derived)
         _check("dashboard sessions exclude unconfigured fixture", f"{_PFX}-fixture" not in derived)
+        legacy_derived = list_dashboard_sessions(config=replace(CFG, session_ids=[sup_a]))
+        _check("legacy bare supervisor topology remains unchanged", legacy_derived == [sup_a])
         hands_sup = f"{_PFX}-hands"
         notify_redis_connect().set(notify_state_key(hands_sup, "parent"), sup_b)
         hands_derived = list_dashboard_sessions(config=replace(CFG, session_ids=[hands_sup]))
@@ -136,10 +139,28 @@ def main() -> int:
         notify_redis_connect().set(notify_state_key(claude_sup, "parent"), sup_b)
         claude_derived = list_dashboard_sessions(config=replace(CFG, session_ids=[claude_sup]))
         _check("configured claude-suffixed supervisor is not collapsed", claude_derived == [claude_sup])
-        _check("configured claude dashboard resolver stays itself", _dashboard_supervisor_session(claude_sup) == claude_sup)
+        _check(
+            "configured claude dashboard resolver stays itself",
+            _dashboard_supervisor_session(
+                claude_sup,
+                config=replace(CFG, session_ids=[claude_sup]),
+            )
+            == claude_sup,
+        )
+        _check(
+            "configured claude badge resolver stays itself",
+            _supervisor_badge_session(
+                claude_sup,
+                config=replace(CFG, session_ids=[claude_sup]),
+            )
+            == claude_sup,
+        )
         _check("configured claude shared resolver stays itself", _resolve_supervisor_session(claude_sup, config=replace(CFG, session_ids=[claude_sup])) == claude_sup)
         notify_redis_connect().set(notify_state_key(peer_a, "parent"), peer_a)
         _check("non-configured peer still resolves to parent", _resolve_supervisor_session(peer_a, config=replace(CFG, session_ids=[sup_a])) == sup_a)
+        notify_redis_connect().set(notify_state_key(sup_a, "parent"), sup_b)
+        _check("configured codex topology beats stale bare-worker parent", _resolve_supervisor_session(sup_a, config=replace(CFG, session_ids=[peer_a])) == peer_a)
+        _check("configured codex control remains itself", _resolve_supervisor_session(peer_a, config=replace(CFG, session_ids=[peer_a])) == peer_a)
 
         # --- 3. LOOPBACK DEFAULT ---
         saved = os.environ.pop("ORCH_HOST", None)

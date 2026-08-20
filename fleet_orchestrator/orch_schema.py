@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .careers_loop_proof import normalize_loop_proof_evidence
-from .config import OrchConfig, get_neo4j_driver
+from .config import OrchConfig, _parse_session_ids, get_neo4j_driver
 from .evidence_verification import (
     UNVERIFIED,
     VERIFIED,
@@ -37,6 +37,11 @@ from .inflight import PEER_HEARTBEAT_STALE_SEC as _DEFAULT_PEER_HEARTBEAT_STALE_
 from .inflight import task_actively_in_flight
 from .notify_state import redis_connect as _notify_redis_connect
 from .notify_state import state_key as _notify_state_key
+from .session_topology import (
+    configured_supervisor_for_session,
+    control_principal_for_session,
+    supervised_worker_sessions,
+)
 
 
 SCHEMA_CONSTRAINTS = [
@@ -540,12 +545,9 @@ def _validate_terminal_status_write(
     return None
 
 
-def _normalize_owner_session(owner: str) -> str:
-    owner = (owner or "").strip()
-    for suffix in ("-codex", "-gemini", "-grok"):
-        if owner.endswith(suffix):
-            return owner[: -len(suffix)]
-    return owner
+def _normalize_owner_session(owner: str, config: Optional[OrchConfig] = None) -> str:
+    registered = config.session_ids if config is not None else _parse_session_ids()
+    return control_principal_for_session(owner, registered)
 
 
 def _condition_view(condition: Dict[str, Any]) -> Dict[str, Any]:
@@ -1279,58 +1281,38 @@ def _session_pause_active(session_id: str, config: Optional[OrchConfig] = None) 
     return True
 
 
-def _is_configured_dashboard_supervisor_session(session_id: str, cfg: OrchConfig) -> bool:
-    session = str(session_id or "").strip().lower()
-    if not session:
-        return False
-    return session in {
-        _dashboard_supervisor_session(str(raw_session or ""))
-        for raw_session in cfg.session_ids or []
-    }
-
-
 def _resolve_supervisor_session(session_id: str, config: Optional[OrchConfig] = None) -> str:
     cfg = config or OrchConfig()
     session = str(session_id or "").strip()
-    if _is_configured_dashboard_supervisor_session(session, cfg):
-        return _normalize_owner_session(session)
+    configured = configured_supervisor_for_session(session, cfg.session_ids)
+    if configured:
+        return configured
     r = _fleet_state_redis()
     try:
         explicit = r.get(_state_key(session, "parent"))
     except Exception:
         explicit = None
-    if explicit and str(explicit).strip() != session:
-        return str(explicit)
-    for suffix in ("-codex", "-gemini", "-grok", "-claude"):
-        if session.endswith(suffix):
-            base = session[: -len(suffix)]
-            if base:
-                return base
-    return session
+    return control_principal_for_session(
+        session,
+        cfg.session_ids,
+        explicit_parent=str(explicit or "").strip() or None,
+    )
 
 
 def _session_is_supervisor_context(session_id: str, supervisor: str) -> bool:
     return str(session_id or "").strip() == str(supervisor or "").strip()
 
 
-def _dashboard_supervisor_session(value: Any) -> str:
-    session = str(value or "").strip()
-    lowered = session.lower()
-    for suffix in ("-codex", "-gemini", "-grok"):
-        if lowered.endswith(suffix):
-            session = session[: -len(suffix)]
-            break
-    return _normalize_owner_session(session).lower()
+def _dashboard_supervisor_session(value: Any, config: Optional[OrchConfig] = None) -> str:
+    registered = config.session_ids if config is not None else _parse_session_ids()
+    return control_principal_for_session(str(value or ""), registered).lower()
 
 
 def _configured_dashboard_supervisor_session(session_id: str, cfg: OrchConfig) -> str:
     value = str(session_id or "").strip()
     if not value:
         return ""
-    lowered = value.lower()
-    if any(lowered.endswith(suffix) for suffix in ("-codex", "-gemini", "-grok")):
-        value = _resolve_supervisor_session(value, config=cfg)
-    return _dashboard_supervisor_session(value)
+    return _dashboard_supervisor_session(value, config=cfg)
 
 
 def _configured_dashboard_supervisors(config: Optional[OrchConfig] = None) -> set[str]:
@@ -1364,13 +1346,13 @@ def list_dashboard_sessions(config: Optional[OrchConfig] = None) -> list:
             "MATCH (p:OrchProject) WHERE coalesce(p.supervisor, '') <> '' "
             "RETURN DISTINCT p.supervisor AS s"
         ):
-            supervisor = _dashboard_supervisor_session(record["s"])
+            supervisor = _dashboard_supervisor_session(record["s"], config=cfg)
             if supervisor in allowlist:
                 found.add(supervisor)
         for record in session.run(
             "MATCH (s:OrchSupervisor) WHERE coalesce(s.session, '') <> '' RETURN s.session AS s"
         ):
-            supervisor = _dashboard_supervisor_session(record["s"])
+            supervisor = _dashboard_supervisor_session(record["s"], config=cfg)
             if supervisor in allowlist:
                 found.add(supervisor)
     return sorted(found)
@@ -1823,8 +1805,11 @@ def _sync_human_review_hold_chat(task_id: str, *, previous_blocked_on: Any,
             if row_dict.get("owner_fallback")
             else str(row_dict.get("project_supervisor") or "").strip()
         )
-        previous_lineage = _supervisor_badge_session(previous_supervisor)
-        current_lineage = _supervisor_badge_session(row_dict.get("effective_supervisor") or row_dict.get("owner") or "")
+        previous_lineage = _supervisor_badge_session(previous_supervisor, config=cfg)
+        current_lineage = _supervisor_badge_session(
+            row_dict.get("effective_supervisor") or row_dict.get("owner") or "",
+            config=cfg,
+        )
         if previous_lineage and (
             not current_is_hold
             or str(previous_blocked_on or "").strip() != str(row_dict.get("blocked_on") or "").strip()
@@ -1841,7 +1826,7 @@ def _sync_human_review_hold_chat(task_id: str, *, previous_blocked_on: Any,
             from .config import get_redis_sync
 
             redis_client = get_redis_sync(cfg)
-        hold = _human_review_hold_record(row_dict)
+        hold = _human_review_hold_record(row_dict, config=cfg)
         if hold:
             _surface_human_review_hold_to_chat(hold, config=cfg, redis_client=redis_client)
 
@@ -2010,9 +1995,6 @@ def _reason_required_block_reason(active_conditions: list[dict[str, Any]]) -> st
 # supervisor stop while peer work was pending or in-flight. The keep-going invariant has
 # no off-switch; see _raw_stop_decision.
 
-_AUTONOMOUS_PEER_SUFFIXES = ("-codex", "-gemini", "-grok", "-claude")
-
-
 def get_supervisor_dispatchable_peer_task(supervisor: str, project_id: str,
                                           config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
     """Top task in ``project_id`` that is dispatchable to an AUTONOMOUS PEER of
@@ -2021,7 +2003,7 @@ def get_supervisor_dispatchable_peer_task(supervisor: str, project_id: str,
     must not block the supervisor), blocked_on empty, all DEPENDS_ON satisfied,
     project live. Returns enough to build a dispatch reason, or None."""
     cfg = config or OrchConfig()
-    peer_owners = [f"{supervisor}{suf}" for suf in _AUTONOMOUS_PEER_SUFFIXES]
+    peer_owners = list(supervised_worker_sessions(supervisor, cfg.session_ids))
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         record = session.run(
@@ -2183,7 +2165,7 @@ def get_supervisor_inflight_peer_task(supervisor: str, project_id: str,
     7-hour-stop hole) and it still BLOCKs. Returns the gate/investigate task,
     or None."""
     cfg = config or OrchConfig()
-    peer_owners = [f"{supervisor}{suf}" for suf in _AUTONOMOUS_PEER_SUFFIXES]
+    peer_owners = list(supervised_worker_sessions(supervisor, cfg.session_ids))
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         rows = [dict(record) for record in session.run(
@@ -2235,7 +2217,7 @@ def has_active_inflight_peer_task(supervisor: str, project_id: str,
     peer's RESPONSE_READY/peer_idle re-wakes it.
     """
     cfg = config or OrchConfig()
-    peer_owners = [f"{supervisor}{suf}" for suf in _AUTONOMOUS_PEER_SUFFIXES]
+    peer_owners = list(supervised_worker_sessions(supervisor, cfg.session_ids))
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         rows = [dict(record) for record in session.run(
@@ -2834,7 +2816,7 @@ def create_project(project_id: str, name: str, description: str = "",
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     created_by = ingested_by or "unknown"
-    supervisor_value = supervisor or _normalize_owner_session(created_by) or "unassigned"
+    supervisor_value = _normalize_owner_session(supervisor or created_by, config=cfg) or "unassigned"
     if (not migration_exempt) and supervisor_value == "unassigned":
         raise ValueError(
             "supervisor must be non-empty and not 'unassigned' unless migration_exempt=true. "
@@ -3120,10 +3102,10 @@ def set_overall_refs(refs: List[Dict[str, Any]], config: Optional[OrchConfig] = 
 
 def set_supervisor_refs(session_id: str, refs: List[Dict[str, Any]],
                         config: Optional[OrchConfig] = None) -> Dict[str, Any]:
-    session_value = _normalize_owner_session(session_id)
+    cfg = config or OrchConfig()
+    session_value = _normalize_owner_session(session_id, config=cfg)
     if not session_value:
         raise ValueError("supervisor session must be non-empty")
-    cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         row = session.run("""
@@ -3162,8 +3144,8 @@ def get_overall_refs(config: Optional[OrchConfig] = None) -> Dict[str, Any]:
 
 
 def get_supervisor_refs(session_id: str, config: Optional[OrchConfig] = None) -> Dict[str, Any]:
-    session_value = _normalize_owner_session(session_id)
     cfg = config or OrchConfig()
+    session_value = _normalize_owner_session(session_id, config=cfg)
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         row = session.run("""
@@ -4215,11 +4197,14 @@ def _supervisor_badge_seed(supervisor: str) -> Dict[str, Any]:
     }
 
 
-def _supervisor_badge_session(value: Any) -> str:
-    return _dashboard_supervisor_session(value)
+def _supervisor_badge_session(value: Any, config: Optional[OrchConfig] = None) -> str:
+    return _dashboard_supervisor_session(value, config=config)
 
 
-def _human_review_hold_record(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _human_review_hold_record(
+    row: Dict[str, Any],
+    config: Optional[OrchConfig] = None,
+) -> Optional[Dict[str, Any]]:
     marker = _declared_await_signal(row.get("blocked_on"))
     if not marker or marker.get("kind") != "human-review":
         return None
@@ -4236,7 +4221,10 @@ def _human_review_hold_record(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "project_id": str(row.get("project_id") or ""),
         "phase_id": str(row.get("phase_id") or ""),
         "owner": str(row.get("owner") or ""),
-        "supervisor": _supervisor_badge_session(row.get("effective_supervisor") or row.get("owner") or ""),
+        "supervisor": _supervisor_badge_session(
+            row.get("effective_supervisor") or row.get("owner") or "",
+            config=config,
+        ),
         "blocked_on": str(row.get("blocked_on") or ""),
         "detail": detail,
         "description": description,
@@ -4248,10 +4236,10 @@ def _human_review_hold_record(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def get_supervisor_human_review_holds(supervisor: str,
                                       config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
     """Return open structured AWAIT:human-review holds for one dashboard supervisor."""
-    supervisor_value = _supervisor_badge_session(supervisor)
+    cfg = config or OrchConfig()
+    supervisor_value = _supervisor_badge_session(supervisor, config=cfg)
     if not supervisor_value:
         return []
-    cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     terminal_statuses = list(_TERMINAL_TASK_STATUSES)
     with driver.session(database=cfg.neo4j_db) as session:
@@ -4280,7 +4268,7 @@ def get_supervisor_human_review_holds(supervisor: str,
         """, terminal_statuses=terminal_statuses)
         holds = []
         for record in result:
-            hold = _human_review_hold_record(dict(record))
+            hold = _human_review_hold_record(dict(record), config=cfg)
             if hold and hold.get("supervisor") == supervisor_value:
                 holds.append(hold)
         return holds
@@ -4335,7 +4323,7 @@ def resolve_human_review_hold(task_id: str, verdict: str, resolved_by: str,
         ).single()
         if row is None:
             return {"ok": False, "task_id": resolved_task_id, "reason": "task not found or already terminal"}
-        hold = _human_review_hold_record(dict(row))
+        hold = _human_review_hold_record(dict(row), config=cfg)
         if not hold:
             return {"ok": False, "task_id": resolved_task_id, "reason": "task is not blocked on AWAIT:human-review"}
         blocked_on = str(row.get("blocked_on") or "")
@@ -4438,10 +4426,10 @@ def _human_review_auto_clear_message(holds: List[Dict[str, Any]], *, responded_b
 def _open_question_rows_for_supervisor(supervisor: str, *,
                                        target_question_id: str = "",
                                        config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
-    supervisor_value = _supervisor_badge_session(supervisor)
+    cfg = config or OrchConfig()
+    supervisor_value = _supervisor_badge_session(supervisor, config=cfg)
     if not supervisor_value:
         return []
-    cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         result = session.run("""
@@ -4489,10 +4477,10 @@ def _refresh_chat_open_questions_for_supervisor(supervisor: str, *,
                                                 config: Optional[OrchConfig] = None) -> List[str]:
     from .config import get_redis_sync
 
-    supervisor_value = _supervisor_badge_session(supervisor)
+    cfg = config or OrchConfig()
+    supervisor_value = _supervisor_badge_session(supervisor, config=cfg)
     if not supervisor_value:
         return []
-    cfg = config or OrchConfig()
     open_question_ids = {
         str(row.get("question_id") or "").strip()
         for row in _open_question_rows_for_supervisor(supervisor_value, config=cfg)
@@ -4545,13 +4533,13 @@ def auto_answer_open_questions_for_reply(supervisor: str, *, answer: str, answer
                                          reply_to_question_id: str = "",
                                          config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     """Mark a supervisor's open OrchQuestions answered when the operator replies in chat."""
-    supervisor_value = _supervisor_badge_session(supervisor)
+    cfg = config or OrchConfig()
+    supervisor_value = _supervisor_badge_session(supervisor, config=cfg)
     if not supervisor_value:
         return {"ok": True, "supervisor": "", "answered_count": 0, "answered_questions": [], "purged_question_ids": []}
     answer_text = str(answer or "").strip()
     if not answer_text:
         raise ValueError(f"answer must be non-empty. {CHAT_NEXT_STEP}")
-    cfg = config or OrchConfig()
     actor = str(answered_by or "").strip() or "operator"
     target_question_id = str(reply_to_question_id or "").strip()
     scope = "specific_question" if target_question_id else "lineage"
@@ -4640,10 +4628,10 @@ def auto_clear_human_review_holds_for_reply(supervisor: str, *, responded_by: st
                                             reply_to_question_id: str = "",
                                             config: Optional[OrchConfig] = None) -> Dict[str, Any]:
     """Clear open AWAIT:human-review holds when the operator replies in a supervisor chat."""
-    supervisor_value = _supervisor_badge_session(supervisor)
+    cfg = config or OrchConfig()
+    supervisor_value = _supervisor_badge_session(supervisor, config=cfg)
     if not supervisor_value:
         return {"ok": True, "supervisor": "", "cleared_count": 0, "cleared_holds": []}
-    cfg = config or OrchConfig()
     target_task_id = ""
     raw_reply_target = str(reply_to_question_id or "").strip()
     if raw_reply_target:
@@ -4681,7 +4669,7 @@ def auto_clear_human_review_holds_for_reply(supervisor: str, *, responded_by: st
         )
         holds = []
         for record in result:
-            hold = _human_review_hold_record(dict(record))
+            hold = _human_review_hold_record(dict(record), config=cfg)
             if hold and hold.get("supervisor") == supervisor_value:
                 holds.append(hold)
         if not holds:
@@ -4781,7 +4769,10 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
     cfg = config or OrchConfig()
     dashboard_supervisors = sorted({
         supervisor
-        for supervisor in (_supervisor_badge_session(item) for item in list_dashboard_sessions(config=cfg))
+        for supervisor in (
+            _supervisor_badge_session(item, config=cfg)
+            for item in list_dashboard_sessions(config=cfg)
+        )
         if supervisor and supervisor not in {"unassigned", "unknown", "none", "null"}
     })
     dashboard_set = set(dashboard_supervisors)
@@ -4794,7 +4785,7 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
     unknown_questions_by_supervisor: Dict[str, int] = {supervisor: 0 for supervisor in badges}
 
     def row_for(raw_supervisor: Any) -> Optional[Dict[str, Any]]:
-        supervisor = _supervisor_badge_session(raw_supervisor)
+        supervisor = _supervisor_badge_session(raw_supervisor, config=cfg)
         if supervisor in dashboard_set:
             return badges[supervisor]
         if fallback_bucket:
@@ -4860,7 +4851,7 @@ def get_supervisor_badges(config: Optional[OrchConfig] = None) -> Dict[str, Dict
                    count(DISTINCT t) AS own_in_progress_count
         """, terminal_statuses=terminal_statuses)
         for record in owner_rows:
-            owner = _supervisor_badge_session(record["owner"])
+            owner = _supervisor_badge_session(record["owner"], config=cfg)
             if owner in dashboard_set:
                 badges[owner]["own_in_progress_count"] += int(record["own_in_progress_count"] or 0)
 
