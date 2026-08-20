@@ -26,12 +26,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from fleet_orchestrator.current_task_binding import (  # noqa: E402
-    mint_outward_handle,
-    revoke_outward_handle,
-)
 from fleet_orchestrator.github_broker import (  # noqa: E402
     GitHubBrokerInstallError,
+    call_broker,
     install_github_broker,
     prefix_is_live,
 )
@@ -162,7 +159,6 @@ def main() -> int:
         redis_file = Path(tmp) / "broker-redis.json"
         redis_file.write_text("{}", encoding="utf-8")
         redis = FileRedis(redis_file)
-        handle = mint_outward_handle(session, task_id, 1.0, redis_client=redis)
         redis.set(
             state_key(session, "current_task"),
             json.dumps(
@@ -171,7 +167,6 @@ def main() -> int:
                     "description": "fixture",
                     "supervisor": supervisor,
                     "started_at": 1.0,
-                    "outward_handle": handle,
                 }
             ),
         )
@@ -223,6 +218,19 @@ def main() -> int:
                     break
                 time.sleep(0.05)
             _check("broker socket exists", socket_path.exists(), socket_path)
+            minted = call_broker(
+                str(socket_path),
+                op="mint",
+                session=session,
+                task_id=task_id,
+                started_at=1.0,
+            )
+            handle = str(minted.get("handle") or "")
+            _check("broker minted handle", bool(handle), minted)
+            dumped = json.loads(redis.get(state_key(session, "current_task")) or "{}")
+            _check("current_task does not contain handle", "outward_handle" not in dumped, dumped)
+            stolen = str(dumped.get("outward_handle") or "")
+            _check("redis dump has no victim handle to replay", stolen == "", dumped)
 
             def run_worker(argv, *, handle_value: str = "", session_value: str = "", path_kind: str = "broker"):
                 env = os.environ.copy()
@@ -295,8 +303,14 @@ def main() -> int:
             )
             _check("system gh did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
 
-            revoke_outward_handle(handle, redis_client=redis)
+            call_broker(str(socket_path), op="revoke", session=session, task_id=task_id)
             redis.delete(state_key(session, "current_task"))
+            stolen_replay = run_worker(["pr", "merge", "32"], handle_value=stolen or "not-a-handle")
+            _check(
+                "stale worker replaying redis current_task handle denied",
+                stolen_replay.returncode == 1 and "SAFETY DENY" in stolen_replay.stderr,
+                (stolen_replay.returncode, stolen_replay.stderr),
+            )
             stale = run_worker(["pr", "merge", "32"], handle_value=handle)
             _check(
                 "revoked handle denied after unbind",

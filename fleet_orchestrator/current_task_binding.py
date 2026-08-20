@@ -3,69 +3,17 @@ from __future__ import annotations
 
 import json
 import logging
-import secrets
 import time
 from typing import Any, Dict, Optional
 
 from redis import RedisError, WatchError
 
 from .config import OrchConfig, get_neo4j_driver
-from .notify_state import key as notify_key
 from .notify_state import redis_connect, state_key
 
 LOG = logging.getLogger(__name__)
 
 LIVE_BINDING_TASK_STATUSES = {"in_progress", "dispatched"}
-OUTWARD_HANDLE_KEY_PREFIX = "outward-handle"
-
-
-def outward_handle_key(handle: str) -> str:
-    return notify_key(f"{OUTWARD_HANDLE_KEY_PREFIX}:{handle}")
-
-
-def mint_outward_handle(
-    session_id: str,
-    task_id: str,
-    started_at: Any,
-    *,
-    redis_client: Any = None,
-) -> str:
-    """Mint a revocable possession handle mapped to this exact binding."""
-    handle = secrets.token_urlsafe(32)
-    r = redis_client or redis_connect()
-    r.set(
-        outward_handle_key(handle),
-        json.dumps(
-            {
-                "session": session_id,
-                "task_id": task_id,
-                "started_at": started_at,
-            }
-        ),
-    )
-    return handle
-
-
-def lookup_outward_handle(handle: str, *, redis_client: Any = None) -> Optional[Dict[str, Any]]:
-    value = str(handle or "").strip()
-    if not value:
-        return None
-    r = redis_client or redis_connect()
-    raw = r.get(outward_handle_key(value))
-    binding = decode_current_task(raw)
-    if not binding:
-        return None
-    if not str(binding.get("session") or "").strip() or not str(binding.get("task_id") or "").strip():
-        return None
-    return binding
-
-
-def revoke_outward_handle(handle: str, *, redis_client: Any = None) -> None:
-    value = str(handle or "").strip()
-    if not value:
-        return
-    r = redis_client or redis_connect()
-    r.delete(outward_handle_key(value))
 
 
 def task_status(task_id: str, *, config: Optional[OrchConfig] = None) -> Optional[str]:
@@ -135,11 +83,8 @@ def clear_matching_current_task(
                     if not current or str(current.get("task_id") or "") != task_id:
                         pipe.unwatch()
                         return False
-                    handle = str(current.get("outward_handle") or "").strip()
                     pipe.multi()
                     pipe.delete(key)
-                    if handle:
-                        pipe.delete(outward_handle_key(handle))
                     pipe.execute()
                     suffix = f" reason={reason}" if reason else ""
                     LOG.warning("cleared current_task binding worker=%s task=%s%s", worker, task_id, suffix)
@@ -161,11 +106,7 @@ def clear_session_current_task(session_id: str, *, redis_client: Any = None) -> 
     raw_outcome = r.get(outcome_key)
     current = decode_current_task(raw_current) or {}
     outcome = decode_current_task(raw_outcome) or {}
-    handle = str(current.get("outward_handle") or "").strip()
-    delete_keys = [current_key, outcome_key]
-    if handle:
-        delete_keys.append(outward_handle_key(handle))
-    deleted = int(r.delete(*delete_keys) or 0)
+    deleted = int(r.delete(current_key, outcome_key) or 0)
     return {
         "session": session_id,
         "cleared": deleted > 0,

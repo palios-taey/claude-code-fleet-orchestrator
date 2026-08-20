@@ -20,12 +20,16 @@ import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
-from .current_task_binding import lookup_outward_handle
+import secrets
+
 from .outward_capability import (
     OutwardAuthorizationError,
     github_argv_requires_outward_capability,
     require_github_argv_capability,
 )
+
+# Broker-process possession map. Never written to Redis or current_task.
+_HANDLES: dict[str, dict[str, Any]] = {}
 
 WORKER_UNSET_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
 LIVE_PREFIXES = (
@@ -46,6 +50,42 @@ class GitHubBrokerClientError(RuntimeError):
 
 def _resolved(path: Path) -> Path:
     return path.expanduser().resolve()
+
+
+def mint_broker_handle(session: str, task_id: str, started_at: Any = None) -> str:
+    handle = secrets.token_urlsafe(32)
+    _HANDLES[handle] = {
+        "session": str(session),
+        "task_id": str(task_id),
+        "started_at": started_at,
+    }
+    return handle
+
+
+def lookup_broker_handle(handle: str) -> Optional[dict[str, Any]]:
+    value = str(handle or "").strip()
+    if not value:
+        return None
+    binding = _HANDLES.get(value)
+    if not isinstance(binding, dict):
+        return None
+    if not str(binding.get("session") or "").strip():
+        return None
+    return dict(binding)
+
+
+def revoke_broker_handles(session: str, task_id: str = "") -> int:
+    session_id = str(session or "").strip()
+    task = str(task_id or "").strip()
+    removed = 0
+    for handle, binding in list(_HANDLES.items()):
+        if str(binding.get("session") or "") != session_id:
+            continue
+        if task and str(binding.get("task_id") or "") != task:
+            continue
+        del _HANDLES[handle]
+        removed += 1
+    return removed
 
 
 def prefix_is_live(prefix: Path) -> bool:
@@ -70,7 +110,7 @@ def handle_broker_request(
     """Authorize mutating argv from a possession handle, never a claimed session."""
     mutating = github_argv_requires_outward_capability(argv)
     if mutating:
-        binding = lookup_outward_handle(handle, redis_client=redis_client)
+        binding = lookup_broker_handle(handle)
         if not binding:
             return {
                 "rc": 1,
@@ -144,7 +184,26 @@ def serve_broker(
             except json.JSONDecodeError:
                 conn.sendall(b'{"rc":1,"stdout":"","stderr":"SAFETY DENY: invalid broker request\\n"}\n')
                 continue
-            argv = request.get("argv") if isinstance(request, dict) else None
+            if not isinstance(request, dict):
+                conn.sendall(b'{"rc":1,"stdout":"","stderr":"SAFETY DENY: argv required\\n"}\n')
+                continue
+            op = str(request.get("op") or "exec").strip()
+            if op == "mint":
+                handle = mint_broker_handle(
+                    str(request.get("session") or ""),
+                    str(request.get("task_id") or ""),
+                    request.get("started_at"),
+                )
+                conn.sendall((json.dumps({"rc": 0, "handle": handle}) + "\n").encode("utf-8"))
+                continue
+            if op == "revoke":
+                removed = revoke_broker_handles(
+                    str(request.get("session") or ""),
+                    str(request.get("task_id") or ""),
+                )
+                conn.sendall((json.dumps({"rc": 0, "removed": removed}) + "\n").encode("utf-8"))
+                continue
+            argv = request.get("argv")
             if not isinstance(argv, list):
                 conn.sendall(b'{"rc":1,"stdout":"","stderr":"SAFETY DENY: argv required\\n"}\n')
                 continue
@@ -162,10 +221,14 @@ def serve_broker(
 
 def call_broker(
     socket_path: str,
-    argv: list[str],
+    argv: Optional[list[str]] = None,
     *,
+    op: str = "exec",
     handle: str = "",
     claimed_session: str = "",
+    session: str = "",
+    task_id: str = "",
+    started_at: Any = None,
 ) -> dict[str, Any]:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -178,9 +241,12 @@ def call_broker(
         sock.sendall(
             json.dumps(
                 {
-                    "argv": list(argv),
+                    "op": str(op or "exec"),
+                    "argv": list(argv or []),
                     "handle": str(handle or ""),
-                    "session": str(claimed_session or ""),
+                    "session": str(claimed_session or session or ""),
+                    "task_id": str(task_id or ""),
+                    "started_at": started_at,
                 }
             ).encode("utf-8")
             + b"\n"

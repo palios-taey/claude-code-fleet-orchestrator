@@ -98,7 +98,6 @@ from .current_task_binding import (
     clear_session_current_task,
     decode_current_task,
     is_live_binding_status,
-    mint_outward_handle,
     task_status as _binding_task_status,
 )
 from .world_manifest import publish_world_manifest_v0
@@ -486,9 +485,6 @@ def bind_current_task(
         "description": description,
         "supervisor": supervisor,
         "started_at": started_at,
-        "outward_handle": mint_outward_handle(
-            worker, task_id, started_at, redis_client=r
-        ),
     }
     if dispatcher:
         current_task["dispatcher"] = dispatcher
