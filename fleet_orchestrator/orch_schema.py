@@ -3258,9 +3258,59 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
                    t.priority AS priority, t.owner AS owner,
                    t.capability_tags AS capability_tags,
                    t.file_blast_radius AS file_blast_radius,
-                   t.estimated_tokens AS estimated_tokens
+                   t.estimated_tokens AS estimated_tokens,
+                   t.status AS status, t.blocked_on AS blocked_on
             ORDER BY {_READY_TASK_ORDER_CYPHER}
         """)
+        return [dict(r) for r in result]
+
+
+_TASK_LIST_SCOPES = ("ready", "active", "all")
+
+
+def list_tasks_by_scope(scope: Optional[str] = None,
+                        config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
+    """Task-list projection with an explicit, read-only scope.
+
+    - ``ready`` (default): pending tasks with dependencies satisfied under an active
+      project (delegates to :func:`get_ready_tasks`) — the backward-compatible ready
+      queue.
+    - ``active``: ``in_progress`` tasks — the stuck-work view; surfaces the
+      ``blocked_on`` (AWAIT) rows the ready queue structurally cannot show.
+    - ``all``: every non-terminal task (pending + in_progress).
+
+    All scopes carry ``status`` + ``blocked_on``. Read-only (MATCH/RETURN only).
+    Raises ``ValueError`` on an unknown scope (fail loud).
+    """
+    scope_value = (scope or "ready").strip().lower()
+    if scope_value not in _TASK_LIST_SCOPES:
+        raise ValueError(
+            f"unknown task list scope {scope_value!r}; "
+            f"expected one of {', '.join(_TASK_LIST_SCOPES)}"
+        )
+    if scope_value == "ready":
+        return get_ready_tasks(config)
+    cfg = config or OrchConfig()
+    if scope_value == "active":
+        where_clause = "t.status = 'in_progress'"
+    else:  # all -> active non-terminal work (pending + in_progress; excludes cancelled + terminal)
+        where_clause = "coalesce(t.status, '') IN $active_statuses"
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run(
+            f"""
+            MATCH (t:OrchTask)
+            WHERE {where_clause}
+            RETURN t.id AS id, t.description AS description,
+                   t.priority AS priority, t.owner AS owner,
+                   t.capability_tags AS capability_tags,
+                   t.file_blast_radius AS file_blast_radius,
+                   t.estimated_tokens AS estimated_tokens,
+                   t.status AS status, t.blocked_on AS blocked_on
+            ORDER BY {_READY_TASK_ORDER_CYPHER}
+            """,
+            active_statuses=["pending", "in_progress"],
+        )
         return [dict(r) for r in result]
 
 
@@ -3533,9 +3583,44 @@ def resolve_task_id(task_id: str, config: Optional[OrchConfig] = None) -> str:
     return rows[0]["id"] if len(rows) == 1 else task_id
 
 
+def _load_task_depends_on(session: Any, task_id: str) -> List[Dict[str, Any]]:
+    """Structured DEPENDS_ON projection: each declared dependency's id + current status.
+
+    Fails loud (raises ValueError) on a malformed dependency record — a DEPENDS_ON
+    edge to an OrchTask carrying no id — rather than silently emitting a blank
+    dependency that a monitor would misread.
+    """
+    records = session.run(
+        """
+        MATCH (:OrchTask {id: $task_id})-[:DEPENDS_ON]->(dep:OrchTask)
+        RETURN dep.id AS id, dep.status AS status
+        ORDER BY dep.id
+        """,
+        task_id=task_id,
+    )
+    depends_on: List[Dict[str, Any]] = []
+    for record in records:
+        dep_id = record["id"]
+        if dep_id is None or not str(dep_id).strip():
+            raise ValueError(
+                f"malformed dependency record for task {task_id!r}: "
+                "a DEPENDS_ON edge points to an OrchTask with no id"
+            )
+        depends_on.append({"id": str(dep_id), "status": record["status"]})
+    return depends_on
+
+
 def get_task(task_id: str,
-             config: Optional[OrchConfig] = None) -> Optional[Dict[str, Any]]:
-    """Return one OrchTask node as a plain dict."""
+             config: Optional[OrchConfig] = None,
+             include_depends_on: bool = False) -> Optional[Dict[str, Any]]:
+    """Return one OrchTask node as a plain dict.
+
+    When ``include_depends_on`` is True, attach a structured ``depends_on`` list of
+    ``{"id", "status"}`` for each DEPENDS_ON edge so API clients read declared
+    dependencies and their current statuses from the record instead of querying
+    Neo4j directly. Default False preserves the exact prior record for the many
+    internal callers (liveness, stop-decision, shippability) — additive only.
+    """
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
@@ -3547,6 +3632,8 @@ def get_task(task_id: str,
             return None
         task = _normalize_map(dict(result["t"]))
         task["forced_continuation_count"] = int(task.get("forced_continuation_count", 0) or 0)
+        if include_depends_on:
+            task["depends_on"] = _load_task_depends_on(session, task_id)
         task = _attach_completion_evidence_verification(task)
         return _attach_ref_runtime(task, source_path=task.get("source_path"))
 
