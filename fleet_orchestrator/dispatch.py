@@ -60,7 +60,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from .config import OrchConfig, _parse_product_owner_map, _parse_session_ids, get_neo4j_session, notify_cli
 from .causal_ledger import (
@@ -1799,14 +1799,156 @@ def check_previous_task(worker: str) -> Optional[dict]:
     return task
 
 
-def clear_current_task(worker: str) -> None:
-    """Force-clear the worker's current_task + last_outcome keys.
+class UnbindError(Exception):
+    """Fail-loud unbind / graph-reconcile error with an HTTP-facing status code."""
 
-    Normally the Stop hook clears these after notifying the supervisor —
+    def __init__(self, message: str, *, status_code: int = 409) -> None:
+        super().__init__(message)
+        self.status_code = int(status_code)
+        self.message = str(message)
+
+
+def _read_session_current_task(worker: str) -> Dict[str, Any]:
+    raw = _redis_connect().get(_state_key(worker, "current_task"))
+    return decode_current_task(raw) or {}
+
+
+def _reconcile_unbind_graph(worker: str, task_id: str) -> Dict[str, Any]:
+    """Identity-bound fail-loud graph reconcile for unbind.
+
+    Preserve owner; set pending; clear dispatched_to + worker_liveness_*.
+    Raises UnbindError when the exact bound task cannot be reconciled.
+    """
+    cfg = OrchConfig()
+    try:
+        with get_neo4j_session(cfg) as session:
+            record = session.run(
+                """
+                MATCH (t:OrchTask {id: $task_id})
+                WHERE coalesce(t.dispatched_to, '') = $worker
+                   OR (
+                        coalesce(t.dispatched_to, '') = ''
+                        AND coalesce(t.owner, '') = $worker
+                        AND coalesce(t.status, '') = 'in_progress'
+                   )
+                   OR coalesce(t.worker_liveness_worker, '') = $worker
+                SET t.status = 'pending',
+                    t.dispatched_to = NULL,
+                    t.blocked_on = NULL,
+                    t.worker_liveness_worker = NULL,
+                    t.worker_liveness_supervisor = NULL,
+                    t.worker_liveness_started_at = NULL,
+                    t.worker_liveness_heartbeat_at = NULL,
+                    t.worker_liveness_ttl_secs = NULL,
+                    t.worker_liveness_ack_at = NULL,
+                    t.worker_liveness_escalated_at = NULL,
+                    t.worker_liveness_escalation_reason = NULL,
+                    t.updated_at = datetime()
+                RETURN t.id AS task_id,
+                       t.status AS status,
+                       t.owner AS owner,
+                       coalesce(t.dispatched_to, '') AS dispatched_to,
+                       coalesce(t.worker_liveness_worker, '') AS worker_liveness_worker
+                """,
+                task_id=task_id,
+                worker=worker,
+            ).single()
+    except UnbindError:
+        raise
+    except Exception as exc:
+        raise UnbindError(
+            f"Neo4j unbind reconcile failed for session={worker} task={task_id}: {exc}",
+            status_code=500,
+        ) from exc
+    if record is None:
+        raise UnbindError(
+            f"No identity-bound OrchTask to unbind for session={worker} task={task_id}; "
+            f"refusing to clear Redis while the graph relation is unmatched. "
+            f"Pass an explicit repair task_id only when dispatched_to/liveness names this session.",
+            status_code=409,
+        )
+    return {
+        "task_id": str(record["task_id"]),
+        "status": str(record["status"] or ""),
+        "owner": str(record["owner"] or ""),
+        "dispatched_to": str(record["dispatched_to"] or "") or None,
+        "worker_liveness_worker": str(record["worker_liveness_worker"] or "") or None,
+    }
+
+
+def clear_current_task(worker: str, *, task_id: Optional[str] = None) -> Dict[str, Any]:
+    """Unbind a session: fail-loud graph reconcile, then clear Redis live bind.
+
+    Normally the Stop hook clears Redis after notifying the supervisor —
     but ONLY when the recorded outcome was ``done``. For ``error`` /
     ``interrupted`` / ``unknown`` outcomes the keys persist as a signal
     to the next dispatcher. This helper is the supervisor's explicit
     "I've seen the previous task's outcome, I'm moving on" acknowledgment
     — call it after investigating or after deciding to cancel.
+
+    Order (authoritative):
+      1. Resolve identity from Redis ``current_task`` (or explicit repair task_id)
+      2. Reconcile Neo4j: pending + clear dispatched_to/liveness (fail loud)
+      3. Clear Redis current_task/last_outcome + worker-task liveness sidecar
+
+    Graph-only ``/current`` stays truthful after step 2; Redis is cleared last so a
+    Neo failure cannot return success with a stale executor relation.
     """
-    clear_session_current_task(worker, redis_client=_redis_connect())
+    from .worker_liveness import worker_task_liveness_key
+
+    session_id = str(worker or "").strip()
+    if not session_id:
+        raise UnbindError("session_id is required for unbind", status_code=400)
+
+    bound = _read_session_current_task(session_id)
+    bound_task_id = str(bound.get("task_id") or "").strip()
+    repair_task_id = str(task_id or "").strip()
+    repair = False
+
+    if bound_task_id:
+        if repair_task_id and repair_task_id != bound_task_id:
+            raise UnbindError(
+                f"Redis bind for {session_id} is {bound_task_id}; refusing repair task_id="
+                f"{repair_task_id}. Unbind without --task-id, or clear the live bind first.",
+                status_code=409,
+            )
+        target_task_id = bound_task_id
+    elif repair_task_id:
+        # Explicit repair when Redis is already absent but a stale graph claim remains.
+        target_task_id = repair_task_id
+        repair = True
+    else:
+        raise UnbindError(
+            f"No Redis current_task bind for {session_id}. If a stale dispatched_to/"
+            f"worker_liveness relation remains, re-run with an explicit repair task_id "
+            f"(DELETE .../current-task?task_id=... or `taey-task unbind {session_id} --task-id ...`).",
+            status_code=409,
+        )
+
+    reconciled = _reconcile_unbind_graph(session_id, target_task_id)
+
+    try:
+        r = _redis_connect()
+        cleared = clear_session_current_task(session_id, redis_client=r)
+        r.delete(worker_task_liveness_key(target_task_id))
+    except Exception as exc:
+        raise UnbindError(
+            f"Graph reconciled to pending for {target_task_id}, but Redis clear failed for "
+            f"{session_id}: {exc}. Retry unbind; graph is already dispatchable.",
+            status_code=500,
+        ) from exc
+
+    return {
+        "session": session_id,
+        "ok": True,
+        "unbound": True,
+        "repair": repair,
+        "previous_task_id": target_task_id,
+        "task_id": reconciled["task_id"],
+        "status": reconciled["status"],
+        "owner": reconciled["owner"],
+        "dispatched_to": reconciled["dispatched_to"],
+        "worker_liveness_worker": reconciled["worker_liveness_worker"],
+        "redis_cleared": bool(cleared.get("cleared")),
+        "cleared": cleared,
+    }

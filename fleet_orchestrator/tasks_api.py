@@ -1801,15 +1801,49 @@ async def clear_pause_session_endpoint(session_id: str, req: Request) -> Dict[st
 
 
 @app.delete("/api/sessions/{session_id}/current-task")
-def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
-    clear_current_task(session_id)
+def session_unbind_current_task(
+    session_id: str,
+    task_id: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    """Identity-bound unbind: reconcile graph to pending, then clear Redis.
+
+    Optional ``task_id`` is an explicit repair when Redis ``current_task`` is already
+    absent but a stale ``dispatched_to`` / liveness claim remains for this session.
+    """
+    from fleet_orchestrator.dispatch import UnbindError
+
+    try:
+        cleared = clear_current_task(session_id, task_id=task_id)
+    except UnbindError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "error": exc.message,
+                "session": session_id,
+                "task_id": (str(task_id).strip() if task_id else None),
+                "next_step": (
+                    f"Inspect `taey-task status` / GET /api/sessions/{session_id}/current. "
+                    f"If Redis is empty but the graph still shows dispatched_to={session_id}, "
+                    f"retry with ?task_id=<exact-task-id> (or `taey-task unbind {session_id} --task-id ...`)."
+                ),
+            },
+        ) from exc
+    previous_task_id = str((cleared or {}).get("previous_task_id") or "").strip()
     return {
         "ok": True,
         "session": session_id,
         "unbound": True,
+        "repair": bool((cleared or {}).get("repair")),
+        "previous_task_id": previous_task_id or None,
+        "task_id": (cleared or {}).get("task_id") or previous_task_id or None,
+        "status": (cleared or {}).get("status"),
+        "owner": (cleared or {}).get("owner"),
+        "dispatched_to": (cleared or {}).get("dispatched_to"),
+        "worker_liveness_worker": (cleared or {}).get("worker_liveness_worker"),
         "next_step": (
-            f"Retry dispatch or inspect the session with GET /api/sessions/{session_id}/current "
-            f"and `taey-task status <task-id>`."
+            f"Task {previous_task_id or '<unknown>'} is pending and unbound. "
+            f"Re-dispatch with `taey-task dispatch {previous_task_id or '<task-id>'} <peer>` "
+            f"or inspect GET /api/sessions/{session_id}/current."
         ),
     }
 
