@@ -198,26 +198,26 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
                    session_roots: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     raw_session = (session or "").strip()
     registered_sessions = _load_registered_sessions()
-    session_key = _normalize_session(session, registered_sessions)
-    aliases = _session_aliases(raw_session, session_key, registered_sessions)
+    control_session = _normalize_session(session, registered_sessions)
+    aliases = _session_aliases(raw_session, control_session, registered_sessions)
     base_roots = session_roots if session_roots is not None else _load_session_roots()
     scoped_env = _read_session_env(aliases, base_roots)
     roots = _load_session_roots(scoped_env) if "ORCH_SESSION_ROOTS" in scoped_env else base_roots
-    work = _resolve_work(session_key, task_id)
+    work = _resolve_work(raw_session, task_id)
     summary = get_project_summary(work["project_id"]) if work.get("project_id") else None
 
     task_text = _task_text(work, summary, task_id)
-    refs = _select_refs(summary, work, task_id, session_key)
+    refs = _select_refs(summary, work, task_id, control_session)
     refs = _warn_if_registered_session_root_missing(refs, aliases, roots, registered_sessions, work)
-    memory_files = _read_memory_files(_memory_dirs(session_key, work, summary, roots, aliases))
-    selected_memory = _select_memory(session_key, work, summary, task_text, memory_files, scoped_env, max_memory)
+    memory_files = _read_memory_files(_memory_dirs(control_session, work, summary, roots, aliases))
+    selected_memory = _select_memory(control_session, work, summary, task_text, memory_files, scoped_env, max_memory)
     repo_head = _git_head()
-    rules_selection = _select_rules(session_key, work, summary, task_text, scoped_env=scoped_env)
+    rules_selection = _select_rules(control_session, work, summary, task_text, scoped_env=scoped_env)
     rules = rules_selection["rules"]
     rules_meta = rules_selection["meta"]
-    identity = _select_identity(raw_session, session_key, cli)
+    identity = _select_identity(raw_session, control_session, cli)
     supervisor_affordance = _supervisor_access_affordance(raw_session, roots, registered_sessions)
-    kb_context = select_kb_context(session_key, work, refs)
+    kb_context = select_kb_context(control_session, work, refs)
 
     context = {
         "overall_refs": refs["overall"],
@@ -235,7 +235,7 @@ def select_context(session: str, task_id: Optional[str] = None, cli: str = "clau
     if kb_context:
         context["kb_context"] = kb_context
     context["snapshot"] = _build_snapshot(
-        session_key,
+        raw_session,
         cli,
         task_id,
         work,
@@ -296,7 +296,7 @@ def build_packet(session: str, context: Dict[str, Any]) -> Dict[str, Any]:
     )
     packet = {
         "packet_id": str(uuid.uuid4()),
-        "generated_for": _normalize_session(session, _load_registered_sessions()),
+        "generated_for": (session or "").strip(),
         "generated_at_commit": generated_at_commit,
         "provenance_hash": "",
         "snapshot": snapshot,

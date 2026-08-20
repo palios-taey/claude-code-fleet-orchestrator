@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 from types import SimpleNamespace
+from unittest import mock
 
 from fastapi import HTTPException
 
@@ -12,6 +13,8 @@ sys.path.insert(0, _REPO)
 
 from fleet_orchestrator.completion_guard import _autonomous_peer_supervisor  # noqa: E402
 from fleet_orchestrator import cli_orch_watch as watch  # noqa: E402
+from fleet_orchestrator import context_assembler  # noqa: E402
+from fleet_orchestrator import tasks_api  # noqa: E402
 from fleet_orchestrator.config import OrchConfigError, _parse_session_ids  # noqa: E402
 from fleet_orchestrator.control_principal_migration import codex_supervisor_mappings  # noqa: E402
 from fleet_orchestrator.session_topology import (  # noqa: E402
@@ -103,12 +106,45 @@ def _topology_contract() -> None:
         )
         == "conductor-codex",
     )
+    packet = context_assembler.build_packet("conductor", {"snapshot": {}})
+    _check(
+        "wake packet provenance remains bound to the exact worker seat",
+        packet["generated_for"] == "conductor",
+        packet["generated_for"],
+    )
 
     original = os.environ.get("ORCH_SESSION_IDS")
     try:
         os.environ["ORCH_SESSION_IDS"] = "conductor-codex,weaver-codex,treasurer-codex,job-seeker-codex"
         parentless = SimpleNamespace(get=lambda _key: None)
         stale_parent = SimpleNamespace(get=lambda _key: "conductor")
+        with mock.patch.object(context_assembler, "get_session_current_work", return_value=None) as current_work, \
+             mock.patch.object(context_assembler, "get_session_next_ready", return_value=None), \
+             mock.patch.object(context_assembler, "get_session_supervised_projects", return_value=[]), \
+             mock.patch.object(context_assembler, "get_overall_refs", return_value={"ref_context": {"refs": []}}), \
+             mock.patch.object(context_assembler, "get_supervisor_refs", return_value={"ref_context": {"refs": []}}), \
+             mock.patch.object(context_assembler, "select_kb_context", return_value=[]):
+            worker_context = context_assembler.select_context("conductor", session_roots={})
+        _check(
+            "worker wake resolves work for the exact receiving seat",
+            current_work.call_args_list == [mock.call("conductor")]
+            and worker_context["snapshot"]["session_id"] == "conductor",
+            {"calls": current_work.call_args_list, "snapshot": worker_context["snapshot"]},
+        )
+        with mock.patch.object(tasks_api, "_cfg", return_value=SimpleNamespace(session_ids=["conductor-codex"])), \
+             mock.patch.object(tasks_api, "_ensure_registered_session"), \
+             mock.patch.object(tasks_api, "select_wake_context", return_value={}), \
+             mock.patch.object(
+                 tasks_api,
+                 "build_wake_packet",
+                 return_value={"generated_for": "conductor-codex"},
+             ):
+            mismatch = tasks_api.session_wake_packet("conductor", cli="claude")
+        _check(
+            "wake endpoint fails open before returning cross-seat context",
+            mismatch.get("ok") is False and "recipient mismatch" in mismatch.get("error", ""),
+            mismatch,
+        )
         _check(
             "orch-watch keeps a parentless codex control at the control seat",
             watch.resolve_supervisor(parentless, "conductor-codex") == "conductor-codex",

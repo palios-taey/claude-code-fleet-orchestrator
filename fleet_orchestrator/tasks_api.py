@@ -2063,6 +2063,12 @@ def session_wake_packet(
         _ensure_registered_session(session_id, cfg)
         context = select_wake_context(session_id, task_id=task_id, cli=cli_key)
         packet = build_wake_packet(session_id, context)
+        generated_for = str(packet.get("generated_for") or "").strip()
+        if generated_for != session_id:
+            raise ValueError(
+                "wake packet recipient mismatch: "
+                f"requested={session_id!r} generated_for={generated_for!r}"
+            )
         rendered = assemble_wake_packet(packet, cli_key, budget_bytes=budget_bytes)
         report = wake_size_report(rendered, packet, budget_bytes=budget_bytes)
         injection_receipt = task_ref_receipt(packet)
@@ -2108,6 +2114,7 @@ def session_wake_packet(
             "packet": rendered,
             "packet_meta": {
                 "packet_id": packet.get("packet_id", ""),
+                "generated_for": generated_for,
                 "provenance_hash": packet.get("provenance_hash", ""),
                 "generated_at_commit": packet.get("generated_at_commit", ""),
                 "proof_capsule": proof_capsule,
