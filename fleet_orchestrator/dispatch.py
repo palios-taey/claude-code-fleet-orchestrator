@@ -126,6 +126,10 @@ class WorkerBusy(Exception):
     """Dispatch blocked because another live dispatcher already owns the worker slot."""
 
 
+class ControlSeatTarget(WorkerBusy):
+    """Dispatch blocked because a worker command targeted another control seat."""
+
+
 class HooksNotInstalled(Exception):
     """Dispatch blocked because the target session has no managed notify hooks."""
 
@@ -990,23 +994,27 @@ def dispatch(
 
     Side effects (in order):
 
-    1. If the worker maps to a product in ``ORCH_PRODUCT_OWNER_MAP`` / ``PRODUCT_OWNER_MAP`` and that
+    1. Reject a cross-supervisor dispatch to a registered ``*-codex`` control
+       before any worker-state mutation. Control seats own and supervise work;
+       their Claude/Gemini/Grok seats execute delegated worker commands.
+    2. If the worker maps to a product in ``ORCH_PRODUCT_OWNER_MAP`` / ``PRODUCT_OWNER_MAP`` and that
        product has ``support:product:<id>:bug_lock == "true"``, raise
        ``BugLockActive`` before any worker-state mutation unless
        ``is_bugfix=True``.
-    2. Write ``taey:<worker>:current_task`` JSON {task_id, description,
+    3. Write ``taey:<worker>:current_task`` JSON {task_id, description,
        supervisor, started_at} — the universal Stop hook reads this to
        build its supervisor-notify body. Cleared by the Stop hook after
        the supervisor is notified.
-    3. If ``supervisor`` is provided, write ``taey:<worker>:parent`` so
+    4. If ``supervisor`` is provided for a worker seat, write
+       ``taey:<worker>:parent`` so
        the Stop hook addresses notifications correctly even for multi-
        level trees (where suffix-strip wouldn't reach the right node).
-    4. Refuse if the target CLI does not have managed notify hooks installed;
+    5. Refuse if the target CLI does not have managed notify hooks installed;
        without hooks the worker cannot maintain wake/stop-discipline state.
-    5. Assemble a wake packet for ``worker`` and ``task_id``. The original
+    6. Assemble a wake packet for ``worker`` and ``task_id``. The original
        dispatch body is embedded in the packet's Human section, so direct
        dispatch still receives rules and context.
-    6. Inject that rendered packet by invoking ``taey-notify <worker> --body-file <path>``,
+    7. Inject that rendered packet by invoking ``taey-notify <worker> --body-file <path>``,
        which the released fleet-notify daemon will pick up and deliver
        via tmux as soon as the worker is idle.
 
@@ -1015,6 +1023,20 @@ def dispatch(
     Pass ``prompt_body`` to override the dispatch body embedded inside the
     packet; it is never sent as an un-injected standalone prompt.
     """
+    registered_sessions = _parse_session_ids()
+    from_session = supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")
+    worker_control = control_principal_for_session(worker, registered_sessions)
+    dispatcher_control = control_principal_for_session(from_session, registered_sessions)
+    target_is_codex_control = (
+        worker.lower().endswith("-codex")
+        and worker_control.lower() == worker.lower()
+    )
+    if target_is_codex_control and dispatcher_control.lower() != worker.lower():
+        raise ControlSeatTarget(
+            f"registered control seat {worker!r} cannot execute a worker dispatch from "
+            f"{from_session!r}; target one of its Claude/Gemini/Grok worker seats"
+        )
+
     hook_status = hook_installation_status(worker)
     if not hook_status.ok:
         raise HooksNotInstalled(hook_status.detail)
@@ -1030,8 +1052,6 @@ def dispatch(
             )
             raise BugLockActive(f"BUG_LOCK_ACTIVE for {product_id}: {reason}")
 
-    from_session = supervisor or os.environ.get("TAEY_NODE_ID", "dispatch")
-
     previous_force_bindings = _current_task_binding_candidates(task_id) if force else set()
     _claim_ready_orch_task(
         task_id=task_id,
@@ -1045,7 +1065,7 @@ def dispatch(
             task_id=task_id,
             description=description,
             supervisor=supervisor,
-            set_parent=bool(supervisor),
+            set_parent=bool(supervisor) and not target_is_codex_control,
             force=force,
             guard_existing=True,
             dispatcher=from_session,
