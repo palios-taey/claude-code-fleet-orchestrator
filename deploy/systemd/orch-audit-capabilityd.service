@@ -12,6 +12,8 @@ Group=orch-cap
 UMask=0077
 WorkingDirectory=/opt/claude-code-fleet-orchestrator
 EnvironmentFile=-/etc/fleet-orchestrator/orch-audit-capabilityd.env
+# Socket-activated: inherits LISTEN_FDS from orch-audit-capabilityd.socket.
+# The daemon must NOT unlink/rebind issuer.sock (that abandons the activated FD).
 ExecStart=/opt/claude-code-fleet-orchestrator/scripts/orch-audit-capabilityd --serve
 Restart=on-failure
 RestartSec=2

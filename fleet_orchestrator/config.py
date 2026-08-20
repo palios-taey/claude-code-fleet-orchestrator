@@ -156,6 +156,9 @@ OPTIONAL_ENV = (
     ("ORCH_AUDIT_CAPABILITY_UID_MAP", "unset",
      "JSON map of supervisor OS uid→fleet session id; peercred uid is the principal "
      "(ORCH_SESSION_ID environ is not authority)"),
+    ("ORCH_AUDIT_CAPABILITY_CLIENT_GROUP", "orch-audit-clients",
+     "systemd SocketGroup for issuer.sock; supervisor client uids must be members, "
+     "shared mira/worker uid must not"),
     ("ORCH_DATA_DIR", "$XDG_DATA_HOME or ~/.local/share (XDG Base Dir spec)",
      "standard local-tool data location; zero-config by design for a single-user local product"),
     ("ORCH_WORLD_MANIFEST_PATH", "ORCH_DATA_DIR/provenance/world-manifest-v0.json",

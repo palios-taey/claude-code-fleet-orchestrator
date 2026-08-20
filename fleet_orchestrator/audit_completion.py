@@ -27,6 +27,9 @@ APPROVED_RECEIPT_ROOTS = (
 )
 # Sole structured provenance file used by the verifier — must be in SHA256SUMS.
 RECEIPT_REFS_NAME = "refs.json"
+RECEIPT_VERDICT_NAMES = ("verdict-receipt.txt", "verdict_receipt.txt")
+# SHA256SUMS itself is the only on-disk file allowed to be absent from the manifest.
+RECEIPT_MANIFEST_NAME = "SHA256SUMS"
 REQUIRED_REFS_FIELDS = (
     "audit_repo",
     "audit_head",
@@ -285,6 +288,57 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.lstat().st_mode)
 
 
+def _normalize_receipt_field(field: str, value: Any) -> Any:
+    if field in {"audit_head", "audit_base", "audit_required_state"}:
+        return str(value or "").strip().lower()
+    if field in {"audit_bound_status_id", "audit_pr_number"}:
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise AuditContractError(f"{field} must be an integer") from exc
+    return str(value or "").strip()
+
+
+def _exact_receipt_fields(source: str, data: Dict[str, Any], expected: Dict[str, Any]) -> None:
+    missing = [k for k in REQUIRED_REFS_FIELDS if k not in data]
+    if missing:
+        raise AuditContractError(f"{source} missing required fields: {', '.join(missing)}")
+    for field, expected_value in expected.items():
+        actual = _normalize_receipt_field(field, data.get(field))
+        want = _normalize_receipt_field(field, expected_value)
+        if actual != want:
+            raise AuditContractError(
+                f"{source}.{field} mismatch: expected {want!r}, got {actual!r}"
+            )
+
+
+def _parse_verdict_fields(text: str) -> Dict[str, Any]:
+    """Parse hashed verdict as JSON object or key=value lines (not free-text substring)."""
+    raw = str(text or "").strip()
+    if not raw:
+        raise AuditContractError("verdict receipt is empty")
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise AuditContractError(f"verdict JSON is invalid: {exc}") from exc
+        if not isinstance(data, dict):
+            raise AuditContractError("verdict JSON must be an object")
+        return data
+    fields: Dict[str, Any] = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key in REQUIRED_REFS_FIELDS:
+            fields[key] = value.strip()
+    return fields
+
+
 def verify_sealed_audit_receipt(
     claimed_path: str,
     *,
@@ -296,23 +350,18 @@ def verify_sealed_audit_receipt(
     expected_status_id: int,
     expected_pr_number: int,
 ) -> Dict[str, Any]:
-    """Fail-closed sealed receipt with exact structured refs.json provenance.
-
-    Provenance is NOT substring-scanned from free text. Only SHA256SUMS-covered
-    ``refs.json`` fields are authoritative. Every semantic file read for
-    verification must appear in SHA256SUMS.
-    """
+    """Fail-closed sealed receipt: exact file-set vs SHA256SUMS + structured refs/verdict."""
     root = resolve_sealed_receipt_root(claimed_path)
     if _mode(root) != 0o555:
         raise AuditContractError(f"audit receipt root mode must be 0555, got {oct(_mode(root))}")
 
-    sha_file = root / "SHA256SUMS"
+    sha_file = root / RECEIPT_MANIFEST_NAME
     if not sha_file.is_file() or sha_file.is_symlink():
         raise AuditContractError("audit receipt must contain a non-symlink SHA256SUMS file")
     if _mode(sha_file) != 0o444:
         raise AuditContractError(f"SHA256SUMS mode must be 0444, got {oct(_mode(sha_file))}")
 
-    files: List[Path] = []
+    observed_rels: set[str] = set()
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dpath = Path(dirpath)
         if dpath.is_symlink():
@@ -329,7 +378,8 @@ def verify_sealed_audit_receipt(
                 raise AuditContractError(f"symlink file not allowed: {child}")
             if _mode(child) != 0o444:
                 raise AuditContractError(f"file mode must be 0444: {child} ({oct(_mode(child))})")
-            files.append(child)
+            rel = child.relative_to(root).as_posix()
+            observed_rels.add(rel)
 
     entries: Dict[str, str] = {}
     for line in sha_file.read_text(encoding="utf-8").splitlines():
@@ -346,6 +396,8 @@ def verify_sealed_audit_receipt(
             raise AuditContractError(f"invalid digest in SHA256SUMS: {digest}")
         if rel.startswith("/") or rel.startswith("\\") or ".." in Path(rel).parts:
             raise AuditContractError(f"SHA256SUMS entry escapes receipt root: {rel}")
+        if rel == RECEIPT_MANIFEST_NAME:
+            raise AuditContractError("SHA256SUMS must not list itself")
         target = (root / rel).resolve(strict=False)
         if not _is_under(root.resolve(), target):
             raise AuditContractError(f"SHA256SUMS entry resolves outside receipt: {rel}")
@@ -356,65 +408,61 @@ def verify_sealed_audit_receipt(
             raise AuditContractError(f"SHA256SUMS mismatch for {rel}")
         entries[rel] = digest.lower()
 
+    listed = set(entries)
+    # Exact observed-vs-listed equality; only SHA256SUMS itself may be unlisted.
+    observed_without_manifest = set(observed_rels)
+    observed_without_manifest.discard(RECEIPT_MANIFEST_NAME)
+    extra = sorted(observed_without_manifest - listed)
+    missing = sorted(listed - observed_without_manifest)
+    if extra:
+        raise AuditContractError(
+            "receipt contains unlisted files not present in SHA256SUMS: " + ", ".join(extra)
+        )
+    if missing:
+        raise AuditContractError(
+            "SHA256SUMS lists missing files: " + ", ".join(missing)
+        )
+
     if RECEIPT_REFS_NAME not in entries:
         raise AuditContractError(
             f"sealed receipt must include {RECEIPT_REFS_NAME} in SHA256SUMS "
             "(structured provenance; substring free-text is not accepted)"
         )
-    # Require a sealed verdict artifact in the manifest (not used for provenance equality).
-    if "verdict-receipt.txt" not in entries and "verdict_receipt.txt" not in entries:
-        raise AuditContractError("sealed receipt must include a verdict receipt text file in SHA256SUMS")
+    verdict_name = next((n for n in RECEIPT_VERDICT_NAMES if n in entries), None)
+    if verdict_name is None:
+        raise AuditContractError(
+            "sealed receipt must include a verdict receipt text file in SHA256SUMS"
+        )
+
+    expected = {
+        "audit_repo": expected_repo,
+        "audit_head": expected_head,
+        "audit_base": expected_base,
+        "audit_required_context": expected_context,
+        "audit_required_state": expected_state,
+        "audit_bound_status_id": expected_status_id,
+        "audit_pr_number": expected_pr_number,
+    }
 
     refs_path = root / RECEIPT_REFS_NAME
-    # Semantic file used for verification must be hashed (already enforced via entries).
     try:
         refs = json.loads(refs_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise AuditContractError(f"{RECEIPT_REFS_NAME} is not valid JSON: {exc}") from exc
     if not isinstance(refs, dict):
         raise AuditContractError(f"{RECEIPT_REFS_NAME} must be a JSON object")
+    _exact_receipt_fields(RECEIPT_REFS_NAME, refs, expected)
 
-    missing = [k for k in REQUIRED_REFS_FIELDS if k not in refs]
-    if missing:
-        raise AuditContractError(f"{RECEIPT_REFS_NAME} missing required fields: {', '.join(missing)}")
-
-    def _exact(field: str, expected: Any) -> None:
-        actual = refs.get(field)
-        if field in {"audit_head", "audit_base"}:
-            actual_norm = str(actual or "").strip().lower()
-            expected_norm = str(expected or "").strip().lower()
-        elif field == "audit_required_state":
-            actual_norm = str(actual or "").strip().lower()
-            expected_norm = str(expected or "").strip().lower()
-        elif field in {"audit_bound_status_id", "audit_pr_number"}:
-            try:
-                actual_norm = int(actual)
-                expected_norm = int(expected)
-            except (TypeError, ValueError) as exc:
-                raise AuditContractError(
-                    f"{RECEIPT_REFS_NAME}.{field} must be an integer matching the trusted pin"
-                ) from exc
-        else:
-            actual_norm = str(actual or "").strip()
-            expected_norm = str(expected or "").strip()
-        if actual_norm != expected_norm:
-            raise AuditContractError(
-                f"{RECEIPT_REFS_NAME}.{field} mismatch: expected {expected_norm!r}, got {actual_norm!r}"
-            )
-
-    _exact("audit_repo", expected_repo)
-    _exact("audit_head", expected_head)
-    _exact("audit_base", expected_base)
-    _exact("audit_required_context", expected_context)
-    _exact("audit_required_state", expected_state)
-    _exact("audit_bound_status_id", expected_status_id)
-    _exact("audit_pr_number", expected_pr_number)
+    verdict_path = root / verdict_name
+    verdict_fields = _parse_verdict_fields(verdict_path.read_text(encoding="utf-8"))
+    _exact_receipt_fields(verdict_name, verdict_fields, expected)
 
     return {
         "receipt_root": str(root),
         "entries": len(entries),
         "sha256sums": str(sha_file),
         "refs": RECEIPT_REFS_NAME,
+        "verdict": verdict_name,
     }
 
 

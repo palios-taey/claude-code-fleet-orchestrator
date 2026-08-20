@@ -166,7 +166,14 @@ class FakeTaskStore:
         return result
 
 
-def _seal_receipt(root: Path, *, forge: bool = False, include_refs: bool = True) -> str:
+def _seal_receipt(
+    root: Path,
+    *,
+    forge: bool = False,
+    include_refs: bool = True,
+    extra_unlisted: bool = False,
+    verdict_wrong: bool = False,
+) -> str:
     root.mkdir(parents=True, exist_ok=True)
     refs = {
         "audit_repo": REPO,
@@ -178,13 +185,21 @@ def _seal_receipt(root: Path, *, forge: bool = False, include_refs: bool = True)
         "audit_pr_number": PR_NUMBER,
     }
     (root / "refs.json").write_text(json.dumps(refs, indent=2) + "\n", encoding="utf-8")
-    (root / "verdict-receipt.txt").write_text(
-        f"ENDORSE audit_repo={REPO} audit_head={HEAD} audit_base={BASE} "
-        f"audit_required_context={CONTEXT} audit_required_state={STATE} "
-        f"audit_bound_status_id={STATUS_ID} audit_pr_number={PR_NUMBER}\n",
-        encoding="utf-8",
+    v_head = WRONG_HEAD if (forge or verdict_wrong) else HEAD
+    v_id = WRONG_ID if (forge or verdict_wrong) else STATUS_ID
+    verdict = (
+        f"audit_repo={REPO}\n"
+        f"audit_head={v_head}\n"
+        f"audit_base={BASE if not forge else WRONG_HEAD}\n"
+        f"audit_required_context={CONTEXT}\n"
+        f"audit_required_state={STATE}\n"
+        f"audit_bound_status_id={v_id}\n"
+        f"audit_pr_number={PR_NUMBER}\n"
     )
-    names = ["verdict-receipt.txt"] + (["refs.json"] if include_refs else [])
+    (root / "verdict-receipt.txt").write_text(verdict, encoding="utf-8")
+    if extra_unlisted:
+        (root / "extra-secret.txt").write_text("smuggled\n", encoding="utf-8")
+    names = ["verdict-receipt.txt"]
     if include_refs:
         names = ["refs.json", "verdict-receipt.txt"]
     lines = [f"{hashlib.sha256((root / n).read_bytes()).hexdigest()}  {n}" for n in names]
@@ -368,10 +383,10 @@ def main() -> int:
     bind = store.bind("t-audit", capability_token=bind_tok, status_id=STATUS_ID)
     _check("bind status id", bind.get("audit_bound_status_id") == STATUS_ID)
 
-    print("-- sealed receipt + complete --")
+    print("-- sealed receipt exact-set + verdict parse --")
     with tempfile.TemporaryDirectory(prefix="audit-receipt-", dir="/home/mira/recovery") as td:
         _expect_error(
-            "unlisted refs rejected",
+            "missing refs.json in manifest rejected",
             lambda: verify_sealed_audit_receipt(
                 _seal_receipt(Path(td) / "u", include_refs=False),
                 expected_repo=REPO, expected_head=HEAD, expected_base=BASE,
@@ -381,7 +396,27 @@ def main() -> int:
             substr="refs.json",
         )
         _expect_error(
-            "forged substring rejected",
+            "extra unlisted mode-0444 file rejected",
+            lambda: verify_sealed_audit_receipt(
+                _seal_receipt(Path(td) / "x", extra_unlisted=True),
+                expected_repo=REPO, expected_head=HEAD, expected_base=BASE,
+                expected_context=CONTEXT, expected_state=STATE,
+                expected_status_id=STATUS_ID, expected_pr_number=PR_NUMBER,
+            ),
+            substr="unlisted files",
+        )
+        _expect_error(
+            "hashed verdict field mismatch rejected",
+            lambda: verify_sealed_audit_receipt(
+                _seal_receipt(Path(td) / "v", verdict_wrong=True),
+                expected_repo=REPO, expected_head=HEAD, expected_base=BASE,
+                expected_context=CONTEXT, expected_state=STATE,
+                expected_status_id=STATUS_ID, expected_pr_number=PR_NUMBER,
+            ),
+            substr="mismatch",
+        )
+        _expect_error(
+            "forged refs rejected",
             lambda: verify_sealed_audit_receipt(
                 _seal_receipt(Path(td) / "f", forge=True),
                 expected_repo=REPO, expected_head=HEAD, expected_base=BASE,
@@ -391,8 +426,99 @@ def main() -> int:
             substr="mismatch",
         )
         good = _seal_receipt(Path(td) / "g")
+        sealed = verify_sealed_audit_receipt(
+            good,
+            expected_repo=REPO, expected_head=HEAD, expected_base=BASE,
+            expected_context=CONTEXT, expected_state=STATE,
+            expected_status_id=STATUS_ID, expected_pr_number=PR_NUMBER,
+        )
+        _check("good receipt parses hashed verdict", sealed.get("verdict") == "verdict-receipt.txt")
         result = store.complete("t-audit", {"audit_receipt": good}, producer=SUPERVISOR)
         _check("lifecycle VERIFIED", result.get("status") == VERIFIED, result)
+
+    # --- LISTEN_FDS activation: do not unlink/rebind; distinct-UID peercred on real socket ---
+    print("-- socket activation FD + distinct-UID connect --")
+    import socket
+    import threading
+    import time
+    from fleet_orchestrator.audit_capability_issuer import run_socket_server
+
+    with tempfile.TemporaryDirectory(prefix="audit-cap-ns-") as sd:
+        sock_path = Path(sd) / "issuer.sock"
+        write_keypair_files(Path(sd) / "ed25519.private", Path(sd) / "ed25519.public", private_key=priv)
+        env = {
+            "ORCH_AUDIT_CAPABILITY_PRIVATE_KEY_PATH": str(Path(sd) / "ed25519.private"),
+            "ORCH_AUDIT_CAPABILITY_PUBLIC_KEY_PATH": str(Path(sd) / "ed25519.public"),
+            "ORCH_AUDIT_CAPABILITY_SOCKET": str(sock_path),
+            "ORCH_AUDIT_CAPABILITY_UID_MAP": json.dumps({str(SUPERVISOR_UID): SUPERVISOR}),
+        }
+        # Pre-bind like systemd socket unit (do not let daemon unlink/rebind).
+        pre = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        pre.bind(str(sock_path))
+        os.chmod(sock_path, 0o660)
+        pre.listen(16)
+        inode_before = sock_path.stat().st_ino
+
+        peer_uid_box = {"uid": SUPERVISOR_UID}
+
+        def _cred() -> tuple[int, int, int]:
+            return (os.getpid(), int(peer_uid_box["uid"]), 0)
+
+        set_issuer_hooks(
+            supervisor_loader=lambda _tid: SUPERVISOR,
+            uid_map_loader=lambda: {SUPERVISOR_UID: SUPERVISOR},
+            peer_cred_resolver=_cred,
+            euid_getter=lambda: ISSUER_UID,
+            stat_uid_getter=lambda _p: (ISSUER_UID, 0o100600),
+        )
+        set_audit_capability_keys(private_key=None, public_key=None)
+        t = threading.Thread(
+            target=lambda: run_socket_server(
+                socket_path=sock_path,
+                env=env,
+                prebound_server=pre,
+            ),
+            daemon=True,
+        )
+        t.start()
+        time.sleep(0.05)
+        _check("activated socket path still exists", sock_path.exists())
+        _check("activated socket inode unchanged (no unlink/rebind)", sock_path.stat().st_ino == inode_before)
+
+        # Distinct-UID (mapped supervisor) connect success via real socket + peercred hook.
+        os.environ["ORCH_SESSION_ID"] = WORKER  # spoof must not matter
+        peer_uid_box["uid"] = SUPERVISOR_UID
+        ok = issue_audit_capability(
+            task_id="t-cap",
+            action="pin-audit-contract",
+            socket_path=sock_path,
+            env=env,
+        )
+        _check("distinct-UID supervisor connect issues via activated socket", ok.get("ok") is True)
+        _check("issued principal from uid map", ok.get("session_id") == SUPERVISOR)
+
+        # Shared worker uid denied even with spoofed supervisor environ.
+        peer_uid_box["uid"] = WORKER_UID
+        os.environ["ORCH_SESSION_ID"] = SUPERVISOR
+        _expect_error(
+            "shared-UID worker connect denied on activated socket",
+            lambda: issue_audit_capability(
+                task_id="t-cap",
+                action="pin-audit-contract",
+                socket_path=sock_path,
+                env=env,
+            ),
+            substr="not a provisioned supervisor principal",
+        )
+        os.environ.pop("ORCH_SESSION_ID", None)
+        _check(
+            "socket unit documents orch-audit-clients group",
+            "SocketGroup=orch-audit-clients" in (ROOT / "deploy/systemd/orch-audit-capabilityd.socket").read_text(),
+        )
+        _check(
+            "issue client script present",
+            (ROOT / "scripts/orch-audit-capability-issue").is_file(),
+        )
 
     set_audit_status_provider(None)
     set_audit_pull_provider(None)

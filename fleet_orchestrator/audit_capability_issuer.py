@@ -314,13 +314,46 @@ def serve_client(conn: socket.socket, _addr: Any = None, *, env: Optional[Dict[s
             pass
 
 
+def _take_systemd_listen_socket() -> Optional[socket.socket]:
+    """Consume systemd socket activation FD (LISTEN_FDS). Never unlink/rebind that path."""
+    values = os.environ
+    listen_pid = str(values.get("LISTEN_PID") or "").strip()
+    listen_fds = str(values.get("LISTEN_FDS") or "").strip()
+    if not listen_pid or not listen_fds:
+        return None
+    try:
+        if int(listen_pid) != int(os.getpid()):
+            return None
+        n_fds = int(listen_fds)
+    except ValueError:
+        return None
+    if n_fds < 1:
+        return None
+    # sd_listen_fds: first FD is always 3
+    fd = 3
+    # fromfd duplicates; close the original systemd FD number to avoid leaks while
+    # keeping the listening socket on the duplicate.
+    server = socket.fromfd(fd, socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    return server
+
+
 def run_socket_server(
     socket_path: Optional[Path] = None,
     *,
     init_keys: bool = False,
     env: Optional[Dict[str, str]] = None,
+    # Test hook: pre-bound listening socket (simulates LISTEN_FDS without systemd).
+    prebound_server: Optional[socket.socket] = None,
 ) -> None:
-    """Blocking socket server (deployable unit entry; run as dedicated uid)."""
+    """Blocking socket server (deployable unit entry; run as dedicated uid).
+
+    Under systemd socket activation, inherits the listening FD and must NOT
+    unlink/rebind the socket pathname (that abandons the activated connection).
+    """
     paths = default_key_paths(env)
     sock_path = Path(socket_path or paths["socket"])
     if init_keys or not paths["private"].is_file() or not paths["public"].is_file():
@@ -332,17 +365,27 @@ def run_socket_server(
     priv = _private_key(env)
     pub = load_public_key(paths["public"])
     set_audit_capability_keys(private_key=priv, public_key=pub)
-    # Fail closed if uid map missing (deploy must provision principals).
     load_uid_principal_map(env)
 
-    sock_path.parent.mkdir(parents=True, exist_ok=True)
-    if sock_path.exists():
-        sock_path.unlink()
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(sock_path))
-    # Distinct-UID deploy: socket 0660 owned by issuer uid; group may allow supervisor clients.
-    os.chmod(sock_path, 0o660)
-    server.listen(16)
+    activated = False
+    if prebound_server is not None:
+        server = prebound_server
+        activated = True
+    else:
+        inherited = _take_systemd_listen_socket()
+        if inherited is not None:
+            server = inherited
+            activated = True
+        else:
+            sock_path.parent.mkdir(parents=True, exist_ok=True)
+            if sock_path.exists():
+                sock_path.unlink()
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(str(sock_path))
+            # Manual bind path: issuer uid owns socket; client group is deploy-time.
+            os.chmod(sock_path, 0o660)
+            server.listen(16)
+
     try:
         while True:
             conn, addr = server.accept()
@@ -353,10 +396,16 @@ def run_socket_server(
                 daemon=True,
             ).start()
     finally:
-        server.close()
-        if sock_path.exists():
-            sock_path.unlink()
-
+        try:
+            server.close()
+        except OSError:
+            pass
+        # Never unlink an activated systemd socket path — the unit owns it.
+        if not activated and sock_path.exists():
+            try:
+                sock_path.unlink()
+            except OSError:
+                pass
 
 def issue_audit_capability(
     *,
