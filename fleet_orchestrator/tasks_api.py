@@ -1610,20 +1610,11 @@ def supervisor_badges() -> Dict[str, Any]:
 
 @app.get("/api/sessions/{session_id}/current")
 def session_current(session_id: str) -> Dict[str, Any]:
-    """What this session is currently executing — live Redis bind + Neo4j context.
-
-    Authoritative live binding is Redis ``current_task``. Neo4j in_progress /
-    ``dispatched_to`` alone must not keep showing WORKING after ``taey-task unbind``.
-    """
+    """What this session is currently executing — top in_progress task with project/phase context."""
     cfg = _cfg()
     activity = get_session_liveness(session_id, config=cfg)
-    from fleet_orchestrator.current_task_binding import decode_current_task
-    from fleet_orchestrator.notify_state import redis_connect as _bind_redis
-    from fleet_orchestrator.notify_state import state_key as _bind_state_key
-
-    bound = decode_current_task(_bind_redis().get(_bind_state_key(session_id, "current_task"))) or {}
-    bound_task_id = str(bound.get("task_id") or "").strip()
-    if not bound_task_id:
+    work = get_session_current_work(session_id, config=cfg)
+    if not work:
         return {
             "session": session_id,
             "current": None,
@@ -1633,21 +1624,6 @@ def session_current(session_id: str) -> Dict[str, Any]:
                 f"No current task is bound for {session_id}. Run `taey-plan next {session_id}` "
                 f"or GET /api/sessions/{session_id}/next-ready to find ready work; inspect projects with "
                 f"GET /api/sessions/{session_id}/projects."
-            ),
-        }
-    work = get_session_current_work(session_id, config=cfg)
-    work_task_id = str((work or {}).get("top_task_id") or (work or {}).get("task_id") or "").strip()
-    if not work or work_task_id != bound_task_id:
-        return {
-            "session": session_id,
-            "current": None,
-            "activity": activity,
-            "liveness": None,
-            "bound_task_id": bound_task_id,
-            "next_action": (
-                f"Redis bind points at {bound_task_id} but Neo4j has no matching in-progress "
-                f"current work for {session_id}. Inspect `taey-task status {bound_task_id}` or "
-                f"re-dispatch / unbind."
             ),
         }
     from fleet_orchestrator.current_liveness import safe_current_task_liveness
@@ -1825,17 +1801,49 @@ async def clear_pause_session_endpoint(session_id: str, req: Request) -> Dict[st
 
 
 @app.delete("/api/sessions/{session_id}/current-task")
-def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
-    cleared = clear_current_task(session_id)
+def session_unbind_current_task(
+    session_id: str,
+    task_id: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    """Identity-bound unbind: reconcile graph to pending, then clear Redis.
+
+    Optional ``task_id`` is an explicit repair when Redis ``current_task`` is already
+    absent but a stale ``dispatched_to`` / liveness claim remains for this session.
+    """
+    from fleet_orchestrator.dispatch import UnbindError
+
+    try:
+        cleared = clear_current_task(session_id, task_id=task_id)
+    except UnbindError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "error": exc.message,
+                "session": session_id,
+                "task_id": (str(task_id).strip() if task_id else None),
+                "next_step": (
+                    f"Inspect `taey-task status` / GET /api/sessions/{session_id}/current. "
+                    f"If Redis is empty but the graph still shows dispatched_to={session_id}, "
+                    f"retry with ?task_id=<exact-task-id> (or `taey-task unbind {session_id} --task-id ...`)."
+                ),
+            },
+        ) from exc
     previous_task_id = str((cleared or {}).get("previous_task_id") or "").strip()
     return {
         "ok": True,
         "session": session_id,
         "unbound": True,
+        "repair": bool((cleared or {}).get("repair")),
         "previous_task_id": previous_task_id or None,
+        "task_id": (cleared or {}).get("task_id") or previous_task_id or None,
+        "status": (cleared or {}).get("status"),
+        "owner": (cleared or {}).get("owner"),
+        "dispatched_to": (cleared or {}).get("dispatched_to"),
+        "worker_liveness_worker": (cleared or {}).get("worker_liveness_worker"),
         "next_step": (
-            f"Retry dispatch or inspect the session with GET /api/sessions/{session_id}/current "
-            f"and `taey-task status <task-id>`."
+            f"Task {previous_task_id or '<unknown>'} is pending and unbound. "
+            f"Re-dispatch with `taey-task dispatch {previous_task_id or '<task-id>'} <peer>` "
+            f"or inspect GET /api/sessions/{session_id}/current."
         ),
     }
 

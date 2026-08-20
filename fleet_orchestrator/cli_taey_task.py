@@ -360,12 +360,32 @@ def cmd_remove_dependency(args):
 
 
 def cmd_unbind(args):
-    """Clear one session's current_task binding through the API."""
-    result = api_call("DELETE", f"/api/sessions/{args.peer}/current-task")
+    """Clear one session's current_task binding through the API.
+
+    Optional --task-id is an explicit repair when Redis is already empty but a
+    stale dispatched_to / liveness claim remains for this peer.
+    """
+    endpoint = f"/api/sessions/{args.peer}/current-task"
+    task_id = str(getattr(args, "task_id", "") or "").strip()
+    if task_id:
+        endpoint = f"{endpoint}?task_id={task_id}"
+    result = api_call("DELETE", endpoint)
     if result.get("ok"):
-        print(f"OK: unbound current_task for {args.peer}")
+        unbound_task = result.get("task_id") or result.get("previous_task_id") or "?"
+        status = result.get("status") or "pending"
+        repair = " (repair)" if result.get("repair") else ""
+        print(
+            f"OK: unbound{repair} {args.peer} task={unbound_task} "
+            f"status={status} dispatched_to={result.get('dispatched_to')}"
+        )
     else:
-        print(f"ERROR: {result.get('error', 'unknown')}", file=sys.stderr)
+        detail = result.get("detail")
+        if isinstance(detail, dict):
+            print(f"ERROR: {detail.get('error') or detail}", file=sys.stderr)
+            if detail.get("next_step"):
+                print(f"NEXT: {detail['next_step']}", file=sys.stderr)
+        else:
+            print(f"ERROR: {result.get('error') or detail or 'unknown'}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -402,6 +422,11 @@ def main():
 
     p_unbind = sub.add_parser("unbind", help="Clear a peer session's current_task binding")
     p_unbind.add_argument("peer", help="Peer session to unbind")
+    p_unbind.add_argument(
+        "--task-id",
+        dest="task_id",
+        help="Explicit repair when Redis is empty but this peer still holds dispatched_to/liveness",
+    )
 
     p_update = sub.add_parser("update", help="Update task status")
     p_update.add_argument("task_id", help="Task ID")
