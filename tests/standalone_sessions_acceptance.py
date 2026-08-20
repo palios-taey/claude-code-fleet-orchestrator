@@ -30,6 +30,7 @@ sys.path.insert(0, _REPO)
 from fleet_orchestrator.orch_schema import (  # noqa: E402
     _dashboard_supervisor_session,
     _resolve_supervisor_session,
+    _supervisor_badge_session,
     create_project,
     get_neo4j_driver,
     init_schema,
@@ -138,7 +139,22 @@ def main() -> int:
         notify_redis_connect().set(notify_state_key(claude_sup, "parent"), sup_b)
         claude_derived = list_dashboard_sessions(config=replace(CFG, session_ids=[claude_sup]))
         _check("configured claude-suffixed supervisor is not collapsed", claude_derived == [claude_sup])
-        _check("configured claude dashboard resolver stays itself", _dashboard_supervisor_session(claude_sup) == claude_sup)
+        _check(
+            "configured claude dashboard resolver stays itself",
+            _dashboard_supervisor_session(
+                claude_sup,
+                config=replace(CFG, session_ids=[claude_sup]),
+            )
+            == claude_sup,
+        )
+        _check(
+            "configured claude badge resolver stays itself",
+            _supervisor_badge_session(
+                claude_sup,
+                config=replace(CFG, session_ids=[claude_sup]),
+            )
+            == claude_sup,
+        )
         _check("configured claude shared resolver stays itself", _resolve_supervisor_session(claude_sup, config=replace(CFG, session_ids=[claude_sup])) == claude_sup)
         notify_redis_connect().set(notify_state_key(peer_a, "parent"), peer_a)
         _check("non-configured peer still resolves to parent", _resolve_supervisor_session(peer_a, config=replace(CFG, session_ids=[sup_a])) == sup_a)

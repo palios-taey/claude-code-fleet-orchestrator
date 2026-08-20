@@ -121,6 +121,8 @@ def _topology_contract() -> None:
             {"from": "x-claude", "to": "x-claude-codex"},
         ),
     )
+    _check("taey remains peerless", supervised_worker_sessions("taey", ["taey"]) == ())
+    _check("taey aliases do not invent peers", session_aliases("taey", ["taey"]) == ("taey",))
 
 
 def _authority_contract() -> None:

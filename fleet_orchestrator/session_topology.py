@@ -6,6 +6,7 @@ from typing import Optional
 
 
 PEER_SUFFIXES = ("-codex", "-gemini", "-grok", "-claude")
+PEERLESS_CONTROLS = frozenset({"taey"})
 
 
 def seat_family(session_id: str) -> str:
@@ -46,6 +47,8 @@ def configured_supervisor_for_session(
     lowered = session.lower()
     for control in registered.values():
         family = _configured_control_family(control)
+        if control.lower() in PEERLESS_CONTROLS:
+            continue
         if control.lower().endswith("-codex"):
             workers = (
                 family,
@@ -95,6 +98,8 @@ def supervised_worker_sessions(
         return ()
     registered = _registered_lookup(registered_sessions)
     configured = registered.get(control.lower(), control)
+    if configured.lower() in PEERLESS_CONTROLS:
+        return ()
     family = _configured_control_family(configured)
     if configured.lower().endswith("-codex"):
         candidates = (
@@ -117,6 +122,8 @@ def session_aliases(session_id: str, registered_sessions: Iterable[str]) -> tupl
     """Return one seat's control and worker spellings without nested suffixes."""
     session = str(session_id or "").strip()
     control = control_principal_for_session(session, registered_sessions)
+    if control.lower() in PEERLESS_CONTROLS:
+        return tuple(dict.fromkeys(value for value in (session, control) if value))
     family = _configured_control_family(control or session)
     values = (
         session,
