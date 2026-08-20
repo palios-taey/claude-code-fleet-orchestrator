@@ -147,6 +147,12 @@ OPTIONAL_ENV = (
      "loopback-only bind for the single-user local product; non-loopback is an explicit operator opt-in"),
     ("ORCH_AUTH_TOKEN", "unset (mutable API tokenless)",
      "default loopback deployments need no token; when set, mutable HTTP methods require the token"),
+    ("ORCH_AUDIT_CAPABILITY_SECRET", "unset",
+     "master HMAC secret for audit pin/bind supervisor capabilities; distinct from ORCH_AUTH_TOKEN; "
+     "provision only on supervisor hosts"),
+    ("ORCH_SESSION_CAPABILITY_SECRETS", "unset",
+     "optional JSON map of session_id→HMAC secret for audit supervisor capabilities; "
+     "overrides derived master keys per session"),
     ("ORCH_DATA_DIR", "$XDG_DATA_HOME or ~/.local/share (XDG Base Dir spec)",
      "standard local-tool data location; zero-config by design for a single-user local product"),
     ("ORCH_WORLD_MANIFEST_PATH", "ORCH_DATA_DIR/provenance/world-manifest-v0.json",

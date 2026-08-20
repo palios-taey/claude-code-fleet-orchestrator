@@ -34,6 +34,11 @@ from fleet_orchestrator.audit_completion import (  # noqa: E402
     verify_audit_completion,
     verify_sealed_audit_receipt,
 )
+from fleet_orchestrator.audit_supervisor_capability import (  # noqa: E402
+    mint_audit_capability,
+    resolve_attested_audit_actor,
+    set_audit_capability_secret_provider,
+)
 from fleet_orchestrator.evidence_verification import (  # noqa: E402
     VERIFIED,
     verify_completion_evidence,
@@ -105,7 +110,8 @@ class FakeTaskStore:
         self,
         task_id: str,
         *,
-        actor: str,
+        capability_token: str,
+        body_from: Optional[str] = None,
         audit_repo: str,
         audit_head: str,
         audit_base: str,
@@ -114,6 +120,14 @@ class FakeTaskStore:
         audit_pr_number: int,
     ) -> Dict[str, Any]:
         task = self._tasks[task_id]
+        # Actor comes from verified capability — body_from is not authority.
+        actor = resolve_attested_audit_actor(
+            capability_token=capability_token,
+            task_id=task_id,
+            action="pin-audit-contract",
+            project_supervisor=task.get("project_supervisor"),
+            body_from=body_from,
+        )
         assert_actor_is_project_supervisor(
             actor=actor,
             project_supervisor=task.get("project_supervisor"),
@@ -133,12 +147,26 @@ class FakeTaskStore:
                     raise AuditContractError(
                         f"trusted audit pins are immutable after creation; refuse overwrite of {key}"
                     )
-            return {"already_pinned": True, **pins}
+            return {"already_pinned": True, "attested_actor": actor, **pins}
         task.update(pins)
-        return {"already_pinned": False, **pins}
+        return {"already_pinned": False, "attested_actor": actor, **pins}
 
-    def bind(self, task_id: str, *, actor: str, status_id: int) -> Dict[str, Any]:
+    def bind(
+        self,
+        task_id: str,
+        *,
+        capability_token: str,
+        status_id: int,
+        body_from: Optional[str] = None,
+    ) -> Dict[str, Any]:
         task = self._tasks[task_id]
+        actor = resolve_attested_audit_actor(
+            capability_token=capability_token,
+            task_id=task_id,
+            action="bind-audit-status",
+            project_supervisor=task.get("project_supervisor"),
+            body_from=body_from,
+        )
         assert_actor_is_project_supervisor(
             actor=actor,
             project_supervisor=task.get("project_supervisor"),
@@ -149,6 +177,8 @@ class FakeTaskStore:
             if task.get("audit_bound_status_id") is not None:
                 raise AuditContractError("compare-once refuses overwrite of bound status id")
             task["audit_bound_status_id"] = int(status_id)
+        bind = dict(bind)
+        bind["attested_actor"] = actor
         return bind
 
     def complete(self, task_id: str, evidence: Dict[str, Any], *, producer: str = "tester") -> Dict[str, Any]:
@@ -222,7 +252,17 @@ def _seal_receipt(
 
 
 def main() -> int:
-    print("=== audit_completion_two_phase_acceptance (supervisor authority + structured receipt) ===")
+    print("=== audit_completion_two_phase_acceptance (capability authority + structured receipt) ===")
+    # Supervisor has a real capability secret; workers with only shared API token do not.
+    SUPERVISOR_SECRET = "supervisor-only-capability-secret-not-api-token"
+    WORKER_API_TOKEN = "shared-orch-auth-token"  # noqa: F841 — documents the adversarial model
+
+    def _secret_for(session_id: str) -> Optional[str]:
+        if session_id == SUPERVISOR:
+            return SUPERVISOR_SECRET
+        return None  # worker / forged sessions have no capability secret
+
+    set_audit_capability_secret_provider(_secret_for)
     store = FakeTaskStore(project_supervisor=SUPERVISOR)
     good_statuses = [
         {"id": STATUS_ID, "context": CONTEXT, "state": STATE},
@@ -238,6 +278,72 @@ def main() -> int:
             "base_sha": BASE if repo == REPO and pr == PR_NUMBER else WRONG_HEAD,
         }
     )
+
+    def _sup_cap(task_id: str, action: str) -> str:
+        return mint_audit_capability(session_id=SUPERVISOR, task_id=task_id, action=action)
+
+    # --- Capability authority: shared API token + forged name denied ---
+    print("-- capability authority (spoofed body.from denied) --")
+    store.create_ordinary("t-cap")
+    _expect_error(
+        "missing capability denied even with forged from=supervisor",
+        lambda: resolve_attested_audit_actor(
+            capability_token="",
+            task_id="t-cap",
+            action="pin-audit-contract",
+            project_supervisor=SUPERVISOR,
+            body_from=SUPERVISOR,
+        ),
+        substr="missing or malformed",
+    )
+    _expect_error(
+        "worker cannot mint supervisor capability (no secret)",
+        lambda: mint_audit_capability(
+            session_id=WORKER,
+            task_id="t-cap",
+            action="pin-audit-contract",
+        ),
+        substr="no audit capability secret",
+    )
+    # Adversary with shared API token forges a token using a wrong/empty secret path:
+    # mint as supervisor fails for worker-held secrets; forging HMAC with wrong key fails verify.
+    set_audit_capability_secret_provider(lambda _sid: "wrong-worker-guess")
+    forged = mint_audit_capability(
+        session_id=SUPERVISOR,
+        task_id="t-cap",
+        action="pin-audit-contract",
+    )
+    set_audit_capability_secret_provider(_secret_for)
+    _expect_error(
+        "forged capability HMAC (API-token holder without supervisor secret) denied",
+        lambda: resolve_attested_audit_actor(
+            capability_token=forged,
+            task_id="t-cap",
+            action="pin-audit-contract",
+            project_supervisor=SUPERVISOR,
+            body_from=SUPERVISOR,
+        ),
+        substr="HMAC mismatch",
+    )
+    _expect_error(
+        "conflicting body.from vs attested session rejected",
+        lambda: resolve_attested_audit_actor(
+            capability_token=_sup_cap("t-cap", "pin-audit-contract"),
+            task_id="t-cap",
+            action="pin-audit-contract",
+            project_supervisor=SUPERVISOR,
+            body_from=WORKER,
+        ),
+        substr="conflicts with attested",
+    )
+    attested = resolve_attested_audit_actor(
+        capability_token=_sup_cap("t-cap", "pin-audit-contract"),
+        task_id="t-cap",
+        action="pin-audit-contract",
+        project_supervisor=SUPERVISOR,
+        body_from=None,
+    )
+    _check("real supervisor capability attests session", attested == SUPERVISOR)
 
     # --- Ordinary create cannot select audit pins ---
     print("-- ordinary create rejects audit fields --")
@@ -260,13 +366,14 @@ def main() -> int:
     _check("ordinary create is standard class", ordinary["completion_class"] == "standard")
     _check("ordinary create has no bound id", ordinary["audit_bound_status_id"] is None)
 
-    # --- Supervisor pin (phase 1) ---
+    # --- Supervisor pin (phase 1) via capability ---
     print("-- supervisor pin authority --")
     _expect_error(
-        "worker cannot pin audit contract",
+        "worker forged-from pin without capability denied",
         lambda: store.pin(
             "t-audit",
-            actor=WORKER,
+            capability_token="",
+            body_from=SUPERVISOR,
             audit_repo=REPO,
             audit_head=HEAD,
             audit_base=BASE,
@@ -274,25 +381,11 @@ def main() -> int:
             audit_required_state=STATE,
             audit_pr_number=PR_NUMBER,
         ),
-        substr="not project supervisor",
-    )
-    _expect_error(
-        "empty actor cannot pin",
-        lambda: store.pin(
-            "t-audit",
-            actor="",
-            audit_repo=REPO,
-            audit_head=HEAD,
-            audit_base=BASE,
-            audit_required_context=CONTEXT,
-            audit_required_state=STATE,
-            audit_pr_number=PR_NUMBER,
-        ),
-        substr="authenticated supervisor",
+        substr="missing or malformed",
     )
     pin = store.pin(
         "t-audit",
-        actor=SUPERVISOR,
+        capability_token=_sup_cap("t-audit", "pin-audit-contract"),
         audit_repo=REPO,
         audit_head=HEAD,
         audit_base=BASE,
@@ -303,6 +396,7 @@ def main() -> int:
     _check("supervisor pin sets class=audit", pin["completion_class"] == "audit")
     _check("supervisor pin leaves status id unset", pin["audit_bound_status_id"] is None)
     _check("supervisor pin sets pr number", pin["audit_pr_number"] == PR_NUMBER)
+    _check("pin attested actor is supervisor", pin.get("attested_actor") == SUPERVISOR)
     _check("is_audit_task true after pin", is_audit_task(store.get("t-audit")))
     _check("missing class is not audit", not is_audit_task({"audit_head": HEAD}))
 
@@ -310,7 +404,7 @@ def main() -> int:
         "refuse pin overwrite",
         lambda: store.pin(
             "t-audit",
-            actor=SUPERVISOR,
+            capability_token=_sup_cap("t-audit", "pin-audit-contract"),
             audit_repo=REPO,
             audit_head=WRONG_HEAD,
             audit_base=BASE,
@@ -344,23 +438,32 @@ def main() -> int:
         v,
     )
 
-    # --- Bind: supervisor only; server-side PR; no caller PR SHAs ---
-    print("-- compare-once bind (supervisor + server-side PR) --")
+    # --- Bind: capability + server-side PR; no caller PR SHAs ---
+    print("-- compare-once bind (capability + server-side PR) --")
     _expect_error(
-        "self-binder (worker) cannot bind",
-        lambda: store.bind("t-audit", actor=WORKER, status_id=STATUS_ID),
-        substr="not project supervisor",
+        "self-binder forged-from without capability denied",
+        lambda: store.bind(
+            "t-audit",
+            capability_token="",
+            body_from=SUPERVISOR,
+            status_id=STATUS_ID,
+        ),
+        substr="missing or malformed",
     )
     _expect_error(
         "bind rejects wrong status id/context",
-        lambda: store.bind("t-audit", actor=SUPERVISOR, status_id=WRONG_ID),
+        lambda: store.bind(
+            "t-audit",
+            capability_token=_sup_cap("t-audit", "bind-audit-status"),
+            status_id=WRONG_ID,
+        ),
         substr="context mismatch",
     )
     # Wrong PR pin would fail server-side provenance — pin a decoy task
     store.create_ordinary("t-bad-pr")
     store.pin(
         "t-bad-pr",
-        actor=SUPERVISOR,
+        capability_token=_sup_cap("t-bad-pr", "pin-audit-contract"),
         audit_repo=REPO,
         audit_head=HEAD,
         audit_base=BASE,
@@ -370,25 +473,42 @@ def main() -> int:
     )
     _expect_error(
         "bind rejects server-side PR mismatch",
-        lambda: store.bind("t-bad-pr", actor=SUPERVISOR, status_id=STATUS_ID),
+        lambda: store.bind(
+            "t-bad-pr",
+            capability_token=_sup_cap("t-bad-pr", "bind-audit-status"),
+            status_id=STATUS_ID,
+        ),
         substr="PR provenance mismatch",
     )
 
-    bind = store.bind("t-audit", actor=SUPERVISOR, status_id=STATUS_ID)
+    bind = store.bind(
+        "t-audit",
+        capability_token=_sup_cap("t-audit", "bind-audit-status"),
+        status_id=STATUS_ID,
+    )
     _check("bind writes concrete status id", bind["audit_bound_status_id"] == STATUS_ID)
     _check("bind echoes server-side pr number", bind.get("pr_number") == PR_NUMBER)
-    again = store.bind("t-audit", actor=SUPERVISOR, status_id=STATUS_ID)
+    _check("bind attested actor is supervisor", bind.get("attested_actor") == SUPERVISOR)
+    again = store.bind(
+        "t-audit",
+        capability_token=_sup_cap("t-audit", "bind-audit-status"),
+        status_id=STATUS_ID,
+    )
     _check("bind same id is idempotent", again.get("already_bound") is True)
     _expect_error(
         "bind different id refuses overwrite",
-        lambda: store.bind("t-audit", actor=SUPERVISOR, status_id=WRONG_ID),
+        lambda: store.bind(
+            "t-audit",
+            capability_token=_sup_cap("t-audit", "bind-audit-status"),
+            status_id=WRONG_ID,
+        ),
         substr="refuses overwrite",
     )
 
     unbound = store.create_ordinary("t-unbound")
     store.pin(
         "t-unbound",
-        actor=SUPERVISOR,
+        capability_token=_sup_cap("t-unbound", "pin-audit-contract"),
         audit_repo=REPO,
         audit_head=HEAD,
         audit_base=BASE,
@@ -553,6 +673,7 @@ def main() -> int:
 
     set_audit_status_provider(None)
     set_audit_pull_provider(None)
+    set_audit_capability_secret_provider(None)
     print("=== summary ===")
     if FAILURES:
         print(f"FAILED {len(FAILURES)}")
