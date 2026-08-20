@@ -15,7 +15,7 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, FrozenSet, Optional
 
 from redis import RedisError
 
@@ -257,7 +257,17 @@ def resolve_session_id(explicit: Optional[str] = None) -> str:
     return ""
 
 
-_GH_WRITE_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
+_GH_READ_METHODS = frozenset({"GET", "HEAD"})
+_GH_READ_SUBCOMMANDS: Dict[str, FrozenSet[str]] = {
+    "pr": frozenset({"view", "list", "diff", "checks", "status"}),
+    "issue": frozenset({"view", "list", "status"}),
+    "repo": frozenset({"view", "list"}),
+    "release": frozenset({"view", "list"}),
+    "run": frozenset({"view", "list", "watch"}),
+    "search": frozenset({"repos", "issues", "prs", "commits", "code"}),
+    "auth": frozenset({"status"}),
+}
+_GH_READ_TOP_LEVEL = frozenset({"help", "version", "--help", "-h", "--version"})
 
 
 def _gh_api_method_and_path(api_args: list[str]) -> tuple[str, str]:
@@ -284,28 +294,32 @@ def _gh_api_method_and_path(api_args: list[str]) -> tuple[str, str]:
     return method, path
 
 
-def github_argv_requires_outward_capability(argv: list[str]) -> bool:
-    """True for GitHub status/comment writes — the incident mutation surface.
+def github_argv_is_classified_read(argv: list[str]) -> bool:
+    """True only for mechanically classified GitHub reads.
 
-    Direct ``gh api -X POST .../statuses|comments`` and ``gh pr/issue comment``
-    must hit the same live-binding gate as the helper CLIs. Reads and other
-    gh subcommands pass through.
+    Everything else (writes, unknown subcommands, empty mutation-shaped argv)
+    is fail-closed and requires live outward capability.
     """
     if not argv:
-        return False
+        return True
     cmd = str(argv[0] or "").strip()
-    rest = [str(item) for item in argv[1:]]
+    if not cmd or cmd in _GH_READ_TOP_LEVEL:
+        return True
+    rest = [str(item) for item in argv[1:] if not str(item).startswith("--session")]
     if cmd == "api":
-        method, path = _gh_api_method_and_path(rest)
-        if method not in _GH_WRITE_METHODS:
-            return False
-        lowered = path.lower()
-        return "/statuses" in lowered or "/comments" in lowered
-    if cmd == "pr" and rest and rest[0] == "comment":
-        return True
-    if cmd == "issue" and rest and rest[0] == "comment":
-        return True
-    return False
+        method, _path = _gh_api_method_and_path(rest)
+        return method in _GH_READ_METHODS
+    allowed = _GH_READ_SUBCOMMANDS.get(cmd)
+    if allowed is None:
+        return False
+    if not rest:
+        return False
+    return rest[0] in allowed
+
+
+def github_argv_requires_outward_capability(argv: list[str]) -> bool:
+    """True unless argv is a classified read. Unknown writes fail closed."""
+    return not github_argv_is_classified_read(argv)
 
 
 def require_github_argv_capability(
@@ -314,7 +328,7 @@ def require_github_argv_capability(
     session_id: str = "",
     **kwargs: Any,
 ) -> Optional[OutwardAuthDecision]:
-    """Authorize mutating GitHub status/comment argv, or return None if a no-op."""
+    """Authorize any non-read GitHub argv, or return None for classified reads."""
     if not github_argv_requires_outward_capability(argv):
         return None
     session = resolve_session_id(session_id)

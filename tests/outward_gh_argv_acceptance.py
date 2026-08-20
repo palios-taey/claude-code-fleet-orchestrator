@@ -102,6 +102,34 @@ def main() -> int:
         "pr view does not require capability",
         not github_argv_requires_outward_capability(["pr", "view", "32"]),
     )
+    _check(
+        "pr merge requires capability (fail-closed write)",
+        github_argv_requires_outward_capability(["pr", "merge", "32"]),
+    )
+    _check(
+        "pr close requires capability",
+        github_argv_requires_outward_capability(["pr", "close", "32"]),
+    )
+    _check(
+        "issue close requires capability",
+        github_argv_requires_outward_capability(["issue", "close", "9"]),
+    )
+    _check(
+        "release create requires capability",
+        github_argv_requires_outward_capability(["release", "create", "v1"]),
+    )
+    _check(
+        "repo delete requires capability",
+        github_argv_requires_outward_capability(["repo", "delete", "org/x"]),
+    )
+    _check(
+        "unknown argv requires capability",
+        github_argv_requires_outward_capability(["mystery", "mutate"]),
+    )
+    _check(
+        "api PATCH requires capability",
+        github_argv_requires_outward_capability(["api", "-X", "PATCH", "repos/org/x"]),
+    )
 
     redis.set(
         state_key(session, "current_task"),

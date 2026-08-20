@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Install the GitHub outward broker into an isolated prefix.
+
+Does not deploy. Live prefixes (/usr, /usr/local, ~/.local) are refused unless
+ORCH_GITHUB_BROKER_ALLOW_LIVE=1, which this fleet task does not set.
+
+Worker PATH should be <prefix>/bin. Worker shells source
+<prefix>/etc/worker-github.env (unsets GH_TOKEN). Credentials live in
+<prefix>/etc/github-broker.env mode 0600 and are injected only by the broker
+after live outward authorization.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from fleet_orchestrator.github_broker import (  # noqa: E402
+    GitHubBrokerInstallError,
+    install_github_broker,
+)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Install isolated GitHub outward broker")
+    parser.add_argument("--prefix", required=True, help="Isolated install prefix (not a live system path)")
+    parser.add_argument("--inner-gh", required=True, help="Real/fake gh binary the broker execs after auth")
+    parser.add_argument("--token", default=os.environ.get("GH_BROKER_INSTALL_TOKEN", ""), help="Broker credential (not left in worker env)")
+    args = parser.parse_args()
+    allow_live = os.environ.get("ORCH_GITHUB_BROKER_ALLOW_LIVE", "").strip() == "1"
+    try:
+        result = install_github_broker(
+            Path(args.prefix),
+            inner_gh=Path(args.inner_gh),
+            broker_script=ROOT / "scripts" / "gh-outward",
+            token=args.token,
+            allow_live=allow_live,
+            python_executable=sys.executable,
+        )
+    except GitHubBrokerInstallError as exc:
+        print(f"INSTALL DENY: {exc}", file=sys.stderr)
+        return 1
+    print("BROKER INSTALLED prefix={prefix} broker={broker_gh} inner={inner_gh}".format(**result))
+    print("worker env unset file: {worker_env}".format(**result))
+    print("credential file (broker only): {credentials}".format(**result))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
