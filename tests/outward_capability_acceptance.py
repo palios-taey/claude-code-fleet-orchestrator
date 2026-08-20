@@ -21,7 +21,6 @@ sys.path.insert(0, str(ROOT))
 from fleet_orchestrator import outward_capability as oc  # noqa: E402
 from fleet_orchestrator.outward_capability import (  # noqa: E402
     OutwardAuthorizationError,
-    authorize_outward_capability,
     post_commit_status,
     post_issue_comment,
     send_outward_notify,
@@ -106,15 +105,14 @@ def main() -> int:
             return {"ok": True, "id": len(notify_sink_log)}
 
         _check(
-            "shared authorize identity",
-            authorize_outward_capability is oc.authorize_outward_capability
-            or True,  # patched module attr is the shared chokepoint
+            "github authorize alias points at shared boundary",
+            oc.authorize_outward_github_mutation is real_authorize,
+            oc.authorize_outward_github_mutation,
         )
         _check(
-            "github facade re-exports shared authorize",
-            oc.authorize_outward_github_mutation is tracking_authorize
-            or oc.authorize_outward_github_mutation is real_authorize
-            or True,
+            "github require alias points at shared require",
+            oc.require_outward_github_mutation is oc.require_outward_capability,
+            oc.require_outward_github_mutation,
         )
 
         # --- bound: allow all three channels ---
