@@ -6,6 +6,9 @@ CollectMode=inactive-or-failed
 
 [Service]
 Type=simple
+# User-session unit. NOT the GitHub control principal. Control mint is
+# the system unit deploy/systemd/fleet-orchestrator-api.service
+# (cgroup /system.slice/fleet-orchestrator-api.service).
 EnvironmentFile=%h/.config/claude-code-fleet-orchestrator/orchestrator-systemd.env
 WorkingDirectory=%h
 Restart=on-failure

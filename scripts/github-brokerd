@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""GitHub outward broker daemon — credential principal.
+
+Holds GH_TOKEN in this process only. Workers talk over ORCH_GITHUB_BROKER_SOCKET
+(exec only). Dispatch/unbind mint and revoke over ORCH_GITHUB_BROKER_CONTROL_SOCKET
+after SO_PEERCRED principal mapping. Does not write the token to disk.
+No deploy: CONTROL runs this as User=github-broker.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from fleet_orchestrator.github_broker import (  # noqa: E402
+    GitHubBrokerPrincipalError,
+    default_control_socket_path,
+    serve_broker,
+)
+
+
+def main() -> int:
+    socket_path = str(os.environ.get("ORCH_GITHUB_BROKER_SOCKET") or "").strip()
+    control_socket = str(os.environ.get("ORCH_GITHUB_BROKER_CONTROL_SOCKET") or "").strip()
+    inner_gh = str(os.environ.get("ORCH_GITHUB_BROKER_INNER") or "").strip()
+    token = str(os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or "").strip()
+    if not socket_path:
+        print("SAFETY DENY: ORCH_GITHUB_BROKER_SOCKET is required", file=sys.stderr)
+        return 1
+    if not control_socket:
+        control_socket = default_control_socket_path(socket_path)
+    if not inner_gh:
+        print("SAFETY DENY: ORCH_GITHUB_BROKER_INNER is required", file=sys.stderr)
+        return 1
+    if not token:
+        print("SAFETY DENY: broker GH_TOKEN is required in the broker principal env", file=sys.stderr)
+        return 1
+    try:
+        serve_broker(
+            socket_path,
+            control_socket_path=control_socket,
+            inner_gh=inner_gh,
+            token=token,
+        )
+    except GitHubBrokerPrincipalError as exc:
+        print(f"SAFETY DENY: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

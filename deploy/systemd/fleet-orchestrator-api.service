@@ -1,0 +1,36 @@
+# System controller unit (CONTROL deploy; this PR does not enable it).
+# Not a systemctl --user unit. Kernel cgroup:
+#   /system.slice/fleet-orchestrator-api.service
+# github-brokerd allows control mint only from that cgroup
+# (ORCH_GITHUB_BROKER_CONTROL_CGROUP, exact absolute path). Same-UID tmux workers live in
+# user.slice/.../tmux-spawn-*.scope and cannot join this cgroup.
+#
+# Socket open(2): this unit alone gets SupplementaryGroups=github-control
+# so it can traverse the disjoint 0750 github-control runtime parent and
+# open the 0660 github-broker:github-control socket. It does not join
+# github-workers and therefore cannot traverse the exec parent. Do not
+# usermod mira into github-control (every seat is uid mira).
+
+[Unit]
+Description=PALIOS Fleet Orchestrator API (system control principal)
+Documentation=https://github.com/palios-taey/claude-code-fleet-orchestrator
+After=network.target github-broker.service
+Wants=github-broker.service
+
+[Service]
+Type=simple
+User=mira
+Group=mira
+SupplementaryGroups=github-control
+UMask=0007
+EnvironmentFile=/etc/orch/orchestrator-api.env
+WorkingDirectory=/home/mira
+Restart=on-failure
+RestartSec=5s
+# EnvironmentFile must set ORCH_REPO_ROOT, ORCH_DOTENV, ORCH_API_BIN, ORCH_API_LOG,
+# ORCH_GITHUB_BROKER_CONTROL_SOCKET, ORCH_GITHUB_BROKER_CONTROL_CGROUP=/system.slice/fleet-orchestrator-api.service
+ExecStart=/bin/bash -lc 'set -euo pipefail; : "${ORCH_REPO_ROOT:?}"; : "${ORCH_DOTENV:?}"; : "${ORCH_API_BIN:?}"; : "${ORCH_API_LOG:?}"; cd "$ORCH_REPO_ROOT"; set -a; . "$ORCH_DOTENV"; set +a; exec "$ORCH_API_BIN" >> "$ORCH_API_LOG" 2>&1'
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Install an isolated GitHub outward worker client (no credentials on disk).
+
+Does not deploy. Live prefixes are refused unless ORCH_GITHUB_BROKER_ALLOW_LIVE=1,
+which this task does not set. The token is never written; CONTROL starts
+github-brokerd as a separate Unix user with GH_TOKEN in that principal's env.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from fleet_orchestrator.github_broker import (  # noqa: E402
+    GitHubBrokerInstallError,
+    install_github_broker,
+)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Install isolated GitHub outward worker client")
+    parser.add_argument("--prefix", required=True, help="Isolated install prefix (not a live system path)")
+    parser.add_argument("--inner-gh", required=True, help="Inner gh copied into broker-private dir, not worker PATH")
+    args = parser.parse_args()
+    allow_live = os.environ.get("ORCH_GITHUB_BROKER_ALLOW_LIVE", "").strip() == "1"
+    try:
+        result = install_github_broker(
+            Path(args.prefix),
+            inner_gh=Path(args.inner_gh),
+            client_script=ROOT / "scripts" / "gh-outward",
+            token="",
+            allow_live=allow_live,
+            python_executable=sys.executable,
+        )
+    except GitHubBrokerInstallError as exc:
+        print(f"INSTALL DENY: {exc}", file=sys.stderr)
+        return 1
+    print("BROKER CLIENT INSTALLED prefix={prefix} worker_gh={worker_gh} socket={socket}".format(**result))
+    print("inner gh is broker-private: {inner_gh}".format(**result))
+    print("worker env unset file: {worker_env}".format(**result))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

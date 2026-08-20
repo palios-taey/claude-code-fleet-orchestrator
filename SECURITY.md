@@ -24,6 +24,41 @@ Do not file public GitHub issues for security disclosures.
 
 This policy covers this repository only.
 
+## GitHub outward broker
+
+Worker processes must not hold a GitHub credential or an authenticated `gh`
+binary. `scripts/github-brokerd` is the credential principal. It listens on two
+Unix sockets:
+
+- **exec** (`ORCH_GITHUB_BROKER_SOCKET`, mode `0660`): `op=exec` only. Mint
+  and revoke are denied here. The broker maps `SO_PEERCRED` pid → TTY → tmux
+  session and looks up the in-memory handle for that session. Workers never
+  receive a bearer token in tmux or process env.
+- **control** (`ORCH_GITHUB_BROKER_CONTROL_SOCKET`, mode `0660` in a
+  disjoint 0750 runtime parent): `op=mint` / `op=revoke` only after
+  `SO_PEERCRED` uid mapping. Mode is `0660` so group `github-control` can
+  mint; `0600` is owner-only and cannot be opened by uid-mira orch.
+  `bind_current_task` mints into broker memory only.
+  `session_unbind_current_task` revokes before Redis clear.
+
+Worker `scripts/gh-outward` is an exec-socket client and never sends mint,
+revoke, or a handle. Production deploy (CONTROL) runs the daemon as Unix user
+`github-broker`. The system API unit is a member of group `github-control`;
+worker processes are members of `github-workers` only. See
+`deploy/systemd/github-broker.service`. This repository does not enable that
+unit.
+
+Observed live: seats share uid 1000. Control mint is the **system** unit
+cgroup `/system.slice/fleet-orchestrator-api.service` compared by exact
+absolute path equality. Exec and control sockets use disjoint top-level
+runtime parents (`/run/github-broker` vs `/run/github-broker-control`). The
+broker `chown`s the exec parent to `github-workers` mode `0750` and the
+control parent to `github-control` mode `0750`; overlapping or nested
+parents fail closed. SupplementaryGroups does not set `st_gid`. Isolated
+tests assert path mode/group topology rather than owner socket access. System-slice
+production proof is undeployed. Same-UID ptrace of the API unit remains a
+CONTROL-deploy residual.
+
 ## Threat model
 
 - Local single-user deployment on a trusted host.

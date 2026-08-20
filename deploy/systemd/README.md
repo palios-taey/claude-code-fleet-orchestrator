@@ -27,3 +27,8 @@ committed unit files.
 
 Use `systemctl --user cat <unit>` after installation to verify the loaded unit
 matches the committed file plus the local env file.
+
+`github-broker.service` is a CONTROL-deploy example for a separate Unix user
+`github-broker`. This PR does not enable or start it. Worker UIDs must not read
+that unit's EnvironmentFile or exec the inner `gh` except through the Unix
+socket.

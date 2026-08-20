@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Worker GitHub client — talks only to the outward broker exec socket.
+
+This process has no GitHub credential and does not know the inner gh path.
+It never mints, revokes, or presents a bearer handle. The broker authorizes
+the live peer process via SO_PEERCRED plus TTY-backed session mapping.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from fleet_orchestrator.github_broker import (  # noqa: E402
+    GitHubBrokerClientError,
+    call_broker,
+)
+
+
+def _split_session(argv: list[str]) -> tuple[str, list[str]]:
+    forwarded: list[str] = []
+    idx = 0
+    while idx < len(argv):
+        token = argv[idx]
+        if token == "--session" and idx + 1 < len(argv):
+            idx += 2
+            continue
+        if token.startswith("--session="):
+            idx += 1
+            continue
+        forwarded.append(token)
+        idx += 1
+    return "", forwarded
+
+
+def main() -> int:
+    socket_path = str(os.environ.get("ORCH_GITHUB_BROKER_SOCKET") or "").strip()
+    if not socket_path:
+        print("SAFETY DENY: ORCH_GITHUB_BROKER_SOCKET is required", file=sys.stderr)
+        return 1
+    _unused_session, argv = _split_session(sys.argv[1:])
+    try:
+        payload = call_broker(socket_path, argv, op="exec")
+    except GitHubBrokerClientError as exc:
+        print(f"SAFETY DENY: {exc}", file=sys.stderr)
+        return 1
+    sys.stdout.write(str(payload.get("stdout") or ""))
+    sys.stderr.write(str(payload.get("stderr") or ""))
+    rc = payload.get("rc")
+    return 1 if rc is None else int(rc)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

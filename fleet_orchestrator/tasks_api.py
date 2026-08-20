@@ -1965,6 +1965,11 @@ def _clear_exact_session_unbind_redis(
 
 @app.delete("/api/sessions/{session_id}/current-task")
 def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
+    from fleet_orchestrator.github_broker import (
+        GitHubBrokerClientError,
+        revoke_and_clear_outward_handle,
+    )
+
     current_key = notify_state_key(session_id, "current_task")
     try:
         redis_client = notify_redis_connect()
@@ -1975,6 +1980,13 @@ def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
             detail=f"could not read current_task before unbind; no state changed: {exc}",
         ) from exc
     if not raw_current:
+        try:
+            revoke_and_clear_outward_handle(session_id)
+        except GitHubBrokerClientError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"no current_task but control revoke failed; handles may remain: {exc}",
+            ) from exc
         return {
             "ok": True,
             "session": session_id,
@@ -2003,6 +2015,13 @@ def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
             },
         )
 
+    try:
+        revoke_and_clear_outward_handle(session_id, task_id)
+    except GitHubBrokerClientError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"control revoke failed; Redis/graph unbind not started: {exc}",
+        ) from exc
     graph = _reconcile_session_unbind_graph(session_id, task_id, float(started_at), config=_cfg())
     try:
         redis_result = _clear_exact_session_unbind_redis(session_id, task_id, raw_current)

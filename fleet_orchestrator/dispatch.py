@@ -465,6 +465,7 @@ def bind_current_task(
     *,
     parent_claim_out: Optional[dict[str, Any]] = None,
     binding_nonce: Optional[float] = None,
+    outward_handle_out: Optional[dict[str, Any]] = None,
 ) -> float:
     """Write the canonical dispatch/current-task wire for ``worker``.
 
@@ -489,42 +490,58 @@ def bind_current_task(
     if dispatcher:
         current_task["dispatcher"] = dispatcher
 
-    if guard_existing:
-        _bind_current_task_checked(
-            r,
-            worker,
-            current_task,
-            set_parent,
-            supervisor,
-            dispatcher or supervisor,
-            force=force,
-            parent_claim_out=parent_claim_out,
-        )
-    else:
-        pipe = r.pipeline(transaction=True)
-        pipe.delete(_state_key(worker, "last_outcome"))
-        pipe.delete(_state_key("orch-watch-stuck", f"{worker}:{task_id}"))
-        pipe.set(_state_key(worker, "current_task"), json.dumps(current_task))
-        if set_parent and supervisor:
-            pipe.set(_state_key(worker, "parent"), supervisor)
-        pipe.execute()
+    from .github_broker import mint_and_deliver_outward_handle, revoke_and_clear_outward_handle
 
-    # Binding a task means the worker is working it — flip it to in_progress so
-    # next-ready stops re-surfacing it.
-    # Best-effort: no-op for ad-hoc tasks / already-claimed / dep-blocked.
-    _mark_in_progress_best_effort(task_id, worker)
-    liveness_registered = register_worker_task_liveness(
-        worker=worker,
-        task_id=task_id,
-        description=description,
-        supervisor=supervisor,
-        started_at=current_task["started_at"],
-        require_binding=require_liveness_binding,
+    # Mint before Redis/graph so a bind failure can revoke without leaving a
+    # live handle. No-op when the control socket is unset.
+    revoke_and_clear_outward_handle(worker)
+    minted = mint_and_deliver_outward_handle(
+        worker,
+        task_id,
+        current_task["started_at"],
+        outward_handle_out=outward_handle_out,
     )
-    if require_liveness_binding and worker_task_liveness_enabled() and not liveness_registered:
-        raise RuntimeError(
-            f"worker binding lost authority during liveness registration: {worker}:{task_id}"
+    try:
+        if guard_existing:
+            _bind_current_task_checked(
+                r,
+                worker,
+                current_task,
+                set_parent,
+                supervisor,
+                dispatcher or supervisor,
+                force=force,
+                parent_claim_out=parent_claim_out,
+            )
+        else:
+            pipe = r.pipeline(transaction=True)
+            pipe.delete(_state_key(worker, "last_outcome"))
+            pipe.delete(_state_key("orch-watch-stuck", f"{worker}:{task_id}"))
+            pipe.set(_state_key(worker, "current_task"), json.dumps(current_task))
+            if set_parent and supervisor:
+                pipe.set(_state_key(worker, "parent"), supervisor)
+            pipe.execute()
+
+        # Binding a task means the worker is working it — flip it to in_progress so
+        # next-ready stops re-surfacing it.
+        # Best-effort: no-op for ad-hoc tasks / already-claimed / dep-blocked.
+        _mark_in_progress_best_effort(task_id, worker)
+        liveness_registered = register_worker_task_liveness(
+            worker=worker,
+            task_id=task_id,
+            description=description,
+            supervisor=supervisor,
+            started_at=current_task["started_at"],
+            require_binding=require_liveness_binding,
         )
+        if require_liveness_binding and worker_task_liveness_enabled() and not liveness_registered:
+            raise RuntimeError(
+                f"worker binding lost authority during liveness registration: {worker}:{task_id}"
+            )
+    except Exception:
+        if minted:
+            revoke_and_clear_outward_handle(worker, task_id)
+        raise
     return current_task["started_at"]
 
 
@@ -763,6 +780,18 @@ def _rollback_claim(
 ) -> None:
     """Undo only the exact Redis binding and graph claim created by dispatch."""
     from redis import WatchError
+
+    from .github_broker import GitHubBrokerClientError, revoke_and_clear_outward_handle
+
+    try:
+        revoke_and_clear_outward_handle(worker, task_id)
+    except GitHubBrokerClientError as exc:
+        logger.warning(
+            "dispatch rollback: control revoke FAILED worker=%s task=%s: %r",
+            worker,
+            task_id,
+            exc,
+        )
 
     try:
         r = _redis_connect()
@@ -1860,24 +1889,26 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
                 r.set(last_outcome_key, json.dumps(payload))
         except Exception as exc:
             logger.warning("worker_outcome_recorded causal event append failed worker=%s: %r", worker, exc)
-        try:
-            if current_task_id:
-                if outcome != "done":
-                    _revert_outcome_claim(worker, current_task_id)
-                    from .worker_liveness import clear_worker_task_liveness
+        if current_task_id:
+            # Worker-originated response_ready is gated by the live binding; emit
+            # before terminal cleanup clears that binding.
+            _notify_supervisor_response_ready(worker, current_task, payload)
+            if outcome != "done":
+                _revert_outcome_claim(worker, current_task_id)
+                from .worker_liveness import clear_worker_task_liveness
 
-                    clear_worker_task_liveness(current_task_id)
-                from .current_task_binding import clear_matching_current_task
+                clear_worker_task_liveness(current_task_id)
+            from .current_task_binding import clear_matching_current_task
 
-                cleared_current_task = clear_matching_current_task(
-                    worker,
-                    current_task_id,
-                    redis_client=r,
-                    reason=f"record_outcome:{outcome}",
-                )
-                if outcome == "done" and cleared_current_task:
-                    _write_completion_receipt(r, worker, current_task_id, payload)
-        finally:
+            cleared_current_task = clear_matching_current_task(
+                worker,
+                current_task_id,
+                redis_client=r,
+                reason=f"record_outcome:{outcome}",
+            )
+            if outcome == "done" and cleared_current_task:
+                _write_completion_receipt(r, worker, current_task_id, payload)
+        else:
             _notify_supervisor_response_ready(worker, current_task, payload)
 
 
