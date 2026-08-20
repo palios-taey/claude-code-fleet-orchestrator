@@ -54,10 +54,20 @@ def main() -> int:
     cfg = OrchConfig()
     drv = get_neo4j_driver(cfg)
 
-    def task_status(tid: str):
+    def task_row(tid: str):
         with drv.session(database=cfg.neo4j_db) as s:
-            r = s.run("MATCH (t:OrchTask {id:$i}) RETURN t.status AS st", i=tid).single()
-            return r["st"] if r else None
+            r = s.run(
+                """
+                MATCH (t:OrchTask {id:$i})
+                RETURN t.status AS st, t.owner AS owner, t.dispatched_to AS dispatched_to
+                """,
+                i=tid,
+            ).single()
+            return r.data() if r else None
+
+    def task_status(tid: str):
+        row = task_row(tid)
+        return row["st"] if row else None
 
     def set_status(tid: str, st: str, binding_nonce: float):
         with drv.session(database=cfg.neo4j_db) as s:
@@ -113,11 +123,12 @@ def main() -> int:
     try:
         create_project(project_id=_PFX, name=_PFX, config=cfg)
         create_phase(project_id=_PFX, phase_id=f"{_PFX}::ph", name="ph", config=cfg)
+        prior_owner = f"{_PFX}-prior-owner"
         for n in ("tfail", "tok", "t1", "t2", "tlog"):
             create_task(phase_id=f"{_PFX}::ph", task_id=f"{_PFX}::{n}", description=n,
-                        owner=_WORKER, wake_owner_if_ready=False, config=cfg)
+                        owner=prior_owner, wake_owner_if_ready=False, config=cfg)
 
-        # 1. FAILURE PATH (happy revert)
+        # 1. FAILURE PATH (happy revert) — also restores prior owner/dispatched_to
         tfail = f"{_PFX}::tfail"
         os.environ["ORCH_NOTIFY_CLI"] = fail_cli
         raised = False
@@ -125,8 +136,19 @@ def main() -> int:
             D.dispatch(worker=_WORKER, task_id=tfail, description="fail", supervisor=f"{_PFX}-sup")
         except RuntimeError:
             raised = True
+        fail_row = task_row(tfail) or {}
         _check("failed wake raises RuntimeError", raised)
-        _check("failed wake REVERTS task to pending", task_status(tfail) == "pending", task_status(tfail))
+        _check("failed wake REVERTS task to pending", fail_row.get("st") == "pending", str(fail_row))
+        _check(
+            "failed wake RESTORES prior owner (not leftover supervisor)",
+            fail_row.get("owner") == prior_owner,
+            str(fail_row),
+        )
+        _check(
+            "failed wake RESTORES prior dispatched_to (cleared when previously unset)",
+            fail_row.get("dispatched_to") in (None, ""),
+            str(fail_row),
+        )
         _check("failed wake CLEARS our binding", get_ct(_WORKER) is None, get_ct(_WORKER))
 
         # 2. SUCCESS PATH (no regression)
