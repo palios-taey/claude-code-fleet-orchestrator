@@ -97,7 +97,37 @@ def peer_credentials(conn: socket.socket) -> tuple[int, int, int]:
         raise GitHubBrokerClientError(f"SO_PEERCRED unavailable: {exc}") from exc
 
 
+def load_control_sessions() -> set[str]:
+    """Supervisor sessions allowed to mint/revoke. Not worker peer suffixes."""
+    raw = (
+        os.environ.get("ORCH_GITHUB_BROKER_CONTROL_SESSIONS")
+        or os.environ.get("ORCH_SESSION_IDS")
+        or ""
+    )
+    return {part.strip() for part in raw.replace(";", ",").split(",") if part.strip()}
+
+
+def peer_is_control_principal(pid: int, uid: int = 0, mapping: Optional[dict[str, set[int]]] = None) -> bool:
+    """Control mint/revoke: TTY session must be a configured supervisor.
+
+    Actual topology: orch API and every seat share uid 1000, so UID/group
+    mapping cannot distinguish them. Worker TTY sessions cannot mint.
+    """
+    del uid, mapping
+    session = session_from_peer_pid(pid)
+    if not session:
+        return False
+    controls = load_control_sessions()
+    if controls:
+        return session in controls
+    lowered = session.lower()
+    if lowered.endswith(("-grok", "-gemini", "-claude")):
+        return False
+    return lowered.endswith("-codex")
+
+
 def peer_may_control(uid: int, mapping: dict[str, set[int]]) -> bool:
+    """Deprecated uid map. Control uses peer_is_control_principal (TTY)."""
     return int(uid) in mapping["control"]
 
 
@@ -363,7 +393,7 @@ def _serve_one(
         _send_json(conn, payload)
         return
     if channel == "control":
-        if not peer_may_control(uid, mapping):
+        if not peer_is_control_principal(pid, uid, mapping):
             _send_json(conn, _deny_payload("control principal not mapped"))
             return
         if op == "mint":

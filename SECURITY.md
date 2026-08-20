@@ -48,10 +48,13 @@ revoke, or a handle. Production deploy (CONTROL) runs the daemon as Unix user
 repository does not enable that unit.
 
 Observed live: fleet-orchestrator API and worker Codex/Grok/Taey processes
-share uid 1000. Isolated tests prove unmapped control uid cannot mint, worker
-exec cannot mint/revoke, control socket is `0660` not `0600`, and a peer
-mapped to another seat cannot use that seat's live handle. Same-UID ptrace
-of another process remains a residual until distinct OS principals.
+share uid 1000, so unix group `github-control` on mira would let every seat
+open the control socket. Control mint is authorized by supervisor TTY
+session (`ORCH_GITHUB_BROKER_CONTROL_SESSIONS` / `ORCH_SESSION_IDS`), not by
+uid or by adding mira to `github-control`. Isolated tests prove a worker
+TTY cannot mint, worker exec cannot mint/revoke, and a peer mapped to
+another seat cannot use that seat's live handle. Same-UID ptrace remains a
+residual until distinct OS principals.
 
 ## Threat model
 

@@ -28,11 +28,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from fleet_orchestrator.dispatch import _rollback_claim, bind_current_task  # noqa: E402
+from fleet_orchestrator import github_broker as github_broker_mod  # noqa: E402
 from fleet_orchestrator.github_broker import (  # noqa: E402
     GitHubBrokerInstallError,
     call_broker,
     install_github_broker,
     mint_and_deliver_outward_handle,
+    peer_is_control_principal,
     peer_may_control,
     prefix_is_live,
     revoke_and_clear_outward_handle,
@@ -184,6 +186,24 @@ def main() -> int:
         "uid 1 is not a default control principal",
         not peer_may_control(1, {"control": {os.getuid()}, "worker": set()}),
     )
+    orig_peer = github_broker_mod.session_from_peer_pid
+    prior_controls = os.environ.get("ORCH_GITHUB_BROKER_CONTROL_SESSIONS")
+    os.environ["ORCH_GITHUB_BROKER_CONTROL_SESSIONS"] = "conductor-codex"
+    github_broker_mod.session_from_peer_pid = lambda pid: "taey-ed-grok"
+    _check(
+        "worker TTY cannot mint on control",
+        not peer_is_control_principal(os.getpid()),
+    )
+    github_broker_mod.session_from_peer_pid = lambda pid: "conductor-codex"
+    _check(
+        "supervisor TTY can mint on control",
+        peer_is_control_principal(os.getpid()),
+    )
+    github_broker_mod.session_from_peer_pid = orig_peer
+    if prior_controls is None:
+        os.environ.pop("ORCH_GITHUB_BROKER_CONTROL_SESSIONS", None)
+    else:
+        os.environ["ORCH_GITHUB_BROKER_CONTROL_SESSIONS"] = prior_controls
     try:
         install_github_broker(
             Path("/usr/local"),
@@ -288,7 +308,16 @@ def main() -> int:
             f"oc._default_task_loader = lambda tid, *, config=None: ({{'id': {task_id!r}, 'status': 'in_progress', 'dispatched_to': {session!r}, 'owner': {supervisor!r}}} if tid == {task_id!r} else None)\n"
             "import fleet_orchestrator.github_broker as gb\n"
             f"PEER_SESSION_FILE = Path({str(Path(tmp) / 'peer-session.txt')!r})\n"
-            "gb.session_from_peer_pid = lambda pid: PEER_SESSION_FILE.read_text().strip()\n",
+            "CONTROL_SESSION = 'conductor-codex'\n"
+            "def _peer_session(pid):\n"
+            "    try:\n"
+            "        cmdline = Path(f'/proc/{pid}/cmdline').read_bytes()\n"
+            "    except OSError:\n"
+            "        cmdline = b''\n"
+            "    if b'gh-outward' in cmdline or b'worker-mint-probe' in cmdline:\n"
+            "        return PEER_SESSION_FILE.read_text().strip()\n"
+            "    return CONTROL_SESSION\n"
+            "gb.session_from_peer_pid = _peer_session\n",
             encoding="utf-8",
         )
         peer_session_file = Path(tmp) / "peer-session.txt"
@@ -301,37 +330,9 @@ def main() -> int:
         base_env["ORCH_GITHUB_BROKER_INNER"] = installed["inner_gh"]
         base_env["PYTHONPATH"] = str(Path(tmp)) + os.pathsep + str(ROOT)
         base_env["ORCH_GITHUB_BROKER_WORKER_UIDS"] = str(os.getuid())
-
-        deny_env = dict(base_env)
-        deny_env["ORCH_GITHUB_BROKER_CONTROL_UIDS"] = "1"
-        deny_proc = _start_broker(deny_env, socket_path)
-        try:
-            _check("broker socket exists (unmapped control)", socket_path.exists(), socket_path)
-            for _attempt in range(50):
-                if control_socket.exists():
-                    break
-                time.sleep(0.05)
-            unmapped = call_broker(
-                str(control_socket),
-                op="mint",
-                session=session,
-                task_id=task_id,
-                started_at=1.0,
-            )
-            _check(
-                "SO_PEERCRED unmapped uid cannot mint on control",
-                int(unmapped.get("rc") or 0) != 0 and "control principal not mapped" in str(unmapped.get("stderr") or ""),
-                unmapped,
-            )
-        finally:
-            _stop_broker(deny_proc)
-            if socket_path.exists():
-                socket_path.unlink()
-            if control_socket.exists():
-                control_socket.unlink()
+        base_env["ORCH_GITHUB_BROKER_CONTROL_SESSIONS"] = supervisor
 
         broker_env = dict(base_env)
-        broker_env["ORCH_GITHUB_BROKER_CONTROL_UIDS"] = str(os.getuid())
         broker_proc = _start_broker(broker_env, socket_path)
         prior_control = os.environ.get("ORCH_GITHUB_BROKER_CONTROL_SOCKET")
         os.environ["ORCH_GITHUB_BROKER_CONTROL_SOCKET"] = str(control_socket)
@@ -371,6 +372,31 @@ def main() -> int:
                 int(victim_revoke.get("rc") or 0) != 0
                 and "authenticated control channel" in str(victim_revoke.get("stderr") or ""),
                 victim_revoke,
+            )
+            probe = Path(tmp) / "worker-mint-probe.py"
+            probe.write_text(
+                "import json, sys\n"
+                f"sys.path.insert(0, {str(ROOT)!r})\n"
+                "from fleet_orchestrator.github_broker import call_broker\n"
+                f"print(json.dumps(call_broker({str(control_socket)!r}, op='mint', session={victim!r}, task_id={victim_task!r})))\n",
+                encoding="utf-8",
+            )
+            worker_mint = subprocess.run(
+                [sys.executable, str(probe)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PYTHONPATH": str(ROOT)},
+                check=False,
+            )
+            try:
+                worker_mint_payload = json.loads(worker_mint.stdout or "{}")
+            except json.JSONDecodeError:
+                worker_mint_payload = {"stdout": worker_mint.stdout, "stderr": worker_mint.stderr}
+            _check(
+                "worker control mint-as-victim denied",
+                int(worker_mint_payload.get("rc") or 0) != 0
+                and "control principal not mapped" in str(worker_mint_payload.get("stderr") or ""),
+                (worker_mint.returncode, worker_mint_payload),
             )
 
             import fleet_orchestrator.dispatch as dispatch_mod

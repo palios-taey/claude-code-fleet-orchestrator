@@ -5,9 +5,12 @@
 #   useradd --system --no-create-home github-broker
 #   groupadd --system github-workers
 #   groupadd --system github-control
-#   usermod -aG github-workers mira
-#   usermod -aG github-control mira   # orch/taey-task control client only
-#   # Do NOT add worker seats to github-control.
+#   # Do NOT add uid mira to github-control: every supervisor and worker
+#   # seat is uid mira, so that group would let workers open the control
+#   # socket. Control mint is authorized by TTY supervisor session
+#   # (ORCH_GITHUB_BROKER_CONTROL_SESSIONS / ORCH_SESSION_IDS), not by
+#   # sharing the login uid. A future dedicated orch-controller user may
+#   # join github-control; worker seats stay github-workers only.
 #
 # Socket modes (mechanically required; 0600 is owner-only and cannot be
 # opened by uid mira even with a supplementary group):
