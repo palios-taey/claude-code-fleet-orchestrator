@@ -11,7 +11,6 @@ import os
 import re
 import stat
 import sys
-import tempfile
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -52,6 +51,23 @@ INTERNAL_NEXT_STEP = (
 )
 OUTPUT_FILESYSTEM_NEXT_STEP = (
     "Choose a writable --output directory on one filesystem, then rerun "
+    "`taey-delegate collect`."
+)
+OUTPUT_SYMLINK_NEXT_STEP = (
+    "Choose an --output path that is not a symlink, or remove the symlink yourself; "
+    "`taey-delegate collect` never writes through a symlink, with or without --force."
+)
+OUTPUT_EXISTS_NEXT_STEP = (
+    "Choose an --output path that does not exist, or pass --force to replace the existing "
+    "regular file, then rerun `taey-delegate collect`."
+)
+OUTPUT_NOT_REGULAR_NEXT_STEP = (
+    "Choose an --output path that is absent or a regular file; --force replaces a regular "
+    "file only, never a directory or other special file."
+)
+DUPLICATE_INPUT_NEXT_STEP = (
+    "Pass each artifact exactly once — two declared paths resolved to the same file, so the "
+    "manifest would count one artifact twice. Remove the duplicates and rerun "
     "`taey-delegate collect`."
 )
 OS_ERROR_NEXT_STEP = (
@@ -198,10 +214,38 @@ def _open_artifact(path: str, stack: ExitStack) -> BinaryIO:
     return handle
 
 
+def _assert_inputs_are_unique(
+    declared_paths: Sequence[str], artifact_paths: Sequence[str]
+) -> None:
+    """Two declared paths that resolve to one file would be hashed and counted twice.
+
+    Silently deduplicating would drop a path the caller declared; counting twice would
+    inflate artifact_count. Both are wrong, so this is a hard error that names the
+    offending declarations.
+    """
+    first_declared: dict[str, str] = {}
+    collisions: dict[str, list[str]] = {}
+    for declared, resolved in zip(declared_paths, artifact_paths):
+        if resolved in first_declared:
+            collisions.setdefault(resolved, [first_declared[resolved]]).append(declared)
+        else:
+            first_declared[resolved] = declared
+    if not collisions:
+        return
+    detail = "; ".join(
+        f"{resolved} declared as " + ", ".join(repr(name) for name in names)
+        for resolved, names in sorted(collisions.items())
+    )
+    raise ArtifactCollectionError(
+        f"duplicate artifact paths: {detail}", DUPLICATE_INPUT_NEXT_STEP
+    )
+
+
 def collect_artifacts(
     declared_paths: Sequence[str], output: Path, stack: ExitStack
 ) -> list[OpenArtifact]:
     artifact_paths = [_resolved_path(declared_path) for declared_path in declared_paths]
+    _assert_inputs_are_unique(declared_paths, artifact_paths)
     _assert_output_is_distinct(output, artifact_paths)
     opened: list[OpenArtifact] = []
     for path in artifact_paths:
@@ -267,16 +311,63 @@ def _assert_artifacts_stable(opened: Sequence[OpenArtifact]) -> dict[str, Any]:
     return _verification_step("descriptor_and_path_fingerprint_sweep", len(opened))
 
 
-def _same_filesystem_commit_method(temp_path: Path, output: Path) -> str:
-    if temp_path.parent != output.parent:
+def _same_filesystem_commit_method(temp_fd: int, dir_fd: int) -> str:
+    """Both descriptors are already held, so this compares the objects being committed.
+
+    The temp file was created relative to `dir_fd`, so it cannot be in another directory;
+    comparing st_dev through the two descriptors proves the rename is same-filesystem
+    without resolving either path again.
+    """
+    if os.fstat(temp_fd).st_dev != os.fstat(dir_fd).st_dev:
         raise ArtifactCollectionError(
-            "manifest temp path is not beside output", OUTPUT_FILESYSTEM_NEXT_STEP
-        )
-    if os.stat(temp_path).st_dev != os.stat(output.parent).st_dev:
-        raise ArtifactCollectionError(
-            "manifest temp path is not on output filesystem", OUTPUT_FILESYSTEM_NEXT_STEP
+            "manifest temp file is not on the output filesystem",
+            OUTPUT_FILESYSTEM_NEXT_STEP,
         )
     return "same_filesystem_atomic_rename_with_directory_fsync"
+
+
+def _assert_output_slot_available(dir_fd: int, name: str, force: bool) -> None:
+    """Decide whether the manifest may occupy `name` inside the held directory.
+
+    Resolution is relative to the held descriptor and uses lstat, so a symlink is seen as
+    a symlink instead of being followed to whatever it points at.
+    """
+    try:
+        existing = os.lstat(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(existing.st_mode):
+        raise ArtifactCollectionError(
+            f"manifest output is a symlink: {name}", OUTPUT_SYMLINK_NEXT_STEP
+        )
+    if not stat.S_ISREG(existing.st_mode):
+        raise ArtifactCollectionError(
+            f"manifest output exists and is not a regular file: {name}",
+            OUTPUT_NOT_REGULAR_NEXT_STEP,
+        )
+    if not force:
+        raise ArtifactCollectionError(
+            f"manifest output already exists: {name}", OUTPUT_EXISTS_NEXT_STEP
+        )
+
+
+def _create_temp_beside(dir_fd: int, name: str) -> tuple[str, int]:
+    """Create the staging file inside the held directory, never by pathname."""
+    for _ in range(64):
+        candidate = f".{name}.{os.urandom(8).hex()}.tmp"
+        try:
+            fd = os.open(
+                candidate,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=dir_fd,
+            )
+        except FileExistsError:
+            continue
+        return candidate, fd
+    raise ArtifactCollectionError(
+        "could not create a unique manifest staging file", INTERNAL_NEXT_STEP
+    )
 
 
 def _verification_guarantee(
@@ -317,22 +408,30 @@ def _verification_guarantee(
     }
 
 
-def _write_manifest_transaction(output: Path, opened: Sequence[OpenArtifact]) -> None:
+def _write_manifest_transaction(
+    output: Path, opened: Sequence[OpenArtifact], force: bool = False
+) -> None:
+    """Stage, verify and commit the manifest through one held directory descriptor.
+
+    The descriptor is opened before anything is created and every subsequent operation —
+    staging file creation, the atomic rename, and the directory fsync — resolves through
+    it. The directory is never reopened by pathname, so the committed manifest cannot land
+    in a directory that replaced the intended one after the checks ran.
+    """
     output.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        "w",
-        delete=False,
-        dir=str(output.parent),
-        prefix=f".{output.name}.",
-        encoding="utf-8",
-    )
-    temp_path = Path(handle.name)
-    dir_fd = None
+    dir_fd = os.open(str(output.parent), os.O_RDONLY | os.O_DIRECTORY)
+    name = output.name
+    temp_name: str | None = None
+    handle = None
     try:
+        _assert_output_slot_available(dir_fd, name, force)
+        temp_name, temp_fd = _create_temp_beside(dir_fd, name)
+        handle = os.fdopen(temp_fd, "w", encoding="utf-8")
+
         held_descriptor_step = _held_descriptor_verification(opened)
         artifacts, reread_step = _reread_and_rehash(opened)
         fingerprint_step = _assert_artifacts_stable(opened)
-        commit_method = _same_filesystem_commit_method(temp_path, output)
+        commit_method = _same_filesystem_commit_method(handle.fileno(), dir_fd)
         verification = _verification_guarantee(
             opened,
             [held_descriptor_step, reread_step, fingerprint_step],
@@ -349,6 +448,7 @@ def _write_manifest_transaction(output: Path, opened: Sequence[OpenArtifact]) ->
         handle.flush()
         os.fsync(handle.fileno())
         handle.close()
+        handle = None
 
         # Advisory locks cannot bind writers that ignore flock. A second full read plus
         # this final descriptor/path sweep closes detectable drift; strict simultaneity
@@ -364,23 +464,52 @@ def _write_manifest_transaction(output: Path, opened: Sequence[OpenArtifact]) ->
                 "manifest verification evidence changed before commit", INTERNAL_NEXT_STEP
             )
         _assert_output_is_distinct(output, [artifact.path for artifact in opened])
-        os.replace(temp_path, output)
-        dir_fd = os.open(str(output.parent), os.O_RDONLY)
+        # Re-checked immediately before the rename: the same rule, enforced against the
+        # state the rename will actually overwrite.
+        _assert_output_slot_available(dir_fd, name, force)
+        os.replace(temp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        temp_name = None
         os.fsync(dir_fd)
     except BaseException:
-        handle.close()
-        temp_path.unlink(missing_ok=True)
+        if handle is not None:
+            handle.close()
+        if temp_name is not None:
+            try:
+                os.unlink(temp_name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
         raise
     finally:
-        if dir_fd is not None:
-            os.close(dir_fd)
+        os.close(dir_fd)
+
+
+def _output_target(raw: str) -> Path:
+    """Resolve the output directory but never the final component.
+
+    `Path.resolve()` follows a symlink at the output itself, which would hand back the
+    link's target and make a symlink at --output invisible to the refusal check. The
+    directory is resolved so the held descriptor is unambiguous; the name is left alone so
+    lstat can still see a link as a link.
+    """
+    absolute = os.path.abspath(os.path.expanduser(raw))
+    name = os.path.basename(absolute)
+    if not name or name in {os.curdir, os.pardir}:
+        raise ArtifactCollectionError(
+            f"--output must name a file, not a directory: {raw}",
+            OUTPUT_NOT_REGULAR_NEXT_STEP,
+        )
+    parent = Path(os.path.dirname(absolute))
+    if parent.exists():
+        parent = Path(os.path.realpath(parent))
+    return parent / name
 
 
 def cmd_collect(args: argparse.Namespace) -> int:
-    output = Path(args.output).expanduser().resolve()
+    output = _output_target(args.output)
+    force = bool(getattr(args, "force", False))
     with ExitStack() as stack:
         opened = collect_artifacts(args.files, output, stack)
-        _write_manifest_transaction(output, opened)
+        _write_manifest_transaction(output, opened, force)
     print(f"wrote {output} ({len(opened)} artifacts)")
     return 0
 
@@ -401,6 +530,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         default="artifacts.json",
         help="manifest path (default: ./artifacts.json)",
+    )
+    collect.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "replace an existing regular file at --output; never replaces a symlink, "
+            "directory, or other special file"
+        ),
     )
     collect.set_defaults(handler=cmd_collect)
     return parser
