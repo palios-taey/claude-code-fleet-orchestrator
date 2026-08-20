@@ -138,6 +138,7 @@ from fleet_orchestrator.orch_schema import (
     update_project_priority,
     update_task_status,
     bind_audit_status_on_task,
+    pin_audit_contract_on_task,
     validate_source_path_for_refs,
     _resolve_supervisor_session,
 )
@@ -757,17 +758,76 @@ def get_task(task_id: str) -> Dict[str, Any]:
     return task
 
 
+@app.post("/api/tasks/{task_id}/pin-audit-contract")
+async def pin_audit_contract(task_id: str, req: Request) -> Dict[str, Any]:
+    """Supervisor/internal authority: pin immutable audit contract (no status ID).
+
+    Ordinary POST /api/task/create cannot set these fields. Body.from must equal
+    the task's project supervisor. Pins: repo/head/base/context/state/pr_number.
+    """
+    pin_next = (
+        "Next step: POST /api/tasks/{task_id}/pin-audit-contract with body "
+        '{"from":"<project-supervisor>","audit_repo":"OWNER/REPO","audit_head":"<40-hex>",'
+        '"audit_base":"<40-hex>","audit_required_context":"<ctx>","audit_required_state":"success",'
+        '"audit_pr_number":<int>}; inspect with GET /api/tasks/{task_id} or `taey-task status {task_id}`.'
+    )
+    try:
+        data = await req.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"request body must be valid JSON: {exc}. {pin_next.format(task_id=task_id)}",
+        )
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=422,
+            detail=f"request body must be a JSON object. {pin_next.format(task_id=task_id)}",
+        )
+    cfg = _cfg()
+    task_id = resolve_task_id(task_id, config=cfg)
+    task = load_task_record(task_id, config=cfg)
+    if not task:
+        raise HTTPException(status_code=404, detail=_task_not_found_detail(task_id))
+    actor = str(data.get("from") or "").strip()
+    try:
+        result = pin_audit_contract_on_task(
+            task_id,
+            actor=actor,
+            audit_repo=str(data.get("audit_repo") or ""),
+            audit_head=str(data.get("audit_head") or ""),
+            audit_base=str(data.get("audit_base") or ""),
+            audit_required_context=str(data.get("audit_required_context") or ""),
+            audit_required_state=str(data.get("audit_required_state") or ""),
+            audit_pr_number=data.get("audit_pr_number"),
+            config=cfg,
+        )
+    except CompletionEvidenceError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    task_after = load_task_record(task_id, config=cfg) or {}
+    return {
+        "ok": True,
+        **result,
+        "completion_class": task_after.get("completion_class"),
+        "audit_repo": task_after.get("audit_repo"),
+        "audit_head": task_after.get("audit_head"),
+        "audit_base": task_after.get("audit_base"),
+        "audit_required_context": task_after.get("audit_required_context"),
+        "audit_required_state": task_after.get("audit_required_state"),
+        "audit_pr_number": task_after.get("audit_pr_number"),
+        "audit_bound_status_id": task_after.get("audit_bound_status_id"),
+    }
+
+
 @app.post("/api/tasks/{task_id}/bind-audit-status")
 async def bind_audit_status(task_id: str, req: Request) -> Dict[str, Any]:
-    """Compare-once supervisor/internal bind of concrete GitHub status ID.
+    """Compare-once supervisor bind of concrete GitHub status ID.
 
-    Requires trusted creation pins already on the OrchTask. Body:
-      status_id (int), pr_head_sha (40-hex), pr_base_sha (40-hex), from (session).
-    Queries the status provider for exact repo/head/context/state and refuses overwrite.
+    Body: status_id (int), from (project supervisor). PR head/base are queried
+    server-side from trusted audit_repo + audit_pr_number pins — request SHAs rejected.
     """
     bind_next = (
         "Next step: POST /api/tasks/{task_id}/bind-audit-status with body "
-        '{"status_id":<int>,"pr_head_sha":"<40-hex>","pr_base_sha":"<40-hex>","from":"<supervisor>"}; '
+        '{"status_id":<int>,"from":"<project-supervisor>"}; '
         "inspect pins with GET /api/tasks/{task_id} or `taey-task status {task_id}`."
     )
     try:
@@ -789,6 +849,19 @@ async def bind_audit_status(task_id: str, req: Request) -> Dict[str, Any]:
     if not task:
         raise HTTPException(status_code=404, detail=_task_not_found_detail(task_id))
 
+    # Callers must not supply PR SHAs — server queries from pinned repo/PR identity.
+    for forbidden in ("pr_head_sha", "pr_base_sha", "audit_head", "audit_base", "audit_pr_number"):
+        if forbidden in data and data.get(forbidden) not in (None, "", [], {}):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"bind-audit-status rejects caller-supplied {forbidden}; "
+                    "PR head/base are queried server-side from trusted pins. "
+                    + bind_next.format(task_id=task_id)
+                ),
+            )
+
+    actor = str(data.get("from") or "").strip()
     raw_status_id = data.get("status_id")
     try:
         status_id = int(raw_status_id)
@@ -800,29 +873,17 @@ async def bind_audit_status(task_id: str, req: Request) -> Dict[str, Any]:
                 + bind_next.format(task_id=task_id)
             ),
         )
-    pr_head_sha = str(data.get("pr_head_sha") or "").strip()
-    pr_base_sha = str(data.get("pr_base_sha") or "").strip()
-    if not pr_head_sha or not pr_base_sha:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "pr_head_sha and pr_base_sha (exact 40-hex) are required for compare-once audit bind. "
-                + bind_next.format(task_id=task_id)
-            ),
-        )
     try:
         result = bind_audit_status_on_task(
             task_id,
+            actor=actor,
             status_id=status_id,
-            pr_head_sha=pr_head_sha,
-            pr_base_sha=pr_base_sha,
             config=cfg,
         )
     except CompletionEvidenceError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{exc}. {bind_next.format(task_id=task_id)}",
-        )
+        # Authorization failures surface as 403; contract mismatches as 400.
+        status = 403 if "not project supervisor" in str(exc) or "requires authenticated supervisor" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc))
     task_after = load_task_record(task_id, config=cfg) or {}
     return {
         "ok": True,
@@ -833,6 +894,7 @@ async def bind_audit_status(task_id: str, req: Request) -> Dict[str, Any]:
         "audit_base": task_after.get("audit_base"),
         "audit_required_context": task_after.get("audit_required_context"),
         "audit_required_state": task_after.get("audit_required_state"),
+        "audit_pr_number": task_after.get("audit_pr_number"),
         "audit_bound_status_id": task_after.get("audit_bound_status_id"),
     }
 
@@ -910,27 +972,24 @@ async def create(req: Request) -> Dict[str, Any]:
     estimated_tokens = int(data.get("estimated_tokens", 50_000))
     initial_status = data.get("initial_status", data.get("status", "pending"))
 
-    # Trusted creation pins for audit-class tasks. Status IDs are NEVER accepted here —
-    # they are bound later via compare-once POST /api/tasks/{id}/bind-audit-status.
-    if any(
-        key in data and data.get(key) not in (None, "", [], {})
-        for key in ("audit_bound_status_id", "audit_status_id", "required_audit_status_ids")
-    ):
+    # Ordinary create cannot select audit contract fields — project supervisor pins
+    # via POST /api/tasks/{id}/pin-audit-contract after create.
+    from fleet_orchestrator.audit_completion import (
+        AuditContractError,
+        reject_ordinary_create_audit_fields,
+    )
+
+    try:
+        reject_ordinary_create_audit_fields(data)
+    except AuditContractError as exc:
         raise HTTPException(
             status_code=400,
             detail=(
-                "audit status IDs cannot be set at task creation; pin class/repo/head/base/"
-                "context/state only, then bind the concrete status ID via "
-                "POST /api/tasks/{id}/bind-audit-status after the worker posts the status. "
-                f"Next step: {TASK_CREATE_NEXT_STEP}"
+                f"{exc}. Next step: create a standard task, then the project supervisor "
+                "pins the contract with POST /api/tasks/{task_id}/pin-audit-contract; "
+                f"or {TASK_CREATE_NEXT_STEP}"
             ),
         )
-    completion_class = data.get("completion_class", "standard")
-    audit_repo = data.get("audit_repo")
-    audit_head = data.get("audit_head")
-    audit_base = data.get("audit_base")
-    audit_required_context = data.get("audit_required_context")
-    audit_required_state = data.get("audit_required_state")
 
     cfg = _cfg()
     requested_phase_id = data.get("phase_id")
@@ -949,12 +1008,6 @@ async def create(req: Request) -> Dict[str, Any]:
             file_blast_radius=file_blast_radius,
             estimated_tokens=estimated_tokens,
             initial_status=initial_status,
-            completion_class=completion_class,
-            audit_repo=audit_repo,
-            audit_head=audit_head,
-            audit_base=audit_base,
-            audit_required_context=audit_required_context,
-            audit_required_state=audit_required_state,
             config=cfg,
         )
     except CompletionEvidenceError as exc:

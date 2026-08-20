@@ -1,11 +1,13 @@
 """Two-phase audit completion contract (task-05a27e83 / task-8e2f7378).
 
-Phase 1 — trusted creation pins immutable class/repo/head/base/context/state.
-Phase 2 — compare-once supervisor bind of concrete GitHub status ID after live
-query proves exact repo/head/context/state (+ PR head/base when provided).
-Completion verifies the immutable bound ID plus a sealed self-contained receipt.
+Phase 1 — supervisor/internal authority pins immutable class/repo/head/base/
+context/state/pr_number. Ordinary POST /api/task/create cannot select pins.
+Phase 2 — supervisor-authorized compare-once bind of concrete GitHub status ID
+after server-side PR + status queries (request may not supply PR head/base).
+Completion verifies the immutable bound ID plus a sealed receipt whose
+provenance is exact structured fields in SHA256SUMS-covered refs.json.
 
-Ordinary create/evidence payloads cannot select or overwrite the contract.
+Ordinary API/evidence cannot select or overwrite the contract.
 """
 from __future__ import annotations
 
@@ -16,18 +18,63 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 APPROVED_RECEIPT_ROOTS = (
     Path("/home/mira/recovery/r5-audit"),
     Path("/home/mira/recovery"),
 )
+# Sole structured provenance file used by the verifier — must be in SHA256SUMS.
+RECEIPT_REFS_NAME = "refs.json"
+REQUIRED_REFS_FIELDS = (
+    "audit_repo",
+    "audit_head",
+    "audit_base",
+    "audit_required_context",
+    "audit_required_state",
+    "audit_bound_status_id",
+    "audit_pr_number",
+)
 
 StatusProvider = Callable[[str, str], List[Dict[str, Any]]]
-# provider(repo, sha) -> list of status objects (GitHub commit status shape)
+# provider(repo, sha) -> list of GitHub commit status objects
+
+PullProvider = Callable[[str, int], Dict[str, Any]]
+# provider(repo, pr_number) -> {head_sha, base_sha, ...}
 
 _STATUS_PROVIDER: Optional[StatusProvider] = None
+_PULL_PROVIDER: Optional[PullProvider] = None
+
+FORBIDDEN_EVIDENCE_AUDIT_FIELDS = frozenset({
+    "completion_class",
+    "audit_repo",
+    "audit_head",
+    "audit_base",
+    "audit_required_context",
+    "audit_required_state",
+    "audit_bound_status_id",
+    "audit_pr_number",
+    "required_audit_contexts",
+    "audit_contexts",
+    "pr_head_sha",
+    "pr_base_sha",
+})
+
+ORDINARY_CREATE_AUDIT_FIELDS = frozenset({
+    "completion_class",
+    "audit_repo",
+    "audit_head",
+    "audit_base",
+    "audit_required_context",
+    "audit_required_state",
+    "audit_bound_status_id",
+    "audit_pr_number",
+    "audit_status_id",
+    "required_audit_status_ids",
+    "required_audit_contexts",
+    "audit_contexts",
+})
 
 
 class AuditContractError(ValueError):
@@ -38,6 +85,12 @@ def set_audit_status_provider(provider: Optional[StatusProvider]) -> None:
     """Test hook: inject a fake GitHub status provider (no live network)."""
     global _STATUS_PROVIDER
     _STATUS_PROVIDER = provider
+
+
+def set_audit_pull_provider(provider: Optional[PullProvider]) -> None:
+    """Test hook: inject a fake GitHub pull provider (no live network)."""
+    global _PULL_PROVIDER
+    _PULL_PROVIDER = provider
 
 
 def _require_sha(name: str, value: str) -> str:
@@ -54,27 +107,77 @@ def _require_nonempty(name: str, value: Any) -> str:
     return text
 
 
-def normalize_creation_pins(
+def _require_pr_number(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise AuditContractError("audit_pr_number must be a positive integer") from exc
+    if number <= 0:
+        raise AuditContractError("audit_pr_number must be a positive integer")
+    return number
+
+
+def assert_actor_is_project_supervisor(
     *,
-    completion_class: str,
+    actor: str,
+    project_supervisor: Optional[str],
+    action: str,
+) -> str:
+    """Authorize supervisor/internal audit transitions by project supervisor identity."""
+    actor_value = str(actor or "").strip()
+    supervisor = str(project_supervisor or "").strip()
+    if not actor_value:
+        raise AuditContractError(
+            f"{action} requires authenticated supervisor identity via body.from "
+            f"(API token alone is not supervisor authority)"
+        )
+    if not supervisor or supervisor.lower() in {"unassigned", "unknown", "none", "null"}:
+        raise AuditContractError(
+            f"{action} requires the task's project supervisor to be set; got {supervisor!r}"
+        )
+    if actor_value != supervisor:
+        raise AuditContractError(
+            f"{action} refused: actor {actor_value!r} is not project supervisor {supervisor!r}"
+        )
+    return supervisor
+
+
+def reject_ordinary_create_audit_fields(payload: Optional[Dict[str, Any]]) -> None:
+    """Ordinary POST /api/task/create cannot select or pin the audit contract."""
+    if not isinstance(payload, dict):
+        return
+    present = sorted(
+        k for k in ORDINARY_CREATE_AUDIT_FIELDS
+        if k in payload and payload.get(k) not in (None, "", [], {})
+    )
+    # completion_class=standard (or absent) is fine; only reject non-standard / pin fields.
+    if "completion_class" in present:
+        klass = str(payload.get("completion_class") or "").strip().lower()
+        if klass in {"", "standard"}:
+            present = [k for k in present if k != "completion_class"]
+        elif klass != "audit":
+            raise AuditContractError(
+                f"completion_class={klass!r} is not accepted on ordinary create; "
+                "use standard create then POST /api/tasks/{id}/pin-audit-contract from the project supervisor"
+            )
+    if present:
+        raise AuditContractError(
+            "ordinary POST /api/task/create cannot select audit contract fields "
+            f"({', '.join(present)}); project supervisor must pin via "
+            "POST /api/tasks/{id}/pin-audit-contract"
+        )
+
+
+def normalize_supervisor_pins(
+    *,
     audit_repo: Optional[str],
     audit_head: Optional[str],
     audit_base: Optional[str],
     audit_required_context: Optional[str],
     audit_required_state: Optional[str],
+    audit_pr_number: Any,
 ) -> Dict[str, Any]:
-    """Validate pins allowed at trusted creation time (no status ID)."""
-    klass = str(completion_class or "standard").strip().lower() or "standard"
-    if klass != "audit":
-        return {
-            "completion_class": "standard",
-            "audit_repo": None,
-            "audit_head": None,
-            "audit_base": None,
-            "audit_required_context": None,
-            "audit_required_state": None,
-            "audit_bound_status_id": None,
-        }
+    """Validate pins for the supervisor/internal pin path (no status ID)."""
     repo = _require_nonempty("audit_repo", audit_repo)
     if "/" not in repo or repo.count("/") != 1:
         raise AuditContractError("audit_repo must be OWNER/REPO")
@@ -86,6 +189,7 @@ def normalize_creation_pins(
     state = _require_nonempty("audit_required_state", audit_required_state).lower()
     if state not in {"success", "failure", "error", "pending"}:
         raise AuditContractError("audit_required_state must be a GitHub status state")
+    pr_number = _require_pr_number(audit_pr_number)
     return {
         "completion_class": "audit",
         "audit_repo": repo,
@@ -93,26 +197,52 @@ def normalize_creation_pins(
         "audit_base": base,
         "audit_required_context": context,
         "audit_required_state": state,
+        "audit_pr_number": pr_number,
         "audit_bound_status_id": None,
     }
+
+
+# Backward-compatible alias used by older call sites/tests.
+def normalize_creation_pins(
+    *,
+    completion_class: str,
+    audit_repo: Optional[str],
+    audit_head: Optional[str],
+    audit_base: Optional[str],
+    audit_required_context: Optional[str],
+    audit_required_state: Optional[str],
+    audit_pr_number: Any = None,
+) -> Dict[str, Any]:
+    klass = str(completion_class or "standard").strip().lower() or "standard"
+    if klass != "audit":
+        return {
+            "completion_class": "standard",
+            "audit_repo": None,
+            "audit_head": None,
+            "audit_base": None,
+            "audit_required_context": None,
+            "audit_required_state": None,
+            "audit_pr_number": None,
+            "audit_bound_status_id": None,
+        }
+    return normalize_supervisor_pins(
+        audit_repo=audit_repo,
+        audit_head=audit_head,
+        audit_base=audit_base,
+        audit_required_context=audit_required_context,
+        audit_required_state=audit_required_state,
+        audit_pr_number=audit_pr_number,
+    )
 
 
 def assert_no_audit_override_in_evidence(evidence: Optional[Dict[str, Any]]) -> None:
     """Ordinary evidence cannot select/overwrite the trusted audit contract."""
     if not isinstance(evidence, dict):
         return
-    forbidden = {
-        "completion_class",
-        "audit_repo",
-        "audit_head",
-        "audit_base",
-        "audit_required_context",
-        "audit_required_state",
-        "audit_bound_status_id",
-        "required_audit_contexts",
-        "audit_contexts",
-    }
-    present = sorted(k for k in forbidden if k in evidence and evidence.get(k) not in (None, "", [], {}))
+    present = sorted(
+        k for k in FORBIDDEN_EVIDENCE_AUDIT_FIELDS
+        if k in evidence and evidence.get(k) not in (None, "", [], {})
+    )
     if present:
         raise AuditContractError(
             "completion evidence cannot select or overwrite trusted audit contract fields: "
@@ -136,7 +266,6 @@ def resolve_sealed_receipt_root(claimed: str) -> Path:
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
         raise AuditContractError("audit_receipt must be an absolute path under an approved recovery root")
-    # Reject any symlink component on the way to the root.
     accumulated = Path("/")
     for part in candidate.parts[1:]:
         accumulated = accumulated / part
@@ -165,8 +294,14 @@ def verify_sealed_audit_receipt(
     expected_context: str,
     expected_state: str,
     expected_status_id: int,
+    expected_pr_number: int,
 ) -> Dict[str, Any]:
-    """Fail-closed sealed receipt: modes, no symlinks, self-contained SHA256SUMS, provenance bind."""
+    """Fail-closed sealed receipt with exact structured refs.json provenance.
+
+    Provenance is NOT substring-scanned from free text. Only SHA256SUMS-covered
+    ``refs.json`` fields are authoritative. Every semantic file read for
+    verification must appear in SHA256SUMS.
+    """
     root = resolve_sealed_receipt_root(claimed_path)
     if _mode(root) != 0o555:
         raise AuditContractError(f"audit receipt root mode must be 0555, got {oct(_mode(root))}")
@@ -177,7 +312,6 @@ def verify_sealed_audit_receipt(
     if _mode(sha_file) != 0o444:
         raise AuditContractError(f"SHA256SUMS mode must be 0444, got {oct(_mode(sha_file))}")
 
-    # Walk tree: every file 0444, every dir 0555, no symlinks anywhere.
     files: List[Path] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dpath = Path(dirpath)
@@ -197,7 +331,6 @@ def verify_sealed_audit_receipt(
                 raise AuditContractError(f"file mode must be 0444: {child} ({oct(_mode(child))})")
             files.append(child)
 
-    # Parse SHA256SUMS: relative, non-traversing, self-contained.
     entries: Dict[str, str] = {}
     for line in sha_file.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -223,42 +356,65 @@ def verify_sealed_audit_receipt(
             raise AuditContractError(f"SHA256SUMS mismatch for {rel}")
         entries[rel] = digest.lower()
 
+    if RECEIPT_REFS_NAME not in entries:
+        raise AuditContractError(
+            f"sealed receipt must include {RECEIPT_REFS_NAME} in SHA256SUMS "
+            "(structured provenance; substring free-text is not accepted)"
+        )
+    # Require a sealed verdict artifact in the manifest (not used for provenance equality).
     if "verdict-receipt.txt" not in entries and "verdict_receipt.txt" not in entries:
-        # allow either name
-        verdict_names = [p.name for p in files if "verdict" in p.name.lower() and p.suffix == ".txt"]
-        if not verdict_names:
-            raise AuditContractError("sealed receipt must include a verdict receipt text file in SHA256SUMS")
+        raise AuditContractError("sealed receipt must include a verdict receipt text file in SHA256SUMS")
 
-    # Provenance bind: receipt must name exact repo/head/base/context/state/status id.
-    # Prefer structured refs.json if present; else scan verdict text.
-    blob = ""
-    for name in ("refs.json", "verdict-receipt.txt", "verdict_receipt.txt", "RECEIPT.md"):
-        p = root / name
-        if p.is_file():
-            blob += "\n" + p.read_text(encoding="utf-8", errors="replace")
-    if not blob:
-        blob = "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in files if p.suffix in {".txt", ".md", ".json"})
+    refs_path = root / RECEIPT_REFS_NAME
+    # Semantic file used for verification must be hashed (already enforced via entries).
+    try:
+        refs = json.loads(refs_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise AuditContractError(f"{RECEIPT_REFS_NAME} is not valid JSON: {exc}") from exc
+    if not isinstance(refs, dict):
+        raise AuditContractError(f"{RECEIPT_REFS_NAME} must be a JSON object")
 
-    def _must_contain(label: str, value: str) -> None:
-        if value not in blob:
-            raise AuditContractError(f"sealed receipt does not bind {label}={value}")
+    missing = [k for k in REQUIRED_REFS_FIELDS if k not in refs]
+    if missing:
+        raise AuditContractError(f"{RECEIPT_REFS_NAME} missing required fields: {', '.join(missing)}")
 
-    _must_contain("audit_repo", expected_repo)
-    _must_contain("audit_head", expected_head)
-    _must_contain("audit_base", expected_base)
-    _must_contain("audit_required_context", expected_context)
-    # status id + state
-    if str(expected_status_id) not in blob:
-        raise AuditContractError(f"sealed receipt does not bind audit_bound_status_id={expected_status_id}")
-    if expected_state not in blob.lower() and expected_state not in blob:
-        # soft: allow SUCCESS uppercase
-        if expected_state.upper() not in blob and expected_state.capitalize() not in blob:
-            raise AuditContractError(f"sealed receipt does not bind audit_required_state={expected_state}")
+    def _exact(field: str, expected: Any) -> None:
+        actual = refs.get(field)
+        if field in {"audit_head", "audit_base"}:
+            actual_norm = str(actual or "").strip().lower()
+            expected_norm = str(expected or "").strip().lower()
+        elif field == "audit_required_state":
+            actual_norm = str(actual or "").strip().lower()
+            expected_norm = str(expected or "").strip().lower()
+        elif field in {"audit_bound_status_id", "audit_pr_number"}:
+            try:
+                actual_norm = int(actual)
+                expected_norm = int(expected)
+            except (TypeError, ValueError) as exc:
+                raise AuditContractError(
+                    f"{RECEIPT_REFS_NAME}.{field} must be an integer matching the trusted pin"
+                ) from exc
+        else:
+            actual_norm = str(actual or "").strip()
+            expected_norm = str(expected or "").strip()
+        if actual_norm != expected_norm:
+            raise AuditContractError(
+                f"{RECEIPT_REFS_NAME}.{field} mismatch: expected {expected_norm!r}, got {actual_norm!r}"
+            )
+
+    _exact("audit_repo", expected_repo)
+    _exact("audit_head", expected_head)
+    _exact("audit_base", expected_base)
+    _exact("audit_required_context", expected_context)
+    _exact("audit_required_state", expected_state)
+    _exact("audit_bound_status_id", expected_status_id)
+    _exact("audit_pr_number", expected_pr_number)
 
     return {
         "receipt_root": str(root),
         "entries": len(entries),
         "sha256sums": str(sha_file),
+        "refs": RECEIPT_REFS_NAME,
     }
 
 
@@ -271,9 +427,40 @@ def _default_status_provider(repo: str, sha: str) -> List[Dict[str, Any]]:
     return payload
 
 
+def _default_pull_provider(repo: str, pr_number: int) -> Dict[str, Any]:
+    from .evidence_verification import _gh_api
+
+    payload = _gh_api(f"repos/{repo}/pulls/{int(pr_number)}")
+    if not isinstance(payload, dict):
+        raise AuditContractError(f"GitHub pull #{pr_number} response was not an object")
+    head = payload.get("head") if isinstance(payload.get("head"), dict) else {}
+    base = payload.get("base") if isinstance(payload.get("base"), dict) else {}
+    return {
+        "number": int(payload.get("number") or pr_number),
+        "head_sha": str(head.get("sha") or "").strip().lower(),
+        "base_sha": str(base.get("sha") or "").strip().lower(),
+        "html_url": str(payload.get("html_url") or ""),
+    }
+
+
 def load_commit_statuses(repo: str, sha: str) -> List[Dict[str, Any]]:
     provider = _STATUS_PROVIDER or _default_status_provider
     return provider(repo, sha)
+
+
+def load_pull_provenance(repo: str, pr_number: int) -> Dict[str, Any]:
+    provider = _PULL_PROVIDER or _default_pull_provider
+    payload = provider(repo, int(pr_number))
+    if not isinstance(payload, dict):
+        raise AuditContractError("pull provider must return a dict")
+    head = _require_sha("pr_head_sha", str(payload.get("head_sha") or ""))
+    base = _require_sha("pr_base_sha", str(payload.get("base_sha") or ""))
+    return {
+        "number": int(payload.get("number") or pr_number),
+        "head_sha": head,
+        "base_sha": base,
+        "html_url": str(payload.get("html_url") or ""),
+    }
 
 
 def find_status_by_id(statuses: List[Dict[str, Any]], status_id: int) -> Optional[Dict[str, Any]]:
@@ -294,6 +481,7 @@ class AuditPins:
     audit_base: str
     audit_required_context: str
     audit_required_state: str
+    audit_pr_number: Optional[int]
     audit_bound_status_id: Optional[int]
 
 
@@ -305,6 +493,12 @@ def pins_from_task(task: Dict[str, Any]) -> AuditPins:
         bound_id = int(bound) if bound is not None and str(bound).strip() != "" else None
     except (TypeError, ValueError):
         bound_id = None
+    pr_raw = task.get("audit_pr_number")
+    pr_number: Optional[int]
+    try:
+        pr_number = int(pr_raw) if pr_raw is not None and str(pr_raw).strip() != "" else None
+    except (TypeError, ValueError):
+        pr_number = None
     return AuditPins(
         completion_class=klass or "standard",
         audit_repo=str(task.get("audit_repo") or "").strip(),
@@ -312,6 +506,7 @@ def pins_from_task(task: Dict[str, Any]) -> AuditPins:
         audit_base=str(task.get("audit_base") or "").strip().lower(),
         audit_required_context=str(task.get("audit_required_context") or "").strip(),
         audit_required_state=str(task.get("audit_required_state") or "").strip().lower(),
+        audit_pr_number=pr_number,
         audit_bound_status_id=bound_id,
     )
 
@@ -326,13 +521,16 @@ def compare_once_bind_status(
     task: Dict[str, Any],
     *,
     status_id: int,
-    pr_head_sha: str,
-    pr_base_sha: str,
 ) -> Dict[str, Any]:
-    """Supervisor/internal compare-once bind after querying exact status + PR provenance."""
+    """Compare-once bind after server-side PR + status queries (no caller PR SHAs)."""
     pins = pins_from_task(task)
     if pins.completion_class != "audit":
         raise AuditContractError("compare-once bind requires completion_class=audit")
+    if pins.audit_pr_number is None:
+        raise AuditContractError(
+            "compare-once bind requires trusted audit_pr_number pin "
+            "(set by supervisor pin-audit-contract; not from bind request)"
+        )
     if pins.audit_bound_status_id is not None:
         if int(pins.audit_bound_status_id) == int(status_id):
             return {"already_bound": True, "audit_bound_status_id": int(status_id)}
@@ -341,11 +539,11 @@ def compare_once_bind_status(
         )
     head = _require_sha("audit_head", pins.audit_head)
     base = _require_sha("audit_base", pins.audit_base)
-    pr_head = _require_sha("pr_head_sha", pr_head_sha)
-    pr_base = _require_sha("pr_base_sha", pr_base_sha)
-    if pr_head != head or pr_base != base:
+    pull = load_pull_provenance(pins.audit_repo, int(pins.audit_pr_number))
+    if pull["head_sha"] != head or pull["base_sha"] != base:
         raise AuditContractError(
-            f"PR provenance mismatch: expected head={head} base={base}, got head={pr_head} base={pr_base}"
+            f"server-side PR provenance mismatch for {pins.audit_repo}#{pins.audit_pr_number}: "
+            f"expected head={head} base={base}, observed head={pull['head_sha']} base={pull['base_sha']}"
         )
     statuses = load_commit_statuses(pins.audit_repo, head)
     row = find_status_by_id(statuses, int(status_id))
@@ -363,7 +561,6 @@ def compare_once_bind_status(
         raise AuditContractError(
             f"status state mismatch: required {pins.audit_required_state!r}, got {state!r}"
         )
-    # GitHub status payloads do not always embed sha; provider must have been queried for exact head.
     return {
         "already_bound": False,
         "audit_bound_status_id": int(status_id),
@@ -372,6 +569,7 @@ def compare_once_bind_status(
         "repo": pins.audit_repo,
         "head": head,
         "base": base,
+        "pr_number": int(pins.audit_pr_number),
     }
 
 
@@ -391,7 +589,17 @@ def verify_audit_completion(
     if pins.audit_bound_status_id is None:
         return _unverified(
             "audit completion requires a prior compare-once bind of audit_bound_status_id "
-            "(POST /api/tasks/{id}/bind-audit-status); creation must not invent status IDs",
+            "(POST /api/tasks/{id}/bind-audit-status by the project supervisor); "
+            "creation/ordinary API must not invent status IDs",
+            repo=pins.audit_repo,
+            commit_sha=pins.audit_head,
+            required_checks=[pins.audit_required_context],
+            producer=producer,
+            reject_completion=True,
+        )
+    if pins.audit_pr_number is None:
+        return _unverified(
+            "audit completion requires trusted audit_pr_number pin on OrchTask",
             repo=pins.audit_repo,
             commit_sha=pins.audit_head,
             required_checks=[pins.audit_required_context],
@@ -409,7 +617,6 @@ def verify_audit_completion(
             reject_completion=True,
         )
     try:
-        # Re-query status to ensure bound ID still matches contract.
         statuses = load_commit_statuses(pins.audit_repo, pins.audit_head)
         row = find_status_by_id(statuses, int(pins.audit_bound_status_id))
         if row is None:
@@ -428,6 +635,7 @@ def verify_audit_completion(
             expected_context=pins.audit_required_context,
             expected_state=pins.audit_required_state,
             expected_status_id=int(pins.audit_bound_status_id),
+            expected_pr_number=int(pins.audit_pr_number),
         )
     except AuditContractError as exc:
         return _unverified(
@@ -450,10 +658,11 @@ def verify_audit_completion(
         "verifier": "audit-completion-contract",
         "audit_bound_status_id": int(pins.audit_bound_status_id),
         "audit_base": pins.audit_base,
+        "audit_pr_number": int(pins.audit_pr_number),
         "audit_receipt": sealed["receipt_root"],
         "reason": (
-            "trusted OrchTask completion_class=audit with compare-once bound status id, "
-            "exact head/base pins, and sealed self-contained receipt (no merge required)"
+            "trusted supervisor-pinned OrchTask completion_class=audit with compare-once "
+            "bound status id, server-side PR provenance, and sealed structured refs.json receipt"
         ),
         "checks": [{
             "name": pins.audit_required_context,
@@ -461,7 +670,7 @@ def verify_audit_completion(
             "ok": True,
             "detail": (
                 f"id={pins.audit_bound_status_id} state={pins.audit_required_state} "
-                f"on {pins.audit_repo}@{pins.audit_head}"
+                f"on {pins.audit_repo}@{pins.audit_head} pr=#{pins.audit_pr_number}"
             ),
         }],
     }
