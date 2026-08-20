@@ -47,14 +47,12 @@ revoke, or a handle. Production deploy (CONTROL) runs the daemon as Unix user
 `github-workers` only. See `deploy/systemd/github-broker.service`. This
 repository does not enable that unit.
 
-Observed live: fleet-orchestrator API and worker Codex/Grok/Taey processes
-share uid 1000, so unix group `github-control` on mira would let every seat
-open the control socket. Control mint is authorized by supervisor TTY
-session (`ORCH_GITHUB_BROKER_CONTROL_SESSIONS` / `ORCH_SESSION_IDS`), not by
-uid or by adding mira to `github-control`. Isolated tests prove a worker
-TTY cannot mint, worker exec cannot mint/revoke, and a peer mapped to
-another seat cannot use that seat's live handle. Same-UID ptrace remains a
-residual until distinct OS principals.
+Observed live: seats share uid 1000. Control mint is the systemd API
+daemon (`uvicorn` + `tasks_api`, no TTY) or a supervisor TTY. Only the
+API unit joins `SupplementaryGroups=github-control`; mira is not added
+to that group globally. Isolated tests prove a no-TTY API cmdline can
+mint, a worker cmdline cannot, and a non-API caller cannot. Same-UID
+ptrace remains a residual until distinct OS principals.
 
 ## Threat model
 

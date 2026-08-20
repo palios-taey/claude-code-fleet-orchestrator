@@ -5,12 +5,11 @@
 #   useradd --system --no-create-home github-broker
 #   groupadd --system github-workers
 #   groupadd --system github-control
-#   # Do NOT add uid mira to github-control: every supervisor and worker
-#   # seat is uid mira, so that group would let workers open the control
-#   # socket. Control mint is authorized by TTY supervisor session
-#   # (ORCH_GITHUB_BROKER_CONTROL_SESSIONS / ORCH_SESSION_IDS), not by
-#   # sharing the login uid. A future dedicated orch-controller user may
-#   # join github-control; worker seats stay github-workers only.
+#   # Do NOT usermod -aG github-control mira: every seat is uid mira.
+#   # Only the orchestrator API unit gets SupplementaryGroups=github-control
+#   # (see fleet-orchestrator-api-gatea.service). Worker tmux seats do not
+#   # inherit that group. Control mint also requires the API cmdline
+#   # (uvicorn + tasks_api) or a supervisor TTY.
 #
 # Socket modes (mechanically required; 0600 is owner-only and cannot be
 # opened by uid mira even with a supplementary group):

@@ -107,13 +107,33 @@ def load_control_sessions() -> set[str]:
     return {part.strip() for part in raw.replace(";", ",").split(",") if part.strip()}
 
 
-def peer_is_control_principal(pid: int, uid: int = 0, mapping: Optional[dict[str, set[int]]] = None) -> bool:
-    """Control mint/revoke: TTY session must be a configured supervisor.
+def peer_cmdline(pid: int) -> bytes:
+    try:
+        return Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+    except OSError:
+        return b""
 
-    Actual topology: orch API and every seat share uid 1000, so UID/group
-    mapping cannot distinguish them. Worker TTY sessions cannot mint.
+
+def process_is_orch_api_controller(pid: int) -> bool:
+    """True for the systemd API daemon (uvicorn tasks_api). No TTY required.
+
+    Workers and gh-outward never match. This is the production mint caller.
+    """
+    raw = peer_cmdline(pid)
+    if b"gh-outward" in raw or b"worker-mint-probe" in raw:
+        return False
+    return b"uvicorn" in raw and b"tasks_api" in raw
+
+
+def peer_is_control_principal(pid: int, uid: int = 0, mapping: Optional[dict[str, set[int]]] = None) -> bool:
+    """Control mint/revoke: API daemon cmdline, or supervisor TTY.
+
+    Actual topology: seats share uid 1000. The systemd API process has no
+    TTY, so TTY-only checks deny the production caller. Workers cannot mint.
     """
     del uid, mapping
+    if process_is_orch_api_controller(pid):
+        return True
     session = session_from_peer_pid(pid)
     if not session:
         return False

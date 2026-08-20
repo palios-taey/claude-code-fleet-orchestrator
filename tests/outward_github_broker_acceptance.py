@@ -37,6 +37,7 @@ from fleet_orchestrator.github_broker import (  # noqa: E402
     peer_is_control_principal,
     peer_may_control,
     prefix_is_live,
+    process_is_orch_api_controller,
     revoke_and_clear_outward_handle,
 )
 from fleet_orchestrator.notify_state import state_key  # noqa: E402
@@ -199,11 +200,34 @@ def main() -> int:
         "supervisor TTY can mint on control",
         peer_is_control_principal(os.getpid()),
     )
+    github_broker_mod.session_from_peer_pid = lambda pid: ""
+    _check(
+        "empty TTY without API cmdline cannot mint",
+        not peer_is_control_principal(os.getpid()),
+    )
     github_broker_mod.session_from_peer_pid = orig_peer
     if prior_controls is None:
         os.environ.pop("ORCH_GITHUB_BROKER_CONTROL_SESSIONS", None)
     else:
         os.environ["ORCH_GITHUB_BROKER_CONTROL_SESSIONS"] = prior_controls
+    api_unit = (ROOT / "deploy" / "systemd" / "fleet-orchestrator-api-gatea.service").read_text(
+        encoding="utf-8"
+    )
+    broker_unit = (ROOT / "deploy" / "systemd" / "github-broker.service").read_text(encoding="utf-8")
+    _check(
+        "API unit is the github-control supplementary group",
+        "SupplementaryGroups=github-control" in api_unit,
+        api_unit,
+    )
+    _check(
+        "broker unit forbids usermod mira into github-control",
+        "Do NOT usermod -aG github-control mira" in broker_unit,
+        broker_unit,
+    )
+    _check(
+        "this test process is not the API controller cmdline",
+        not process_is_orch_api_controller(os.getpid()),
+    )
     try:
         install_github_broker(
             Path("/usr/local"),
@@ -302,21 +326,47 @@ def main() -> int:
             "        for key in keys:\n"
             "            store.pop(key, None)\n"
             "        self._save(store)\n"
+            "    def pipeline(self, transaction=True):\n"
+            "        return _Pipe(self)\n"
+            "class _Pipe:\n"
+            "    def __init__(self, redis):\n"
+            "        self.redis = redis\n"
+            "        self.ops = []\n"
+            "    def delete(self, *keys):\n"
+            "        self.ops.append(('delete', keys))\n"
+            "        return self\n"
+            "    def set(self, key, value):\n"
+            "        self.ops.append(('set', key, value))\n"
+            "        return self\n"
+            "    def execute(self):\n"
+            "        results = []\n"
+            "        for op in self.ops:\n"
+            "            if op[0] == 'delete':\n"
+            "                results.append(self.redis.delete(*op[1]))\n"
+            "            else:\n"
+            "                results.append(self.redis.set(op[1], op[2]))\n"
+            "        self.ops.clear()\n"
+            "        return results\n"
             f"redis = FileRedis({str(redis_file)!r})\n"
             "oc.redis_connect = lambda: redis\n"
             "ctb.redis_connect = lambda: redis\n"
             f"oc._default_task_loader = lambda tid, *, config=None: ({{'id': {task_id!r}, 'status': 'in_progress', 'dispatched_to': {session!r}, 'owner': {supervisor!r}}} if tid == {task_id!r} else None)\n"
+            "import fleet_orchestrator.dispatch as dispatch_mod\n"
+            "dispatch_mod._redis_connect = lambda: redis\n"
+            "dispatch_mod._mark_in_progress_best_effort = lambda *a, **k: None\n"
+            "dispatch_mod.register_worker_task_liveness = lambda **k: True\n"
+            "dispatch_mod.worker_task_liveness_enabled = lambda: False\n"
             "import fleet_orchestrator.github_broker as gb\n"
             f"PEER_SESSION_FILE = Path({str(Path(tmp) / 'peer-session.txt')!r})\n"
-            "CONTROL_SESSION = 'conductor-codex'\n"
+            "_real_session = gb.session_from_peer_pid\n"
             "def _peer_session(pid):\n"
             "    try:\n"
             "        cmdline = Path(f'/proc/{pid}/cmdline').read_bytes()\n"
             "    except OSError:\n"
             "        cmdline = b''\n"
-            "    if b'gh-outward' in cmdline or b'worker-mint-probe' in cmdline:\n"
+            "    if b'gh-outward' in cmdline:\n"
             "        return PEER_SESSION_FILE.read_text().strip()\n"
-            "    return CONTROL_SESSION\n"
+            "    return _real_session(pid)\n"
             "gb.session_from_peer_pid = _peer_session\n",
             encoding="utf-8",
         )
@@ -398,24 +448,101 @@ def main() -> int:
                 and "control principal not mapped" in str(worker_mint_payload.get("stderr") or ""),
                 (worker_mint.returncode, worker_mint_payload),
             )
-
-            import fleet_orchestrator.dispatch as dispatch_mod
-
-            dispatch_mod._redis_connect = lambda: redis  # type: ignore[attr-defined]
-            dispatch_mod._mark_in_progress_best_effort = lambda *a, **k: None  # type: ignore[attr-defined]
-            dispatch_mod.register_worker_task_liveness = lambda **k: True  # type: ignore[attr-defined]
-            dispatch_mod.worker_task_liveness_enabled = lambda: False  # type: ignore[attr-defined]
-
-            handle_out: dict = {}
-            bind_current_task(
-                session,
-                task_id,
-                "fixture",
-                supervisor=supervisor,
-                outward_handle_out=handle_out,
+            direct_mint = call_broker(
+                str(control_socket),
+                op="mint",
+                session=victim,
+                task_id=victim_task,
             )
+            _check(
+                "non-API caller cannot mint (no uvicorn tasks_api cmdline)",
+                int(direct_mint.get("rc") or 0) != 0
+                and "control principal not mapped" in str(direct_mint.get("stderr") or ""),
+                direct_mint,
+            )
+
+            api_script = Path(tmp) / "no_tty_uvicorn_tasks_api.py"
+            api_script.write_text(
+                "import json, os, sys\n"
+                f"sys.path.insert(0, {str(ROOT)!r})\n"
+                "from fleet_orchestrator.dispatch import bind_current_task\n"
+                "from fleet_orchestrator.github_broker import mint_and_deliver_outward_handle, revoke_and_clear_outward_handle\n"
+                "op = sys.argv[1]\n"
+                "out = {}\n"
+                "tty = os.isatty(0)\n"
+                "if op == 'mint':\n"
+                f"    handle = mint_and_deliver_outward_handle({session!r}, {task_id!r}, 1.0, outward_handle_out=out)\n"
+                "    print(json.dumps({'handle': handle, 'tty': tty}))\n"
+                "elif op == 'bind':\n"
+                f"    bind_current_task({session!r}, {task_id!r}, 'fixture', supervisor={supervisor!r}, outward_handle_out=out)\n"
+                "    print(json.dumps({'handle': out.get('handle', ''), 'tty': tty}))\n"
+                "elif op == 'boom':\n"
+                "    import fleet_orchestrator.dispatch as dispatch_mod\n"
+                "    class Boom:\n"
+                "        def pipeline(self, transaction=True):\n"
+                "            raise RuntimeError('isolated redis bind failure')\n"
+                "    dispatch_mod._redis_connect = lambda: Boom()\n"
+                "    try:\n"
+                f"        bind_current_task('boom-worker', {task_id!r}, 'fixture', supervisor={supervisor!r}, outward_handle_out=out)\n"
+                "        print(json.dumps({'error': 'expected RuntimeError', 'handle': out.get('handle', ''), 'tty': tty}))\n"
+                "    except RuntimeError as exc:\n"
+                "        print(json.dumps({'error': str(exc), 'handle': out.get('handle', ''), 'tty': tty}))\n"
+                "elif op == 'revoke':\n"
+                f"    removed = revoke_and_clear_outward_handle({session!r}, {task_id!r})\n"
+                "    print(json.dumps({'removed': removed, 'tty': tty}))\n"
+                "else:\n"
+                "    raise SystemExit('unknown op')\n",
+                encoding="utf-8",
+            )
+
+            def run_api_controller(op: str) -> dict:
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(api_script),
+                        op,
+                        "uvicorn",
+                        "fleet_orchestrator.tasks_api:app",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                    env={
+                        **os.environ,
+                        "PYTHONPATH": str(Path(tmp)) + os.pathsep + str(ROOT),
+                        "ORCH_GITHUB_BROKER_CONTROL_SOCKET": str(control_socket),
+                        "ORCH_GITHUB_BROKER_CONTROL_SESSIONS": supervisor,
+                    },
+                    check=False,
+                )
+                try:
+                    payload = json.loads((result.stdout or "").strip().splitlines()[-1])
+                except (json.JSONDecodeError, IndexError):
+                    payload = {
+                        "error": "unparsed",
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                        "rc": result.returncode,
+                    }
+                payload["_rc"] = result.returncode
+                payload["_stderr"] = result.stderr
+                return payload
+
+            no_tty_mint = run_api_controller("mint")
+            _check(
+                "no-TTY API cmdline can mint",
+                bool(no_tty_mint.get("handle")) and no_tty_mint.get("tty") is False,
+                no_tty_mint,
+            )
+
+            handle_out = run_api_controller("bind")
             handle = str(handle_out.get("handle") or "")
-            _check("bind_current_task minted handle via control", bool(handle), handle_out)
+            _check(
+                "no-TTY API bind_current_task minted handle via control",
+                bool(handle) and handle_out.get("tty") is False,
+                handle_out,
+            )
             dumped = json.loads(redis.get(state_key(session, "current_task")) or "{}")
             _check("current_task does not contain handle", "outward_handle" not in dumped, dumped)
             stolen = str(dumped.get("outward_handle") or "")
@@ -473,29 +600,12 @@ def main() -> int:
             )
             before = list(_sink_events(sink))
 
-            class BoomRedis(FileRedis):
-                def pipeline(self, transaction: bool = True):
-                    del transaction
-                    raise RuntimeError("isolated redis bind failure")
-
-            boom_file = Path(tmp) / "boom-redis.json"
-            boom_out: dict = {}
-            dispatch_mod._redis_connect = lambda: BoomRedis(boom_file)  # type: ignore[attr-defined]
-            try:
-                bind_current_task(
-                    "boom-worker",
-                    task_id,
-                    "fixture",
-                    supervisor=supervisor,
-                    outward_handle_out=boom_out,
-                )
-                _check("bind redis failure raised", False, "expected RuntimeError")
-            except RuntimeError as exc:
-                _check(
-                    "bind redis failure raised",
-                    "isolated redis bind failure" in str(exc),
-                    exc,
-                )
+            boom_out = run_api_controller("boom")
+            _check(
+                "bind redis failure raised",
+                "isolated redis bind failure" in str(boom_out.get("error") or ""),
+                boom_out,
+            )
             leaked = str(boom_out.get("handle") or "")
             _check("failed bind produced a handle that must be revoked", bool(leaked), boom_out)
             peer_session_file.write_text("boom-worker", encoding="utf-8")
@@ -507,7 +617,6 @@ def main() -> int:
                 (failed_bind_write.returncode, failed_bind_write.stderr),
             )
             peer_session_file.write_text(session, encoding="utf-8")
-            dispatch_mod._redis_connect = lambda: redis  # type: ignore[attr-defined]
 
             system_write = run_worker(
                 ["api", "-X", "POST", "repos/palios-taey/x/statuses/abc"],
@@ -520,8 +629,9 @@ def main() -> int:
             )
             _check("system gh did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
 
-            removed = revoke_and_clear_outward_handle(session, task_id)
-            _check("unbind helper revoked handle", removed >= 1, removed)
+            revoked = run_api_controller("revoke")
+            removed = int(revoked.get("removed") or 0)
+            _check("unbind helper revoked handle", removed >= 1, revoked)
             redis.delete(state_key(session, "current_task"))
             stolen_replay = run_worker(["pr", "merge", "32"])
             _check(
@@ -563,10 +673,10 @@ def main() -> int:
                     }
                 ),
             )
-            mint_and_deliver_outward_handle(session, task_id, 1.0, outward_handle_out=lifecycle_out)
+            lifecycle_out = run_api_controller("mint")
             _check(
-                "production mint helper returns a handle",
-                bool(lifecycle_out.get("handle")),
+                "production mint helper returns a handle from no-TTY API",
+                bool(lifecycle_out.get("handle")) and lifecycle_out.get("tty") is False,
                 lifecycle_out,
             )
         finally:

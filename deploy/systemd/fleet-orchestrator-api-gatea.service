@@ -6,6 +6,12 @@ CollectMode=inactive-or-failed
 
 [Service]
 Type=simple
+# Distinct controller path under actual topology (uid mira seats): this
+# unit alone joins github-control so it can open the 0660 broker control
+# socket. Do not add mira to that group globally. This PR does not enable
+# the unit. CONTROL deploy: groupadd github-control and chown the control
+# socket github-broker:github-control mode 0660, dir 0750.
+SupplementaryGroups=github-control
 EnvironmentFile=%h/.config/claude-code-fleet-orchestrator/orchestrator-systemd.env
 WorkingDirectory=%h
 Restart=on-failure
