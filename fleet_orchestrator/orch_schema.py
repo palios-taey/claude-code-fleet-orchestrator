@@ -205,11 +205,14 @@ def _completion_verification_status(verification: Dict[str, Any]) -> str:
     return VERIFIED if verification.get("verified") is True else UNVERIFIED
 
 
-def _legacy_unverified_completion_verification(evidence: Dict[str, Any]) -> Dict[str, Any]:
+def _legacy_unverified_completion_verification(
+    evidence: Dict[str, Any],
+    trusted_task: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     return {
         "status": UNVERIFIED,
         "verified": False,
-        "applies": completion_evidence_verification_applies(evidence),
+        "applies": completion_evidence_verification_applies(evidence, trusted_task=trusted_task),
         "source": "legacy-or-direct-db-write",
         "repo": "",
         "commit_sha": str(evidence.get("commit_sha") or "").strip(),
@@ -226,12 +229,15 @@ def _attach_completion_evidence_verification(record: Dict[str, Any]) -> Dict[str
     record["completion_evidence"] = evidence
     verification = _decode_json_field(record.get("completion_evidence_verification"), None)
     if not isinstance(verification, dict) and record.get("status") == "completed" and isinstance(evidence, dict) and evidence:
-        verification = _legacy_unverified_completion_verification(evidence)
+        verification = _legacy_unverified_completion_verification(evidence, trusted_task=record)
     if isinstance(verification, dict):
         status = _completion_verification_status(verification)
         applies = record.get("completion_evidence_verification_applies")
         if applies is None:
-            applies = bool(verification.get("applies") or completion_evidence_verification_applies(evidence))
+            applies = bool(
+                verification.get("applies")
+                or completion_evidence_verification_applies(evidence, trusted_task=record)
+            )
         verification["status"] = status
         verification["verified"] = status == VERIFIED
         verification["applies"] = bool(applies)
@@ -3004,6 +3010,7 @@ def create_task(
     wake_owner_if_ready: bool = True,
     delivery_gate: Optional[bool] = None,
     config: Optional[OrchConfig] = None,
+    trusted_audit_pins: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Create an OrchTask linked to a phase."""
     delivery_gate_enabled = bool(delivery_gate)
@@ -3014,6 +3021,19 @@ def create_task(
             "terminal initial status is not accepted; create the task pending and complete it through the evidence-gated task API"
         )
     cfg = config or OrchConfig()
+    audit_pins: Optional[Dict[str, Any]] = None
+    if trusted_audit_pins:
+        from .audit_completion import assert_no_status_id_at_pin, normalize_supervisor_pins
+
+        assert_no_status_id_at_pin(trusted_audit_pins)
+        audit_pins = normalize_supervisor_pins(
+            audit_repo=trusted_audit_pins.get("audit_repo"),
+            audit_head=trusted_audit_pins.get("audit_head"),
+            audit_base=trusted_audit_pins.get("audit_base"),
+            audit_required_context=trusted_audit_pins.get("audit_required_context"),
+            audit_required_state=trusted_audit_pins.get("audit_required_state"),
+            audit_pr_number=trusted_audit_pins.get("audit_pr_number"),
+        )
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
         # Ownership guard via the shared chokepoint (R2/R3/R4 audit — do NOT delete, do NOT make
@@ -3079,9 +3099,183 @@ def create_task(
         if record is None:
             raise TaskParentNotFoundError(f"phase '{phase_id}' not found; cannot create task '{task_id}'")
         created_id = record["id"]
+        if audit_pins:
+            from .audit_completion import AuditContractError, is_audit_task, pins_from_task
+
+            existing_pins = _audit_task_row(session, created_id) or {}
+            if is_audit_task(existing_pins):
+                current = pins_from_task(existing_pins)
+                expected_pairs = {
+                    "audit_repo": (current.audit_repo, audit_pins["audit_repo"]),
+                    "audit_head": (current.audit_head, audit_pins["audit_head"]),
+                    "audit_base": (current.audit_base, audit_pins["audit_base"]),
+                    "audit_required_context": (
+                        current.audit_required_context,
+                        audit_pins["audit_required_context"],
+                    ),
+                    "audit_required_state": (
+                        current.audit_required_state,
+                        audit_pins["audit_required_state"],
+                    ),
+                    "audit_pr_number": (current.audit_pr_number, audit_pins["audit_pr_number"]),
+                }
+                mismatches = [key for key, (got, expected) in expected_pairs.items() if got != expected]
+                if mismatches:
+                    raise AuditContractError(
+                        "trusted audit pins are immutable after creation; refuse overwrite of "
+                        + ", ".join(mismatches)
+                        + ". Next step: POST /api/task/{task_id}/bind-audit-status as supervisor "
+                        "with the observed GitHub status id"
+                    )
+            else:
+                session.run(
+                    """
+                    MATCH (t:OrchTask {id: $task_id})
+                    SET t.completion_class = $completion_class,
+                        t.audit_repo = $audit_repo,
+                        t.audit_head = $audit_head,
+                        t.audit_base = $audit_base,
+                        t.audit_required_context = $audit_required_context,
+                        t.audit_required_state = $audit_required_state,
+                        t.audit_pr_number = $audit_pr_number,
+                        t.audit_bound_status_id = NULL
+                    """,
+                    task_id=created_id,
+                    **{k: audit_pins[k] for k in audit_pins if k != "audit_bound_status_id"},
+                )
     if wake_owner_if_ready:
         _wake_owner_for_zero_dep_task(created_id, cfg)
     return created_id
+
+
+def _audit_task_row(session, task_id: str) -> Optional[Dict[str, Any]]:
+    row = session.run(
+        """
+        MATCH (t:OrchTask {id: $task_id})
+        OPTIONAL MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t)
+        RETURN t.completion_class AS completion_class,
+               t.audit_repo AS audit_repo,
+               t.audit_head AS audit_head,
+               t.audit_base AS audit_base,
+               t.audit_required_context AS audit_required_context,
+               t.audit_required_state AS audit_required_state,
+               t.audit_pr_number AS audit_pr_number,
+               t.audit_bound_status_id AS audit_bound_status_id,
+               p.supervisor AS project_supervisor
+        """,
+        task_id=task_id,
+    ).single()
+    return dict(row) if row is not None else None
+
+
+def pin_audit_contract(
+    task_id: str,
+    pins: Dict[str, Any],
+    *,
+    actor: str,
+    config: Optional[OrchConfig] = None,
+) -> Dict[str, Any]:
+    from .audit_completion import (
+        AuditContractError,
+        assert_no_status_id_at_pin,
+        is_audit_task,
+        normalize_supervisor_pins,
+        pins_from_task,
+        require_supervisor_actor,
+    )
+
+    cfg = config or OrchConfig()
+    assert_no_status_id_at_pin(pins)
+    normalized = normalize_supervisor_pins(
+        audit_repo=pins.get("audit_repo"),
+        audit_head=pins.get("audit_head"),
+        audit_base=pins.get("audit_base"),
+        audit_required_context=pins.get("audit_required_context"),
+        audit_required_state=pins.get("audit_required_state"),
+        audit_pr_number=pins.get("audit_pr_number"),
+    )
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        existing = _audit_task_row(session, task_id)
+        if existing is None:
+            raise AuditContractError(
+                f"task {task_id} not found. Next step: POST /api/task/{task_id}/pin-audit-contract "
+                "as the project supervisor after the task exists"
+            )
+        require_supervisor_actor(existing, actor, "pin-audit-contract")
+        if is_audit_task(existing):
+            current = pins_from_task(existing)
+            expected_pairs = {
+                "audit_repo": (current.audit_repo, normalized["audit_repo"]),
+                "audit_head": (current.audit_head, normalized["audit_head"]),
+                "audit_base": (current.audit_base, normalized["audit_base"]),
+                "audit_required_context": (
+                    current.audit_required_context,
+                    normalized["audit_required_context"],
+                ),
+                "audit_required_state": (
+                    current.audit_required_state,
+                    normalized["audit_required_state"],
+                ),
+                "audit_pr_number": (current.audit_pr_number, normalized["audit_pr_number"]),
+            }
+            mismatches = [key for key, (got, expected) in expected_pairs.items() if got != expected]
+            if mismatches:
+                raise AuditContractError(
+                    "trusted audit pins are immutable after creation; refuse overwrite of "
+                    + ", ".join(mismatches)
+                    + ". Next step: POST /api/task/{task_id}/bind-audit-status as supervisor "
+                    "with the observed GitHub status id"
+                )
+            return {"already_pinned": True, **normalized}
+        session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            SET t.completion_class = $completion_class,
+                t.audit_repo = $audit_repo,
+                t.audit_head = $audit_head,
+                t.audit_base = $audit_base,
+                t.audit_required_context = $audit_required_context,
+                t.audit_required_state = $audit_required_state,
+                t.audit_pr_number = $audit_pr_number,
+                t.audit_bound_status_id = NULL
+            """,
+            task_id=task_id,
+            **{k: normalized[k] for k in normalized if k != "audit_bound_status_id"},
+        )
+    return {"already_pinned": False, **normalized}
+
+
+def bind_audit_status(
+    task_id: str,
+    *,
+    status_id: int,
+    actor: str,
+    config: Optional[OrchConfig] = None,
+) -> Dict[str, Any]:
+    from .audit_completion import AuditContractError, compare_once_bind_status, require_supervisor_actor
+
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        existing = _audit_task_row(session, task_id)
+        if existing is None:
+            raise AuditContractError(
+                f"task {task_id} not found. Next step: POST /api/task/{task_id}/bind-audit-status "
+                "as the project supervisor after trusted pins exist"
+            )
+        require_supervisor_actor(existing, actor, "bind-audit-status")
+        result = compare_once_bind_status(existing, status_id=int(status_id))
+        if not result.get("already_bound"):
+            session.run(
+                """
+                MATCH (t:OrchTask {id: $task_id})
+                SET t.audit_bound_status_id = $status_id
+                """,
+                task_id=task_id,
+                status_id=int(status_id),
+            )
+    return result
 
 
 def set_overall_refs(refs: List[Dict[str, Any]], config: Optional[OrchConfig] = None) -> Dict[str, Any]:
@@ -3367,8 +3561,29 @@ def update_task_status(task_id: str, status: str, owner: str = "",
             delivery_gate=delivery_gate,
         )
         completed_by_value = completed_by or owner or ""
+        trusted_task_row = None
+        if status == "completed":
+            trusted_task_row = session.run(
+                """
+                MATCH (t:OrchTask {id: $task_id})
+                RETURN t.completion_class AS completion_class,
+                       t.audit_repo AS audit_repo,
+                       t.audit_head AS audit_head,
+                       t.audit_base AS audit_base,
+                       t.audit_required_context AS audit_required_context,
+                       t.audit_required_state AS audit_required_state,
+                       t.audit_pr_number AS audit_pr_number,
+                       t.audit_bound_status_id AS audit_bound_status_id
+                """,
+                task_id=task_id,
+            ).single()
+        trusted_task = dict(trusted_task_row) if trusted_task_row is not None else None
         completion_verification_value = (
-            verify_completion_evidence(completion_evidence_value, producer=completed_by_value)
+            verify_completion_evidence(
+                completion_evidence_value,
+                producer=completed_by_value,
+                trusted_task=trusted_task,
+            )
             if status == "completed"
             else None
         )
@@ -3378,7 +3593,10 @@ def update_task_status(task_id: str, status: str, owner: str = "",
             else None
         )
         completion_verification_applies = (
-            completion_evidence_verification_applies(completion_evidence_value)
+            completion_evidence_verification_applies(
+                completion_evidence_value,
+                trusted_task=trusted_task,
+            )
             if status == "completed"
             else None
         )

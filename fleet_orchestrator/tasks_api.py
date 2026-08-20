@@ -129,6 +129,8 @@ from fleet_orchestrator.orch_schema import (
     get_task as load_task_record,
     get_session_stop_decision,
     get_task_phase,
+    pin_audit_contract,
+    bind_audit_status,
     reset_project,
     resolve_human_review_hold,
     session_registration_error_detail,
@@ -187,6 +189,17 @@ TASK_CREATE_NEXT_STEP = (
     'Retry POST /api/task/create body {"description":"<task description>",'
     '"from":"<session-id>","phase_id":"<phase-id>"}; use `taey-task create '
     "'<task description>'` for default-project tasks."
+)
+AUDIT_PIN_NEXT_STEP = (
+    'Retry POST /api/task/{task_id}/pin-audit-contract as the project supervisor with body '
+    '{"from":"<supervisor>","audit_repo":"OWNER/REPO","audit_head":"<40-hex>",'
+    '"audit_base":"<40-hex>","audit_required_context":"<context>",'
+    '"audit_required_state":"success","audit_pr_number":<n>}; ordinary create/evidence cannot pin.'
+)
+AUDIT_BIND_NEXT_STEP = (
+    'Retry POST /api/task/{task_id}/bind-audit-status as the project supervisor with body '
+    '{"from":"<supervisor>","status_id":<github-status-id>} after the worker posts the '
+    'pinned context/state on the pinned head; ordinary API cannot bind or overwrite.'
 )
 PROJECT_CREATE_NEXT_STEP = (
     'Retry POST /api/projects body {"id":"<project-id>","name":"<name>",'
@@ -834,6 +847,11 @@ async def create(req: Request) -> Dict[str, Any]:
     phase_id = requested_phase_id if requested_phase_id else ensure_default_project(cfg)
     task_id = f"task-{uuid.uuid4().hex[:8]}"
     try:
+        from fleet_orchestrator.audit_completion import (
+            AuditContractError,
+            reject_ordinary_create_audit_fields,
+        )
+        reject_ordinary_create_audit_fields(data)
         create_task(
             phase_id=phase_id,
             task_id=task_id,
@@ -856,8 +874,58 @@ async def create(req: Request) -> Dict[str, Any]:
         # Fail-closed (bad/orphan/fused phase_id, or an owned id) -> 409, not a raw 500 (R5 audit:
         # match the /phases + /plan routes which already map this to 4xx).
         raise HTTPException(status_code=409, detail=f"{exc} Next step: {TASK_CREATE_NEXT_STEP}")
+    except AuditContractError as exc:
+        raise HTTPException(status_code=400, detail=f"{exc} Next step: {TASK_CREATE_NEXT_STEP}")
 
     return {"ok": True, "task_id": task_id, "from": sender, "owner": owner, "task_type": task_type}
+
+
+@app.post("/api/task/{task_id}/pin-audit-contract")
+async def pin_audit_contract_endpoint(task_id: str, req: Request) -> Dict[str, Any]:
+    from fleet_orchestrator.audit_completion import AuditContractError
+
+    data = await req.json()
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=422,
+            detail=f"request body must be a JSON object. Next step: {AUDIT_PIN_NEXT_STEP}",
+        )
+    actor = str(data.get("from") or "").strip()
+    try:
+        result = pin_audit_contract(task_id, data, actor=actor, config=_cfg())
+    except AuditContractError as exc:
+        raise HTTPException(status_code=400, detail=f"{exc} Next step: {AUDIT_PIN_NEXT_STEP}")
+    return {"ok": True, "task_id": task_id, **result}
+
+
+@app.post("/api/task/{task_id}/bind-audit-status")
+async def bind_audit_status_endpoint(task_id: str, req: Request) -> Dict[str, Any]:
+    from fleet_orchestrator.audit_completion import AuditContractError
+
+    data = await req.json()
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=422,
+            detail=f"request body must be a JSON object. Next step: {AUDIT_BIND_NEXT_STEP}",
+        )
+    actor = str(data.get("from") or "").strip()
+    try:
+        status_id = int(data.get("status_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"status_id must be a positive integer. Next step: {AUDIT_BIND_NEXT_STEP}",
+        )
+    if status_id <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status_id must be a positive integer. Next step: {AUDIT_BIND_NEXT_STEP}",
+        )
+    try:
+        result = bind_audit_status(task_id, status_id=status_id, actor=actor, config=_cfg())
+    except AuditContractError as exc:
+        raise HTTPException(status_code=400, detail=f"{exc} Next step: {AUDIT_BIND_NEXT_STEP}")
+    return {"ok": True, "task_id": task_id, **result}
 
 
 def _terminal_evidence_from_request(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:

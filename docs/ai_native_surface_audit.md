@@ -14,8 +14,8 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 268.
-- Teaches: 130.
+- Enumerated surfaces: 279.
+- Teaches: 141.
 - Needs-fix baseline debt: 47.
 - Exempt reviewed rows: 91.
 
@@ -290,4 +290,15 @@ Summary:
 | fleet_orchestrator/tasks_api.py | session_wake_packet | http_exception_detail | 1 | 2280 | b5149cdb01925464 | teaches | GET /api/sessions/{}/wake-packet | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | session_wake_packet | http_exception_detail | 2 | 2285 | c3b52d7c1280774e | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | health | json_response_error | 1 | 2389 | 8df1950eddf0c720 | teaches | next_step | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/orch_schema.py | bind_audit_status | orch_raise_error | 1 | 3263 | b178c5d5099c41f8 | teaches | POST /api/task/{}/bind-audit-status | Static teaching assertion passes. | task-05a27e83 |
+| fleet_orchestrator/orch_schema.py | create_task | orch_raise_error | 3 | 3124 | 9ef443feb0752499 | teaches | POST /api/task/{}/bind-audit-status | Static teaching assertion passes. | task-05a27e83 |
+| fleet_orchestrator/orch_schema.py | pin_audit_contract | orch_raise_error | 1 | 3201 | ba54939b40307c13 | teaches | POST /api/task/{}/pin-audit-contract | Static teaching assertion passes. | task-05a27e83 |
+| fleet_orchestrator/orch_schema.py | pin_audit_contract | orch_raise_error | 2 | 3224 | 9ef443feb0752499 | teaches | POST /api/task/{}/bind-audit-status | Static teaching assertion passes. | task-05a27e83 |
+| fleet_orchestrator/tasks_api.py | bind_audit_status_endpoint | http_exception_detail | 1 | 907 | b829c67bd5a6ccfc | teaches | POST /api/task/{}/bind-audit-status | Static teaching assertion passes. | task-05a27e83 |
+| fleet_orchestrator/tasks_api.py | bind_audit_status_endpoint | http_exception_detail | 2 | 915 | 4aea5d99e4d05e70 | teaches | POST /api/task/{}/bind-audit-status | Static teaching assertion passes. | task-05a27e83 |
+| fleet_orchestrator/tasks_api.py | bind_audit_status_endpoint | http_exception_detail | 3 | 920 | 4aea5d99e4d05e70 | teaches | POST /api/task/{}/bind-audit-status | Static teaching assertion passes. | task-05a27e83 |
+| fleet_orchestrator/tasks_api.py | bind_audit_status_endpoint | http_exception_detail | 4 | 927 | 33d7e40b5d1529f0 | teaches | POST /api/task/{}/bind-audit-status | Static teaching assertion passes. | task-05a27e83 |
+| fleet_orchestrator/tasks_api.py | create | http_exception_detail | 6 | 878 | b27c185f13fb5a7e | teaches | taey-task | Static teaching assertion passes. | task-05a27e83 |
+| fleet_orchestrator/tasks_api.py | pin_audit_contract_endpoint | http_exception_detail | 1 | 889 | c3673c536defa6d2 | teaches | POST /api/task/{}/pin-audit-contract | Static teaching assertion passes. | task-05a27e83 |
+| fleet_orchestrator/tasks_api.py | pin_audit_contract_endpoint | http_exception_detail | 2 | 897 | e978566f39d5d810 | teaches | POST /api/task/{}/pin-audit-contract | Static teaching assertion passes. | task-05a27e83 |
 <!-- ai-native-surfaces:end -->
