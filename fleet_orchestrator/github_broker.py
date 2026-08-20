@@ -2,8 +2,9 @@
 
 Workers never receive GH_TOKEN, never learn the inner ``gh`` path, and cannot
 mutate GitHub except by sending argv to the **exec** socket. Mint and revoke
-happen only on a separate authenticated **control** socket, atomic with
-bind/unbind. The broker maps SO_PEERCRED uid to a broker-owned principal set.
+happen only on a separate authenticated **control** socket (mode 0660), atomic
+with bind/unbind. Exec authorization maps SO_PEERCRED pid → TTY → tmux session
+and looks up the in-memory handle; workers never receive a bearer token.
 
 Production shape (CONTROL deploy, not this PR): systemd ``User=github-broker``
 with a 0600 EnvironmentFile the worker UID cannot read, distinct worker UIDs,
@@ -130,6 +131,65 @@ def lookup_broker_handle(handle: str) -> Optional[dict[str, Any]]:
     return dict(binding)
 
 
+def lookup_live_session_handle(session: str) -> Optional[dict[str, Any]]:
+    session_id = str(session or "").strip()
+    if not session_id:
+        return None
+    for handle, binding in _HANDLES.items():
+        if str(binding.get("session") or "") != session_id:
+            continue
+        found = dict(binding)
+        found["handle"] = handle
+        return found
+    return None
+
+
+def ancestor_tty_from_pid(start_pid: int) -> str:
+    """Walk `/proc/<pid>` including start_pid for a real TTY. Not TMUX_PANE."""
+    pid = int(start_pid)
+    for _ in range(12):
+        if pid <= 1:
+            break
+        try:
+            fd0 = os.readlink(f"/proc/{pid}/fd/0")
+            if fd0.startswith("/dev/pts/") or fd0.startswith("/dev/tty"):
+                return fd0
+        except OSError:
+            pass
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+                stat_text = handle.read()
+            after_comm = stat_text[stat_text.rfind(")") + 2 :]
+            pid = int(after_comm.split()[1])
+        except (OSError, IndexError, ValueError):
+            break
+    return ""
+
+
+def session_from_peer_pid(pid: int) -> str:
+    """Map a kernel peer pid to its tmux session via TTY, never caller env."""
+    tty = ancestor_tty_from_pid(pid)
+    if not tty:
+        return ""
+    try:
+        result = subprocess.run(
+            ["tmux", "list-panes", "-a", "-F", "#{pane_tty} #{session_name}"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except OSError:
+        return ""
+    if result.returncode != 0:
+        return ""
+    for line in (result.stdout or "").splitlines():
+        parts = line.strip().split(" ", 1)
+        if len(parts) == 2 and parts[0] == tty:
+            return parts[1]
+    return ""
+
+
 def revoke_broker_handles(session: str, task_id: str = "") -> int:
     session_id = str(session or "").strip()
     task = str(task_id or "").strip()
@@ -156,17 +216,19 @@ def prefix_is_live(prefix: Path) -> bool:
 def handle_broker_request(
     argv: list[str],
     *,
-    handle: str,
+    handle: str = "",
+    peer_session: str = "",
     claimed_session: str = "",
     inner_gh: str,
     token: str,
     redis_client: Any = None,
     task_loader: Any = None,
 ) -> dict[str, Any]:
-    """Authorize mutating argv from a possession handle, never a claimed session."""
+    """Authorize mutating argv from the live peer session, never a bearer token."""
+    del handle, claimed_session
     mutating = github_argv_requires_outward_capability(argv)
     if mutating:
-        binding = lookup_broker_handle(handle)
+        binding = lookup_live_session_handle(peer_session)
         if not binding:
             return {
                 "rc": 1,
@@ -175,12 +237,6 @@ def handle_broker_request(
             }
         bound_session = str(binding.get("session") or "").strip()
         bound_task = str(binding.get("task_id") or "").strip()
-        if claimed_session and claimed_session != bound_session:
-            return {
-                "rc": 1,
-                "stdout": "",
-                "stderr": "SAFETY DENY: possession handle cannot be exchanged for another session\n",
-            }
         try:
             decision = require_github_argv_capability(
                 argv,
@@ -268,7 +324,7 @@ def _serve_one(
     mapping: dict[str, set[int]],
 ) -> None:
     try:
-        _pid, uid, _gid = peer_credentials(conn)
+        pid, uid, _gid = peer_credentials(conn)
     except GitHubBrokerClientError:
         _send_json(conn, _deny_payload("peer credentials required"))
         return
@@ -289,22 +345,8 @@ def _serve_one(
                 _deny_payload("mint/revoke only on authenticated control channel"),
             )
             return
-        if op == "resolve":
-            binding = lookup_broker_handle(str(request.get("handle") or ""))
-            if not binding:
-                _send_json(conn, _deny_payload("missing or revoked outward possession handle"))
-                return
-            _send_json(
-                conn,
-                {
-                    "rc": 0,
-                    "session": str(binding.get("session") or ""),
-                    "task_id": str(binding.get("task_id") or ""),
-                },
-            )
-            return
         if op != "exec":
-            _send_json(conn, _deny_payload("exec socket accepts op=exec or op=resolve only"))
+            _send_json(conn, _deny_payload("exec socket accepts op=exec only"))
             return
         argv = request.get("argv")
         if not isinstance(argv, list):
@@ -312,8 +354,7 @@ def _serve_one(
             return
         payload = handle_broker_request(
             [str(item) for item in argv],
-            handle=str(request.get("handle") or ""),
-            claimed_session=str(request.get("session") or ""),
+            peer_session=session_from_peer_pid(pid),
             inner_gh=inner_gh,
             token=token,
             redis_client=redis_client,
@@ -364,8 +405,15 @@ def serve_broker(
     exec_sock = _bind_unix_socket(
         exec_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP
     )
-    control_sock = _bind_unix_socket(control_path, stat.S_IRUSR | stat.S_IWUSR)
-    os.chmod(str(control_path.parent), stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    # 0660 so CONTROL group (github-control) can mint; 0600 is owner-only and
+    # cannot be opened by uid mira orch even with a supplementary group.
+    control_sock = _bind_unix_socket(
+        control_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP
+    )
+    os.chmod(
+        str(control_path.parent),
+        stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP,
+    )
     try:
         while True:
             readable, _unused_w, _unused_x = select.select([exec_sock, control_sock], [], [])
@@ -433,32 +481,6 @@ def call_broker(
     return payload
 
 
-def deliver_handle_via_tmux(session: str, handle: str) -> None:
-    """Put the handle in the worker tmux session env. Not Redis/current_task."""
-    session_id = str(session or "").strip()
-    value = str(handle or "").strip()
-    if not session_id or not value:
-        return
-    for args in (
-        ["tmux", "set-environment", "-t", session_id, "ORCH_OUTWARD_HANDLE", value],
-        ["tmux", "set-environment", "-t", session_id, "ORCH_OUTWARD_SESSION", session_id],
-    ):
-        subprocess.run(args, capture_output=True, text=True, check=False, timeout=2)
-
-
-def clear_handle_via_tmux(session: str) -> None:
-    session_id = str(session or "").strip()
-    if not session_id:
-        return
-    subprocess.run(
-        ["tmux", "set-environment", "-t", session_id, "-u", "ORCH_OUTWARD_HANDLE"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=2,
-    )
-
-
 def control_socket_configured() -> str:
     return str(os.environ.get("ORCH_GITHUB_BROKER_CONTROL_SOCKET") or "").strip()
 
@@ -470,7 +492,7 @@ def mint_and_deliver_outward_handle(
     *,
     outward_handle_out: Optional[dict[str, Any]] = None,
 ) -> str:
-    """Control-channel mint + tmux delivery. No-op if control socket unset."""
+    """Control-channel mint into broker memory. No tmux/env bearer delivery."""
     socket_path = control_socket_configured()
     if not socket_path:
         if outward_handle_out is not None:
@@ -487,18 +509,16 @@ def mint_and_deliver_outward_handle(
     rc = payload.get("rc")
     if (1 if rc is None else int(rc)) != 0 or not handle:
         raise GitHubBrokerClientError(f"control mint failed: {payload}")
-    deliver_handle_via_tmux(session, handle)
     if outward_handle_out is not None:
         outward_handle_out["handle"] = handle
     return handle
 
 
 def revoke_and_clear_outward_handle(session: str, task_id: str = "") -> int:
-    """Control-channel revoke + tmux unset. No-op if control socket unset."""
+    """Control-channel revoke. No-op if control socket unset."""
     socket_path = control_socket_configured()
     if not socket_path:
         return 0
-    clear_handle_via_tmux(session)
     payload = call_broker(
         socket_path,
         op="revoke",
@@ -540,7 +560,10 @@ def install_github_broker(
     control_dir = broker_dir / "control"
     for directory in (worker_bin, usr_bin, broker_dir, control_dir):
         directory.mkdir(parents=True, exist_ok=True)
-    os.chmod(str(control_dir), stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    os.chmod(
+        str(control_dir),
+        stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP,
+    )
 
     real_gh = broker_dir / "gh-real"
     shutil.copy2(inner_gh, real_gh)

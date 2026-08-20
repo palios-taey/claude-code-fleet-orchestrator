@@ -2,8 +2,8 @@
 """Worker GitHub client — talks only to the outward broker exec socket.
 
 This process has no GitHub credential and does not know the inner gh path.
-It never mints or revokes handles. Mutating argv is authorized inside the
-broker against a possession handle delivered at bind time.
+It never mints, revokes, or presents a bearer handle. The broker authorizes
+the live peer process via SO_PEERCRED plus TTY-backed session mapping.
 """
 from __future__ import annotations
 
@@ -22,27 +22,19 @@ from fleet_orchestrator.github_broker import (  # noqa: E402
 
 
 def _split_session(argv: list[str]) -> tuple[str, list[str]]:
-    session = ""
     forwarded: list[str] = []
     idx = 0
     while idx < len(argv):
         token = argv[idx]
         if token == "--session" and idx + 1 < len(argv):
-            session = argv[idx + 1]
             idx += 2
             continue
         if token.startswith("--session="):
-            session = token.split("=", 1)[1]
             idx += 1
             continue
         forwarded.append(token)
         idx += 1
-    return session, forwarded
-
-
-def _possession_handle() -> str:
-    """Possession handle from this process env only. Tmux/TAEY_NODE_ID are not identity."""
-    return str(os.environ.get("ORCH_OUTWARD_HANDLE") or "").strip()
+    return "", forwarded
 
 
 def main() -> int:
@@ -50,15 +42,9 @@ def main() -> int:
     if not socket_path:
         print("SAFETY DENY: ORCH_GITHUB_BROKER_SOCKET is required", file=sys.stderr)
         return 1
-    session_flag, argv = _split_session(sys.argv[1:])
+    _unused_session, argv = _split_session(sys.argv[1:])
     try:
-        payload = call_broker(
-            socket_path,
-            argv,
-            op="exec",
-            handle=_possession_handle(),
-            claimed_session=session_flag,
-        )
+        payload = call_broker(socket_path, argv, op="exec")
     except GitHubBrokerClientError as exc:
         print(f"SAFETY DENY: {exc}", file=sys.stderr)
         return 1

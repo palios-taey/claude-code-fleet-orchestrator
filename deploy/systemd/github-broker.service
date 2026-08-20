@@ -1,14 +1,20 @@
 # Example CONTROL-deploy unit. This PR does not enable or start it.
 #
-# Production-viable principal separation (observed live: orch API + workers are
+# Production-viable principal split (observed live: orch API + workers are
 # all uid 1000, so SO_PEERCRED uid mapping cannot distinguish them):
 #   useradd --system --no-create-home github-broker
 #   groupadd --system github-workers
+#   groupadd --system github-control
 #   usermod -aG github-workers mira
-#   # orch control client (taey-task/dispatch) must run as github-broker or
-#   # supplementary group github-broker so it can open the 0600 control socket.
-#   # Workers stay uid mira / group github-workers and can open only the 0660
-#   # exec socket. Same-uid 0600 admits both; do not chown control to mira.
+#   usermod -aG github-control mira   # orch/taey-task control client only
+#   # Do NOT add worker seats to github-control.
+#
+# Socket modes (mechanically required; 0600 is owner-only and cannot be
+# opened by uid mira even with a supplementary group):
+#   exec socket    0660 github-broker:github-workers
+#   control socket 0660 github-broker:github-control
+#   control dir    0750 github-broker:github-control
+#
 #   install -m 600 -o github-broker -g github-broker github-broker.env /etc/orch/github-broker.env
 # Worker UIDs must not be able to read that file or exec the inner gh except via the socket.
 
@@ -20,6 +26,8 @@ After=network.target
 Type=simple
 User=github-broker
 Group=github-broker
+SupplementaryGroups=github-workers github-control
+UMask=0007
 EnvironmentFile=/etc/orch/github-broker.env
 # EnvironmentFile must set GH_TOKEN, ORCH_GITHUB_BROKER_SOCKET,
 # ORCH_GITHUB_BROKER_CONTROL_SOCKET, ORCH_GITHUB_BROKER_INNER,

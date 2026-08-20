@@ -207,6 +207,10 @@ def main() -> int:
         "dispatch rollback revokes minted handles",
         "revoke_and_clear_outward_handle" in inspect.getsource(_rollback_claim),
     )
+    _check(
+        "mint does not write tmux session env",
+        "set-environment" not in inspect.getsource(mint_and_deliver_outward_handle),
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         prefix = Path(tmp) / "prefix"
@@ -281,9 +285,14 @@ def main() -> int:
             f"redis = FileRedis({str(redis_file)!r})\n"
             "oc.redis_connect = lambda: redis\n"
             "ctb.redis_connect = lambda: redis\n"
-            f"oc._default_task_loader = lambda tid, *, config=None: ({{'id': {task_id!r}, 'status': 'in_progress', 'dispatched_to': {session!r}, 'owner': {supervisor!r}}} if tid == {task_id!r} else None)\n",
+            f"oc._default_task_loader = lambda tid, *, config=None: ({{'id': {task_id!r}, 'status': 'in_progress', 'dispatched_to': {session!r}, 'owner': {supervisor!r}}} if tid == {task_id!r} else None)\n"
+            "import fleet_orchestrator.github_broker as gb\n"
+            f"PEER_SESSION_FILE = Path({str(Path(tmp) / 'peer-session.txt')!r})\n"
+            "gb.session_from_peer_pid = lambda pid: PEER_SESSION_FILE.read_text().strip()\n",
             encoding="utf-8",
         )
+        peer_session_file = Path(tmp) / "peer-session.txt"
+        peer_session_file.write_text(session, encoding="utf-8")
 
         base_env = os.environ.copy()
         base_env["GH_TOKEN"] = TOKEN
@@ -334,9 +343,14 @@ def main() -> int:
             _check("broker socket exists", socket_path.exists(), socket_path)
             _check("control socket exists", control_socket.exists(), control_socket)
             _check(
-                "control socket mode 0600",
-                stat.S_IMODE(control_socket.stat().st_mode) == 0o600,
+                "control socket mode 0660 not 0600",
+                stat.S_IMODE(control_socket.stat().st_mode) == 0o660,
                 oct(stat.S_IMODE(control_socket.stat().st_mode)),
+            )
+            _check(
+                "exec socket mode 0660",
+                stat.S_IMODE(socket_path.stat().st_mode) == 0o660,
+                oct(stat.S_IMODE(socket_path.stat().st_mode)),
             )
 
             victim_mint = call_broker(
@@ -381,16 +395,12 @@ def main() -> int:
             stolen = str(dumped.get("outward_handle") or "")
             _check("redis dump has no victim handle to replay", stolen == "", dumped)
 
-            def run_worker(argv, *, handle_value: str = "", session_value: str = "", path_kind: str = "broker"):
+            def run_worker(argv, *, path_kind: str = "broker"):
                 env = os.environ.copy()
                 env.pop("GH_TOKEN", None)
                 env.pop("GITHUB_TOKEN", None)
                 env.pop("ORCH_OUTWARD_HANDLE", None)
                 env.pop("ORCH_GITHUB_BROKER_CONTROL_SOCKET", None)
-                if handle_value:
-                    env["ORCH_OUTWARD_HANDLE"] = handle_value
-                if session_value:
-                    env["ORCH_OUTWARD_SESSION"] = session_value
                 env["ORCH_GITHUB_BROKER_SOCKET"] = str(socket_path)
                 env["PYTHONPATH"] = str(ROOT)
                 if path_kind == "broker":
@@ -399,9 +409,8 @@ def main() -> int:
                 else:
                     env["PATH"] = str(worker_root / "usr" / "bin") + os.pathsep + env.get("PATH", "")
                     binary = str(worker_root / "usr" / "bin" / "gh")
-                extra = ["--session", session_value] if session_value else []
                 return subprocess.run(
-                    [binary, *extra, *argv],
+                    [binary, *argv],
                     capture_output=True,
                     text=True,
                     env=env,
@@ -410,32 +419,26 @@ def main() -> int:
 
             bound_write = run_worker(
                 ["api", "-X", "POST", "repos/palios-taey/x/statuses/abc", "-f", "state=success"],
-                handle_value=handle,
             )
             _check(
-                "bound broker write reaches inner gh with token",
+                "existing-process post-bind write succeeds without env handle",
                 bound_write.returncode == 0 and any(e.get("token") == TOKEN for e in _sink_events(sink)),
                 (bound_write.returncode, bound_write.stderr, _sink_events(sink)),
             )
             before = list(_sink_events(sink))
 
-            implicit_unbound = run_worker(
-                ["api", "repos/palios-taey/x/issues", "-f", "title=x"],
-                handle_value="",
-            )
+            peer_session_file.write_text(victim, encoding="utf-8")
+            theft = run_worker(["pr", "merge", "32"])
             _check(
-                "implicit gh api -f POST without handle denied",
-                implicit_unbound.returncode == 1 and "SAFETY DENY" in implicit_unbound.stderr,
-                (implicit_unbound.returncode, implicit_unbound.stderr),
+                "cross-seat peer cannot use another seat's live handle",
+                theft.returncode == 1 and "possession handle" in theft.stderr,
+                (theft.returncode, theft.stderr),
             )
-            _check(
-                "implicit gh api -f POST did not mutate sink",
-                _sink_events(sink) == before,
-                _sink_events(sink),
-            )
+            _check("cross-seat theft did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
+            peer_session_file.write_text(session, encoding="utf-8")
+
             implicit_bound = run_worker(
                 ["api", "repos/palios-taey/x/issues", "-f", "title=x"],
-                handle_value=handle,
             )
             _check(
                 "bound implicit gh api -f POST reaches inner gh",
@@ -469,37 +472,16 @@ def main() -> int:
                 )
             leaked = str(boom_out.get("handle") or "")
             _check("failed bind produced a handle that must be revoked", bool(leaked), boom_out)
-            failed_bind_write = run_worker(["pr", "merge", "32"], handle_value=leaked)
+            peer_session_file.write_text("boom-worker", encoding="utf-8")
+            failed_bind_write = run_worker(["pr", "merge", "32"])
             _check(
                 "handle from failed bind is revoked",
                 failed_bind_write.returncode == 1
                 and "revoked outward possession handle" in failed_bind_write.stderr,
                 (failed_bind_write.returncode, failed_bind_write.stderr),
             )
+            peer_session_file.write_text(session, encoding="utf-8")
             dispatch_mod._redis_connect = lambda: redis  # type: ignore[attr-defined]
-
-            spoof = run_worker(
-                ["pr", "merge", "32"],
-                handle_value="",
-                session_value=session,
-            )
-            _check(
-                "stale worker spoofing victim session without handle denied",
-                spoof.returncode == 1 and "possession handle" in spoof.stderr,
-                (spoof.returncode, spoof.stderr),
-            )
-            _check("session spoof did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
-
-            swap = run_worker(
-                ["pr", "merge", "32"],
-                handle_value=handle,
-                session_value="other-victim",
-            )
-            _check(
-                "handle cannot be exchanged for another session",
-                swap.returncode == 1 and "cannot be exchanged" in swap.stderr,
-                (swap.returncode, swap.stderr),
-            )
 
             system_write = run_worker(
                 ["api", "-X", "POST", "repos/palios-taey/x/statuses/abc"],
@@ -515,20 +497,20 @@ def main() -> int:
             removed = revoke_and_clear_outward_handle(session, task_id)
             _check("unbind helper revoked handle", removed >= 1, removed)
             redis.delete(state_key(session, "current_task"))
-            stolen_replay = run_worker(["pr", "merge", "32"], handle_value=stolen or "not-a-handle")
+            stolen_replay = run_worker(["pr", "merge", "32"])
             _check(
                 "stale worker replaying redis current_task handle denied",
                 stolen_replay.returncode == 1 and "SAFETY DENY" in stolen_replay.stderr,
                 (stolen_replay.returncode, stolen_replay.stderr),
             )
-            stale = run_worker(["pr", "merge", "32"], handle_value=handle)
+            stale = run_worker(["pr", "merge", "32"])
             _check(
                 "revoked handle denied after unbind",
                 stale.returncode == 1 and "revoked outward possession handle" in stale.stderr,
                 (stale.returncode, stale.stderr),
             )
             _check("revoked handle did not mutate sink", _sink_events(sink) == before, _sink_events(sink))
-            unknown = run_worker(["mystery", "mutate"], handle_value="")
+            unknown = run_worker(["mystery", "mutate"])
             _check(
                 "unbound unknown argv fail-closed",
                 unknown.returncode == 1 and "SAFETY DENY" in unknown.stderr,
@@ -536,7 +518,6 @@ def main() -> int:
             )
             get_status = run_worker(
                 ["api", "repos/palios-taey/x/commits/abc/statuses?per_page=100"],
-                handle_value="",
             )
             _check(
                 "classified GET still works after unbind",
