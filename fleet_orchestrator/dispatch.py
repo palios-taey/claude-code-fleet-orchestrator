@@ -1860,24 +1860,26 @@ def record_outcome(worker: str, outcome: str, details: Optional[str] = None) -> 
                 r.set(last_outcome_key, json.dumps(payload))
         except Exception as exc:
             logger.warning("worker_outcome_recorded causal event append failed worker=%s: %r", worker, exc)
-        try:
-            if current_task_id:
-                if outcome != "done":
-                    _revert_outcome_claim(worker, current_task_id)
-                    from .worker_liveness import clear_worker_task_liveness
+        if current_task_id:
+            # Worker-originated response_ready is gated by the live binding; emit
+            # before terminal cleanup clears that binding.
+            _notify_supervisor_response_ready(worker, current_task, payload)
+            if outcome != "done":
+                _revert_outcome_claim(worker, current_task_id)
+                from .worker_liveness import clear_worker_task_liveness
 
-                    clear_worker_task_liveness(current_task_id)
-                from .current_task_binding import clear_matching_current_task
+                clear_worker_task_liveness(current_task_id)
+            from .current_task_binding import clear_matching_current_task
 
-                cleared_current_task = clear_matching_current_task(
-                    worker,
-                    current_task_id,
-                    redis_client=r,
-                    reason=f"record_outcome:{outcome}",
-                )
-                if outcome == "done" and cleared_current_task:
-                    _write_completion_receipt(r, worker, current_task_id, payload)
-        finally:
+            cleared_current_task = clear_matching_current_task(
+                worker,
+                current_task_id,
+                redis_client=r,
+                reason=f"record_outcome:{outcome}",
+            )
+            if outcome == "done" and cleared_current_task:
+                _write_completion_receipt(r, worker, current_task_id, payload)
+        else:
             _notify_supervisor_response_ready(worker, current_task, payload)
 
 
