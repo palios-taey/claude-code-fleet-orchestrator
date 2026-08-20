@@ -136,6 +136,17 @@ def active_inflight_signal(
             if raise_on_probe_error:
                 raise InFlightProbeError(f"terminal outcome probe failed for {worker}") from exc
             pass
+        # Durable active-turn signal from taey-presence (ZSET with expiry lease).
+        # If worker has non-expired active turn for its bound task, treat as in-flight.
+        # This prevents stale/awaiting during long blocking proxy turns.
+        try:
+            turn_key = state_key(worker, "active_turns")
+            if r.zrangebyscore(turn_key, current_time, "+inf", start=0, num=1):
+                return InFlightSignal(source="active_turn", worker=worker)
+        except Exception as exc:
+            if raise_on_probe_error:
+                raise InFlightProbeError(f"active_turn probe failed for {worker}") from exc
+            pass
         try:
             raw_tool_activity = r.get(state_key(worker, "last_tool_activity"))
         except Exception as exc:

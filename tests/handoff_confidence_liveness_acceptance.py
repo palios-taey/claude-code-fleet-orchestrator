@@ -186,6 +186,20 @@ def main() -> int:
         liveness = _liveness(client)
         _check("fresh notify last_activity after dispatch => working", liveness.get("state") == "working", liveness)
 
+        # P0 fix: derive from durable active-turn signal (ZSET with future expiry, maintained
+        # by taey-presence with renewable lease on claim/turn_start and during long turn).
+        # Even with no/fresh last_activity, presence of non-expired entry => working.
+        # This makes long blocking turn (delivery_claim + turn_attempt + active_turns) report working.
+        notify_r.delete(state_key(WORKER, "last_activity"))
+        notify_r.delete(state_key(WORKER, "idle"))
+        turn_id = b"1466be908e1c4cf3bc22581b1c93ba7b"  # example from live
+        future_score = time.time() + 3600
+        notify_r.zadd(state_key(WORKER, "active_turns"), {turn_id: future_score})
+        liveness = _liveness(client)
+        _check("durable active_turn ZSET (future expiry) + current_task => working (long turn not stale)", liveness.get("state") == "working", liveness)
+        # cleanup
+        notify_r.zrem(state_key(WORKER, "active_turns"), turn_id)
+
         notify_r.set(state_key(WORKER, "idle"), "1")
         notify_r.set(state_key(WORKER, "last_activity"), str(time.time()))
         liveness = _liveness(client)
@@ -213,7 +227,7 @@ def main() -> int:
     if FAILURES:
         print(f"\nFAIL -- {len(FAILURES)}: {FAILURES}")
         return 1
-    print("\nPASS -- current-task handoff liveness is derived from notify Redis activity.")
+    print("\nPASS -- current-task handoff liveness derives working from durable active-turn ZSET signal (or last_activity).")
     return 0
 
 

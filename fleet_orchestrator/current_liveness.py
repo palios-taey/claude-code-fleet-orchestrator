@@ -87,7 +87,26 @@ def current_task_liveness(session_id: str,
         ttl = float(worker_task_liveness_ttl_secs())
     ttl = max(1.0, ttl)
 
-    if dispatch_started_at is None or last_activity is None or last_activity <= dispatch_started_at:
+    # Derive working from the durable active-turn signal (per-seat ZSET maintained by taey-presence
+    # with expiry scores / renewable lease). Presence of non-expired entry for the worker means
+    # an active long turn (blocking proxy call) is in flight. This is the authoritative signal
+    # that must make tracker report working, even if last_activity is old/stale.
+    has_active_turn = False
+    try:
+        turn_key = state_key(worker, "active_turns")
+        # any member with score (deadline) > now
+        active = redis_client.zrangebyscore(turn_key, checked_at, "+inf", start=0, num=1)
+        has_active_turn = bool(active)
+    except RedisError:
+        pass
+
+    current_matches = str(current_payload.get("task_id") or "") == task_id
+    if has_active_turn and current_matches:
+        state = "working"
+        age_base = last_activity or dispatch_started_at or checked_at
+        age_seconds = int(max(0.0, checked_at - age_base))
+        summary = "active turn (durable lease)"
+    elif dispatch_started_at is None or last_activity is None or last_activity <= dispatch_started_at:
         state = "awaiting_start"
         age_seconds = int(max(0.0, checked_at - dispatch_started_at)) if dispatch_started_at is not None else None
         summary = "dispatched, peer not yet started"
