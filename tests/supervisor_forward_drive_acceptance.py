@@ -147,6 +147,7 @@ def main() -> int:
             },
         )
         _check("peer PATCH completed is rejected", rejected.status_code == 409, rejected.text)
+        _check("peer rejection names controlling supervisor", rejected.json().get("supervisor") == SUP, rejected.text)
         task = get_task(TASK, config=CFG)
         _check("rejected peer self-completion leaves task in_progress", task.get("status") == "in_progress", task)
 

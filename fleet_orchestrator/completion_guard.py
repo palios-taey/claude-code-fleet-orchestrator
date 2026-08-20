@@ -160,7 +160,7 @@ def peer_self_completion_rejection(task_id: str,
         ),
         "task_id": task_id,
         "status": task_before.get("status"),
-        "supervisor": project_supervisor,
+        "supervisor": supervisor,
         "next_step": f"taey-task outcome {outcome_command} --details '<short outcome summary>'",
     }
 
