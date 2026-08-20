@@ -1816,38 +1816,8 @@ async def clear_pause_session_endpoint(session_id: str, req: Request) -> Dict[st
     return {"ok": True, "pause_meta": meta}
 
 
-def _reconcile_session_unbind_graph(
-    session_id: str,
-    task_id: str,
-    started_at: float,
-    *,
-    config: OrchConfig,
-) -> Dict[str, Any]:
-    driver = get_neo4j_driver(config)
-    with driver.session(database=config.neo4j_db) as session:
-        row = session.run(
-            """
-            MATCH (t:OrchTask {id: $task_id})
-            WITH t,
-                 coalesce(t.status, 'pending') AS prior_status,
-                 t.owner AS prior_owner,
-                 t.dispatched_to AS prior_dispatched_to,
-                 t.blocked_on AS prior_blocked_on,
-                 t.worker_liveness_worker AS prior_liveness_worker,
-                 t.worker_liveness_supervisor AS prior_liveness_supervisor,
-                 t.worker_liveness_started_at AS prior_liveness_started_at,
-                 t.worker_liveness_heartbeat_at AS prior_liveness_heartbeat_at,
-                 t.worker_liveness_ttl_secs AS prior_liveness_ttl_secs,
-                 t.worker_liveness_ack_at AS prior_liveness_ack_at,
-                 t.worker_liveness_escalated_at AS prior_liveness_escalated_at,
-                 t.worker_liveness_escalation_reason AS prior_liveness_escalation_reason
-            WHERE prior_status IN ['in_progress', 'dispatched']
-              AND (
-                  coalesce(prior_dispatched_to, '') = $session_id
-                  OR (coalesce(prior_dispatched_to, '') = '' AND coalesce(prior_owner, '') = $session_id)
-              )
-              AND coalesce(prior_liveness_worker, '') = $session_id
-              AND prior_liveness_started_at = $started_at
+def _unbind_graph_set_clause() -> str:
+    return """
             SET t.status = 'pending',
                 t.dispatched_to = NULL,
                 t.worker_liveness_worker = NULL,
@@ -1870,46 +1840,123 @@ def _reconcile_session_unbind_graph(
                    prior_liveness_ttl_secs,
                    prior_liveness_ack_at,
                    prior_liveness_escalated_at,
-                   prior_liveness_escalation_reason
-            """,
-            task_id=task_id,
-            session_id=session_id,
-            started_at=started_at,
-        ).single()
-        if row is not None:
-            return {"task_exists": True, "changed": True, "prior": dict(row)}
-
-        observed = session.run(
-            """
-            MATCH (t:OrchTask {id: $task_id})
-            RETURN coalesce(t.status, 'pending') AS status,
+                   prior_liveness_escalation_reason,
+                   t.status AS status,
                    t.owner AS owner,
                    t.dispatched_to AS dispatched_to,
-                   t.blocked_on AS blocked_on,
-                   t.worker_liveness_worker AS worker_liveness_worker,
-                   t.worker_liveness_started_at AS worker_liveness_started_at
-            """,
-            task_id=task_id,
-        ).single()
-        if observed is None:
-            return {"task_exists": False, "changed": False, "prior": None}
+                   t.worker_liveness_worker AS worker_liveness_worker
+    """
 
-        state = dict(observed)
-        already_reconciled = (
-            state.get("status") == "pending"
-            and not state.get("dispatched_to")
-            and not state.get("worker_liveness_worker")
-            and state.get("worker_liveness_started_at") is None
-        )
-        if already_reconciled:
-            return {"task_exists": True, "changed": False, "prior": state}
+
+def _unbind_graph_with_clause() -> str:
+    return """
+            MATCH (t:OrchTask {id: $task_id})
+            WITH t,
+                 coalesce(t.status, 'pending') AS prior_status,
+                 t.owner AS prior_owner,
+                 t.dispatched_to AS prior_dispatched_to,
+                 t.blocked_on AS prior_blocked_on,
+                 t.worker_liveness_worker AS prior_liveness_worker,
+                 t.worker_liveness_supervisor AS prior_liveness_supervisor,
+                 t.worker_liveness_started_at AS prior_liveness_started_at,
+                 t.worker_liveness_heartbeat_at AS prior_liveness_heartbeat_at,
+                 t.worker_liveness_ttl_secs AS prior_liveness_ttl_secs,
+                 t.worker_liveness_ack_at AS prior_liveness_ack_at,
+                 t.worker_liveness_escalated_at AS prior_liveness_escalated_at,
+                 t.worker_liveness_escalation_reason AS prior_liveness_escalation_reason
+    """
+
+
+def _observe_unbind_task(session, task_id: str) -> Optional[Dict[str, Any]]:
+    observed = session.run(
+        """
+        MATCH (t:OrchTask {id: $task_id})
+        RETURN coalesce(t.status, 'pending') AS status,
+               t.owner AS owner,
+               t.dispatched_to AS dispatched_to,
+               t.blocked_on AS blocked_on,
+               t.worker_liveness_worker AS worker_liveness_worker,
+               t.worker_liveness_started_at AS worker_liveness_started_at
+        """,
+        task_id=task_id,
+    ).single()
+    return dict(observed) if observed is not None else None
+
+
+def _already_reconciled_unbind_state(state: Dict[str, Any]) -> bool:
+    return (
+        state.get("status") == "pending"
+        and not state.get("dispatched_to")
+        and not state.get("worker_liveness_worker")
+        and state.get("worker_liveness_started_at") is None
+    )
+
+
+def _reconcile_session_unbind_graph(
+    session_id: str,
+    task_id: str,
+    started_at: Optional[float],
+    *,
+    config: OrchConfig,
+    repair: bool = False,
+) -> Dict[str, Any]:
+    """Fail-loud graph reconcile for unbind.
+
+    Normal path: Redis binding identity (task_id + started_at + session) must match.
+    Repair path (Redis already absent): explicit task_id + dispatched_to/session match only.
+    """
+    driver = get_neo4j_driver(config)
+    with driver.session(database=config.neo4j_db) as session:
+        if repair:
+            row = session.run(
+                _unbind_graph_with_clause()
+                + """
+            WHERE prior_status IN ['in_progress', 'dispatched']
+              AND coalesce(prior_dispatched_to, '') = $session_id
+            """
+                + _unbind_graph_set_clause(),
+                task_id=task_id,
+                session_id=session_id,
+            ).single()
+        else:
+            row = session.run(
+                _unbind_graph_with_clause()
+                + """
+            WHERE prior_status IN ['in_progress', 'dispatched']
+              AND (
+                  coalesce(prior_dispatched_to, '') = $session_id
+                  OR (coalesce(prior_dispatched_to, '') = '' AND coalesce(prior_owner, '') = $session_id)
+              )
+              AND coalesce(prior_liveness_worker, '') = $session_id
+              AND prior_liveness_started_at = $started_at
+            """
+                + _unbind_graph_set_clause(),
+                task_id=task_id,
+                session_id=session_id,
+                started_at=started_at,
+            ).single()
+        if row is not None:
+            return {"task_exists": True, "changed": True, "prior": dict(row), "after": dict(row)}
+
+        state = _observe_unbind_task(session, task_id)
+        if state is None:
+            return {"task_exists": False, "changed": False, "prior": None, "after": None}
+
+        if _already_reconciled_unbind_state(state):
+            return {"task_exists": True, "changed": False, "prior": state, "after": state}
         raise HTTPException(
             status_code=409,
             detail={
-                "error": "current_task does not match the task's live executor/liveness identity; refusing partial unbind",
+                "error": (
+                    "current_task does not match the task's live executor/liveness identity; "
+                    "refusing partial unbind"
+                    if not repair
+                    else "repair task_id is not a live dispatched_to claim for this session; refusing silent clear"
+                ),
                 "session": session_id,
                 "task_id": task_id,
                 "binding_started_at": started_at,
+                "repair": repair,
                 "task_state": state,
             },
         )
@@ -1964,7 +2011,18 @@ def _clear_exact_session_unbind_redis(
 
 
 @app.delete("/api/sessions/{session_id}/current-task")
-def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
+def session_unbind_current_task(
+    session_id: str,
+    task_id: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    """Identity-bound unbind: reconcile graph to pending, then clear Redis.
+
+    Graph reconcile is required and ordered first so a Neo failure cannot return
+    success while leaving a live executor relation. Optional ``task_id`` is the
+    explicit repair path when Redis ``current_task`` is already absent but a
+    stale ``dispatched_to`` / liveness claim remains for this session.
+    """
+    repair_task_id = str(task_id or "").strip()
     current_key = notify_state_key(session_id, "current_task")
     try:
         redis_client = notify_redis_connect()
@@ -1974,46 +2032,98 @@ def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
             status_code=503,
             detail=f"could not read current_task before unbind; no state changed: {exc}",
         ) from exc
-    if not raw_current:
-        return {
-            "ok": True,
-            "session": session_id,
-            "unbound": False,
-            "previous_task_id": None,
-            "graph_reconciled": False,
-            "redis_cleared": False,
-            "next_step": f"No Redis current_task is bound for {session_id}; no graph state was guessed or mutated.",
-        }
 
-    current = decode_current_task(raw_current)
-    task_id = str((current or {}).get("task_id") or "").strip()
-    started_at = (current or {}).get("started_at")
-    valid_started_at = (
-        isinstance(started_at, (int, float))
-        and not isinstance(started_at, bool)
-        and math.isfinite(float(started_at))
-        and float(started_at) > 0.0
-    )
-    if not task_id or not valid_started_at:
+    repair = False
+    started_at: Optional[float] = None
+    if raw_current:
+        current = decode_current_task(raw_current)
+        bound_task_id = str((current or {}).get("task_id") or "").strip()
+        started_at_raw = (current or {}).get("started_at")
+        valid_started_at = (
+            isinstance(started_at_raw, (int, float))
+            and not isinstance(started_at_raw, bool)
+            and math.isfinite(float(started_at_raw))
+            and float(started_at_raw) > 0.0
+        )
+        if not bound_task_id or not valid_started_at:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "current_task lacks an exact task_id/started_at identity; refusing partial unbind",
+                    "session": session_id,
+                },
+            )
+        if repair_task_id and repair_task_id != bound_task_id:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": (
+                        f"Redis bind for {session_id} is {bound_task_id}; refusing repair "
+                        f"task_id={repair_task_id}. Unbind without --task-id first."
+                    ),
+                    "session": session_id,
+                    "task_id": bound_task_id,
+                },
+            )
+        target_task_id = bound_task_id
+        started_at = float(started_at_raw)
+        expected_current = raw_current
+    elif repair_task_id:
+        repair = True
+        target_task_id = repair_task_id
+        expected_current = None
+    else:
         raise HTTPException(
             status_code=409,
             detail={
-                "error": "current_task lacks an exact task_id/started_at identity; refusing partial unbind",
+                "error": (
+                    f"No Redis current_task bind for {session_id}. If a stale "
+                    f"dispatched_to/worker_liveness relation remains, re-run with an "
+                    f"explicit repair task_id."
+                ),
                 "session": session_id,
+                "next_step": (
+                    f"DELETE /api/sessions/{session_id}/current-task?task_id=<exact-task-id> "
+                    f"or `taey-task unbind {session_id} --task-id <exact-task-id>`."
+                ),
             },
         )
 
-    graph = _reconcile_session_unbind_graph(session_id, task_id, float(started_at), config=_cfg())
+    graph = _reconcile_session_unbind_graph(
+        session_id,
+        target_task_id,
+        started_at,
+        config=_cfg(),
+        repair=repair,
+    )
     try:
-        redis_result = _clear_exact_session_unbind_redis(session_id, task_id, raw_current)
+        if expected_current is None:
+            # Repair: Redis bind already absent — still clear scoped sidecar keys.
+            redis_client = notify_redis_connect()
+            deleted = redis_client.delete(
+                notify_state_key(session_id, "last_outcome"),
+                worker_task_liveness_key(target_task_id),
+                worker_task_liveness_dedup_key(target_task_id),
+            )
+            redis_result = {
+                "cleared": True,
+                "superseded": False,
+                "deleted_keys": int(deleted or 0),
+                "repair": True,
+            }
+        else:
+            redis_result = _clear_exact_session_unbind_redis(
+                session_id, target_task_id, expected_current
+            )
     except RedisError as exc:
         raise HTTPException(
             status_code=503,
             detail={
                 "error": f"graph reconciled but Redis clear failed: {exc}",
                 "session": session_id,
-                "task_id": task_id,
+                "task_id": target_task_id,
                 "graph_reconciled": True,
+                "repair": repair,
             },
         ) from exc
     if redis_result.get("superseded"):
@@ -2022,18 +2132,25 @@ def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
             detail={
                 "error": "current_task was superseded during unbind; Redis was not cleared",
                 "session": session_id,
-                "task_id": task_id,
+                "task_id": target_task_id,
                 "graph_reconciled": bool(graph.get("task_exists")),
                 "graph_changed": bool(graph.get("changed")),
                 "redis_result": redis_result,
             },
         )
+    after = graph.get("after") or graph.get("prior") or {}
     return {
         "ok": True,
         "session": session_id,
         "unbound": bool(redis_result.get("cleared")),
-        "previous_task_id": task_id,
+        "repair": repair,
+        "previous_task_id": target_task_id,
         "previous_started_at": started_at,
+        "task_id": target_task_id,
+        "status": after.get("status") or "pending",
+        "owner": after.get("owner") or after.get("prior_owner"),
+        "dispatched_to": after.get("dispatched_to"),
+        "worker_liveness_worker": after.get("worker_liveness_worker"),
         "previous_task_state": graph.get("prior"),
         "graph_reconciled": bool(graph.get("task_exists")),
         "graph_changed": bool(graph.get("changed")),
@@ -2041,8 +2158,9 @@ def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
         "redis_superseded": bool(redis_result.get("superseded")),
         "redis_result": redis_result,
         "next_step": (
-            f"Retry dispatch or inspect the session with GET /api/sessions/{session_id}/current "
-            f"and `taey-task status {task_id}`."
+            f"Task {target_task_id} is pending and unbound. "
+            f"Re-dispatch with `taey-task dispatch {target_task_id} <peer>` "
+            f"or inspect GET /api/sessions/{session_id}/current."
         ),
     }
 
