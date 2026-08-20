@@ -1,0 +1,17 @@
+[Unit]
+Description=Fleet orchestrator audit capability issuer socket
+Documentation=https://github.com/palios-taey/claude-code-fleet-orchestrator
+
+[Socket]
+ListenStream=/var/lib/fleet-orchestrator/audit-capability/issuer.sock
+SocketUser=orch-cap
+SocketGroup=orch-audit-sup
+SocketMode=0660
+DirectoryMode=0750
+# orch-cap owns the inode; group orch-audit-sup is the supervisor client path
+# (add orch-sup-<session> users to that group). Shared mira/worker uid 1000
+# is not in the group and cannot connect. The service consumes LISTEN_FDS
+# and must not unlink/rebind this pathname.
+
+[Install]
+WantedBy=sockets.target

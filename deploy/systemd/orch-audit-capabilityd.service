@@ -1,0 +1,25 @@
+[Unit]
+Description=Fleet orchestrator audit capability issuer (distinct-UID)
+Documentation=https://github.com/palios-taey/claude-code-fleet-orchestrator
+Requires=orch-audit-capabilityd.socket
+After=orch-audit-capabilityd.socket
+
+[Service]
+Type=simple
+User=orch-cap
+Group=orch-cap
+UMask=0077
+WorkingDirectory=/opt/claude-code-fleet-orchestrator
+EnvironmentFile=-/etc/fleet-orchestrator/orch-audit-capabilityd.env
+ExecStart=/opt/claude-code-fleet-orchestrator/scripts/orch-audit-capabilityd --serve
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fleet-orchestrator/audit-capability
+# Private key 0600 owned by orch-cap. API units must NOT have this ReadWritePaths
+# entry and must load only ORCH_AUDIT_CAPABILITY_PUBLIC_KEY_PATH.
+
+[Install]
+WantedBy=multi-user.target
