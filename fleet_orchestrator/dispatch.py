@@ -463,6 +463,7 @@ def bind_current_task(
     dispatcher: Optional[str] = None,
     *,
     parent_claim_out: Optional[dict[str, Any]] = None,
+    binding_nonce: Optional[float] = None,
 ) -> float:
     """Write the canonical dispatch/current-task wire for ``worker``.
 
@@ -476,11 +477,12 @@ def bind_current_task(
     (not one a subsequent dispatch for the same worker may have rebound).
     """
     r = _redis_connect()
+    started_at = time.time() if binding_nonce is None else float(binding_nonce)
     current_task = {
         "task_id": task_id,
         "description": description,
         "supervisor": supervisor,
-        "started_at": time.time(),
+        "started_at": started_at,
     }
     if dispatcher:
         current_task["dispatcher"] = dispatcher
@@ -531,7 +533,8 @@ def _orch_task_exists(task_id: str) -> bool:
 
 def _claim_ready_orch_task(task_id: str, worker: str, *,
                            supervisor: Optional[str] = None,
-                           force: bool = False) -> None:
+                           force: bool = False,
+                           binding_nonce: Optional[float] = None) -> None:
     if not _orch_task_exists(task_id):
         return
 
@@ -559,6 +562,8 @@ def _claim_ready_orch_task(task_id: str, worker: str, *,
             SET t.status = 'in_progress',
                 t.owner = $owner,
                 t.dispatched_to = $worker,
+                t.dispatch_claim_worker = $worker,
+                t.dispatch_claim_started_at = $binding_nonce,
                 t.blocked_on = NULL,
                 t.reclaim_count = CASE
                     WHEN prior_status = 'completed' THEN coalesce(t.reclaim_count, 0) + 1
@@ -575,6 +580,7 @@ def _claim_ready_orch_task(task_id: str, worker: str, *,
             worker=worker,
             owner=owner,
             force=bool(force),
+            binding_nonce=binding_nonce,
         ).single()
 
         if record is not None:
@@ -668,7 +674,7 @@ def _binding_is_ours(raw: Optional[str], task_id: str, binding_nonce: Optional[f
     return binding_nonce is None or cur.get("started_at") == binding_nonce
 
 
-def _rollback_claim_only(worker: str, task_id: str) -> None:
+def _rollback_claim_only(worker: str, task_id: str, binding_nonce: float) -> None:
     """Undo the OrchTask claim made before a guarded bind refusal."""
     try:
         if _orch_task_exists(task_id):
@@ -678,16 +684,17 @@ def _rollback_claim_only(worker: str, task_id: str) -> None:
                     """
                     MATCH (t:OrchTask {id: $task_id})
                     WHERE t.status = 'in_progress'
-                      AND (
-                          coalesce(t.dispatched_to, '') = $worker
-                          OR (coalesce(t.dispatched_to, '') = '' AND coalesce(t.owner, '') = $worker)
-                      )
+                      AND t.dispatch_claim_worker = $worker
+                      AND t.dispatch_claim_started_at = $binding_nonce
                     SET t.status = 'pending',
                         t.dispatched_to = NULL,
+                        t.dispatch_claim_worker = NULL,
+                        t.dispatch_claim_started_at = NULL,
                         t.updated_at = datetime()
                     """,
                     task_id=task_id,
                     worker=worker,
+                    binding_nonce=binding_nonce,
                 )
     except Exception as exc:
         logger.warning(
@@ -721,7 +728,7 @@ def _rollback_claim(
     parent_key = _state_key(worker, "parent")
     liveness_key = worker_task_liveness_key(task_id)
     liveness_dedup_key = worker_task_liveness_dedup_key(task_id)
-    redis_cleared = False
+    graph_rollback_allowed = False
     try:
         for attempt in range(_WATCH_MAX_ATTEMPTS):
             with r.pipeline() as pipe:
@@ -730,9 +737,21 @@ def _rollback_claim(
                     if parent_claim:
                         watched_keys.append(parent_key)
                     pipe.watch(*watched_keys)
-                    if not _binding_is_ours(pipe.get(current_key), task_id, binding_nonce):
+                    raw_current = pipe.get(current_key)
+                    current = _decode_current_task(raw_current)
+                    if raw_current and current is None:
                         pipe.unwatch()
                         return
+                    live_task_id = str((current or {}).get("task_id") or "")
+                    binding_is_ours = _binding_is_ours(raw_current, task_id, binding_nonce)
+                    if live_task_id == task_id and not binding_is_ours:
+                        pipe.unwatch()
+                        return
+
+                    if not binding_is_ours:
+                        pipe.unwatch()
+                        graph_rollback_allowed = True
+                        break
 
                     claim = parent_claim or {}
                     live_parent = pipe.get(parent_key) if claim else None
@@ -742,16 +761,25 @@ def _rollback_claim(
                     else:
                         live_parent_text = str(live_parent or "")
                     restore_parent = bool(claim) and live_parent_text == expected_parent
+                    liveness = _decode_current_task(pipe.get(liveness_key))
+                    liveness_is_ours = (
+                        isinstance(liveness, dict)
+                        and liveness.get("task_id") == task_id
+                        and liveness.get("worker") == worker
+                        and liveness.get("dispatch_started_at") == binding_nonce
+                    )
 
                     pipe.multi()
-                    pipe.delete(current_key, liveness_key, liveness_dedup_key)
+                    pipe.delete(current_key)
+                    if liveness_is_ours:
+                        pipe.delete(liveness_key, liveness_dedup_key)
                     if restore_parent:
                         if bool(claim.get("prior_parent_present")):
                             pipe.set(parent_key, claim.get("prior_parent"))
                         else:
                             pipe.delete(parent_key)
                     pipe.execute()
-                    redis_cleared = True
+                    graph_rollback_allowed = True
                     break
                 except WatchError:
                     if attempt == _WATCH_MAX_ATTEMPTS - 1:
@@ -766,7 +794,7 @@ def _rollback_claim(
         )
         return
 
-    if not redis_cleared:
+    if not graph_rollback_allowed:
         logger.warning(
             "dispatch rollback: Redis identity changed repeatedly; graph preserved "
             "worker=%s task=%s",
@@ -782,19 +810,12 @@ def _rollback_claim(
                 """
                 MATCH (t:OrchTask {id: $task_id})
                 WHERE t.status = 'in_progress'
-                  AND (
-                      coalesce(t.dispatched_to, '') = $worker
-                      OR (coalesce(t.dispatched_to, '') = '' AND coalesce(t.owner, '') = $worker)
-                  )
-                  AND (
-                      t.worker_liveness_started_at IS NULL
-                      OR (
-                          t.worker_liveness_worker = $worker
-                          AND t.worker_liveness_started_at = $binding_nonce
-                      )
-                  )
+                  AND t.dispatch_claim_worker = $worker
+                  AND t.dispatch_claim_started_at = $binding_nonce
                 SET t.status = 'pending',
                     t.dispatched_to = NULL,
+                    t.dispatch_claim_worker = NULL,
+                    t.dispatch_claim_started_at = NULL,
                     t.worker_liveness_worker = NULL,
                     t.worker_liveness_supervisor = NULL,
                     t.worker_liveness_started_at = NULL,
@@ -1111,15 +1132,17 @@ def dispatch(
             raise BugLockActive(f"BUG_LOCK_ACTIVE for {product_id}: {reason}")
 
     previous_force_bindings = _current_task_binding_candidates(task_id) if force else set()
+    binding_nonce = time.time()
     _claim_ready_orch_task(
         task_id=task_id,
         worker=worker,
         supervisor=supervisor,
         force=force,
+        binding_nonce=binding_nonce,
     )
     parent_claim: dict[str, Any] = {}
     try:
-        binding_nonce = bind_current_task(
+        bind_current_task(
             worker=worker,
             task_id=task_id,
             description=description,
@@ -1129,9 +1152,13 @@ def dispatch(
             guard_existing=True,
             dispatcher=from_session,
             parent_claim_out=parent_claim,
+            binding_nonce=binding_nonce,
         )
     except WorkerBusy:
-        _rollback_claim_only(worker, task_id)
+        _rollback_claim_only(worker, task_id, binding_nonce)
+        raise
+    except Exception:
+        _rollback_claim(worker, task_id, binding_nonce, parent_claim=parent_claim or None)
         raise
     had_prompt_override = prompt_body is not None
     try:
