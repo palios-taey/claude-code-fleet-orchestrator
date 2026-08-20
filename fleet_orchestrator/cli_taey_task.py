@@ -157,17 +157,22 @@ def cmd_create(args):
 
 
 def cmd_list(args):
-    """List pending tasks."""
-    result = api_call("GET", "/api/tasks/ranked")
+    """List tasks by scope (ready|active|all)."""
+    scope = getattr(args, "scope", "ready") or "ready"
+    if scope == "ready":
+        result = api_call("GET", "/api/tasks/ranked")
+    else:
+        result = api_call("GET", f"/api/tasks?scope={scope}")
     tasks = result.get("tasks", [])
     if not tasks:
-        print("No pending tasks.")
+        print(f"No tasks (scope={scope}).")
         return
-    print(f"{'ID':<25} {'Pri':>3} {'Description':<60}")
-    print("-" * 90)
-    for t in tasks[:20]:
-        desc = t.get("description", "")[:58]
-        print(f"{t['task_id']:<25} {t.get('priority',0):>3} {desc}")
+    print(f"{'ID':<42} {'Pri':>3} {'Status':<12} {'Blocked/AWAIT':<30} {'Description':<36}")
+    print("-" * 132)
+    for t in tasks[:40]:
+        desc = t.get("description", "")[:34]
+        tid = t.get("task_id") or t.get("id", "?")
+        print(f"{tid:<42} {t.get('priority',0):>3} {str(t.get('status') or ''):<12} {str(t.get('blocked_on') or ''):<30} {desc}")
 
 
 def cmd_status(args):
@@ -382,7 +387,9 @@ def main():
     p_create.add_argument("--type", choices=["standard", "micro"], default="standard",
                           help="micro = trivial fix (<10 LOC), skips DMAIC MEASURE")
 
-    p_list = sub.add_parser("list", help="List pending tasks")
+    p_list = sub.add_parser("list", help="List tasks (scope: ready|active|all)")
+    p_list.add_argument("--scope", choices=["ready", "active", "all"], default="ready",
+                        help="ready=ready queue (default); active=in_progress/stuck work; all=non-terminal")
 
     p_status = sub.add_parser("status", aliases=["show"], help="Check task status (alias: show)")
     p_status.add_argument("task_id", help="Task ID")

@@ -3265,6 +3265,55 @@ def get_ready_tasks(config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]
         return [dict(r) for r in result]
 
 
+_TASK_LIST_SCOPES = ("ready", "active", "all")
+
+
+def list_tasks_by_scope(scope: Optional[str] = None,
+                        config: Optional[OrchConfig] = None) -> List[Dict[str, Any]]:
+    """Task-list projection with an explicit, read-only scope.
+
+    - ``ready`` (default): pending tasks with dependencies satisfied under an active
+      project (delegates to :func:`get_ready_tasks`) — the backward-compatible ready
+      queue.
+    - ``active``: ``in_progress`` tasks — the stuck-work view; surfaces the
+      ``blocked_on`` (AWAIT) rows the ready queue structurally cannot show.
+    - ``all``: every non-terminal task (pending + in_progress).
+
+    All scopes carry ``status`` + ``blocked_on``. Read-only (MATCH/RETURN only).
+    Raises ``ValueError`` on an unknown scope (fail loud).
+    """
+    scope_value = (scope or "ready").strip().lower()
+    if scope_value not in _TASK_LIST_SCOPES:
+        raise ValueError(
+            f"unknown task list scope {scope_value!r}; "
+            f"expected one of {', '.join(_TASK_LIST_SCOPES)}"
+        )
+    if scope_value == "ready":
+        return get_ready_tasks(config)
+    cfg = config or OrchConfig()
+    if scope_value == "active":
+        where_clause = "t.status = 'in_progress'"
+    else:  # all -> active non-terminal work (pending + in_progress; excludes cancelled + terminal)
+        where_clause = "coalesce(t.status, '') IN $active_statuses"
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        result = session.run(
+            f"""
+            MATCH (t:OrchTask)
+            WHERE {where_clause}
+            RETURN t.id AS id, t.description AS description,
+                   t.priority AS priority, t.owner AS owner,
+                   t.capability_tags AS capability_tags,
+                   t.file_blast_radius AS file_blast_radius,
+                   t.estimated_tokens AS estimated_tokens,
+                   t.status AS status, t.blocked_on AS blocked_on
+            ORDER BY {_READY_TASK_ORDER_CYPHER}
+            """,
+            active_statuses=["pending", "in_progress"],
+        )
+        return [dict(r) for r in result]
+
+
 def _clear_matching_current_task(owner: str, task_id: str, config: Optional[OrchConfig] = None) -> bool:
     from redis import RedisError
 

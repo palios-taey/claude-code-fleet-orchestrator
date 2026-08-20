@@ -120,6 +120,7 @@ from fleet_orchestrator.orch_schema import (
     get_supervisor_badges,
     get_project_summary,
     get_ready_tasks,
+    list_tasks_by_scope,
     get_session_current_work,
     get_session_liveness,
     list_dashboard_sessions,
@@ -641,8 +642,16 @@ def _dispatch_task_id_from_payload(data: Dict[str, Any], target: str) -> Optiona
 
 
 @app.get("/api/tasks")
-def list_tasks() -> Dict[str, Any]:
-    tasks = get_ready_tasks(_cfg())
+def list_tasks(scope: str = "ready") -> Dict[str, Any]:
+    """Ready queue by default; ``scope=active`` (in_progress/stuck) or ``scope=all``
+    (non-terminal). The default preserves the exact prior ready-list contract; the
+    explicit scopes surface in_progress and blocked/AWAIT rows (with status +
+    blocked_on) that the ready projection structurally cannot show. Read-only.
+    """
+    try:
+        tasks = list_tasks_by_scope(scope, _cfg())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {"tasks": tasks}
 
 
