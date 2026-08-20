@@ -574,6 +574,169 @@ def _verify_supervisor_completion_evidence(evidence: Dict[str, Any], *, producer
     }
 
 
+def _is_sha40(value: str) -> bool:
+    return len(value) == 40 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+
+def _verify_audit_gate_status(repo: str, sha: str, audit_status: Any) -> Tuple[bool, str]:
+    """A trusted success commit status for the declared context, bound to the cited status id.
+
+    Reuses the same GitHub statuses primitives as the required-checks path. Fail-closed:
+    a stale/superseded status id (not the latest trusted success for the context) does not verify.
+    """
+    if not isinstance(audit_status, dict):
+        return False, "audit_status must be an object with context, state, id"
+    context = str(audit_status.get("context") or "").strip()
+    want_state = str(audit_status.get("state") or "").strip().lower()
+    want_id = audit_status.get("id")
+    if not context or want_state != "success" or want_id in (None, ""):
+        return False, "audit_status requires context, state='success', and a status id"
+    payload = _gh_api(f"repos/{repo}/commits/{sha}/statuses?per_page=100")
+    statuses = payload if isinstance(payload, list) else (payload.get("statuses") if isinstance(payload, dict) else None)
+    if not isinstance(statuses, list):
+        return False, "GitHub statuses response did not include a list"
+    latest = _latest_named(statuses, "context", context)
+    if not latest:
+        return False, f"no commit status for context {context!r} on {sha}"
+    state = str(latest.get("state") or "").lower()
+    trusted = _trusted_status(latest)
+    if not (state == "success" and trusted):
+        return False, f"latest {context} status is state={state} trusted={trusted}, not a trusted success"
+    if str(latest.get("id")) != str(want_id):
+        return False, f"cited audit status id {want_id} is not the latest trusted {context} success id {latest.get('id')} (stale/superseded)"
+    return True, f"{context} state=success trusted id={latest.get('id')}"
+
+
+def _verify_immutable_receipt(receipt: Any) -> Tuple[bool, str]:
+    """Self-contained sealed receipt: SHA256SUMS binds every file, and the whole tree is
+    immutable (files 0444, dirs 0555). Fail-closed on missing, stale (manifest hash mismatch),
+    mutated (content hash mismatch), or mutable (any write bit) receipts."""
+    import os
+    import hashlib
+    if not isinstance(receipt, dict):
+        return False, "receipt must be an object with path, manifest_sha256, manifest(optional)"
+    path = str(receipt.get("path") or "").strip()
+    manifest_name = str(receipt.get("manifest") or "SHA256SUMS").strip()
+    want_sums_sha = str(receipt.get("manifest_sha256") or receipt.get("sha256sums_sha256") or "").strip().lower()
+    if not path or not want_sums_sha:
+        return False, "receipt requires path and manifest_sha256 (or sha256sums_sha256)"
+    if os.path.basename(manifest_name) != manifest_name or manifest_name in (".", ".."):
+        return False, f"receipt manifest must be a plain filename, not a path: {manifest_name!r}"
+    if not os.path.isdir(path):
+        return False, f"receipt path is not a directory: {path}"
+    sums = os.path.join(path, manifest_name)
+    if not os.path.isfile(sums):
+        return False, f"receipt has no manifest {manifest_name} at {sums}"
+    with open(sums, "rb") as fh:
+        sums_bytes = fh.read()
+    got_sums_sha = hashlib.sha256(sums_bytes).hexdigest()
+    if got_sums_sha != want_sums_sha:
+        return False, f"{manifest_name} sha256 {got_sums_sha} != cited {want_sums_sha} (stale/tampered manifest)"
+    for line in sums_bytes.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            return False, f"malformed {manifest_name} line: {line!r}"
+        want_hex = parts[0].strip().lower()
+        rel = parts[1].strip().lstrip("*")
+        fp = os.path.join(path, rel)
+        if os.path.abspath(fp) == os.path.abspath(sums):
+            continue  # the manifest's own bytes are bound by manifest_sha256 above
+        if not os.path.isfile(fp):
+            return False, f"{manifest_name} references missing file: {rel}"
+        h = hashlib.sha256()
+        with open(fp, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        if h.hexdigest() != want_hex:
+            return False, f"content hash mismatch for {rel} (mutated after sealing)"
+    for root, _dirs, files in os.walk(path):
+        if (os.stat(root).st_mode & 0o777) != 0o555:
+            return False, f"receipt dir not sealed 0555: {root}"
+        for fn in files:
+            fp = os.path.join(root, fn)
+            mode = os.stat(fp).st_mode & 0o777
+            if mode != 0o444:
+                return False, f"receipt file not sealed 0444 (mutable): {os.path.relpath(fp, path)} mode={oct(mode)}"
+    return True, f"immutable receipt verified at {path} ({manifest_name} {got_sums_sha[:16]})"
+
+
+def _verify_audit_class_completion(
+    evidence: Dict[str, Any],
+    *,
+    producer: str = "",
+) -> Dict[str, Any]:
+    """Completion path for read-only R5 audit/gatekeeper tasks whose scope forbids merge.
+
+    Requires the exact audited head/base to exist, a trusted success gate status bound to the
+    cited id, and a verified immutable self-contained receipt. Deliberately does NOT require the
+    audited commit to be merged / off an open PR — that requirement stays on implementation/deploy
+    tasks. Selected only by an explicit completion_class=='audit' field, never description parsing.
+    """
+    repo = repo_from_completion_evidence(evidence)
+    audited_head = str(evidence.get("audited_head") or "").strip()
+    audited_base = str(evidence.get("audited_base") or "").strip()
+    audit_status = evidence.get("audit_status")
+    receipt = evidence.get("receipt")
+    missing = [name for name, val in (
+        ("repo", repo), ("audited_head", audited_head), ("audited_base", audited_base),
+        ("audit_status", audit_status), ("receipt", receipt),
+    ) if not val]
+    if missing:
+        return _unverified(
+            "audit-class completion evidence is missing required field(s): " + ", ".join(missing)
+            + "; audit-class requires repo, audited_head, audited_base, "
+            "audit_status{context,state,id}, receipt{path,manifest_sha256,manifest(optional, default SHA256SUMS)}",
+            repo=repo, commit_sha=audited_head, required_checks=[], producer=producer, reject_completion=True,
+        )
+    if not (_is_sha40(audited_head) and _is_sha40(audited_base)):
+        return _unverified(
+            "audit-class audited_head and audited_base must be 40-hex commit SHAs",
+            repo=repo, commit_sha=audited_head, required_checks=[], producer=producer, reject_completion=True,
+        )
+    if not _repo_allowed_for_completion_evidence(repo):
+        return _unverified(
+            _repo_not_allowed_reason(repo),
+            repo=repo, commit_sha=audited_head, required_checks=[], producer=producer, reject_completion=True,
+        )
+    _commit_exists(repo, audited_head)
+    _commit_exists(repo, audited_base)
+    status_ok, status_detail = _verify_audit_gate_status(repo, audited_head, audit_status)
+    if not status_ok:
+        return _unverified(
+            "audit-class gate status not verified: " + status_detail,
+            repo=repo, commit_sha=audited_head, required_checks=[], producer=producer, reject_completion=True,
+        )
+    receipt_ok, receipt_detail = _verify_immutable_receipt(receipt)
+    if not receipt_ok:
+        return _unverified(
+            "audit-class receipt not verified (fail-closed): " + receipt_detail,
+            repo=repo, commit_sha=audited_head, required_checks=[], producer=producer, reject_completion=True,
+        )
+    return {
+        "status": VERIFIED,
+        "verified": True,
+        "applies": True,
+        "source": "audit-class-completion",
+        "repo": repo,
+        "commit_sha": audited_head,
+        "audited_base": audited_base,
+        "required_checks": [],
+        "producer": producer,
+        "verifier": "audit-class-completion",
+        "reason": (
+            "audit-class: trusted success gate on the exact audited head plus a verified immutable "
+            "self-contained receipt; merge not required for read-only audit scope"
+        ),
+        "checks": [
+            {"name": "audit-gate-status", "kind": "github-commit-status", "ok": True, "detail": status_detail},
+            {"name": "immutable-receipt", "kind": "sealed-sha256sums", "ok": True, "detail": receipt_detail},
+        ],
+    }
+
+
 def verify_completion_evidence(
     evidence: Optional[Dict[str, Any]],
     *,
@@ -585,6 +748,8 @@ def verify_completion_evidence(
         verification = verify_loop_proof_receipt(evidence, producer=producer)
         verification["applies"] = True
         return verification
+    if str(evidence.get("completion_class") or "").strip().lower() == "audit":
+        return _verify_audit_class_completion(evidence, producer=producer)
     commit_sha = str(evidence.get("commit_sha") or "").strip()
     repo = repo_from_completion_evidence(evidence)
     checks = required_github_checks_for_repo(repo) if repo else required_github_checks()
