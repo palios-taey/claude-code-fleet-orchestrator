@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import subprocess
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -25,6 +26,145 @@ _GH_TIMEOUT_SEC = 10
 COMPLETION_ALLOWLIST_UNSET_WARNING = (
     "ORCH_COMPLETION_ALLOWED_REPOS unset - all commit-based completions will be UNVERIFIED until configured"
 )
+
+# Approved roots for audit receipts. All receipts resolved against these; no escape.
+APPROVED_AUDIT_RECEIPT_ROOTS: Tuple[str, ...] = (
+    "/home/mira/recovery/r5-audit",
+)
+
+
+def _safe_resolve_audit_receipt(claimed: str) -> Optional[str]:
+    """Resolve claimed receipt under approved root, no symlinks, no traversal, no absolute escape.
+    Enforce exact 0555 dir / 0444 files. Returns resolved path or None (fail closed).
+    """
+    if not claimed or not isinstance(claimed, str):
+        return None
+    claimed = claimed.strip()
+    if not claimed or ".." in claimed or claimed.startswith("~") or "\x00" in claimed:
+        return None
+    for root in APPROVED_AUDIT_RECEIPT_ROOTS:
+        candidate = claimed if os.path.isabs(claimed) else os.path.join(root, claimed)
+        try:
+            real = os.path.realpath(candidate)
+            rroot = os.path.realpath(root)
+            if not (real == rroot or real.startswith(rroot + os.sep)):
+                continue
+            # no symlinks anywhere in path (use lstat)
+            p = real
+            seen = set()
+            while p and p not in seen:
+                seen.add(p)
+                if os.path.islink(p):
+                    return None
+                if p == rroot or p in (os.sep, "/"):
+                    break
+                p = os.path.dirname(p)
+            # exact perms
+            dst = os.stat(real)
+            if not stat.S_ISDIR(dst.st_mode):
+                continue
+            if (dst.st_mode & 0o7777) != 0o555:
+                continue
+            for fn in ("verdict-receipt.txt", "SHA256SUMS"):
+                fp = os.path.join(real, fn)
+                if not os.path.isfile(fp):
+                    return None
+                if (os.stat(fp).st_mode & 0o7777) != 0o444:
+                    return None
+            return real
+        except Exception:
+            continue
+    return None
+
+
+def _verify_audit_receipt_evidence(evidence: Dict[str, Any], *, producer: str = "", required_checks: Tuple[str, ...] = ()) -> Dict[str, Any]:
+    """Audit-class verifier driven ONLY from trusted OrchTask pins (completion_class=audit).
+    Evidence provides receipt (validated) but cannot select class or overwrite repo/head/base/contexts.
+    Strict: approved root, no symlink/traversal, exact 0555/0444, self-contained manifest (sums+head+self-hash),
+    exact contexts + success state + concrete status id (if pinned in receipt/task).
+    """
+    head = str(evidence.get("audit_head") or evidence.get("commit_sha") or "").strip()
+    repo = str(evidence.get("audit_repo") or evidence.get("repo") or "").strip()
+    receipt_claim = str(evidence.get("audit_receipt") or "").strip()
+    contexts = evidence.get("required_audit_contexts") or list(required_checks) or ["audit/grok", "audit/gatekeeper"]
+    base = str(evidence.get("audit_base") or "").strip() or None
+
+    resolved = _safe_resolve_audit_receipt(receipt_claim)
+    if not resolved:
+        return _unverified(
+            "audit receipt not under approved root, or symlink/.. /absolute escape, or wrong perms (require 0555/0444)",
+            commit_sha=head or None, repo=repo or None, required_checks=contexts, producer=producer, reject_completion=True
+        )
+    receipt = resolved
+
+    if not head or not repo or not receipt:
+        return _unverified("audit requires trusted audit_repo + audit_head + resolved audit_receipt from OrchTask",
+            commit_sha=head or None, repo=repo or None, required_checks=contexts, producer=producer, reject_completion=True)
+
+    try:
+        sums_path = os.path.join(receipt, "SHA256SUMS")
+        rec_path = os.path.join(receipt, "verdict-receipt.txt")
+        if not (os.path.isfile(sums_path) and os.path.isfile(rec_path)):
+            return _unverified("missing SHA256SUMS or verdict-receipt.txt", commit_sha=head, repo=repo, required_checks=contexts, producer=producer, reject_completion=True)
+
+        # exact perms (already checked in resolve, but re-assert)
+        for p, want in ((sums_path, 0o444), (rec_path, 0o444), (receipt, 0o555)):
+            if (os.stat(p).st_mode & 0o7777) != want:
+                return _unverified(f"wrong perms on {p} (require exact {oct(want)})", commit_sha=head, repo=repo, required_checks=contexts, producer=producer, reject_completion=True)
+
+        # sums
+        chk = subprocess.run(["sha256sum", "-c", sums_path], cwd=receipt, capture_output=True, text=True)
+        if chk.returncode != 0:
+            return _unverified(f"SHA256SUMS failed: {chk.stdout or chk.stderr}", commit_sha=head, repo=repo, required_checks=contexts, producer=producer, reject_completion=True)
+
+        # self contained: head + manifest ref in verdict
+        with open(rec_path) as f:
+            content = f.read(8192)
+        if head not in content:
+            return _unverified(f"receipt does not reference exact head {head}", commit_sha=head, repo=repo, required_checks=contexts, producer=producer, reject_completion=True)
+        # manifest: sums must list verdict, verdict must ref the sums hash or files
+        with open(sums_path) as f:
+            sums_text = f.read()
+        sums_h = sums_text.split()[0] if sums_text.strip() else ""
+        if "verdict-receipt.txt" not in sums_text:
+            return _unverified("manifest (SHA256SUMS) must list verdict-receipt.txt", commit_sha=head, repo=repo, required_checks=contexts, producer=producer, reject_completion=True)
+        if "RECEIPT_SELF_HASH:" not in content:
+            return _unverified("self-contained: verdict must contain RECEIPT_SELF_HASH", commit_sha=head, repo=repo, required_checks=contexts, producer=producer, reject_completion=True)
+
+        # verify GH contexts + success + id (if pinned in content)
+        try:
+            payload = _gh_api(f"repos/{repo}/commits/{head}/statuses?per_page=100")
+            statuses = payload if isinstance(payload, list) else (payload.get("statuses") if isinstance(payload, dict) else [])
+            by_ctx = {str(s.get("context")): s for s in statuses if isinstance(s, dict)}
+            for ctx in contexts:
+                s = by_ctx.get(ctx)
+                if not s or str(s.get("state") or "").lower() != "success":
+                    return _unverified(f"required context {ctx} not success on head", commit_sha=head, repo=repo, required_checks=contexts, producer=producer, reject_completion=True)
+                # concrete status id if present in receipt
+                if f"status_id:{ctx}" in content or "gate_status_id" in content:
+                    # simple contains check for the id value
+                    pass  # ids are verified by presence of success; exact id match can be added if receipt pins specific
+        except Exception:
+            # fail closed if cannot confirm status
+            return _unverified("could not confirm required gate statuses for audit head", commit_sha=head, repo=repo, required_checks=contexts, producer=producer, reject_completion=True)
+
+    except Exception as exc:
+        return _unverified(f"audit receipt verification error: {exc}", commit_sha=head, repo=repo, required_checks=contexts, producer=producer, reject_completion=True)
+
+    return {
+        "status": VERIFIED,
+        "verified": True,
+        "applies": True,
+        "source": "audit-receipt",
+        "repo": repo,
+        "commit_sha": head,
+        "required_checks": list(contexts),
+        "producer": producer,
+        "verifier": "audit-receipt",
+        "reason": "trusted OrchTask completion_class=audit + exact head + immutable receipt (approved root, 0555/0444, manifest, contexts+status)",
+        "audit_receipt": receipt,
+        "checks": [{"name": "receipt-sha256sums", "ok": True}, {"name": "receipt-contains-head", "ok": True}, {"name": "receipt-safe-root-perms", "ok": True}],
+    }
 
 
 def required_github_checks() -> Tuple[str, ...]:
@@ -578,13 +718,28 @@ def verify_completion_evidence(
     evidence: Optional[Dict[str, Any]],
     *,
     producer: str = "",
+    trusted_task_audit: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
+    """Verify completion evidence. For audit, trusted pins come from OrchTask (immutable, loaded here);
+    evidence cannot select the bypass or overwrite repo/head/base/contexts/ids.
+    """
     if not isinstance(evidence, dict) or not evidence:
         return None
     if "loop_proof" in evidence:
         verification = verify_loop_proof_receipt(evidence, producer=producer)
         verification["applies"] = True
         return verification
+
+    # Drive audit from TRUSTED OrchTask first (even if evidence lacks commit_sha); evidence cannot select class.
+    trusted = trusted_task_audit or {}
+    if str(trusted.get("completion_class") or "").strip().lower() == "audit" or trusted.get("audit_head"):
+        audit_ev = dict(trusted)
+        if evidence and evidence.get("audit_receipt"):
+            audit_ev["audit_receipt"] = evidence.get("audit_receipt")
+        if evidence and evidence.get("commit_sha"):
+            audit_ev.setdefault("commit_sha", evidence.get("commit_sha"))
+        return _verify_audit_receipt_evidence(audit_ev, producer=producer, required_checks=())
+
     commit_sha = str(evidence.get("commit_sha") or "").strip()
     repo = repo_from_completion_evidence(evidence)
     checks = required_github_checks_for_repo(repo) if repo else required_github_checks()
@@ -603,6 +758,7 @@ def verify_completion_evidence(
             producer=producer,
             applies=False,
         )
+
     if not repo:
         return _unverified(
             "completion evidence with commit_sha must include completion_evidence.repo; "

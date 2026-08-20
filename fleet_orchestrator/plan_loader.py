@@ -810,6 +810,12 @@ def load_plan_from_text(md: str, source_path: str, source_kind: str,
                 estimated_tokens=50_000,
                 initial_status="pending" if is_existing_task else "ingesting",
                 wake_owner_if_ready=False,
+                completion_class=task.get("completion_class", "standard"),
+                audit_repo=task.get("audit_repo"),
+                audit_head=task.get("audit_head"),
+                audit_base=task.get("audit_base"),
+                required_audit_contexts=task.get("required_audit_contexts") or task.get("audit_contexts"),
+                audit_receipt=task.get("audit_receipt"),
                 config=cfg,
             )
             assign_task_to_phase(task["id"], phase["id"], config=cfg)
