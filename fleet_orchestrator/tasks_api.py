@@ -18,6 +18,7 @@ import hmac
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 import subprocess
@@ -29,6 +30,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from redis import RedisError, WatchError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -55,7 +57,9 @@ from fleet_orchestrator.version import __version__ as RUNNING_VERSION
 from fleet_orchestrator.evidence_contract import REQUEST_TERMINAL_EVIDENCE_KEYS, TERMINAL_STATUSES
 from fleet_orchestrator.feature_flags import TRUE_ENV_VALUES, chat_enabled, wake_packet_endpoint_enabled
 from fleet_orchestrator.handoff_validation import ensure_handoff_index_backfilled
+from fleet_orchestrator.current_task_binding import decode_current_task
 from fleet_orchestrator.notify_state import redis_connect as notify_redis_connect
+from fleet_orchestrator.notify_state import state_key as notify_state_key
 from fleet_orchestrator.session_topology import (
     configured_supervisor_for_session,
     control_principal_for_session,
@@ -80,7 +84,6 @@ from fleet_orchestrator.dispatch import (
     OrchTaskNotReady,
     WorkerBusy,
     bind_current_task,
-    clear_current_task,
     dispatch as dispatch_task,
     record_outcome,
     request_changes,
@@ -144,6 +147,10 @@ from fleet_orchestrator.plan_loader import (
     scope_declared_id,
 )
 from fleet_orchestrator.orch_schema import TaskIdCollisionError, TaskParentNotFoundError
+from fleet_orchestrator.worker_liveness import (
+    worker_task_liveness_dedup_key,
+    worker_task_liveness_key,
+)
 
 LOGGER = logging.getLogger("uvicorn.error")
 
@@ -1800,16 +1807,233 @@ async def clear_pause_session_endpoint(session_id: str, req: Request) -> Dict[st
     return {"ok": True, "pause_meta": meta}
 
 
+def _reconcile_session_unbind_graph(
+    session_id: str,
+    task_id: str,
+    started_at: float,
+    *,
+    config: OrchConfig,
+) -> Dict[str, Any]:
+    driver = get_neo4j_driver(config)
+    with driver.session(database=config.neo4j_db) as session:
+        row = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            WITH t,
+                 coalesce(t.status, 'pending') AS prior_status,
+                 t.owner AS prior_owner,
+                 t.dispatched_to AS prior_dispatched_to,
+                 t.blocked_on AS prior_blocked_on,
+                 t.worker_liveness_worker AS prior_liveness_worker,
+                 t.worker_liveness_supervisor AS prior_liveness_supervisor,
+                 t.worker_liveness_started_at AS prior_liveness_started_at,
+                 t.worker_liveness_heartbeat_at AS prior_liveness_heartbeat_at,
+                 t.worker_liveness_ttl_secs AS prior_liveness_ttl_secs,
+                 t.worker_liveness_ack_at AS prior_liveness_ack_at,
+                 t.worker_liveness_escalated_at AS prior_liveness_escalated_at,
+                 t.worker_liveness_escalation_reason AS prior_liveness_escalation_reason
+            WHERE prior_status IN ['in_progress', 'dispatched']
+              AND (
+                  coalesce(prior_dispatched_to, '') = $session_id
+                  OR (coalesce(prior_dispatched_to, '') = '' AND coalesce(prior_owner, '') = $session_id)
+              )
+              AND coalesce(prior_liveness_worker, '') = $session_id
+              AND prior_liveness_started_at = $started_at
+            SET t.status = 'pending',
+                t.dispatched_to = NULL,
+                t.worker_liveness_worker = NULL,
+                t.worker_liveness_supervisor = NULL,
+                t.worker_liveness_started_at = NULL,
+                t.worker_liveness_heartbeat_at = NULL,
+                t.worker_liveness_ttl_secs = NULL,
+                t.worker_liveness_ack_at = NULL,
+                t.worker_liveness_escalated_at = NULL,
+                t.worker_liveness_escalation_reason = NULL,
+                t.updated_at = datetime()
+            RETURN prior_status,
+                   prior_owner,
+                   prior_dispatched_to,
+                   prior_blocked_on,
+                   prior_liveness_worker,
+                   prior_liveness_supervisor,
+                   prior_liveness_started_at,
+                   prior_liveness_heartbeat_at,
+                   prior_liveness_ttl_secs,
+                   prior_liveness_ack_at,
+                   prior_liveness_escalated_at,
+                   prior_liveness_escalation_reason
+            """,
+            task_id=task_id,
+            session_id=session_id,
+            started_at=started_at,
+        ).single()
+        if row is not None:
+            return {"task_exists": True, "changed": True, "prior": dict(row)}
+
+        observed = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            RETURN coalesce(t.status, 'pending') AS status,
+                   t.owner AS owner,
+                   t.dispatched_to AS dispatched_to,
+                   t.blocked_on AS blocked_on,
+                   t.worker_liveness_worker AS worker_liveness_worker,
+                   t.worker_liveness_started_at AS worker_liveness_started_at
+            """,
+            task_id=task_id,
+        ).single()
+        if observed is None:
+            return {"task_exists": False, "changed": False, "prior": None}
+
+        state = dict(observed)
+        already_reconciled = (
+            state.get("status") == "pending"
+            and not state.get("dispatched_to")
+            and not state.get("worker_liveness_worker")
+            and state.get("worker_liveness_started_at") is None
+        )
+        if already_reconciled:
+            return {"task_exists": True, "changed": False, "prior": state}
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "current_task does not match the task's live executor/liveness identity; refusing partial unbind",
+                "session": session_id,
+                "task_id": task_id,
+                "binding_started_at": started_at,
+                "task_state": state,
+            },
+        )
+
+
+def _clear_exact_session_unbind_redis(
+    session_id: str,
+    task_id: str,
+    expected_current: Any,
+) -> Dict[str, Any]:
+    redis_client = notify_redis_connect()
+    current_key = notify_state_key(session_id, "current_task")
+    outcome_key = notify_state_key(session_id, "last_outcome")
+    liveness_key = worker_task_liveness_key(task_id)
+    liveness_dedup_key = worker_task_liveness_dedup_key(task_id)
+    for attempt in range(5):
+        with redis_client.pipeline() as pipe:
+            try:
+                pipe.watch(current_key, outcome_key, liveness_key, liveness_dedup_key)
+                live_current = pipe.get(current_key)
+                if live_current != expected_current:
+                    current = decode_current_task(live_current)
+                    pipe.unwatch()
+                    return {
+                        "cleared": False,
+                        "superseded": True,
+                        "live_task_id": str((current or {}).get("task_id") or "") or None,
+                        "live_started_at": (current or {}).get("started_at"),
+                    }
+                prior_outcome = decode_current_task(pipe.get(outcome_key))
+                pipe.multi()
+                pipe.delete(current_key, outcome_key, liveness_key, liveness_dedup_key)
+                deleted = pipe.execute()
+                return {
+                    "cleared": True,
+                    "superseded": False,
+                    "deleted_keys": int(deleted[0] or 0),
+                    "prior_outcome": prior_outcome,
+                }
+            except WatchError:
+                if attempt == 4:
+                    break
+                time.sleep(0.01 * (attempt + 1))
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "current_task changed repeatedly during unbind; graph is pending and Redis was not cleared blindly",
+            "session": session_id,
+            "task_id": task_id,
+        },
+    )
+
+
 @app.delete("/api/sessions/{session_id}/current-task")
 def session_unbind_current_task(session_id: str) -> Dict[str, Any]:
-    clear_current_task(session_id)
+    current_key = notify_state_key(session_id, "current_task")
+    try:
+        redis_client = notify_redis_connect()
+        raw_current = redis_client.get(current_key)
+    except RedisError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"could not read current_task before unbind; no state changed: {exc}",
+        ) from exc
+    if not raw_current:
+        return {
+            "ok": True,
+            "session": session_id,
+            "unbound": False,
+            "previous_task_id": None,
+            "graph_reconciled": False,
+            "redis_cleared": False,
+            "next_step": f"No Redis current_task is bound for {session_id}; no graph state was guessed or mutated.",
+        }
+
+    current = decode_current_task(raw_current)
+    task_id = str((current or {}).get("task_id") or "").strip()
+    started_at = (current or {}).get("started_at")
+    valid_started_at = (
+        isinstance(started_at, (int, float))
+        and not isinstance(started_at, bool)
+        and math.isfinite(float(started_at))
+        and float(started_at) > 0.0
+    )
+    if not task_id or not valid_started_at:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "current_task lacks an exact task_id/started_at identity; refusing partial unbind",
+                "session": session_id,
+            },
+        )
+
+    graph = _reconcile_session_unbind_graph(session_id, task_id, float(started_at), config=_cfg())
+    try:
+        redis_result = _clear_exact_session_unbind_redis(session_id, task_id, raw_current)
+    except RedisError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": f"graph reconciled but Redis clear failed: {exc}",
+                "session": session_id,
+                "task_id": task_id,
+                "graph_reconciled": True,
+            },
+        ) from exc
+    if redis_result.get("superseded"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "current_task was superseded during unbind; Redis was not cleared",
+                "session": session_id,
+                "task_id": task_id,
+                "graph_reconciled": bool(graph.get("task_exists")),
+                "graph_changed": bool(graph.get("changed")),
+                "redis_result": redis_result,
+            },
+        )
     return {
         "ok": True,
         "session": session_id,
-        "unbound": True,
+        "unbound": bool(redis_result.get("cleared")),
+        "previous_task_id": task_id,
+        "previous_started_at": started_at,
+        "previous_task_state": graph.get("prior"),
+        "graph_reconciled": bool(graph.get("task_exists")),
+        "graph_changed": bool(graph.get("changed")),
+        "redis_cleared": bool(redis_result.get("cleared")),
+        "redis_superseded": bool(redis_result.get("superseded")),
+        "redis_result": redis_result,
         "next_step": (
             f"Retry dispatch or inspect the session with GET /api/sessions/{session_id}/current "
-            f"and `taey-task status <task-id>`."
+            f"and `taey-task status {task_id}`."
         ),
     }
 
