@@ -14,10 +14,10 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 260.
+- Enumerated surfaces: 266.
 - Teaches: 127.
 - Needs-fix baseline debt: 48.
-- Exempt reviewed rows: 85.
+- Exempt reviewed rows: 91.
 
 <!-- ai-native-surfaces:start -->
 | File | Function | Kind | Ordinal | Line Hint | Fingerprint | Classification | Teaching Evidence | Rationale | Review |
@@ -183,10 +183,12 @@ Summary:
 | fleet_orchestrator/public_readonly.py | health | json_response_error | 1 | 538 | 0f9cb10f6ef4b99f | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
 | fleet_orchestrator/public_readonly.py | project_user_stop_conditions | http_exception_detail | 1 | 559 | e01225fda10e5dc0 | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
 | fleet_orchestrator/public_readonly.py | project_user_stop_conditions | http_exception_detail | 2 | 562 | e01225fda10e5dc0 | exempt |  | Public read-only surface is intentionally redacted/fail-closed and should not disclose private operator remediation paths. | anbr-fix-exempt:public-redacted |
+| fleet_orchestrator/tasks_api.py | _clear_exact_session_unbind_redis | http_exception_detail | 1 | 1947 | f7e01ebaa8e5b678 | exempt |  | Compare-and-set exhaustion is an internal concurrency conflict; the rejection preserves Redis state and forbids a blind clear, so no further client mutation is safe. | task-1fe784f4:concurrency-fail-closed |
 | fleet_orchestrator/tasks_api.py | _dispatch_task_id_from_payload | http_exception_detail | 1 | 540 | 707ea79e3f9ccf32 | exempt |  | Required-body helper emits the endpoint, explicit dispatch body contract, and curl retry command; verifier cannot statically expand the helper payload. | task-8e73dbfc:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | _ensure_registered_session | http_exception_detail | 1 | 499 | 2e82c2d3e7d60d71 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | _load_task | http_exception_detail | 1 | 545 | 22c8c2430788ed07 | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | _optional_mutable_auth | json_response_error | 1 | 354 | 2f857139ba14bcbe | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
+| fleet_orchestrator/tasks_api.py | _reconcile_session_unbind_graph | http_exception_detail | 1 | 1897 | bcf1d20c068e60b2 | exempt |  | Exact executor/liveness mismatch is a fail-closed safety boundary; the response returns the conflicting binding identity and task state for authoritative reconciliation rather than client-side mutation. | task-1fe784f4:identity-fail-closed |
 | fleet_orchestrator/tasks_api.py | _strict_force_flag | http_exception_detail | 1 | 473 | b35691f41936cbb7 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | _validated_source_path | http_exception_detail | 1 | 492 | 45872ce65bfabe35 | exempt |  | Wrapper only relays the validator message already triaged separately; changing this row would duplicate the underlying fix. | anbr-fix-exempt:pass-through-duplicate |
 | fleet_orchestrator/tasks_api.py | add_project_condition_endpoint | http_exception_detail | 1 | 1368 | 348b384465a1a6c1 | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
@@ -256,6 +258,10 @@ Summary:
 | fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 4 | 1529 | 3262aa0c8965f5cd | teaches | taey-task | Static teaching assertion passes. | task-53b428df |
 | fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 5 | 1542 | 19c67a0e5601b0f3 | teaches | taey-notify | Static teaching assertion passes. | task-53b428df |
 | fleet_orchestrator/tasks_api.py | session_notify | http_exception_detail | 6 | 1563 | ea16455f43767dc4 | teaches | taey-notify | Static teaching assertion passes. | baseline-pr171 |
+| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 1 | 1964 | 3ff178c921829b8d | exempt |  | Redis transport failure occurs before any state change and is an operator/service-health concern, not a client-correctable workflow surface. | task-1fe784f4:internal-transport |
+| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 2 | 1989 | 565c6955c6ee3fc4 | exempt |  | Malformed binding identity is rejected before mutation; repair requires authoritative control-plane reconciliation rather than guessing a task or nonce. | task-1fe784f4:identity-fail-closed |
+| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 3 | 2001 | 85d2d4dede5606ca | exempt |  | Redis failed after graph reconciliation, so the response exposes the partial state for operator recovery and deliberately offers no unsafe automated retry. | task-1fe784f4:partial-state-fail-closed |
+| fleet_orchestrator/tasks_api.py | session_unbind_current_task | http_exception_detail | 4 | 2011 | d20450a93680f185 | exempt |  | A superseding binding is a concurrency boundary; the response reports both graph and live Redis observations while refusing to clear the newer binding. | task-1fe784f4:concurrency-fail-closed |
 | fleet_orchestrator/tasks_api.py | session_wake_packet | http_exception_detail | 1 | 1609 | b5149cdb01925464 | teaches | GET /api/sessions/{}/wake-packet | Static teaching assertion passes. | baseline-pr171 |
 | fleet_orchestrator/tasks_api.py | session_wake_packet | http_exception_detail | 2 | 1614 | c3b52d7c1280774e | exempt |  | Manual source review found the runtime message already carries an endpoint, CLI, body contract, env/config repair, structured next_step, or structured verdict; remaining work is verifier/registry evidence, not runtime prose. | anbr-fix-exempt:reviewed-teaches |
 | fleet_orchestrator/tasks_api.py | set_project_stop_reason_endpoint | http_exception_detail | 1 | 1313 | e580830222b55f0c | teaches | taey-plan | Static teaching assertion passes. | baseline-pr171 |
