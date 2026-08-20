@@ -170,7 +170,14 @@ def repo_from_completion_evidence(evidence: Dict[str, Any]) -> str:
     return str(evidence.get("repo") or "").strip()
 
 
-def completion_evidence_verification_applies(evidence: Optional[Dict[str, Any]]) -> bool:
+def completion_evidence_verification_applies(
+    evidence: Optional[Dict[str, Any]],
+    trusted_task: Optional[Dict[str, Any]] = None,
+) -> bool:
+    from .audit_completion import is_audit_task
+
+    if is_audit_task(trusted_task):
+        return True
     if not isinstance(evidence, dict) or not evidence:
         return False
     if str(evidence.get("commit_sha") or "").strip():
@@ -578,9 +585,23 @@ def verify_completion_evidence(
     evidence: Optional[Dict[str, Any]],
     *,
     producer: str = "",
+    trusted_task: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
+    from .audit_completion import (
+        AuditContractError,
+        assert_no_audit_override_in_evidence,
+        is_audit_task,
+        verify_audit_completion,
+    )
+
     if not isinstance(evidence, dict) or not evidence:
         return None
+    try:
+        assert_no_audit_override_in_evidence(evidence)
+    except AuditContractError as exc:
+        return _unverified(str(exc), producer=producer, reject_completion=True)
+    if is_audit_task(trusted_task):
+        return verify_audit_completion(trusted_task or {}, evidence, producer=producer)
     if "loop_proof" in evidence:
         verification = verify_loop_proof_receipt(evidence, producer=producer)
         verification["applies"] = True

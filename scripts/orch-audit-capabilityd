@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Deployable unix-socket issuer for audit supervisor capabilities.
+
+Principal separation under shared-UID fleet topology:
+  - Private Ed25519 key stays with this process/file (0600).
+  - API loads only the public verify key.
+  - Client identity is SO_PEERCRED pid → tmux pane ownership, not JSON
+    body.from and not ORCH_SESSION_ID environ.
+
+Usage:
+  orch-audit-capabilityd --init-keys
+  orch-audit-capabilityd --socket /path/to/issuer.sock
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from fleet_orchestrator.audit_capability_issuer import run_socket_server  # noqa: E402
+from fleet_orchestrator.audit_supervisor_capability import (  # noqa: E402
+    default_key_paths,
+    write_keypair_files,
+)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Audit supervisor capability issuer daemon")
+    parser.add_argument("--socket", default="", help="Unix socket path")
+    parser.add_argument(
+        "--init-keys",
+        action="store_true",
+        help="Generate Ed25519 private(0600)/public(0644) key files and exit",
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Run the unix-socket issuer (default when not --init-keys)",
+    )
+    args = parser.parse_args()
+    paths = default_key_paths()
+    if args.init_keys:
+        priv, _pub = write_keypair_files(paths["private"], paths["public"])
+        print(f"wrote private {paths['private']} mode 0600")
+        print(f"wrote public  {paths['public']} mode 0644")
+        print(f"socket path   {paths['socket']}")
+        del priv
+        return 0
+    socket_path = Path(args.socket) if args.socket else paths["socket"]
+    print(f"orch-audit-capabilityd listening on {socket_path}", flush=True)
+    run_socket_server(socket_path=socket_path, init_keys=False)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
