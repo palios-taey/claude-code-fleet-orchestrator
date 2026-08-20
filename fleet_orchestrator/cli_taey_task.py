@@ -233,30 +233,17 @@ def cmd_dispatch(args):
             file=sys.stderr,
         )
 
-    from fleet_orchestrator.dispatch import (
-        BugLockActive,
-        HooksNotInstalled,
-        OrchTaskNotReady,
-        WorkerBusy,
-        dispatch as dispatch_task,
+    api_call(
+        "POST",
+        f"/api/sessions/{args.peer}/notify",
+        data={
+            "dispatch": True,
+            "task_id": task_id,
+            "from": sender,
+            "priority": args.priority,
+            "force": bool(args.force),
+        },
     )
-
-    try:
-        dispatch_task(
-            worker=args.peer,
-            task_id=task_id,
-            description=description,
-            supervisor=sender,
-            priority=args.priority,
-            force=bool(args.force),
-        )
-    except (BugLockActive, HooksNotInstalled, OrchTaskNotReady, WorkerBusy, RuntimeError) as exc:
-        print(
-            f"ERROR: dispatch failed: {exc}. "
-            f"Inspect with `taey-task status {task_id}` or retry `taey-task dispatch {task_id} {args.peer}`.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
 
     print(f"OK: dispatched {task_id} -> {args.peer} (by {sender})")
 

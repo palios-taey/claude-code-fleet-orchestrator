@@ -14,8 +14,8 @@ Registry rules:
 
 Summary:
 
-- Enumerated surfaces: 261.
-- Teaches: 128.
+- Enumerated surfaces: 260.
+- Teaches: 127.
 - Needs-fix baseline debt: 48.
 - Exempt reviewed rows: 85.
 
@@ -50,7 +50,6 @@ Summary:
 | fleet_orchestrator/cli_taey_task.py | cmd_dispatch | cli_failure_message | 2 | 141 | f1e8f1505630373a | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_task.py | cmd_dispatch | cli_failure_message | 3 | 146 | 6ffaf4faed9b64dc | teaches | taey-task | Static teaching assertion passes. | task-4332d8d5 |
 | fleet_orchestrator/cli_taey_task.py | cmd_dispatch | cli_failure_message | 4 | 154 | 755ac58892c02c46 | teaches | taey-task | Static teaching assertion passes. | task-4332d8d5 |
-| fleet_orchestrator/cli_taey_task.py | cmd_dispatch | cli_failure_message | 5 | 177 | 4193eec112f298af | teaches | taey-task | Static teaching assertion passes. | task-4332d8d5 |
 | fleet_orchestrator/cli_taey_task.py | cmd_list | cli_empty_state_message | 1 | 93 | fcad575660346a31 | needs-fix |  | Baseline non-teaching surface; follow-up must add explicit in-band next step. | baseline-pr171 |
 | fleet_orchestrator/cli_taey_task.py | cmd_remove_dependency | cli_failure_message | 1 | 229 | 0f1cd4262a1ee9a8 | exempt |  | Thin CLI wrapper relays the API error body from remove_task_dependency; the endpoint rows carry the actionable next-step text. | task-ea95c040:thin-cli-wrapper |
 | fleet_orchestrator/cli_taey_task.py | cmd_status | cli_failure_message | 1 | 106 | 15ac09e58ff7b290 | needs-fix |  | Baseline dynamic surface not statically proven to teach; follow-up must add explicit in-band next step or reviewed evidence. | baseline-pr171 |
