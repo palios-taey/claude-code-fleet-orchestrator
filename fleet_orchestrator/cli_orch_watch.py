@@ -106,6 +106,7 @@ from fleet_orchestrator.notify_state import (
     key_prefix as notify_key_prefix,
     state_key as notify_state_key,
 )
+from fleet_orchestrator.session_topology import configured_supervisor_for_session
 
 import redis as redis_lib
 
@@ -269,12 +270,16 @@ def resolve_supervisor(r, node_id: str, task: Optional[dict] = None) -> Optional
     """Resolve the deliverable supervisor for a worker alert.
 
     Current-task payloads are the dispatch contract, so their supervisor or
-    dispatcher wins over legacy parent/suffix fallback. A local hostname fallback
-    is ignored unless it is also configured or visible as a real local session.
+    dispatcher wins over configured control-principal topology, then legacy
+    parent/suffix fallback. A local hostname fallback is ignored unless it is
+    also configured or visible as a real local session.
     """
     candidates: list[object] = []
     if isinstance(task, dict):
         candidates.extend([task.get("supervisor"), task.get("dispatcher")])
+    configured = configured_supervisor_for_session(node_id, OrchConfig().session_ids)
+    if configured:
+        candidates.append(configured)
     try:
         explicit = r.get(state_key(node_id, "parent"))
         if explicit:
