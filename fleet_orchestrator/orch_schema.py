@@ -104,6 +104,7 @@ _PAUSE_SOURCES = {"ui", "cli", "api", "user_command_explicit"}
 _REF_READ_BYTE_CAP = 1024 * 1024
 _COMPLETION_EVIDENCE_KEYS = ("commit_sha", "gate_run_id", "production_observation")
 _COMPLETION_EVIDENCE_CONTEXT_KEYS = ("repo",)
+_COMPLETION_AUDIT_RECEIPT_KEY = "audit_receipt"
 _COMPLETION_SUPERVISOR_VERIFICATION_KEY = "supervisor_verification"
 _NON_SUCCESS_TERMINAL_EVIDENCE_KEYS = ("reason", "error", "production_observation")
 # Closed set of legal task statuses. Validated BEFORE any completed-specific logic so a
@@ -258,6 +259,9 @@ def _evidence_value_well_formed(key: str, text: str) -> bool:
         )
     if key == "gate_run_id":
         return len(text) >= 3 and all(c.isalnum() or c in "._:-/" for c in text)
+    if key == _COMPLETION_AUDIT_RECEIPT_KEY:
+        # Absolute path under an approved recovery root; full sealed checks run in verifier.
+        return text.startswith("/") and len(text) >= 8 and ".." not in text.split("/")
     if key == "production_observation":
         return len(text) >= 8
     return False
@@ -409,12 +413,18 @@ def _normalize_completion_evidence(
         return None
     if not isinstance(evidence, dict):
         raise CompletionEvidenceError(f"The completion-evidence check is a shape/plausibility filter (self-reported claim, not verified provenance). completion evidence must be a JSON object. {COMPLETED_EVIDENCE_NEXT_STEP}")
+    from .audit_completion import AuditContractError, assert_no_audit_override_in_evidence
+
+    try:
+        assert_no_audit_override_in_evidence(evidence)
+    except AuditContractError as exc:
+        raise CompletionEvidenceError(f"{exc}. {COMPLETED_EVIDENCE_NEXT_STEP}") from exc
     normalized: Dict[str, Any] = {}
     delivery_gate_evidence: Dict[str, Any] = {}
     if delivery_gate:
         delivery_gate_evidence = _normalize_delivery_gate_evidence(evidence)
         normalized.update(delivery_gate_evidence)
-    for key in _COMPLETION_EVIDENCE_KEYS + _COMPLETION_EVIDENCE_CONTEXT_KEYS:
+    for key in _COMPLETION_EVIDENCE_KEYS + _COMPLETION_EVIDENCE_CONTEXT_KEYS + (_COMPLETION_AUDIT_RECEIPT_KEY,):
         value = evidence.get(key)
         if value is None:
             continue
@@ -435,7 +445,8 @@ def _normalize_completion_evidence(
             raise CompletionEvidenceError(
                 "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. "
                 f"completion evidence {key!r}={text!r} is not well-formed "
-                f"(commit_sha=4-64 hex, repo=OWNER/REPO, gate_run_id>=3 id-chars, production_observation>=8 chars). "
+                f"(commit_sha=4-64 hex, repo=OWNER/REPO, gate_run_id>=3 id-chars, production_observation>=8 chars, "
+                f"audit_receipt=absolute path). "
                 f"{COMPLETED_EVIDENCE_NEXT_STEP}"
             )
         normalized[key] = text
@@ -461,10 +472,11 @@ def _normalize_completion_evidence(
         and "outbound_actions" not in normalized
         and _COMPLETION_SUPERVISOR_VERIFICATION_KEY not in normalized
         and "loop_proof" not in normalized
+        and _COMPLETION_AUDIT_RECEIPT_KEY not in normalized
     ):
         raise CompletionEvidenceError(
             "The completion-evidence check is a shape/plausibility filter; provenance is recorded separately as VERIFIED/UNVERIFIED. completed status requires evidence with at least one of: "
-            f"commit_sha, gate_run_id, production_observation, loop_proof, supervisor_verification, or outbound_actions with signoff gate_pass provenance. Optional repo=OWNER/REPO selects the GitHub repository for commit verification. {COMPLETED_EVIDENCE_NEXT_STEP}"
+            f"commit_sha, gate_run_id, production_observation, loop_proof, supervisor_verification, audit_receipt, or outbound_actions with signoff gate_pass provenance. Optional repo=OWNER/REPO selects the GitHub repository for commit verification. {COMPLETED_EVIDENCE_NEXT_STEP}"
         )
     return normalized
 
@@ -3003,9 +3015,22 @@ def create_task(
     initial_status: str = "pending",
     wake_owner_if_ready: bool = True,
     delivery_gate: Optional[bool] = None,
+    *,
+    completion_class: str = "standard",
+    audit_repo: Optional[str] = None,
+    audit_head: Optional[str] = None,
+    audit_base: Optional[str] = None,
+    audit_required_context: Optional[str] = None,
+    audit_required_state: Optional[str] = None,
     config: Optional[OrchConfig] = None,
 ) -> str:
-    """Create an OrchTask linked to a phase."""
+    """Create an OrchTask linked to a phase.
+
+    Audit pins (completion_class=audit + repo/head/base/context/state) are written
+    only on node creation and are immutable thereafter. Status IDs are never set here.
+    """
+    from .audit_completion import AuditContractError, normalize_creation_pins
+
     delivery_gate_enabled = bool(delivery_gate)
     if initial_status in _VALID_TASK_STATUSES:
         _validate_terminal_status_write(initial_status, None, delivery_gate=delivery_gate_enabled)
@@ -3013,6 +3038,22 @@ def create_task(
         raise CompletionEvidenceError(
             "terminal initial status is not accepted; create the task pending and complete it through the evidence-gated task API"
         )
+    try:
+        pins = normalize_creation_pins(
+            completion_class=completion_class,
+            audit_repo=audit_repo,
+            audit_head=audit_head,
+            audit_base=audit_base,
+            audit_required_context=audit_required_context,
+            audit_required_state=audit_required_state,
+        )
+    except AuditContractError as exc:
+        raise CompletionEvidenceError(
+            f"{exc}. Next step: create audit tasks with completion_class/repo/head/base/"
+            "context/state only via create_task or POST /api/task/create; never set "
+            "audit_bound_status_id at creation — bind later with "
+            "POST /api/tasks/{task_id}/bind-audit-status."
+        ) from exc
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     with driver.session(database=cfg.neo4j_db) as session:
@@ -3028,7 +3069,14 @@ def create_task(
             ON CREATE SET t.created_at = datetime(),
                           t.status = $initial_status,
                           t.owner = $owner,
-                          t.forced_continuation_count = 0
+                          t.forced_continuation_count = 0,
+                          t.completion_class = $completion_class,
+                          t.audit_repo = $audit_repo,
+                          t.audit_head = $audit_head,
+                          t.audit_base = $audit_base,
+                          t.audit_required_context = $audit_required_context,
+                          t.audit_required_state = $audit_required_state,
+                          t.audit_bound_status_id = NULL
             SET t.description = $description,
                 t.priority = $priority,
                 t.owner = $owner,
@@ -3074,6 +3122,12 @@ def create_task(
             heartbeat_exempt_secs=heartbeat_exempt_secs,
             initial_status=initial_status,
             delivery_gate=delivery_gate,
+            completion_class=pins["completion_class"],
+            audit_repo=pins["audit_repo"],
+            audit_head=pins["audit_head"],
+            audit_base=pins["audit_base"],
+            audit_required_context=pins["audit_required_context"],
+            audit_required_state=pins["audit_required_state"],
         )
         record = result.single()
         if record is None:
@@ -3334,6 +3388,113 @@ def _clear_matching_current_task(owner: str, task_id: str, config: Optional[Orch
     )
 
 
+def bind_audit_status_on_task(
+    task_id: str,
+    *,
+    status_id: int,
+    pr_head_sha: str,
+    pr_base_sha: str,
+    config: Optional[OrchConfig] = None,
+) -> Dict[str, Any]:
+    """Compare-once supervisor/internal bind of concrete GitHub status ID.
+
+    Pins (class/repo/head/base/context/state) must already exist on OrchTask from
+    trusted creation. This transition queries the status provider + exact PR
+    provenance, then writes ``audit_bound_status_id`` once. Ordinary create/evidence
+    cannot select or overwrite the bound ID.
+    """
+    from .audit_completion import AuditContractError, compare_once_bind_status
+
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            RETURN t.completion_class AS completion_class,
+                   t.audit_repo AS audit_repo,
+                   t.audit_head AS audit_head,
+                   t.audit_base AS audit_base,
+                   t.audit_required_context AS audit_required_context,
+                   t.audit_required_state AS audit_required_state,
+                   t.audit_bound_status_id AS audit_bound_status_id
+            """,
+            task_id=task_id,
+        ).single()
+        bind_next = (
+            f"Next step: POST /api/tasks/{task_id}/bind-audit-status with "
+            '{"status_id":<int>,"pr_head_sha":"<40-hex>","pr_base_sha":"<40-hex>"}; '
+            f"inspect with GET /api/tasks/{task_id} or `taey-task status {task_id}`."
+        )
+        if row is None:
+            raise CompletionEvidenceError(
+                f"task '{task_id}' not found for audit status bind. {bind_next}"
+            )
+        task = dict(row)
+        try:
+            bind = compare_once_bind_status(
+                task,
+                status_id=int(status_id),
+                pr_head_sha=pr_head_sha,
+                pr_base_sha=pr_base_sha,
+            )
+        except AuditContractError as exc:
+            raise CompletionEvidenceError(f"{exc}. {bind_next}") from exc
+        if bind.get("already_bound"):
+            return {"ok": True, "task_id": task_id, **bind}
+        # Compare-once CAS: only write when still unbound.
+        cas = session.run(
+            """
+            MATCH (t:OrchTask {id: $task_id})
+            WHERE t.completion_class = 'audit'
+              AND t.audit_bound_status_id IS NULL
+            SET t.audit_bound_status_id = $status_id,
+                t.updated_at = datetime()
+            RETURN t.audit_bound_status_id AS audit_bound_status_id
+            """,
+            task_id=task_id,
+            status_id=int(status_id),
+        ).single()
+        if cas is None:
+            # Re-read: either race lost to another binder or class changed.
+            again = session.run(
+                """
+                MATCH (t:OrchTask {id: $task_id})
+                RETURN t.audit_bound_status_id AS audit_bound_status_id,
+                       t.completion_class AS completion_class
+                """,
+                task_id=task_id,
+            ).single()
+            if again is None:
+                raise CompletionEvidenceError(
+                    f"task '{task_id}' disappeared during audit status bind. {bind_next}"
+                )
+            existing = again.get("audit_bound_status_id")
+            if existing is not None and int(existing) == int(status_id):
+                return {
+                    "ok": True,
+                    "task_id": task_id,
+                    "already_bound": True,
+                    "audit_bound_status_id": int(status_id),
+                }
+            raise CompletionEvidenceError(
+                f"compare-once bind lost race or refused overwrite: "
+                f"existing audit_bound_status_id={existing!r} "
+                f"completion_class={again.get('completion_class')!r}. {bind_next}"
+            )
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "already_bound": False,
+            "audit_bound_status_id": int(cas["audit_bound_status_id"]),
+            "context": bind.get("context"),
+            "state": bind.get("state"),
+            "repo": bind.get("repo"),
+            "head": bind.get("head"),
+            "base": bind.get("base"),
+        }
+
+
 def update_task_status(task_id: str, status: str, owner: str = "",
                        result: Optional[str] = None,
                        blocked_on: Optional[str] = None,
@@ -3367,8 +3528,30 @@ def update_task_status(task_id: str, status: str, owner: str = "",
             delivery_gate=delivery_gate,
         )
         completed_by_value = completed_by or owner or ""
+        # Trusted audit contract loads from OrchTask only; evidence cannot select/overwrite pins.
+        trusted_task_audit: Optional[Dict[str, Any]] = None
+        if status == "completed":
+            ta = session.run(
+                """
+                MATCH (t:OrchTask {id: $task_id})
+                RETURN t.completion_class AS completion_class,
+                       t.audit_repo AS audit_repo,
+                       t.audit_head AS audit_head,
+                       t.audit_base AS audit_base,
+                       t.audit_required_context AS audit_required_context,
+                       t.audit_required_state AS audit_required_state,
+                       t.audit_bound_status_id AS audit_bound_status_id
+                """,
+                task_id=task_id,
+            ).single()
+            if ta is not None:
+                trusted_task_audit = dict(ta)
         completion_verification_value = (
-            verify_completion_evidence(completion_evidence_value, producer=completed_by_value)
+            verify_completion_evidence(
+                completion_evidence_value,
+                producer=completed_by_value,
+                trusted_task=trusted_task_audit,
+            )
             if status == "completed"
             else None
         )

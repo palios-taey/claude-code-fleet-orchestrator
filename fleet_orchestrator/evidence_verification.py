@@ -578,13 +578,48 @@ def verify_completion_evidence(
     evidence: Optional[Dict[str, Any]],
     *,
     producer: str = "",
+    trusted_task: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
+    """Verify completion evidence.
+
+    Audit-class completion is driven ONLY from trusted OrchTask metadata
+    (``trusted_task`` loaded by the caller). Evidence may supply ``audit_receipt``
+    but cannot select ``completion_class`` or overwrite pins/status IDs.
+    """
     if not isinstance(evidence, dict) or not evidence:
         return None
     if "loop_proof" in evidence:
         verification = verify_loop_proof_receipt(evidence, producer=producer)
         verification["applies"] = True
         return verification
+
+    from .audit_completion import (
+        AuditContractError,
+        assert_no_audit_override_in_evidence,
+        is_audit_task,
+        verify_audit_completion,
+    )
+
+    try:
+        assert_no_audit_override_in_evidence(evidence)
+    except AuditContractError as exc:
+        return _unverified(
+            str(exc),
+            producer=producer,
+            reject_completion=True,
+        )
+
+    if is_audit_task(trusted_task):
+        return verify_audit_completion(trusted_task or {}, evidence, producer=producer)
+
+    if str(evidence.get("audit_receipt") or "").strip():
+        return _unverified(
+            "audit_receipt is only valid when trusted OrchTask.completion_class=audit "
+            "(loaded by verifier; evidence cannot self-select audit completion)",
+            producer=producer,
+            reject_completion=True,
+        )
+
     commit_sha = str(evidence.get("commit_sha") or "").strip()
     repo = repo_from_completion_evidence(evidence)
     checks = required_github_checks_for_repo(repo) if repo else required_github_checks()
