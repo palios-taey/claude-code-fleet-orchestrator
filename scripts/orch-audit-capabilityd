@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Deployable distinct-UID issuer for audit supervisor capabilities.
+
+Principal = SO_PEERCRED uid mapped via ORCH_AUDIT_CAPABILITY_UID_MAP.
+tmux / ORCH_SESSION_ID are not authority.
+
+systemd socket activation: consume LISTEN_FDS; do not unlink/rebind issuer.sock.
+
+Usage:
+  orch-audit-capabilityd --init-keys
+  orch-audit-capabilityd --serve
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from fleet_orchestrator.audit_capability_issuer import (  # noqa: E402
+    assert_private_key_ownership,
+    load_uid_principal_map,
+    run_socket_server,
+)
+from fleet_orchestrator.audit_supervisor_capability import (  # noqa: E402
+    default_key_paths,
+    write_keypair_files,
+)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Audit supervisor capability issuer daemon")
+    parser.add_argument("--socket", default="", help="Unix socket path (ignored when LISTEN_FDS is set)")
+    parser.add_argument(
+        "--init-keys",
+        action="store_true",
+        help="Generate Ed25519 private(0600)/public(0644) key files and exit",
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Run the unix-socket issuer (default when not --init-keys)",
+    )
+    args = parser.parse_args()
+    paths = default_key_paths()
+    if args.init_keys:
+        write_keypair_files(paths["private"], paths["public"])
+        assert_private_key_ownership(paths["private"])
+        print(f"wrote private {paths['private']} mode 0600 (owner must be issuer uid)")
+        print(f"wrote public  {paths['public']} mode 0644")
+        print(f"socket path   {paths['socket']}")
+        print("provision ORCH_AUDIT_CAPABILITY_UID_MAP before --serve")
+        return 0
+    load_uid_principal_map()
+    socket_path = Path(args.socket) if args.socket else paths["socket"]
+    print(
+        f"orch-audit-capabilityd serving {socket_path} "
+        f"(LISTEN_FDS={__import__('os').environ.get('LISTEN_FDS') or '0'}; "
+        "principal=peer uid map; environ/tmux ignored)",
+        flush=True,
+    )
+    run_socket_server(socket_path=socket_path, init_keys=False)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
