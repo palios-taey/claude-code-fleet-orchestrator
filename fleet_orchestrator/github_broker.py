@@ -107,6 +107,9 @@ def load_control_sessions() -> set[str]:
     return {part.strip() for part in raw.replace(";", ",").split(",") if part.strip()}
 
 
+DEFAULT_CONTROL_CGROUP = "/system.slice/fleet-orchestrator-api.service"
+
+
 def peer_cmdline(pid: int) -> bytes:
     try:
         return Path(f"/proc/{int(pid)}/cmdline").read_bytes()
@@ -114,22 +117,48 @@ def peer_cmdline(pid: int) -> bytes:
         return b""
 
 
-def process_is_orch_api_controller(pid: int) -> bool:
-    """True for the systemd API daemon (uvicorn tasks_api). No TTY required.
+def peer_cgroup_path(pid: int) -> str:
+    """Return the unified cgroup path for pid (kernel credential, not argv)."""
+    try:
+        text = Path(f"/proc/{int(pid)}/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        if line.startswith("0::"):
+            return line[3:].strip()
+        if ":name=systemd:" in line:
+            return line.split(":name=systemd:", 1)[1].strip()
+    return ""
 
-    Workers and gh-outward never match. This is the production mint caller.
-    """
-    raw = peer_cmdline(pid)
-    if b"gh-outward" in raw or b"worker-mint-probe" in raw:
+
+def cgroup_is_control_principal(cgroup: str, required: str) -> bool:
+    """Match a systemd unit cgroup at a path boundary, not a cmdline substring."""
+    cg = str(cgroup or "").strip()
+    req = str(required or "").strip()
+    if not cg or not req:
         return False
-    return b"uvicorn" in raw and b"tasks_api" in raw
+    if cg == req:
+        return True
+    return cg.endswith("/" + req.lstrip("/"))
+
+
+def process_is_orch_api_controller(pid: int) -> bool:
+    """True when the peer is the systemd API unit cgroup.
+
+    Same-UID workers cannot join ``system.slice/fleet-orchestrator-api.service``.
+    Cmdline strings are not identity.
+    """
+    required = str(
+        os.environ.get("ORCH_GITHUB_BROKER_CONTROL_CGROUP") or DEFAULT_CONTROL_CGROUP
+    ).strip()
+    return cgroup_is_control_principal(peer_cgroup_path(pid), required)
 
 
 def peer_is_control_principal(pid: int, uid: int = 0, mapping: Optional[dict[str, set[int]]] = None) -> bool:
-    """Control mint/revoke: API daemon cmdline, or supervisor TTY.
+    """Control mint/revoke: systemd API cgroup, or supervisor TTY.
 
-    Actual topology: seats share uid 1000. The systemd API process has no
-    TTY, so TTY-only checks deny the production caller. Workers cannot mint.
+    The production caller is the system API unit (no TTY). Workers in a
+    tmux scope cannot mint even if they spoof uvicorn argv.
     """
     del uid, mapping
     if process_is_orch_api_controller(pid):

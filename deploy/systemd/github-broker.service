@@ -6,10 +6,9 @@
 #   groupadd --system github-workers
 #   groupadd --system github-control
 #   # Do NOT usermod -aG github-control mira: every seat is uid mira.
-#   # Only the orchestrator API unit gets SupplementaryGroups=github-control
-#   # (see fleet-orchestrator-api-gatea.service). Worker tmux seats do not
-#   # inherit that group. Control mint also requires the API cmdline
-#   # (uvicorn + tasks_api) or a supervisor TTY.
+#   # Only the SYSTEM unit fleet-orchestrator-api.service gets
+#   # SupplementaryGroups=github-control. Control mint is that unit's
+#   # cgroup (/system.slice/fleet-orchestrator-api.service), not argv.
 #
 # Socket modes (mechanically required; 0600 is owner-only and cannot be
 # opened by uid mira even with a supplementary group):

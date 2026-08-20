@@ -47,12 +47,14 @@ revoke, or a handle. Production deploy (CONTROL) runs the daemon as Unix user
 `github-workers` only. See `deploy/systemd/github-broker.service`. This
 repository does not enable that unit.
 
-Observed live: seats share uid 1000. Control mint is the systemd API
-daemon (`uvicorn` + `tasks_api`, no TTY) or a supervisor TTY. Only the
-API unit joins `SupplementaryGroups=github-control`; mira is not added
-to that group globally. Isolated tests prove a no-TTY API cmdline can
-mint, a worker cmdline cannot, and a non-API caller cannot. Same-UID
-ptrace remains a residual until distinct OS principals.
+Observed live: seats share uid 1000. Control mint is the **system** unit
+`deploy/systemd/fleet-orchestrator-api.service` cgroup
+`/system.slice/fleet-orchestrator-api.service` (kernel `/proc/PID/cgroup`,
+not argv). Same-UID workers in `user.slice`/`tmux-spawn` cannot join that
+cgroup. That system unit alone gets `SupplementaryGroups=github-control`.
+The `systemctl --user` API unit is not the control principal. Isolated
+tests prove a systemd unit cgroup can mint and a same-UID uvicorn argv
+spoof in a tmux scope cannot.
 
 ## Threat model
 

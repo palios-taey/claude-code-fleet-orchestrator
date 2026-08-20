@@ -202,7 +202,7 @@ def main() -> int:
     )
     github_broker_mod.session_from_peer_pid = lambda pid: ""
     _check(
-        "empty TTY without API cmdline cannot mint",
+        "empty TTY without API cgroup cannot mint",
         not peer_is_control_principal(os.getpid()),
     )
     github_broker_mod.session_from_peer_pid = orig_peer
@@ -210,14 +210,32 @@ def main() -> int:
         os.environ.pop("ORCH_GITHUB_BROKER_CONTROL_SESSIONS", None)
     else:
         os.environ["ORCH_GITHUB_BROKER_CONTROL_SESSIONS"] = prior_controls
-    api_unit = (ROOT / "deploy" / "systemd" / "fleet-orchestrator-api-gatea.service").read_text(
+    sys_api_unit = (ROOT / "deploy" / "systemd" / "fleet-orchestrator-api.service").read_text(
+        encoding="utf-8"
+    )
+    user_api_unit = (ROOT / "deploy" / "systemd" / "fleet-orchestrator-api-gatea.service").read_text(
         encoding="utf-8"
     )
     broker_unit = (ROOT / "deploy" / "systemd" / "github-broker.service").read_text(encoding="utf-8")
     _check(
-        "API unit is the github-control supplementary group",
-        "SupplementaryGroups=github-control" in api_unit,
-        api_unit,
+        "system API unit is multi-user.target",
+        "WantedBy=multi-user.target" in sys_api_unit,
+        sys_api_unit,
+    )
+    _check(
+        "system API unit documents system.slice cgroup",
+        "system.slice/fleet-orchestrator-api.service" in sys_api_unit,
+        sys_api_unit,
+    )
+    _check(
+        "system API unit joins github-control",
+        "SupplementaryGroups=github-control" in sys_api_unit,
+        sys_api_unit,
+    )
+    _check(
+        "user API unit is not the github-control principal",
+        "SupplementaryGroups=github-control" not in user_api_unit,
+        user_api_unit,
     )
     _check(
         "broker unit forbids usermod mira into github-control",
@@ -225,7 +243,7 @@ def main() -> int:
         broker_unit,
     )
     _check(
-        "this test process is not the API controller cmdline",
+        "this tmux worker cgroup is not the API controller",
         not process_is_orch_api_controller(os.getpid()),
     )
     try:
@@ -381,6 +399,9 @@ def main() -> int:
         base_env["PYTHONPATH"] = str(Path(tmp)) + os.pathsep + str(ROOT)
         base_env["ORCH_GITHUB_BROKER_WORKER_UIDS"] = str(os.getuid())
         base_env["ORCH_GITHUB_BROKER_CONTROL_SESSIONS"] = supervisor
+        api_unit_name = f"t7107-api-{os.getpid()}"
+        control_cgroup = f"app.slice/{api_unit_name}.service"
+        base_env["ORCH_GITHUB_BROKER_CONTROL_CGROUP"] = control_cgroup
 
         broker_env = dict(base_env)
         broker_proc = _start_broker(broker_env, socket_path)
@@ -455,13 +476,38 @@ def main() -> int:
                 task_id=victim_task,
             )
             _check(
-                "non-API caller cannot mint (no uvicorn tasks_api cmdline)",
+                "non-API caller cannot mint (tmux cgroup, not API unit)",
                 int(direct_mint.get("rc") or 0) != 0
                 and "control principal not mapped" in str(direct_mint.get("stderr") or ""),
                 direct_mint,
             )
+            spoof = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import json,sys; sys.path.insert(0, sys.argv[1]); from fleet_orchestrator.github_broker import call_broker; "
+                    f"print(json.dumps(call_broker({str(control_socket)!r}, op='mint', session={victim!r}, task_id={victim_task!r})))",
+                    str(ROOT),
+                    "uvicorn",
+                    "fleet_orchestrator.tasks_api:app",
+                ],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PYTHONPATH": str(ROOT)},
+                check=False,
+            )
+            try:
+                spoof_payload = json.loads(spoof.stdout or "{}")
+            except json.JSONDecodeError:
+                spoof_payload = {"stdout": spoof.stdout, "stderr": spoof.stderr}
+            _check(
+                "same-UID uvicorn argv spoof cannot mint (wrong cgroup)",
+                int(spoof_payload.get("rc") or 0) != 0
+                and "control principal not mapped" in str(spoof_payload.get("stderr") or ""),
+                spoof_payload,
+            )
 
-            api_script = Path(tmp) / "no_tty_uvicorn_tasks_api.py"
+            api_script = Path(tmp) / "controller_bind.py"
             api_script.write_text(
                 "import json, os, sys\n"
                 f"sys.path.insert(0, {str(ROOT)!r})\n"
@@ -496,24 +542,25 @@ def main() -> int:
             )
 
             def run_api_controller(op: str) -> dict:
+                pythonpath = str(Path(tmp)) + os.pathsep + str(ROOT)
                 result = subprocess.run(
                     [
+                        "systemd-run",
+                        "--user",
+                        "--pipe",
+                        "--wait",
+                        "--collect",
+                        "--quiet",
+                        f"--unit={api_unit_name}",
+                        f"--setenv=PYTHONPATH={pythonpath}",
+                        f"--setenv=ORCH_GITHUB_BROKER_CONTROL_SOCKET={control_socket}",
+                        f"--setenv=ORCH_GITHUB_BROKER_CONTROL_SESSIONS={supervisor}",
                         sys.executable,
                         str(api_script),
                         op,
-                        "uvicorn",
-                        "fleet_orchestrator.tasks_api:app",
                     ],
                     capture_output=True,
                     text=True,
-                    stdin=subprocess.DEVNULL,
-                    start_new_session=True,
-                    env={
-                        **os.environ,
-                        "PYTHONPATH": str(Path(tmp)) + os.pathsep + str(ROOT),
-                        "ORCH_GITHUB_BROKER_CONTROL_SOCKET": str(control_socket),
-                        "ORCH_GITHUB_BROKER_CONTROL_SESSIONS": supervisor,
-                    },
                     check=False,
                 )
                 try:
@@ -531,7 +578,7 @@ def main() -> int:
 
             no_tty_mint = run_api_controller("mint")
             _check(
-                "no-TTY API cmdline can mint",
+                "systemd API cgroup can mint with no TTY",
                 bool(no_tty_mint.get("handle")) and no_tty_mint.get("tty") is False,
                 no_tty_mint,
             )
@@ -539,7 +586,7 @@ def main() -> int:
             handle_out = run_api_controller("bind")
             handle = str(handle_out.get("handle") or "")
             _check(
-                "no-TTY API bind_current_task minted handle via control",
+                "systemd API cgroup bind_current_task minted handle",
                 bool(handle) and handle_out.get("tty") is False,
                 handle_out,
             )
@@ -675,7 +722,7 @@ def main() -> int:
             )
             lifecycle_out = run_api_controller("mint")
             _check(
-                "production mint helper returns a handle from no-TTY API",
+                "production mint helper returns a handle from API cgroup",
                 bool(lifecycle_out.get("handle")) and lifecycle_out.get("tty") is False,
                 lifecycle_out,
             )
