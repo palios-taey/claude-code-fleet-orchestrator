@@ -578,6 +578,8 @@ def _claim_ready_orch_task(task_id: str, worker: str, *,
                 t.dispatch_claim_prior_status = prior_status,
                 t.dispatch_claim_prior_owner = prior_owner,
                 t.dispatch_claim_prior_dispatched_to = prior_dispatched_to,
+                t.unbind_tombstone_session = NULL,
+                t.unbind_tombstone_started_at = NULL,
                 t.blocked_on = NULL,
                 t.reclaim_count = CASE
                     WHEN prior_status = 'completed' THEN coalesce(t.reclaim_count, 0) + 1
@@ -904,6 +906,8 @@ def _mark_in_progress_best_effort(task_id: str, worker: str) -> bool:
             SET t.status = 'in_progress',
                 t.owner = $owner,
                 t.dispatched_to = $worker,
+                t.unbind_tombstone_session = NULL,
+                t.unbind_tombstone_started_at = NULL,
                 t.blocked_on = NULL,
                 t.updated_at = datetime()
             RETURN t.id AS task_id

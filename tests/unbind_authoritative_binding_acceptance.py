@@ -296,6 +296,48 @@ def main() -> int:
         if isinstance(live, bytes):
             live = live.decode()
         _check("mismatched/new bind left untouched", live == new_bind, live)
+
+        # Endpoint-level hole: graph already pending; Redis holds a NEWER bind.
+        # HTTP DELETE must 409 and preserve superseding current_task/outcome/liveness.
+        _cleanup()
+        create_project(PROJECT, "unbind binding", supervisor=SUP, priority=10, config=CFG)
+        create_phase(PROJECT, PHASE, "phase", config=CFG)
+        create_task(PHASE, TASK, "bound work", owner=SUP, priority=1, config=CFG)
+        old_started = _seed_bound()
+        old_raw = R.get(state_key(PEER, "current_task"))
+        if isinstance(old_raw, bytes):
+            old_raw = old_raw.decode()
+        tasks_api_mod._clear_exact_session_unbind_redis = _boom  # type: ignore[assignment]
+        try:
+            CLIENT.delete(f"/api/sessions/{PEER}/current-task")
+        finally:
+            tasks_api_mod._clear_exact_session_unbind_redis = real_clear  # type: ignore[assignment]
+        # Graph pending with tombstone for old_started; install superseding Redis bind
+        new_started = old_started + 1000.0
+        R.set(
+            state_key(PEER, "current_task"),
+            f'{{"task_id":"{TASK}","description":"superseding","supervisor":"{SUP}","started_at":{new_started}}}',
+        )
+        R.set(state_key(PEER, "last_outcome"), '{"outcome":"keep","details":"probe"}')
+        R.set(worker_task_liveness_key(TASK), '{"worker":"keep-liv","task_id":"%s"}' % TASK)
+        blocked = CLIENT.delete(f"/api/sessions/{PEER}/current-task")
+        _check(
+            "HTTP retry with superseding bind is 409",
+            blocked.status_code == 409,
+            blocked.json(),
+        )
+        cur = R.get(state_key(PEER, "current_task"))
+        if isinstance(cur, bytes):
+            cur = cur.decode()
+        _check("superseding current_task preserved", cur is not None and f'"started_at":{new_started}' in cur, cur)
+        out = R.get(state_key(PEER, "last_outcome"))
+        if isinstance(out, bytes):
+            out = out.decode()
+        _check("superseding last_outcome preserved", out is not None and "keep" in out, out)
+        liv = R.get(worker_task_liveness_key(TASK))
+        if isinstance(liv, bytes):
+            liv = liv.decode()
+        _check("superseding liveness preserved", liv is not None and "keep-liv" in liv, liv)
     finally:
         clear_worker_task_liveness(TASK, config=CFG)
         _cleanup()

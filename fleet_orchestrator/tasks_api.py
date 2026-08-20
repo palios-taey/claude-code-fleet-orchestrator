@@ -1817,6 +1817,10 @@ async def clear_pause_session_endpoint(session_id: str, req: Request) -> Dict[st
 
 
 def _unbind_graph_set_clause() -> str:
+    # Persist bind tombstone on first graph mutation so a later HTTP retry can
+    # CAS-clear only that exact Redis bind (session + started_at), not a newer
+    # superseding bind. Tombstone is NOT cleared on Redis success — next dispatch
+    # supersedes it to avoid a cross-store partial-failure window.
     return """
             SET t.status = 'pending',
                 t.dispatched_to = NULL,
@@ -1828,6 +1832,8 @@ def _unbind_graph_set_clause() -> str:
                 t.worker_liveness_ack_at = NULL,
                 t.worker_liveness_escalated_at = NULL,
                 t.worker_liveness_escalation_reason = NULL,
+                t.unbind_tombstone_session = $tombstone_session,
+                t.unbind_tombstone_started_at = $tombstone_started_at,
                 t.updated_at = datetime()
             RETURN prior_status,
                    prior_owner,
@@ -1844,7 +1850,9 @@ def _unbind_graph_set_clause() -> str:
                    t.status AS status,
                    t.owner AS owner,
                    t.dispatched_to AS dispatched_to,
-                   t.worker_liveness_worker AS worker_liveness_worker
+                   t.worker_liveness_worker AS worker_liveness_worker,
+                   t.unbind_tombstone_session AS unbind_tombstone_session,
+                   t.unbind_tombstone_started_at AS unbind_tombstone_started_at
     """
 
 
@@ -1876,7 +1884,9 @@ def _observe_unbind_task(session, task_id: str) -> Optional[Dict[str, Any]]:
                t.dispatched_to AS dispatched_to,
                t.blocked_on AS blocked_on,
                t.worker_liveness_worker AS worker_liveness_worker,
-               t.worker_liveness_started_at AS worker_liveness_started_at
+               t.worker_liveness_started_at AS worker_liveness_started_at,
+               t.unbind_tombstone_session AS unbind_tombstone_session,
+               t.unbind_tombstone_started_at AS unbind_tombstone_started_at
         """,
         task_id=task_id,
     ).single()
@@ -1890,6 +1900,24 @@ def _already_reconciled_unbind_state(state: Dict[str, Any]) -> bool:
         and not state.get("worker_liveness_worker")
         and state.get("worker_liveness_started_at") is None
     )
+
+
+def _tombstone_matches_bind(
+    state: Dict[str, Any],
+    *,
+    session_id: str,
+    started_at: float,
+) -> bool:
+    tombstone_session = str(state.get("unbind_tombstone_session") or "").strip()
+    tombstone_started = state.get("unbind_tombstone_started_at")
+    if tombstone_session != session_id:
+        return False
+    if tombstone_started is None or started_at is None:
+        return False
+    try:
+        return float(tombstone_started) == float(started_at)
+    except (TypeError, ValueError):
+        return False
 
 
 def _reconcile_session_unbind_graph(
@@ -1907,6 +1935,8 @@ def _reconcile_session_unbind_graph(
     """
     driver = get_neo4j_driver(config)
     with driver.session(database=config.neo4j_db) as session:
+        tombstone_session = session_id
+        tombstone_started_at = float(started_at) if started_at is not None else None
         if repair:
             row = session.run(
                 _unbind_graph_with_clause()
@@ -1917,6 +1947,8 @@ def _reconcile_session_unbind_graph(
                 + _unbind_graph_set_clause(),
                 task_id=task_id,
                 session_id=session_id,
+                tombstone_session=tombstone_session,
+                tombstone_started_at=tombstone_started_at,
             ).single()
         else:
             row = session.run(
@@ -1934,6 +1966,8 @@ def _reconcile_session_unbind_graph(
                 task_id=task_id,
                 session_id=session_id,
                 started_at=started_at,
+                tombstone_session=tombstone_session,
+                tombstone_started_at=tombstone_started_at,
             ).single()
         if row is not None:
             return {"task_exists": True, "changed": True, "prior": dict(row), "after": dict(row)}
@@ -1966,19 +2000,22 @@ def _reconcile_session_unbind_graph(
                         "task_state": state,
                     },
                 )
-            # Normal retry after graph-success/Redis-failure: graph is already pending, but the
-            # exact Redis current_task bind may still be present. Allow idempotent CAS clear only.
-            if started_at is None:
+            # Normal retry after graph-success/Redis-failure: admit only when live Redis
+            # started_at exactly matches the durable unbind tombstone from the first mutation.
+            if started_at is None or not _tombstone_matches_bind(
+                state, session_id=session_id, started_at=float(started_at)
+            ):
                 raise HTTPException(
                     status_code=409,
                     detail={
                         "error": (
-                            f"task {task_id} is already pending/unbound and no exact Redis bind "
-                            "identity was provided; refusing Redis-only clear"
+                            f"task {task_id} is already pending/unbound and live Redis bind does not "
+                            "match the durable unbind tombstone; refusing clear of a superseding bind"
                         ),
                         "session": session_id,
                         "task_id": task_id,
                         "repair": False,
+                        "binding_started_at": started_at,
                         "task_state": state,
                     },
                 )
