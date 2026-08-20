@@ -32,7 +32,11 @@ UMask=0007
 EnvironmentFile=/etc/orch/github-broker.env
 # EnvironmentFile must set GH_TOKEN, ORCH_GITHUB_BROKER_SOCKET,
 # ORCH_GITHUB_BROKER_CONTROL_SOCKET, ORCH_GITHUB_BROKER_INNER,
-# ORCH_GITHUB_BROKER_CONTROL_UIDS, ORCH_GITHUB_BROKER_WORKER_UIDS.
+# ORCH_GITHUB_BROKER_EXEC_GROUP=github-workers,
+# ORCH_GITHUB_BROKER_CONTROL_GROUP=github-control,
+# ORCH_GITHUB_BROKER_CONTROL_CGROUP=/system.slice/fleet-orchestrator-api.service.
+# The broker chowns exec socket/parent to EXEC_GROUP and control
+# socket/parent to CONTROL_GROUP; SupplementaryGroups does not set st_gid.
 ExecStart=/usr/bin/python3 /usr/local/lib/claude-code-fleet-orchestrator/scripts/github-brokerd
 Restart=on-failure
 NoNewPrivileges=true

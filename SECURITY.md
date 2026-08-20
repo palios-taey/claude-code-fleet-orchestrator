@@ -48,13 +48,13 @@ revoke, or a handle. Production deploy (CONTROL) runs the daemon as Unix user
 repository does not enable that unit.
 
 Observed live: seats share uid 1000. Control mint is the **system** unit
-`deploy/systemd/fleet-orchestrator-api.service` cgroup
-`/system.slice/fleet-orchestrator-api.service` (kernel `/proc/PID/cgroup`,
-not argv). Same-UID workers in `user.slice`/`tmux-spawn` cannot join that
-cgroup. That system unit alone gets `SupplementaryGroups=github-control`.
-The `systemctl --user` API unit is not the control principal. Isolated
-tests prove a systemd unit cgroup can mint and a same-UID uvicorn argv
-spoof in a tmux scope cannot.
+cgroup `/system.slice/fleet-orchestrator-api.service` compared by exact
+absolute path equality. The broker `chown`s exec socket/parent to
+`github-workers` and control socket/parent to `github-control`;
+SupplementaryGroups does not set `st_gid`. Isolated tests use a user
+systemd-run cgroup (full `/proc` path) and existing groups for `st_gid`.
+System-slice production proof is undeployed. Same-UID ptrace of the API
+unit remains a CONTROL-deploy residual.
 
 ## Threat model
 

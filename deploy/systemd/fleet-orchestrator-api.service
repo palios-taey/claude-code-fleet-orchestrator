@@ -2,7 +2,7 @@
 # Not a systemctl --user unit. Kernel cgroup:
 #   /system.slice/fleet-orchestrator-api.service
 # github-brokerd allows control mint only from that cgroup
-# (ORCH_GITHUB_BROKER_CONTROL_CGROUP). Same-UID tmux workers live in
+# (ORCH_GITHUB_BROKER_CONTROL_CGROUP, exact absolute path). Same-UID tmux workers live in
 # user.slice/.../tmux-spawn-*.scope and cannot join this cgroup.
 #
 # Socket open(2): this unit alone gets SupplementaryGroups=github-control

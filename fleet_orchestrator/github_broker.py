@@ -12,6 +12,7 @@ and a 0600 control socket the worker principal cannot open.
 """
 from __future__ import annotations
 
+import grp
 import json
 import os
 import secrets
@@ -51,6 +52,10 @@ class GitHubBrokerInstallError(RuntimeError):
 
 class GitHubBrokerClientError(RuntimeError):
     """Raised when the worker client cannot reach the broker socket."""
+
+
+class GitHubBrokerPrincipalError(RuntimeError):
+    """Fail-closed: required Unix group missing or socket chown failed."""
 
 
 def _resolved(path: Path) -> Path:
@@ -131,26 +136,38 @@ def peer_cgroup_path(pid: int) -> str:
     return ""
 
 
+def configured_control_cgroup() -> str:
+    """Absolute cgroup path of the system API unit. Relative paths fail closed."""
+    raw = str(
+        os.environ.get("ORCH_GITHUB_BROKER_CONTROL_CGROUP") or DEFAULT_CONTROL_CGROUP
+    ).strip()
+    if not raw.startswith("/"):
+        raise GitHubBrokerPrincipalError(
+            "ORCH_GITHUB_BROKER_CONTROL_CGROUP must be an absolute cgroup path, "
+            f"got {raw!r}"
+        )
+    return raw
+
+
 def cgroup_is_control_principal(cgroup: str, required: str) -> bool:
-    """Match a systemd unit cgroup at a path boundary, not a cmdline substring."""
+    """Exact absolute cgroup path equality. No suffix/subtree match."""
     cg = str(cgroup or "").strip()
     req = str(required or "").strip()
-    if not cg or not req:
+    if not cg.startswith("/") or not req.startswith("/"):
         return False
-    if cg == req:
-        return True
-    return cg.endswith("/" + req.lstrip("/"))
+    return cg == req
 
 
 def process_is_orch_api_controller(pid: int) -> bool:
-    """True when the peer is the systemd API unit cgroup.
+    """True when the peer cgroup equals the configured system API cgroup.
 
-    Same-UID workers cannot join ``system.slice/fleet-orchestrator-api.service``.
-    Cmdline strings are not identity.
+    Same-UID workers cannot join ``/system.slice/fleet-orchestrator-api.service``.
+    Cmdline strings are not identity. Suffix matches are not identity.
     """
-    required = str(
-        os.environ.get("ORCH_GITHUB_BROKER_CONTROL_CGROUP") or DEFAULT_CONTROL_CGROUP
-    ).strip()
+    try:
+        required = configured_control_cgroup()
+    except GitHubBrokerPrincipalError:
+        return False
     return cgroup_is_control_principal(peer_cgroup_path(pid), required)
 
 
@@ -381,13 +398,50 @@ def _recv_request(conn: socket.socket) -> Optional[dict[str, Any]]:
     return request
 
 
-def _bind_unix_socket(path: Path, mode: int) -> socket.socket:
+def resolve_group_id(name: str) -> int:
+    """Resolve a group name or numeric gid. Missing groups fail closed."""
+    label = str(name or "").strip()
+    if not label:
+        raise GitHubBrokerPrincipalError("Unix group name is required")
+    try:
+        if label.isdigit():
+            gid = int(label)
+            grp.getgrgid(gid)
+            return gid
+        return int(grp.getgrnam(label).gr_gid)
+    except KeyError as exc:
+        raise GitHubBrokerPrincipalError(f"Unix group {label!r} does not exist") from exc
+
+
+def chown_group(path: Path, gid: int) -> None:
+    """Assign st_gid. SupplementaryGroups does not set this; chown is required."""
+    target = Path(path)
+    try:
+        os.chown(target, -1, int(gid))
+    except OSError as exc:
+        raise GitHubBrokerPrincipalError(
+            f"chown {target} gid={gid} failed: {exc}"
+        ) from exc
+    st = target.stat()
+    if int(st.st_gid) != int(gid):
+        raise GitHubBrokerPrincipalError(
+            f"{target} st_gid={st.st_gid} != required gid={gid}"
+        )
+
+
+def _prepare_group_dir(path: Path, gid: int, mode: int) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, mode)
+    chown_group(path, gid)
+
+
+def _bind_unix_socket(path: Path, mode: int, gid: int) -> socket.socket:
     if path.exists():
         path.unlink()
-    path.parent.mkdir(parents=True, exist_ok=True)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(str(path))
     os.chmod(str(path), mode)
+    chown_group(path, gid)
     sock.listen(16)
     return sock
 
@@ -481,17 +535,32 @@ def serve_broker(
     exec_path = Path(socket_path)
     control_path = Path(control_socket_path or default_control_socket_path(socket_path))
     mapping = load_principal_map(control_uids=control_uids, worker_uids=worker_uids)
-    exec_sock = _bind_unix_socket(
-        exec_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP
+    configured_control_cgroup()
+    exec_gid = resolve_group_id(
+        os.environ.get("ORCH_GITHUB_BROKER_EXEC_GROUP") or "github-workers"
     )
-    # 0660 so CONTROL group (github-control) can mint; 0600 is owner-only and
-    # cannot be opened by uid mira orch even with a supplementary group.
-    control_sock = _bind_unix_socket(
-        control_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP
+    control_gid = resolve_group_id(
+        os.environ.get("ORCH_GITHUB_BROKER_CONTROL_GROUP") or "github-control"
     )
-    os.chmod(
-        str(control_path.parent),
+    _prepare_group_dir(
+        exec_path.parent,
+        exec_gid,
         stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP,
+    )
+    _prepare_group_dir(
+        control_path.parent,
+        control_gid,
+        stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP,
+    )
+    exec_sock = _bind_unix_socket(
+        exec_path,
+        stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP,
+        exec_gid,
+    )
+    control_sock = _bind_unix_socket(
+        control_path,
+        stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP,
+        control_gid,
     )
     try:
         while True:

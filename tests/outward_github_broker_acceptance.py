@@ -14,9 +14,11 @@ No live Redis/Neo/GitHub.
 """
 from __future__ import annotations
 
+import grp
 import inspect
 import json
 import os
+import socket as socketmod
 import stat
 import subprocess
 import sys
@@ -31,13 +33,16 @@ from fleet_orchestrator.dispatch import _rollback_claim, bind_current_task  # no
 from fleet_orchestrator import github_broker as github_broker_mod  # noqa: E402
 from fleet_orchestrator.github_broker import (  # noqa: E402
     GitHubBrokerInstallError,
+    GitHubBrokerPrincipalError,
     call_broker,
+    cgroup_is_control_principal,
     install_github_broker,
     mint_and_deliver_outward_handle,
     peer_is_control_principal,
     peer_may_control,
     prefix_is_live,
     process_is_orch_api_controller,
+    resolve_group_id,
     revoke_and_clear_outward_handle,
 )
 from fleet_orchestrator.notify_state import state_key  # noqa: E402
@@ -168,6 +173,45 @@ def _start_broker(env: dict, socket_path: Path) -> subprocess.Popen:
     return proc
 
 
+def _probe_unit_cgroup(unit: str) -> str:
+    result = subprocess.run(
+        [
+            "systemd-run",
+            "--user",
+            "--pipe",
+            "--wait",
+            "--collect",
+            "--quiet",
+            f"--unit={unit}",
+            "cat",
+            "/proc/self/cgroup",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    for line in (result.stdout or "").splitlines():
+        if line.startswith("0::"):
+            path = line[3:].strip()
+            if path.startswith("/"):
+                return path
+    raise RuntimeError(
+        f"systemd-run cgroup probe failed rc={result.returncode} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def _unix_connect(path: Path) -> str:
+    sock = socketmod.socket(socketmod.AF_UNIX, socketmod.SOCK_STREAM)
+    try:
+        sock.connect(str(path))
+        return "open"
+    except OSError as exc:
+        return f"deny:{exc.errno}"
+    finally:
+        sock.close()
+
+
 def _stop_broker(proc: subprocess.Popen) -> None:
     proc.terminate()
     try:
@@ -183,6 +227,25 @@ def main() -> int:
     victim = "victim-grok"
     victim_task = "task-victim-live"
     _check("live /usr prefix refused by classifier", prefix_is_live(Path("/usr/bin")))
+    _check(
+        "suffix/subtree cgroup is not identity",
+        not cgroup_is_control_principal(
+            "/user.slice/delegated/system.slice/fleet-orchestrator-api.service",
+            "/system.slice/fleet-orchestrator-api.service",
+        ),
+    )
+    _check(
+        "exact absolute cgroup matches",
+        cgroup_is_control_principal(
+            "/system.slice/fleet-orchestrator-api.service",
+            "/system.slice/fleet-orchestrator-api.service",
+        ),
+    )
+    try:
+        resolve_group_id("no-such-group-7107c13f")
+        _check("missing group fails closed", False, "expected GitHubBrokerPrincipalError")
+    except GitHubBrokerPrincipalError as exc:
+        _check("missing group fails closed", "does not exist" in str(exc), exc)
     _check(
         "uid 1 is not a default control principal",
         not peer_may_control(1, {"control": {os.getuid()}, "worker": set()}),
@@ -400,8 +463,56 @@ def main() -> int:
         base_env["ORCH_GITHUB_BROKER_WORKER_UIDS"] = str(os.getuid())
         base_env["ORCH_GITHUB_BROKER_CONTROL_SESSIONS"] = supervisor
         api_unit_name = f"t7107-api-{os.getpid()}"
-        control_cgroup = f"app.slice/{api_unit_name}.service"
+        control_cgroup = _probe_unit_cgroup(api_unit_name)
+        _check(
+            "probed systemd-run cgroup is absolute",
+            control_cgroup.startswith("/"),
+            control_cgroup,
+        )
         base_env["ORCH_GITHUB_BROKER_CONTROL_CGROUP"] = control_cgroup
+        exec_group = "users"
+        control_group = "docker"
+        exec_gid = grp.getgrnam(exec_group).gr_gid
+        control_gid = grp.getgrnam(control_group).gr_gid
+        base_env["ORCH_GITHUB_BROKER_EXEC_GROUP"] = exec_group
+        base_env["ORCH_GITHUB_BROKER_CONTROL_GROUP"] = control_group
+
+        missing_group = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "github-brokerd")],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={
+                **base_env,
+                "ORCH_GITHUB_BROKER_SOCKET": str(Path(tmp) / "missing-group.sock"),
+                "ORCH_GITHUB_BROKER_CONTROL_SOCKET": str(Path(tmp) / "missing-group-control.sock"),
+                "ORCH_GITHUB_BROKER_CONTROL_GROUP": "no-such-group-7107c13f",
+            },
+            check=False,
+        )
+        _check(
+            "broker fails closed when CONTROL_GROUP is missing",
+            missing_group.returncode != 0 and "does not exist" in (missing_group.stderr or ""),
+            missing_group.stderr,
+        )
+        relative_cg = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "github-brokerd")],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={
+                **base_env,
+                "ORCH_GITHUB_BROKER_SOCKET": str(Path(tmp) / "relative-cg.sock"),
+                "ORCH_GITHUB_BROKER_CONTROL_SOCKET": str(Path(tmp) / "relative-cg-control.sock"),
+                "ORCH_GITHUB_BROKER_CONTROL_CGROUP": "app.slice/lookalike.service",
+            },
+            check=False,
+        )
+        _check(
+            "broker fails closed on relative cgroup path",
+            relative_cg.returncode != 0 and "absolute cgroup path" in (relative_cg.stderr or ""),
+            relative_cg.stderr,
+        )
 
         broker_env = dict(base_env)
         broker_proc = _start_broker(broker_env, socket_path)
@@ -424,6 +535,53 @@ def main() -> int:
                 stat.S_IMODE(socket_path.stat().st_mode) == 0o660,
                 oct(stat.S_IMODE(socket_path.stat().st_mode)),
             )
+            _check(
+                "exec socket st_gid is EXEC_GROUP",
+                socket_path.stat().st_gid == exec_gid,
+                socket_path.stat().st_gid,
+            )
+            _check(
+                "exec parent st_gid is EXEC_GROUP",
+                socket_path.parent.stat().st_gid == exec_gid,
+                socket_path.parent.stat().st_gid,
+            )
+            _check(
+                "control socket st_gid is CONTROL_GROUP",
+                control_socket.stat().st_gid == control_gid,
+                control_socket.stat().st_gid,
+            )
+            _check(
+                "control parent st_gid is CONTROL_GROUP",
+                control_socket.parent.stat().st_gid == control_gid,
+                control_socket.parent.stat().st_gid,
+            )
+            _check(
+                "authorized process can open control socket",
+                _unix_connect(control_socket) == "open",
+            )
+            worker_open = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); "
+                    f"s.connect({str(control_socket)!r}); print('open')",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if control_socket.stat().st_uid != os.getuid():
+                _check(
+                    "worker open of control socket denied",
+                    worker_open.returncode != 0,
+                    (worker_open.returncode, worker_open.stderr),
+                )
+            else:
+                _check(
+                    "isolated same-uid owner open is not production EACCES",
+                    worker_open.returncode == 0,
+                    (worker_open.returncode, worker_open.stderr),
+                )
 
             victim_mint = call_broker(
                 str(socket_path),
