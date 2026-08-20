@@ -760,11 +760,12 @@ def get_task(task_id: str) -> Dict[str, Any]:
 
 def _audit_capability_next_step(task_id: str, action: str) -> str:
     return (
-        "Next step: mint a capability via "
-        "fleet_orchestrator.audit_supervisor_capability.mint_audit_capability("
-        f"session_id=<project-supervisor>, task_id={task_id!r}, action={action!r}) "
-        "using ORCH_AUDIT_CAPABILITY_SECRET or ORCH_SESSION_CAPABILITY_SECRETS "
-        "(distinct from ORCH_AUTH_TOKEN), send header X-Orch-Audit-Capability, then "
+        "Next step: from the project-supervisor process (ORCH_SESSION_ID set), "
+        "run `scripts/orch-audit-capabilityd` if needed, then "
+        f"`python -c \"from fleet_orchestrator.audit_capability_issuer import issue_audit_capability; "
+        f"print(issue_audit_capability(task_id={task_id!r}, action={action!r})['capability'])\"` "
+        "to obtain X-Orch-Audit-Capability from the unix-socket issuer (peercred session; "
+        "private key stays on the issuer). Send that header on "
         f"POST /api/tasks/{task_id}/{action}; inspect with GET /api/tasks/{task_id} "
         f"or `taey-task status {task_id}`."
     )

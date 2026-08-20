@@ -3380,10 +3380,9 @@ def pin_audit_contract_on_task(
 
     cfg = config or OrchConfig()
     pin_next = (
-        f"Next step: mint X-Orch-Audit-Capability for session=<project-supervisor> "
-        f"task={task_id} action=pin-audit-contract via mint_audit_capability "
-        "(ORCH_AUDIT_CAPABILITY_SECRET / ORCH_SESSION_CAPABILITY_SECRETS, not ORCH_AUTH_TOKEN), "
-        f"then POST /api/tasks/{task_id}/pin-audit-contract; "
+        f"Next step: issue X-Orch-Audit-Capability via orch-audit-capabilityd unix socket "
+        f"from the project-supervisor process (SO_PEERCRED session) for task={task_id} "
+        f"action=pin-audit-contract, then POST /api/tasks/{task_id}/pin-audit-contract; "
         f"inspect with GET /api/tasks/{task_id} or `taey-task status {task_id}`."
     )
     project_supervisor = _task_project_supervisor(task_id, cfg)
@@ -3491,11 +3490,11 @@ def bind_audit_status_on_task(
 
     cfg = config or OrchConfig()
     bind_next = (
-        f"Next step: mint X-Orch-Audit-Capability for session=<project-supervisor> "
-        f"task={task_id} action=bind-audit-status via mint_audit_capability "
-        "(ORCH_AUDIT_CAPABILITY_SECRET / ORCH_SESSION_CAPABILITY_SECRETS, not ORCH_AUTH_TOKEN), "
-        f"then POST /api/tasks/{task_id}/bind-audit-status with {{\"status_id\":<int>}}; "
-        f"inspect with GET /api/tasks/{task_id} or `taey-task status {task_id}`."
+        f"Next step: issue X-Orch-Audit-Capability via orch-audit-capabilityd unix socket "
+        f"from the project-supervisor process (SO_PEERCRED session) for task={task_id} "
+        f"action=bind-audit-status, then POST /api/tasks/{task_id}/bind-audit-status "
+        f"with {{\"status_id\":<int>}}; inspect with GET /api/tasks/{task_id} or "
+        f"`taey-task status {task_id}`."
     )
     project_supervisor = _task_project_supervisor(task_id, cfg)
     try:
