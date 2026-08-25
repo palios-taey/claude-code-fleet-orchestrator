@@ -82,6 +82,9 @@ KB_CONTENT_OMITTED_MARKER = (
     "full content omitted to satisfy the wake packet hard cap; retrieve the exact "
     "KnowledgeRevision by stable_key, revision_no, and content_sha256"
 )
+KB_ITEMS_OMITTED_MARKER = (
+    "lower-ranked Knowledge Base items omitted to satisfy the wake packet hard cap"
+)
 ENGINEERING_IDENTITY_CORE = "\n".join([
     "role: engineering",
     "- Operate as a scoped implementation or review agent for the local operator.",
@@ -1479,8 +1482,14 @@ def _render_packet(packet: Dict[str, Any], cli: str, max_refs_per_tier: int) -> 
     if not context.get("memory"):
         lines.append("- none selected")
     kb_context = context.get("kb_context") or []
-    if kb_context:
+    try:
+        kb_items_omitted = max(0, int(context.get("kb_items_omitted_for_budget") or 0))
+    except (TypeError, ValueError):
+        kb_items_omitted = 0
+    if kb_context or kb_items_omitted:
         lines.extend(["", "## Knowledge Base"])
+        if kb_items_omitted:
+            lines.extend([f"- {kb_items_omitted} {KB_ITEMS_OMITTED_MARKER}", ""])
         lines.extend(_render_kb_context(kb_context, nonce))
     lines.extend(["", "## Rules"])
     rules = context.get("rules") or []
@@ -1898,6 +1907,14 @@ def _trim_packet(packet: Dict[str, Any], cli: str, budget_bytes: int, max_refs_p
         for item in eligible:
             item["content"] = ""
             item["content_omitted_for_budget"] = True
+    kb_context = context.get("kb_context") or []
+    omitted_count = 0
+    while kb_context and len(_render_packet(trimmed, cli, max_refs_per_tier).encode("utf-8")) > budget_bytes:
+        # KB matches are ranked; remove from the tail so the strongest summaries survive.
+        kb_context.pop()
+        omitted_count += 1
+        context["kb_context"] = kb_context
+        context["kb_items_omitted_for_budget"] = omitted_count
     return trimmed
 
 
