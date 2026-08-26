@@ -10,7 +10,11 @@ from .careers_loop_proof import verify_loop_proof_receipt
 
 
 DEFAULT_REQUIRED_GITHUB_CHECKS = ("r5-audit-gate", "ship-gate-acceptance")
-MERGED_PR_HEAD_PROVENANCE_CHECKS = ("r5-audit-gate",)
+DEFAULT_MERGED_PR_HEAD_PROVENANCE_CHECKS = (
+    "r5-audit-gate",
+    "audit/grok",
+    "audit/gatekeeper",
+)
 DEFAULT_TRUSTED_CHECK_RUN_APPS = ("github-actions",)
 DEFAULT_TRUSTED_STATUS_CREATORS = ("github-actions[bot]",)
 GATED_REPO_PROFILE = "gated"
@@ -126,6 +130,10 @@ def trusted_check_run_apps() -> Tuple[str, ...]:
 
 def trusted_status_creators() -> Tuple[str, ...]:
     return _csv_env_values("ORCH_COMPLETION_TRUSTED_STATUS_CREATORS", DEFAULT_TRUSTED_STATUS_CREATORS)
+
+
+def merged_pr_head_provenance_checks() -> Tuple[str, ...]:
+    return _csv_env_values("ORCH_COMPLETION_MERGED_PR_HEAD_CHECKS", DEFAULT_MERGED_PR_HEAD_PROVENANCE_CHECKS)
 
 
 def _gh_api(path: str) -> Any:
@@ -438,7 +446,7 @@ def _can_use_merged_pr_head_provenance(
     status_observation: Dict[str, Any],
 ) -> bool:
     return (
-        check in MERGED_PR_HEAD_PROVENANCE_CHECKS
+        check in merged_pr_head_provenance_checks()
         and _check_missing(run_observation)
         and _check_missing(status_observation)
     )
