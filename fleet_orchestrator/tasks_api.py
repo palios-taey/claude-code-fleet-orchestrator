@@ -829,6 +829,13 @@ async def create(req: Request) -> Dict[str, Any]:
     estimated_tokens = int(data.get("estimated_tokens", 50_000))
     initial_status = data.get("initial_status", data.get("status", "pending"))
 
+    # Audit-class metadata (explicit; allows R5 gatekeeper/audit tasks with receipt verification, no merge)
+    audit_repo = data.get("audit_repo")
+    audit_head = data.get("audit_head")
+    audit_base = data.get("audit_base")
+    required_audit_contexts = data.get("required_audit_contexts") or data.get("audit_contexts")
+    audit_receipt = data.get("audit_receipt")
+
     cfg = _cfg()
     requested_phase_id = data.get("phase_id")
     phase_id = requested_phase_id if requested_phase_id else ensure_default_project(cfg)
@@ -846,6 +853,11 @@ async def create(req: Request) -> Dict[str, Any]:
             file_blast_radius=file_blast_radius,
             estimated_tokens=estimated_tokens,
             initial_status=initial_status,
+            audit_repo=audit_repo,
+            audit_head=audit_head,
+            audit_base=audit_base,
+            required_audit_contexts=required_audit_contexts,
+            audit_receipt=audit_receipt,
             config=cfg,
         )
     except CompletionEvidenceError as exc:

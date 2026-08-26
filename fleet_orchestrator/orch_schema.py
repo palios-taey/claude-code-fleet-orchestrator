@@ -3003,6 +3003,13 @@ def create_task(
     initial_status: str = "pending",
     wake_owner_if_ready: bool = True,
     delivery_gate: Optional[bool] = None,
+    # Explicit audit-class metadata (P0 R5 fix): audit tasks use head+receipt verification, no merge required.
+    # Non-audit (impl/deploy) retain merge+production observation.
+    audit_repo: Optional[str] = None,
+    audit_head: Optional[str] = None,
+    audit_base: Optional[str] = None,
+    required_audit_contexts: Optional[List[str]] = None,
+    audit_receipt: Optional[str] = None,
     config: Optional[OrchConfig] = None,
 ) -> str:
     """Create an OrchTask linked to a phase."""
@@ -3055,7 +3062,13 @@ def create_task(
                 t.delivery_gate = CASE
                     WHEN $delivery_gate IS NULL THEN coalesce(t.delivery_gate, false)
                     ELSE $delivery_gate
-                END
+                END,
+                // Audit-class explicit metadata (no-merge scope for R5 gatekeeper/audits)
+                t.audit_repo = $audit_repo,
+                t.audit_head = $audit_head,
+                t.audit_base = $audit_base,
+                t.required_audit_contexts = $required_audit_contexts,
+                t.audit_receipt = $audit_receipt
             MERGE (ph)-[:HAS_TASK]->(t)
             RETURN t.id AS id
         """,
@@ -3074,6 +3087,11 @@ def create_task(
             heartbeat_exempt_secs=heartbeat_exempt_secs,
             initial_status=initial_status,
             delivery_gate=delivery_gate,
+            audit_repo=audit_repo,
+            audit_head=audit_head,
+            audit_base=audit_base,
+            required_audit_contexts=required_audit_contexts or [],
+            audit_receipt=audit_receipt,
         )
         record = result.single()
         if record is None:
