@@ -5,6 +5,7 @@ Endpoints:
   GET  /api/tasks/ranked           — same, LVP-ranked (falls back to priority)
   GET  /api/tasks/{task_id}        — one task's full state
   POST /api/task/create            — create a task
+  POST /api/admin/questions/{question_id}/invalidate — invalidate a human-review gate without a verdict
   DELETE /api/tasks/{task_id}/dependencies/{depends_on_id} — remove a manual dependency edge
   PATCH /api/task/{task_id}        — update status/owner
 
@@ -123,6 +124,7 @@ from fleet_orchestrator.orch_schema import (
     list_tasks_by_scope,
     get_session_current_work,
     get_session_liveness,
+    invalidate_human_review_gate,
     list_dashboard_sessions,
     remove_dependency,
     resolve_task_id,
@@ -1249,6 +1251,73 @@ async def ui_answer_human_review_gate_endpoint(question_id: str, req: Request) -
         )
     except Exception as exc:
         LOGGER.exception("Unhandled UI human-review answer failed question=%s", question_id)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+
+@app.post("/api/admin/questions/{question_id}/invalidate")
+async def invalidate_human_review_gate_endpoint(question_id: str, req: Request) -> Dict[str, Any]:
+    client_host = req.client.host if req.client is not None else ""
+    if not _is_loopback_host(client_host):
+        raise HTTPException(status_code=403, detail="human-review invalidation requires a loopback client")
+    try:
+        data = await req.json()
+    except Exception as exc:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "error": f"request body must be valid JSON: {exc}",
+                "next_step": f"Retry POST /api/admin/questions/{question_id}/invalidate with a JSON object body.",
+            },
+        )
+    if not isinstance(data, dict):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "ok": False,
+                "error": f"request body must be a JSON object, got {type(data).__name__}",
+                "next_step": f"Retry POST /api/admin/questions/{question_id}/invalidate with a JSON object body.",
+            },
+        )
+    reason = str(data.get("reason") or data.get("disposition") or "").strip()
+    claimed_by = str(
+        data.get("claimed_by") or data.get("invalidated_by") or data.get("from") or "local-admin"
+    ).strip()
+    if not reason:
+        raise HTTPException(
+            status_code=422,
+            detail=_required_body_detail(
+                "reason",
+                {"reason": "<why the gate is invalid>", "claimed_by": "<session-id>"},
+                endpoint=f"POST /api/admin/questions/{question_id}/invalidate",
+                command=f"taey-question invalidate {question_id} '<reason>' --from <session-id>",
+            ),
+        )
+    try:
+        result = invalidate_human_review_gate(question_id, reason, claimed_by, config=_cfg())
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": result.get("reason"),
+                    "question_id": question_id,
+                    "next_step": "Inspect the question and gate task; invalidation applies only to open unanswered human-review gates.",
+                },
+            )
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "error": str(exc),
+                "next_step": f"Inspect the gate, then retry `taey-question invalidate {question_id} '<reason>'` locally.",
+            },
+        )
+    except Exception as exc:
+        LOGGER.exception("Unhandled human-review invalidation failed question=%s", question_id)
         return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
 
