@@ -1262,11 +1262,22 @@ async def invalidate_human_review_gate_endpoint(question_id: str, req: Request) 
     try:
         data = await req.json()
     except Exception as exc:
-        return JSONResponse(status_code=400, content={"ok": False, "error": f"request body must be valid JSON: {exc}"})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "error": f"request body must be valid JSON: {exc}",
+                "next_step": f"Retry POST /api/admin/questions/{question_id}/invalidate with a JSON object body.",
+            },
+        )
     if not isinstance(data, dict):
         return JSONResponse(
             status_code=422,
-            content={"ok": False, "error": f"request body must be a JSON object, got {type(data).__name__}"},
+            content={
+                "ok": False,
+                "error": f"request body must be a JSON object, got {type(data).__name__}",
+                "next_step": f"Retry POST /api/admin/questions/{question_id}/invalidate with a JSON object body.",
+            },
         )
     reason = str(data.get("reason") or data.get("disposition") or "").strip()
     claimed_by = str(
@@ -1297,7 +1308,14 @@ async def invalidate_human_review_gate_endpoint(question_id: str, req: Request) 
     except HTTPException:
         raise
     except ValueError as exc:
-        return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "error": str(exc),
+                "next_step": f"Inspect the gate, then retry `taey-question invalidate {question_id} '<reason>'` locally.",
+            },
+        )
     except Exception as exc:
         LOGGER.exception("Unhandled human-review invalidation failed question=%s", question_id)
         return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})

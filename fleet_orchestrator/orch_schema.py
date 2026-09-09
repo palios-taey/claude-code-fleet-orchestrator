@@ -5971,7 +5971,10 @@ def invalidate_human_review_gate(question_id: str, reason: str, claimed_by: str,
     reason_text = str(reason or "").strip()
     actor_claim = str(claimed_by or "").strip() or "local-admin"
     if not reason_text:
-        raise ValueError("invalidation reason must be non-empty")
+        raise ValueError(
+            f"invalidation reason must be non-empty. Use `taey-question invalidate {question_id} "
+            "'<reason>' --from <session-id>` from the orchestrator host"
+        )
     cfg = config or OrchConfig()
     driver = get_neo4j_driver(cfg)
     evidence = _validate_terminal_status_write("interrupted", {"reason": reason_text})
