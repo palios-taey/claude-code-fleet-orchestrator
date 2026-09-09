@@ -5884,6 +5884,7 @@ def answer_question(question_id: str, answer: str, answered_by: str,
     with driver.session(database=cfg.neo4j_db) as session:
         found = session.run("""
             MATCH (q:OrchQuestion {id: $id})
+            WHERE q.status = 'open'
             RETURN q.id AS id, q.question_type AS question_type,
                    q.gate_task_id AS gate_task_id, q.lineage AS lineage,
                    q.reviewer AS reviewer, properties(q) AS props
@@ -5904,19 +5905,28 @@ def answer_question(question_id: str, answer: str, answered_by: str,
                 "verified": False,
                 "source": "unauthenticated_api",
             })
-            session.run("""
+            updated = session.run("""
                 MATCH (q:OrchQuestion {id: $id})
+                WHERE q.status = 'open'
                 SET q.unverified_answer = $answer,
                     q.unverified_answered_by = $answered_by,
                     q.unverified_answered_at = datetime(),
                     q.unverified_answers = $unverified_answers,
                     q.status = 'open'
+                RETURN q.id AS id
             """,
                 id=question_id,
                 answer=str(answer).strip(),
                 answered_by=answered_by,
                 unverified_answers=_json_encode(unverified),
-            )
+            ).single()
+            if updated is None:
+                return {
+                    "ok": False,
+                    "question_id": question_id,
+                    "gate_completed": False,
+                    "verified": False,
+                }
             return {
                 "ok": True,
                 "question_id": question_id,
@@ -5929,6 +5939,7 @@ def answer_question(question_id: str, answer: str, answered_by: str,
             }
         result = session.run("""
             MATCH (q:OrchQuestion {id: $id})
+            WHERE q.status = 'open'
             SET q.answer = $answer,
                 q.answered_by = $answered_by,
                 q.status = 'answered',
@@ -5951,6 +5962,111 @@ def answer_question(question_id: str, answer: str, answered_by: str,
         "question_type": record.get("question_type"),
         "gate_task_id": record.get("gate_task_id") or "",
         "next_step": _human_review_answer_next_step(question_id),
+    }
+
+
+def invalidate_human_review_gate(question_id: str, reason: str, claimed_by: str,
+                                 config: Optional[OrchConfig] = None) -> Dict[str, Any]:
+    """Invalidate an open human-review gate without recording a verdict."""
+    reason_text = str(reason or "").strip()
+    actor_claim = str(claimed_by or "").strip() or "local-admin"
+    if not reason_text:
+        raise ValueError("invalidation reason must be non-empty")
+    cfg = config or OrchConfig()
+    driver = get_neo4j_driver(cfg)
+    evidence = _validate_terminal_status_write("interrupted", {"reason": reason_text})
+    with driver.session(database=cfg.neo4j_db) as session:
+        row = session.run("""
+            MATCH (q:OrchQuestion {id: $question_id})-[:CONCERNS_TASK]->(t:OrchTask {id: q.gate_task_id})
+            WHERE q.question_type = $question_type
+              AND t.task_type = $task_type
+              AND q.status = 'open'
+              AND q.answer IS NULL
+              AND q.answered_at IS NULL
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
+            SET q.status = 'invalidated',
+                q.verified = false,
+                q.invalidated_at = datetime(),
+                q.invalidation_reason = $reason,
+                q.invalidation_claimed_by = $claimed_by,
+                q.invalidation_channel = 'loopback_admin_api',
+                t.status = 'interrupted',
+                t.result = $reason,
+                t.completion_evidence = $completion_evidence,
+                t.interrupted_at = datetime(),
+                t.interruption_claimed_by = $claimed_by,
+                t.blocked_on = NULL,
+                t.updated_at = datetime()
+            RETURN q.id AS question_id, q.lineage AS lineage, q.reviewer AS reviewer,
+                   t.id AS gate_task_id, q.status AS question_status, t.status AS task_status,
+                   q.invalidation_reason AS invalidation_reason,
+                   q.invalidation_claimed_by AS invalidation_claimed_by
+        """,
+            question_id=question_id,
+            question_type=HUMAN_REVIEW_QUESTION_TYPE,
+            task_type=HUMAN_REVIEW_TASK_TYPE,
+            terminal_statuses=list(_TERMINAL_TASK_STATUSES),
+            reason=reason_text,
+            claimed_by=actor_claim,
+            completion_evidence=_json_encode(evidence),
+        ).single()
+        transitioned = row is not None
+        if row is None:
+            row = session.run("""
+                MATCH (q:OrchQuestion {id: $question_id})-[:CONCERNS_TASK]->(t:OrchTask {id: q.gate_task_id})
+                WHERE q.question_type = $question_type
+                  AND t.task_type = $task_type
+                  AND q.status = 'invalidated'
+                  AND q.answer IS NULL
+                  AND q.answered_at IS NULL
+                  AND t.status = 'interrupted'
+                RETURN q.id AS question_id, q.lineage AS lineage, q.reviewer AS reviewer,
+                       t.id AS gate_task_id, q.status AS question_status, t.status AS task_status,
+                       q.invalidation_reason AS invalidation_reason,
+                       q.invalidation_claimed_by AS invalidation_claimed_by
+            """,
+                question_id=question_id,
+                question_type=HUMAN_REVIEW_QUESTION_TYPE,
+                task_type=HUMAN_REVIEW_TASK_TYPE,
+            ).single()
+            if row is None:
+                return {
+                    "ok": False,
+                    "question_id": question_id,
+                    "reason": "question is not an open unanswered human-review gate or its task is terminal",
+                }
+        gate_task_id = row["gate_task_id"]
+        session.run("""
+            MATCH (p:OrchProject)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(t:OrchTask {id: $task_id})
+            WITH p
+            OPTIONAL MATCH (p)-[:HAS_PHASE]->(:OrchPhase)-[:HAS_TASK]->(sibling:OrchTask)
+            WHERE sibling.id <> $task_id AND sibling.status = 'in_progress'
+            WITH p, count(sibling) AS in_progress_siblings
+            SET p.in_progress_heartbeat_at = CASE
+                    WHEN in_progress_siblings = 0 THEN ''
+                    ELSE p.in_progress_heartbeat_at
+                END,
+                p.status = CASE
+                    WHEN p.status = 'in_progress' AND in_progress_siblings = 0 THEN 'active'
+                    ELSE p.status
+                END,
+                p.updated_at = datetime()
+        """, task_id=gate_task_id)
+    lineage = str(row.get("lineage") or row.get("reviewer") or "")
+    _resolve_chat_question(question_id, config=cfg, lineage=lineage)
+    stored_reason = str(row.get("invalidation_reason") or reason_text)
+    stored_actor_claim = str(row.get("invalidation_claimed_by") or actor_claim)
+    return {
+        "ok": True,
+        "question_id": question_id,
+        "gate_task_id": gate_task_id,
+        "question_status": row["question_status"],
+        "task_status": row["task_status"],
+        "invalidation_reason": stored_reason,
+        "invalidation_claimed_by": stored_actor_claim,
+        "invalidation_channel": "loopback_admin_api",
+        "transitioned": transitioned,
+        "verdict_recorded": False,
     }
 
 
@@ -5978,6 +6094,10 @@ def complete_human_review_gate(question_id: str, answer: str, answered_by: str,
             MATCH (q:OrchQuestion {id: $question_id})-[:CONCERNS_TASK]->(t:OrchTask {id: q.gate_task_id})
             WHERE q.question_type = 'human_review_gate'
               AND t.task_type = 'human-review'
+              AND q.status = 'open'
+              AND q.answer IS NULL
+              AND q.answered_at IS NULL
+              AND NOT (coalesce(t.status, 'pending') IN $terminal_statuses)
             SET q.answer = $answer,
                 q.answered_by = $answered_by,
                 q.answered_at = datetime(),
@@ -5997,6 +6117,7 @@ def complete_human_review_gate(question_id: str, answer: str, answered_by: str,
             answer=answer_text,
             answered_by=reviewer,
             completion_evidence=_json_encode(evidence),
+            terminal_statuses=list(_TERMINAL_TASK_STATUSES),
         ).single()
         if row is None:
             return {"ok": False, "question_id": question_id, "gate_completed": False, "verified": False}

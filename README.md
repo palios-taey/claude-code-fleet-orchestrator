@@ -215,7 +215,12 @@ A human-review gate records a question that must be answered by a person:
 ```bash
 taey-question create-gate demo::build demo::human-review "Ship this artifact?" --reviewer operator
 taey-question answer <question-id> "Ship it" --from supervisor
+taey-question invalidate <question-id> "SUPERSEDED_INVALID_NO_HUMAN_VERDICT" --from supervisor
 ```
+
+`invalidate` is a loopback-only administrative transition for withdrawing a mistaken gate. It marks the question
+`invalidated` and its task `interrupted`, records the reason and claimed local actor, and never writes an answer or
+human verdict.
 
 For harness-driven work where the runner is not the agent session itself:
 

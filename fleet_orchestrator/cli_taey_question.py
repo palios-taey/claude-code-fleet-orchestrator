@@ -88,6 +88,19 @@ def cmd_answer(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_invalidate(args: argparse.Namespace) -> int:
+    result = api_call(
+        "POST",
+        f"/api/admin/questions/{args.question_id}/invalidate",
+        {"reason": args.reason, "claimed_by": args.sender or detect_from_node()},
+    )
+    print(
+        f"OK: invalidated human-review gate task={result['gate_task_id']} "
+        f"question={result['question_id']} verdict_recorded={str(bool(result.get('verdict_recorded'))).lower()}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="taey-question")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -109,6 +122,15 @@ def build_parser() -> argparse.ArgumentParser:
     answer.add_argument("answer")
     answer.add_argument("--from", dest="sender", default="")
     answer.set_defaults(func=cmd_answer)
+
+    invalidate = sub.add_parser(
+        "invalidate",
+        help="Invalidate an open human-review gate without recording a verdict",
+    )
+    invalidate.add_argument("question_id")
+    invalidate.add_argument("reason")
+    invalidate.add_argument("--from", dest="sender", default="")
+    invalidate.set_defaults(func=cmd_invalidate)
     return parser
 
 
